@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,8 @@ from pathlib import Path
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def session_path() -> Path:
@@ -19,6 +22,20 @@ def session_path() -> Path:
 
 def get_justwin_base_url() -> str:
     return (settings.justwin_base_url or "https://app.justwin.ai").rstrip("/")
+
+
+def invalidate_session() -> bool:
+    """Delete the saved Playwright storage so the next login is fresh."""
+    path = session_path()
+    if not path.is_file():
+        return False
+    try:
+        path.unlink()
+        logger.info("[justwin-sync] cleared stale session at %s", path)
+        return True
+    except OSError as exc:
+        logger.warning("[justwin-sync] could not clear session %s: %s", path, exc)
+        return False
 
 
 @dataclass
@@ -60,35 +77,97 @@ def _perform_login(page: Page) -> None:
     page.wait_for_timeout(2000)
 
 
-def get_authenticated_context() -> AuthContext:
-    """Launch Chromium, restore session if present, login when needed."""
+def _save_session(context: BrowserContext) -> None:
+    path = session_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    context.storage_state(path=str(path))
+    logger.info("[justwin-sync] saved session to %s", path)
+
+
+def _open_leads(context: BrowserContext) -> Page:
+    page = context.new_page()
+    page.goto(
+        f"{get_justwin_base_url()}/leads",
+        wait_until="domcontentloaded",
+        timeout=60_000,
+    )
+    # SPA auth redirects can lag past domcontentloaded.
+    page.wait_for_timeout(2500)
+    return page
+
+
+def get_authenticated_context(*, force_fresh: bool = False) -> AuthContext:
+    """Launch Chromium, restore session if present, login when needed.
+
+    Stale cookies are wiped and a fresh email/password login is performed
+    automatically — callers should not ask the user to delete the session file.
+    """
     headless = settings.justwin_headless
     path = session_path()
+
+    if force_fresh:
+        invalidate_session()
 
     pw = sync_playwright().start()
     browser = pw.chromium.launch(headless=headless)
 
-    if path.is_file():
+    used_saved_session = path.is_file() and not force_fresh
+    if used_saved_session:
         storage = json.loads(path.read_text(encoding="utf-8"))
         context = browser.new_context(storage_state=storage)
     else:
         context = browser.new_context()
 
-    page = context.new_page()
-    page.goto(f"{get_justwin_base_url()}/leads", wait_until="domcontentloaded", timeout=60_000)
+    page = _open_leads(context)
 
     if _is_login_page(page):
+        if used_saved_session:
+            logger.warning(
+                "[justwin-sync] saved session expired — logging in again with credentials"
+            )
+            page.close()
+            context.close()
+            invalidate_session()
+            context = browser.new_context()
+            page = _open_leads(context)
         _perform_login(page)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        context.storage_state(path=str(path))
+        _save_session(context)
 
-    if "/login" in page.url:
+    if _is_login_page(page) or "/login" in page.url:
+        page.close()
         browser.close()
         pw.stop()
-        raise RuntimeError("JustWin login failed — still on login page")
+        raise RuntimeError(
+            "JustWin login failed — still on login page. "
+            "Check JUSTWIN_EMAIL / JUSTWIN_PASSWORD."
+        )
 
     page.close()
     return AuthContext(browser=browser, context=context, _playwright=pw)
+
+
+def ensure_authenticated_page(auth: AuthContext, page: Page) -> tuple[AuthContext, Page]:
+    """If ``page`` landed on login, re-auth once and return a fresh leads page."""
+    page.wait_for_timeout(1500)
+    if not (_is_login_page(page) or "/login" in page.url):
+        return auth, page
+
+    logger.warning(
+        "[justwin-sync] session lost after open — re-authenticating automatically"
+    )
+    try:
+        page.close()
+    except Exception:  # noqa: BLE001
+        pass
+    close_auth(auth)
+    auth = get_authenticated_context(force_fresh=True)
+    page = _open_leads(auth.context)
+    if _is_login_page(page) or "/login" in page.url:
+        raise RuntimeError(
+            "JustWin login failed after auto re-auth. "
+            "Check JUSTWIN_EMAIL / JUSTWIN_PASSWORD."
+        )
+    return auth, page
 
 
 def close_auth(auth: AuthContext) -> None:

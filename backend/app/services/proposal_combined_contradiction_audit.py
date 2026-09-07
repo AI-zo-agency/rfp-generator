@@ -83,6 +83,7 @@ async def detect_all_contradictions(
     rfp: RfpRecord,
     rfp_text: str,
     research: ProposalResearchCache | None,
+    lean: bool | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """One LLM call → (fact_raw, rfp_raw, budget_raw), each shaped for the
     matching pass's ``_parse_findings``. Returns None when detection could not
@@ -90,7 +91,15 @@ async def detect_all_contradictions(
     """
     if not llm.is_configured():
         return None
-    digest = _manuscript_digest(draft, max_chars=34_000)
+    if lean is None:
+        try:
+            from app.core.step_debug_logger import get_pipeline_phase
+
+            lean = (get_pipeline_phase() or "").strip().casefold() == "fulfill-scan"
+        except Exception:  # noqa: BLE001
+            lean = False
+    digest_cap = 18_000 if lean else 34_000
+    digest = _manuscript_digest(draft, max_chars=digest_cap)
     if not digest.strip():
         return None
 
@@ -101,10 +110,13 @@ async def detect_all_contradictions(
             _fetch_verified_facts_corpus,
         )
 
-        verified_corpus, _sources = await _fetch_verified_facts_corpus()
+        verified_corpus, _sources = await _fetch_verified_facts_corpus(
+            max_chars=12_000 if lean else 48_000
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Combined audit: verified corpus fetch failed: %s", exc)
 
+    rfp_cap = 12_000 if lean else 38_000
     # Client/title/due-date, verified company facts, and RFP text are all
     # identical across every one of this function's ~6 call sites for a given
     # RFP — only the manuscript digest changes as the draft evolves. Cache the
@@ -114,17 +126,24 @@ async def detect_all_contradictions(
         f"Due date: {getattr(rfp, 'due_date', None) or 'unknown'}\n\n"
         f"VERIFIED COMPANY FACTS (01_companyfacts_verified — authoritative):\n"
         f"{verified_corpus or '(corpus unavailable — still flag cross-section conflicts)'}\n\n"
-        f"RFP TEXT (authoritative for dimension 2):\n{(rfp_text or '')[:38_000]}\n\n"
+        f"RFP TEXT (authoritative for dimension 2):\n{(rfp_text or '')[:rfp_cap]}\n\n"
     )
-    user = f"FULL MANUSCRIPT (check EVERY tab):\n{digest}"
+    lean_rule = (
+        "\nLEAN PASS: return at most 8 findings TOTAL across all three arrays "
+        "(critical/major only). Prefer empty arrays over padding.\n"
+        if lean
+        else ""
+    )
+    user = f"{lean_rule}FULL MANUSCRIPT (check EVERY tab):\n{digest}"
     try:
         raw, _ = await llm.chat_json(
             [
                 {"role": "system", "content": _COMBINED_SYSTEM},
                 {"role": "user", "content": user},
             ],
-            max_tokens=16000,
+            max_tokens=4096,
             temperature=0.0,
+            tier="light",
             node_name="combined_contradiction_audit",
             rfp_id=rfp.id,
             cache_prefix=cache_prefix,

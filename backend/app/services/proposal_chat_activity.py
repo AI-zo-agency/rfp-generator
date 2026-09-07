@@ -72,9 +72,19 @@ def build_improve_agent_activity(
     apply_fix: bool = False,
 ) -> ProposalAgentActivity:
     title = (section_title or "this section").strip() or "this section"
+    title_low = title.casefold()
+    budgetish = any(
+        tok in title_low
+        for tok in ("budget", "cost", "pricing", "fee", "compensation")
+    )
+    fact_step = (
+        "Checked the draft against the fee ledger / KB where this tab needs facts"
+        if budgetish
+        else "Checked the draft against mapped RFP asks / KB where this tab needs facts"
+    )
     steps = [
         f"Read “{title}” and your instruction",
-        "Checked the draft against the fee ledger / KB where this tab needs facts",
+        fact_step,
         "Looked for discrepancies (placeholders, grounding, protected tags)",
         "Applied edits or left the manuscript unchanged",
     ]

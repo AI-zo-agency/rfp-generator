@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_intelligence.agent_base import safe_chat_json
+from app.services.proposal_outline_dedup import humanize_outline_title
 from app.services.proposal_rfp_excerpt import (
     closing_package_excerpt,
     submission_documents_excerpt,
@@ -92,6 +93,12 @@ class ClosingRequirement(BaseModel):
         if not (self.section_id or "").strip() and self.id:
             slug = re.sub(r"[^a-z0-9]+", "-", self.id.strip().casefold()).strip("-")
             self.section_id = f"rfp-closing-{slug}"
+        # A machine key (or blank) can come back as the title itself — e.g. a
+        # closing-package tab literally rendered as "addenda_acknowled". A tab
+        # heading must be human-readable; humanize_outline_title deterministically
+        # cleans machine keys and over-long sentences alike.
+        if not (self.title or "").strip() or humanize_outline_title(self.title) != self.title:
+            self.title = humanize_outline_title(self.title or self.id)
 
 
 class ClosingRequirementLedger(BaseModel):

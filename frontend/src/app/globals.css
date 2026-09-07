@@ -1519,15 +1519,24 @@ h4 {
   top: 0.85rem;
   width: 2px;
   border-radius: 2px;
-  height: calc(var(--wf-progress, 0) * (100% - 1.7rem));
+  /* Full-length track scaled from the top rather than an animated height —
+     same visual, but a compositor transform instead of a layout property. */
+  height: calc(100% - 1.7rem);
+  transform-origin: top center;
+  transform: scaleY(var(--wf-progress, 0));
   background: #10b981;
-  transition: height 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .proposal-workflow-step {
   position: relative;
   display: flex;
   align-items: flex-start;
+  /* Wrap so a nested sub-step list drops onto its own line instead of becoming
+     a third flex item beside the dot and label — which floated the whole
+     Intelligence sub-sequence off to the right of its parent row. Rows without
+     a sub-list have only two children and never wrap. */
+  flex-wrap: wrap;
   gap: 0.6rem;
   font-size: 13px;
   line-height: 1.45;
@@ -1550,25 +1559,84 @@ h4 {
   transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 
+/* Nested phase sub-steps (the Intelligence graph's own nodes while Phase 2
+   runs). A subordinate sequence, not a peer of the seven phases: it hangs off
+   its parent's dot with its own shorter track, smaller nodes and smaller type,
+   so the eye reads one running phase containing six steps rather than thirteen
+   equal rows. Its own class — reusing the group-level list drew that list's
+   track at the group's indent, which is why the sub-track floated detached
+   from its dots. */
+.proposal-workflow-substeps {
+  position: relative;
+  /* Full row, hung under the parent label rather than beside it. */
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  /* Negative top margin cancels the parent's 0.6rem flex gap so the sub-list
+     sits tight under its own step, not adrift between two phases. */
+  margin: -0.25rem 0 0.2rem calc(10px + 0.6rem);
+  padding: 0.25rem 0 0.25rem 0.75rem;
+  list-style: none;
+}
+
+.proposal-workflow-substeps::before {
+  content: "";
+  position: absolute;
+  /* Dead-centre under the sub-dots: the list's own left padding, plus half the
+     8px dot, minus half the 2px track. At left:3px the connector ran outside
+     its own nodes and read as a stray rule beside the list. */
+  left: calc(0.75rem + 3px);
+  top: 0.6rem;
+  bottom: 0.6rem;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(17, 24, 39, 0.12);
+}
+
+.proposal-workflow-substeps .proposal-workflow-step {
+  /* Deliberately NOT smaller than its parent row. PRODUCT.md's primary user is
+     an older, non-technical adult needing large legible type, so subordination
+     is carried by indent and node size — never by shrinking the text. */
+  line-height: 1.45;
+  gap: 0.5rem;
+}
+
+.proposal-workflow-substeps .proposal-workflow-step-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 0.29rem;
+  border-width: 2px;
+}
+
 .proposal-workflow-step-label {
+  /* Take the remaining row and wrap INSIDE the label. Without flex-basis 0 the
+     label kept its content width, so at narrow rail widths the row's wrap
+     pushed the label under its own dot and the timeline fell apart. */
+  flex: 1 1 0%;
   min-width: 0;
 }
 
 .proposal-workflow-step.is-done {
-  color: #10b981;
+  /* #10b981 measured 2.54:1 on white — unreadable at 13px. The dot keeps the
+     emerald; the label takes a darker green at 5.48:1. */
+  color: #047857;
 }
 
-.proposal-workflow-step.is-done .proposal-workflow-step-dot {
+.proposal-workflow-step.is-done > .proposal-workflow-step-dot {
   border-color: #10b981;
   background: #10b981;
 }
 
 .proposal-workflow-step.is-active {
-  color: var(--zo-orange);
+  /* --zo-orange (#ef5018) measured 3.60:1 — the RUNNING step, the one line the
+     user most needs to read, was the least legible. Deepened to 5.27:1; the
+     dot below still carries the true brand orange. */
+  color: #c53a0b;
   font-weight: 600;
 }
 
-.proposal-workflow-step.is-active .proposal-workflow-step-dot {
+.proposal-workflow-step.is-active > .proposal-workflow-step-dot {
   border-color: var(--zo-orange);
   background: var(--zo-orange);
   animation: proposal-workflow-node-pulse 1.8s ease-out infinite;

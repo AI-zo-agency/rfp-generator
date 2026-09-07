@@ -19,6 +19,17 @@ class ImproveAgentActivityTests(unittest.TestCase):
         self.assertEqual(activity.outcome, "ok")
         self.assertTrue(any("Updated" in c for c in activity.changes))
         self.assertEqual(activity.discrepancies, [])
+        self.assertTrue(any("fee ledger" in s.casefold() for s in activity.steps))
+
+    def test_non_budget_recap_skips_fee_ledger_step(self) -> None:
+        activity = build_improve_agent_activity(
+            section_title="Strategic Growth Approach",
+            before="old",
+            after="new text here",
+            draft_changed=True,
+        )
+        self.assertTrue(any("mapped rfp" in s.casefold() for s in activity.steps))
+        self.assertFalse(any("fee ledger" in s.casefold() for s in activity.steps))
 
     def test_flags_apply_fix_that_changed_nothing(self) -> None:
         """A swallowed Apply click must read as needs_review, not a clean run."""

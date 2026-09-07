@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconSync } from "./ui/icons";
+import { ZoAmuletLoader } from "./ZoAmuletLoader";
 
 interface SyncJustWinModalProps {
   open: boolean;
@@ -426,9 +427,11 @@ export function SyncJustWinModal({
 
           {/* Progress / Status Indicator */}
           {syncing && (
-            <div className="flex items-center gap-3 rounded-xl border border-zo-orange/40 bg-zo-orange/10 p-3.5 text-sm font-medium text-zo-orange">
-              <div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-zo-orange border-t-transparent" />
-              <span>{statusMessage || "Syncing in progress..."}</span>
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-zo-orange/40 bg-zo-orange/10 px-4 py-6 text-center">
+              <ZoAmuletLoader label="Syncing JustWin" />
+              <span className="text-sm font-medium text-zo-orange">
+                {statusMessage || "Syncing in progress..."}
+              </span>
             </div>
           )}
 

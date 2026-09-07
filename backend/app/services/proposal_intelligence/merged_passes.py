@@ -278,6 +278,10 @@ Return JSON ONLY:
     "confidence": 0.0
   }
 }
+Keep output COMPACT so the JSON always completes:
+- At most 10 work packages; ≤3 short deliverable phrases each
+- At most 8 milestones; short names/offsets only
+- Role allocations only — no prose paragraphs
 No proposal prose. Do not invent named people — roles only.
 Do NOT invent allocationPct / percent-time / FTE figures — leave allocationPct null
 unless the RFP explicitly states a required %. Never copy static 10/35/25 grids.
@@ -748,7 +752,9 @@ async def run_execution_plan(
                 ),
             },
         ],
-        max_tokens=4096,
+        # Sonnet reasoning can burn ~3k of a 4k budget before writing
+        # WBS/timeline/resources JSON; 4096 truncated live (finish_reason=length).
+        max_tokens=16384,
         agent_name="execution_plan",
     )
     plan = _apply_validated(

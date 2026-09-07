@@ -1,7 +1,9 @@
+import { Suspense } from "react";
 import { DashboardContent } from "@/components/DashboardContent";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { getDashboardData } from "@/lib/rfp-service";
 
-export default async function DashboardPage() {
+async function DashboardData() {
   const {
     rfps,
     stats,
@@ -20,5 +22,26 @@ export default async function DashboardPage() {
       currentProposals={currentProposals}
       latestProposal={latestProposal}
     />
+  );
+}
+
+function DashboardAmuletFallback() {
+  return (
+    <div
+      className="flex min-h-[min(32rem,70vh)] flex-col items-center justify-center py-20"
+      role="status"
+      aria-busy="true"
+      aria-label="Loading dashboard"
+    >
+      <ZoAmuletLoader label="Loading dashboard" />
+    </div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<DashboardAmuletFallback />}>
+      <DashboardData />
+    </Suspense>
   );
 }

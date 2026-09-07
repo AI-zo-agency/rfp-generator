@@ -45,7 +45,10 @@ from app.services.proposal_retrieval_graph import (
     _hit_key,
     _hit_label,
 )
-from app.services.proposal_voice_enforcement import enforce_narrative_voice
+from app.services.proposal_voice_enforcement import (
+    enforce_narrative_voice,
+    scrub_rev6_voice_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,25 +70,33 @@ _AUTO_FIX_CATEGORIES = frozenset({
 })
 
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
-_CAT_RANK = {"placeholder": 0, "copy_paste": 1, "grammar": 2, "voice": 3, "consistency": 4, "compliance": 5}
+# Voice/Rev 6 first — Review & Fix must clear zö voice before softer copy issues.
+_CAT_RANK = {"voice": 0, "placeholder": 1, "copy_paste": 2, "grammar": 3, "consistency": 4, "compliance": 5}
+
+from app.services.proposal_drafting_prompts import GLOBAL_AGENT_PROMPT_RULES
 
 SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed pre-submit review issues.
 
+""" + GLOBAL_AGENT_PROMPT_RULES + """
+
 MANDATORY:
 1. Preserve section structure — headings, lists, paragraph order, approximate length, and any [DESIGNER NOTE: ...] blocks.
-2. Preserve zö BRAND VOICE from the voice block — first person we/our in narrative sections.
-3. Use ONLY facts from the evidence corpus / KB excerpts. Do NOT leave citation markers like [E1] or [E2] in the text.
-4. Replace [VERIFY: ...] tags with real prose FROM evidence when available; remove resolved tags entirely.
-5. Keep a short [VERIFY: ...] ONLY for requirements still missing from evidence after search.
-6. Wrong-client names → use the target client name or remove the stray reference.
-7. Voice issues → never "The Vendor", "The Offeror", or third-person agency distance in narrative prose.
-8. Grammar: fix "We were …, and is …" → "and are"; never "of we" or "across we" — use our firm / zö agency / our studio.
-9. Subcontractors: if cost proposal lists translation partners, do NOT claim "no subcontractors" — zö self-performs marketing/communications; partners are scoped separately.
-10. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
-11. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
-12. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
-13. Keep strong existing prose — change only what is needed to clear the listed issues.
-14. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
+2. COMPULSORY zö Brand & Writing Standards rev 6 (voice block): first person we/our; company name 'zö agency'; no em dashes; no negation-contrast (rather than / instead of / X, not Y / not just); no empty hype (robust/seamless/cutting-edge/…); no hedging announcements (worth noting / worth naming); no significance-close fluff. Apply silently — never narrate the rule.
+3. Preserve zö BRAND VOICE from the voice block — first person we/our in narrative sections.
+4. Use ONLY facts from the evidence corpus / KB excerpts. Do NOT leave citation markers like [E1] or [E2] in the text.
+5. Replace [VERIFY: ...] tags with real prose FROM evidence when available; remove resolved tags entirely.
+6. Keep a short [VERIFY: ...] ONLY for requirements still missing from evidence after search.
+7. Wrong-client names → use the target client name or remove the stray reference.
+8. Voice issues → never "The Vendor", "The Offeror", or third-person agency distance in narrative prose.
+9. Grammar: fix "We were …, and is …" → "and are"; never "of we" or "across we" — use our firm / zö agency / our studio.
+10. Subcontractors: if cost proposal lists translation partners, do NOT claim "no subcontractors" — zö self-performs marketing/communications; partners are scoped separately.
+11. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
+12. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
+13. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
+14. Keep strong existing prose — change only what is needed to clear the listed issues.
+15. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
+16. CRITICAL: Do NOT refuse to apply fixes by leaving meta-comments (e.g. "Please provide..."). If a fix requires missing information, you MUST insert a [VERIFY: missing fact] tag to hold the space. NEVER fabricate facts or completely rewrite the section to fill a gap.
+17. ANTI-RFP-ECHO: NEVER restate the RFP. Clear issues with proposal substance — do not paraphrase requirement lists or the buyer's ask into the body.
 
 Return ONLY JSON: {"content": "full updated section text", "kbRefs": ["E1"]}"""
 
@@ -97,6 +108,8 @@ MANDATORY:
 3. Replace [VERIFY: ...] ONLY when the answer is explicitly in the section or evidence; otherwise shorten to a minimal [VERIFY: brief note].
 4. Do NOT add new [VERIFY] tags. Do NOT quote other clients from evidence.
 5. Do NOT expand length. Change the minimum text needed.
+6. NO BLANK REFUSALS: Never leave the section empty with a meta-comment (e.g. "Please provide details"). Draft the best possible form/letter and use [VERIFY: missing fact] for gaps.
+7. NO FABRICATION: Do not invent client names, metrics, or missing facts.
 
 Return ONLY JSON: {"content": "full updated section text"}"""
 
@@ -170,6 +183,13 @@ def _apply_deterministic_fixes(
         content = voiced
         methods.append("voice_register")
 
+    # Compulsory Rev 6 hard bans (em dash, negation-contrast, hype, hedges).
+    rev6, rev6_logs = scrub_rev6_voice_patterns(content)
+    rev6 = rev6.replace("—", ",").replace("–", "-")
+    if rev6 != content or rev6_logs:
+        content = rev6
+        methods.append("rev6_voice")
+
     return content, methods
 
 
@@ -199,12 +219,14 @@ def _sanitize_after_llm(
     rfp: RfpRecord,
 ) -> str:
     fixed, _ = fix_stale_client_references(content, rfp, section=section)
-    return enforce_narrative_voice(
+    voiced = enforce_narrative_voice(
         fixed,
         section_id=section.id,
         title=section.title,
         zo_mode=section.mode,
     )
+    scrubbed, _ = scrub_rev6_voice_patterns(voiced)
+    return scrubbed.replace("—", ",").replace("–", "-")
 
 
 def _should_run_llm(
@@ -426,6 +448,28 @@ async def _enrich_section_evidence(
         if research and corpus != list(research.evidence_corpus or []):
             research = research.model_copy(update={"evidence_corpus": corpus})
 
+    if "reference" in section.title.lower() or "past performance" in section.title.lower():
+        text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+            "client references past performance 08_References",
+            limit=5,
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+        )
+        if text:
+            kb_block += f"\n\n=== VERIFIED KNOWLEDGE BASE REFERENCES ===\n{text[:5000]}\nMUST USE these exact references to build the section."
+
+    if "case " in section.title.lower() or "our work" in section.title.lower() or "past performance" in section.title.lower():
+        from app.services.proposal_case_study_match import match_case_studies_for_rfp
+        try:
+            match_res = await match_case_studies_for_rfp(rfp, save_to_cache=False, fetch_full_text=False)
+            cs_block = ""
+            if match_res.studies:
+                for st in match_res.studies[:4]:
+                    cs_block += f"- **{st.title}** (Fit: {st.fit_label})\n  {st.excerpt}\n"
+                kb_block += f"\n\n=== Recommended Case Studies (via Auto-Match) ===\n{cs_block}\nMUST USE these exact case studies to build the section."
+        except Exception:
+            pass
+
     evidence = _evidence_for_section(section.id, corpus)
     return evidence, kb_block, research, methods
 
@@ -602,7 +646,20 @@ async def run_presubmit_autofix_loop(
     sections_targeted = 0
 
     from app.services.proposal_submission_polish import run_submission_polish_pass
-    from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
+
+    # Compulsory manuscript-wide Rev 6 / zö voice scrub before Review fixes.
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        working, rev6_logs = apply_rev6_voice_scrub_to_draft(working)
+        if rev6_logs:
+            await asave_proposal_draft(working)
+            logger.info(
+                "Pre-submit autofix Rev 6 voice scrub: %d fix(es)",
+                len(rev6_logs),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pre-submit Rev 6 voice scrub skipped: %s", exc)
 
     try:
         working, polish_logs = await run_submission_polish_pass(
@@ -617,18 +674,10 @@ async def run_presubmit_autofix_loop(
     except Exception as exc:
         logger.warning("Pre-submit submission polish skipped: %s", exc)
 
-    try:
-        working, compliance_logs = await run_rfp_compliance_polish_pass(
-            rfp.id,
-            rfp=rfp,
-            draft=working,
-            research=working_research,
-        )
-        if compliance_logs:
-            await asave_proposal_draft(working)
-            sections_targeted += len(compliance_logs)
-    except Exception as exc:
-        logger.warning("Pre-submit RFP compliance polish skipped: %s", exc)
+    # NOTE: run_rfp_compliance_polish_pass removed — it was redundant with the
+    # autofix loop below and the gap finalizer, AND was the root cause of
+    # destructive section deletions (e.g. Cover Letter wipes). Compliance gaps
+    # are handled by the autofix loop's _llm_surgical_fix + gap finalizer pass.
 
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 
@@ -775,7 +824,11 @@ async def run_presubmit_autofix_loop(
                     # rewrites are still useful — accept non-worsening patches that
                     # change content or clear placeholders.
                     accept = False
-                    if repaired.strip() and repaired != best_content:
+                    # Protect against LLM completely wiping out a built section with a short apology or refusal
+                    is_catastrophic_wipe = len(best_content) > 150 and (
+                        len(repaired) < 80 or len(repaired) < (len(best_content) * 0.4)
+                    )
+                    if repaired.strip() and repaired != best_content and not is_catastrophic_wipe:
                         if llm_score < best_score:
                             accept = True
                         elif llm_score <= best_score and (

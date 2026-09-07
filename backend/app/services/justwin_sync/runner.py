@@ -11,7 +11,12 @@ from app.services.justwin_sync.api import (
     create_api_client,
     download_solicitation_pdf_bytes,
 )
-from app.services.justwin_sync.browser import close_auth, get_authenticated_context, get_justwin_base_url
+from app.services.justwin_sync.browser import (
+    close_auth,
+    ensure_authenticated_page,
+    get_authenticated_context,
+    get_justwin_base_url,
+)
 from app.services.justwin_sync.mapper import map_lead_to_rfp, parse_justwin_date
 from app.services.rfp_repository import (
     find_existing_justwin_rfp,
@@ -77,10 +82,9 @@ def run_justwin_sync(
             timeout=60_000,
         )
         page.wait_for_timeout(3000)
-        if "/login" in page.url:
-            raise RuntimeError(
-                "Not authenticated — delete JUSTWIN_SESSION_PATH and rerun sync"
-            )
+        # Stale cookies often redirect here after a quiet wait — re-login
+        # automatically instead of telling the user to delete the session file.
+        auth, page = ensure_authenticated_page(auth, page)
 
         client = create_api_client(page)
         leads = collect_leads(client, target_date or None, tab)

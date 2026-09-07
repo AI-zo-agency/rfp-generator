@@ -42,10 +42,46 @@ By signing below, the undersigned certifies that the information provided in thi
 }
 
 
+def ends_on_an_unfilled_promise(content: str) -> bool:
+    """True when a section's LAST line promises content that never arrives.
+
+    A trailing heading, a bold label on its own line, or a colon lead-in is a
+    section that announced something and stopped. Checked with NO length floor,
+    because these are short by definition: a real case shipped as one sentence
+    followed by "**Confidential and/or Proprietary Declaration**" and nothing
+    else — far under the 350-char floor _looks_truncated_prose needs, so no
+    detector saw it and no repair pass ever ran.
+    """
+    stripped = (content or "").rstrip()
+    if not stripped:
+        return False
+    last = stripped.splitlines()[-1].strip()
+    if not last:
+        return False
+    # A tag is a deliberate, complete handoff to a human — not a broken ending.
+    if last.endswith("]"):
+        return False
+    if last.startswith("#"):
+        return True
+    # Bold-only line: a heading written as emphasis.
+    if last.startswith("**") and last.endswith("**") and len(last) > 4:
+        return True
+    # "The following apply:" with nothing following.
+    if last.endswith(":"):
+        return True
+    # A table header row with no body row under it.
+    if last.startswith("|") and set(last) <= set("| -:"):
+        return True
+    return False
+
+
 def looks_truncated_for_fulfill(content: str) -> bool:
     stripped = (content or "").rstrip()
     if not stripped:
         return False
+    # Length-independent: must run BEFORE the <60 floor below.
+    if ends_on_an_unfilled_promise(stripped):
+        return True
     if _looks_truncated_prose(stripped):
         return True
     if len(stripped) < 60:
@@ -342,16 +378,20 @@ async def _complete_one_truncated_section_from_kb(
         "date, certification, or client.\n"
         "5. Do not add new paragraphs, sections, bullet points, or case studies beyond "
         "what is needed to close the existing cut-off.\n"
-        "6. These rules govern how you write; they are never content. Never write "
+        "6. ANTI-RFP-ECHO: when completing the cut-off, write proposal substance only. "
+        "Do not finish a sentence by paraphrasing the RFP excerpt or listing the buyer's "
+        "scope asks back at them.\n"
+        "7. These rules govern how you write; they are never content. Never write "
         "sentences about verification requirements or your own constraints — apply "
         "the rule silently. The [VERIFY: ...] tag is the only trace of a gap; never "
         "explain or preface it.\n"
-        '7. Return JSON only: {"content": "full corrected section markdown"}'
+        '8. Return JSON only: {"content": "full corrected section markdown"}'
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\nSection: {section.title}\n\n"
         f"KB evidence:\n{evidence_block}\n\n"
-        f"RFP excerpt:\n{rfp_context[:2000]}\n\n"
+        f"RFP excerpt (PRIVATE continuity only — do not paraphrase into the body):\n"
+        f"{rfp_context[:2000]}\n\n"
         f"Truncated section (complete it):\n{body}"
     )
     try:

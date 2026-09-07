@@ -20,9 +20,11 @@ OWNED BY STATIC SECTIONS (mention once with a short pointer, never re-write):
 - Offeror / Vendor / Company Identification forms → short FIELD table + pointer to 1.3 only
   (never a second Business Information essay)
 
-OWNED BY RFP TABS (write only the part THIS tab scores):
-- Understanding / Opportunity → client goals, constraints, audiences — NOT company bio
-- Methodology / Approach → process steps for THIS scope — NOT case studies or Who We Are
+OWNED BY RFP TABS (write only the PROPOSAL ANSWER THIS tab scores — never RFP paraphrase):
+- Understanding / Opportunity / Executive Summary → our diagnosis, fit, and proof —
+  NOT a restatement of client goals / what they already built / what the RFP asks
+- Methodology / Approach → our process for THIS scope — NOT case-study dumps or Who We Are,
+  and NOT a rewrite of the RFP scope list
 - Timeline / Schedule → phases and dates — NOT methodology paragraphs again
 - Budget / Fees → compensation model and transparency — NOT approach restatement
 - References → contacts only — NOT experience narratives
@@ -1696,8 +1698,16 @@ def is_rfp_company_identity_form_section(
     content: str,
 ) -> bool:
     """True for RFP Offeror/Company Information forms that restate Section 1.3."""
+    from app.services.proposal_outline_dedup import title_is_transmittal_deliverable
+
     sid = (section_id or "").casefold()
     if sid.startswith("section-1-") or sid == "section-1-business-info":
+        return False
+    # A cover letter names the contact person, RFP number and proposer — the
+    # same fields an identity form carries. That overlap made it match here and
+    # get compressed to "See 1.3 — Business Information", so the letter was
+    # never written. A transmittal is authored prose, never an identity form.
+    if title_is_transmittal_deliverable(title):
         return False
     title_cf = (title or "").casefold()
     if _COMPANY_IDENTITY_FORM_TITLE_RE.search(title or ""):

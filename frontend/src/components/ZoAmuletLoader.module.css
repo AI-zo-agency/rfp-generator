@@ -1,0 +1,91 @@
+.zoAmulet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  min-height: 5.5rem;
+  min-width: 5.5rem;
+}
+
+.zoAmuletScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  min-height: 100dvh;
+  background: var(--zo-bg, #fafbfc);
+}
+
+.glow {
+  position: absolute;
+  width: 8rem;
+  height: 8rem;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(239, 80, 24, 0.22) 0%, transparent 70%);
+  filter: blur(28px);
+  animation: zoAmuletPulse 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.ring {
+  position: relative;
+  z-index: 1;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 3px solid rgba(239, 80, 24, 0.22);
+  border-top-color: var(--zo-primary, #ef5018);
+  border-radius: 50%;
+  animation: zoAmuletSpin 0.9s linear infinite;
+}
+
+.mark {
+  position: relative;
+  z-index: 1;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--zo-text-muted, #52635f);
+  animation: zoAmuletBreathe 1.8s ease-in-out infinite;
+}
+
+@keyframes zoAmuletPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes zoAmuletSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes zoAmuletBreathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow,
+  .ring,
+  .mark {
+    animation: none;
+  }
+
+  .mark {
+    opacity: 0.85;
+  }
+}

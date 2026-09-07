@@ -392,7 +392,21 @@ async def run_dynamic_section_planner(
         rfp_context,
         section_factory=lambda raw: OutlineSection.model_validate(raw),
     )
-    kept, cap_dropped = enforce_outline_section_cap(kept, section_cap)
+    # Recompute the cap floor AFTER the outline exists: min_sections above was
+    # derived from the upstream evaluation extraction, which can under-count
+    # (e.g. it returns a single criterion with points=None when parsing
+    # fails). That must never let the cap shrink below the number of RFP-
+    # derived tabs the planner + coverage passes actually produced on this
+    # page. The pre-outline section_cap is kept as-is for the prompt text
+    # above (the model still needs a target number to aim for before the
+    # outline exists); only the value passed to enforce_outline_section_cap
+    # is raised here.
+    from app.services.proposal_outline_dedup import section_is_rfp_derived
+
+    rfp_derived_count = sum(1 for sec in kept if section_is_rfp_derived(sec))
+    effective_section_cap = max(section_cap, rfp_derived_count)
+
+    kept, cap_dropped = enforce_outline_section_cap(kept, effective_section_cap)
     dropped = list(dropped) + list(cap_dropped)
     if dropped:
         logger.info(
@@ -423,12 +437,29 @@ async def run_dynamic_section_planner(
             scored_added[:12],
         )
     if cap_dropped:
-        logger.info(
-            "%s hard-capped outline to %d tab(s); dropped %d: %s",
+        # These are planner-invented tabs trimmed for page budget — never RFP-
+        # derived sections (enforce_outline_section_cap keeps every
+        # RFP-derived tab unconditionally). Escalated from info to warning so
+        # a page-budget trim of invented padding is visible in normal logs,
+        # not just on request.
+        logger.warning(
+            "%s hard-capped outline to %d tab(s); trimmed %d planner-invented "
+            "tab(s) for page budget (RFP-derived tabs are never dropped): %s",
             AGENT,
-            section_cap,
+            effective_section_cap,
             len(cap_dropped),
             cap_dropped[:12],
+        )
+    if len(kept) > effective_section_cap:
+        # RFP-derived tabs alone exceeded the cap — enforce_outline_section_cap
+        # kept them all anyway. Surface the overflow instead of leaving it silent.
+        logger.warning(
+            "%s outline finished with %d tab(s), over the %d-tab page-budget "
+            "cap — the RFP itself demands more sections than the page budget "
+            "allows; no section was dropped to force the count down.",
+            AGENT,
+            len(kept),
+            effective_section_cap,
         )
     outline.sections = kept
 

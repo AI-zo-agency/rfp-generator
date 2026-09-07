@@ -564,6 +564,45 @@ def _is_in_place_section_budget_fill(
     )
 
 
+def user_asks_case_study_rfp_rematch(text: str) -> bool:
+    """Swap/replace featured case studies with better RFP-aligned KB studies.
+
+    In-place content rewrite on the open Case Studies / Our Work tab — NOT
+    outline add of a random unused KB title. "instead of these case studies…
+    use another… align with rfp" must not hit the unnamed "add another case
+    study" heuristic (that path once tried to ADD a staff-news document).
+    """
+    raw = (text or "").strip()
+    if not raw or not re.search(r"(?i)\bcase\s*stud", raw):
+        return False
+    if re.search(
+        r"(?is)\b(?:instead\s+of|replace|swap(?:\s+out)?|switch|substitute)\b"
+        r".{0,100}\b(?:case\s*stud|these|those|this|the\s+(?:current|existing))",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\b(?:use|pick|choose|feature|show|pull|bring)\b.{0,80}\b"
+        r"(?:another|other|different|better|best|matching|relevant|aligned)\b"
+        r".{0,60}\bcase\s*stud",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\bcase\s*stud(?:y|ies)\b.{0,80}\b"
+        r"(?:align|match|fit|relevant)\b.{0,50}\b(?:rfp|requirements?|needs?)\b",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\b(?:best[- ]?match(?:ing)?|better[- ]?match(?:ing)?|"
+        r"rfp[- ]?align(?:ed)?)\b.{0,50}\bcase\s*stud",
+        raw,
+    ):
+        return True
+    return False
+
+
 def _is_in_place_kb_or_verify_edit(text: str) -> bool:
     """True when the user wants to fill/edit the current tab — not add a sidebar section.
 
@@ -1742,10 +1781,83 @@ def unused_case_study_name_from_sources(
     return None
 
 
+def _own_team_member_named_in(draft: ProposalDraft, label: str) -> str | None:
+    """The zö team member named in `label`, if any — read from this draft's bios.
+
+    Section 2 bio tabs ARE the roster for this proposal, so no external list or
+    vocabulary is needed: compare the proposed title against the names we are
+    already presenting as our own people.
+    """
+    haystack = (label or "").casefold()
+    if not haystack:
+        return None
+    for section in draft.sections:
+        if not (section.id or "").startswith("section-2-bio-"):
+            continue
+        title = (section.title or "").strip()
+        # Bio tabs are titled like "2.2 — Ella Lindau"; take the name half.
+        for separator in ("—", "-", ":"):
+            if separator in title:
+                title = title.split(separator)[-1]
+        name = title.strip()
+        # Require both name parts so a common first name alone cannot match.
+        parts = [p for p in name.casefold().split() if len(p) > 1]
+        if len(parts) >= 2 and all(part in haystack for part in parts):
+            return name
+    return None
+
+
 def _plan_add_named_case_study(draft: ProposalDraft, name: str) -> StructurePlan:
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    label = (name or "").strip() or "Case study"
+
+    # Same gate the build path uses. Without it this function minted an Our Work
+    # tab from ANY KB document name — including company news, which is how
+    # "3.3 — Update: Ella Lindau Promoted to Operations Director" became a case
+    # study. An internal staff promotion is not delivered client work, and a tab
+    # like that in Our Work is worse than a missing one in front of a board.
+    #
+    # unused_case_study_name_from_sources (above) already applied this check;
+    # every other caller reached here ungated.
+    # Our Work is about CLIENTS. A title naming one of our own people is company
+    # news, not delivered client work — "Update: Ella Lindau Promoted to
+    # Operations Director" is a staff announcement that the shared title gate
+    # (which screens multi-project dumps and templates) has no reason to catch.
+    #
+    # No keyword list: the draft already carries our roster as Section 2 bio
+    # tabs, so the team's own names are data we have. If the proposed case study
+    # is named after someone with a bio in this very proposal, it is us, not a
+    # client.
+    own_person = _own_team_member_named_in(draft, label)
+    if own_person:
+        logger.info("Case-study ADD refused — names our own staff: %s", label)
+        return StructurePlan(
+            action="clarify",
+            assistantNote=(
+                f"“{label}” names {own_person}, who is on our team — that is a "
+                "company update, not delivered client work, and Our Work must "
+                "show client projects. Tell me which client project to feature "
+                "and I will add that instead."
+            ),
+        )
+
+    if not is_eligible_section3_case_study_title(label):
+        logger.info("Case-study ADD refused — not a client project: %s", label)
+        return StructurePlan(
+            action="clarify",
+            assistantNote=(
+                f"“{label}” is not a client project case study — it reads as a "
+                "company update or a multi-project document, so adding it to Our "
+                "Work would misrepresent it as delivered work. Name the client "
+                "project you want featured and I will add that instead."
+            ),
+        )
+
     cases = _case_study_sections(draft.sections)
     after = cases[-1].id if cases else None
-    label = (name or "").strip() or "Case study"
     logger.info("Case-study ADD: %s (after=%s)", label, after)
     return StructurePlan(
         action="add_sections",
@@ -1907,10 +2019,17 @@ async def plan_chat_structure_action(
 
     # Unnamed "add a case study" — add the next unused 03_CS tab. Clarify only
     # when the KB has no leftover eligible study.
+    # NEVER take this path for rematch/swap/instead-of asks — those rewrite the
+    # open Case Studies body from RFP match scores, they do not mint a random tab.
     msg_cf = user_message.casefold()
     if (
         "case stud" in msg_cf
         and any(w in msg_cf for w in ("add", "create", "another", "more", "include"))
+        and not user_asks_case_study_rfp_rematch(user_message)
+        and not re.search(
+            r"(?i)\b(?:instead\s+of|replace|swap|switch|substitute)\b",
+            user_message,
+        )
         and not _extract_case_study_name_from_add_message(user_message)
     ):
         picked = await _next_unused_kb_case_study_name(draft)
@@ -1980,9 +2099,18 @@ async def plan_chat_structure_action(
                 await asyncio.sleep(1.0)
                 continue
             # Useful fallback — never strand "add a case study" on a generic error.
+            # Rematch/swap asks must not mint a random unused tab here either.
             msg_cf = user_message.casefold()
-            if "case stud" in msg_cf and any(
-                w in msg_cf for w in ("add", "create", "another", "more", "include")
+            if (
+                "case stud" in msg_cf
+                and any(
+                    w in msg_cf for w in ("add", "create", "another", "more", "include")
+                )
+                and not user_asks_case_study_rfp_rematch(user_message)
+                and not re.search(
+                    r"(?i)\b(?:instead\s+of|replace|swap|switch|substitute)\b",
+                    user_message,
+                )
             ):
                 picked = await _next_unused_kb_case_study_name(draft)
                 if picked:

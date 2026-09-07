@@ -45,7 +45,17 @@ _STATIC_COVERED_TITLE_RES = (
     # Bare "Company Information" essay — owned by 1.3. Offeror/Vendor Identification
     # *forms* stay in the outline (buyer needs the form) but are compressed at draft/scan.
     re.compile(r"^\s*company\s+information\s*$", re.IGNORECASE),
-    re.compile(r"\bcertifications?\b", re.IGNORECASE),
+    # Agency / firm CERTIFICATIONS list owned by Section 1.4 — NOT signature
+    # packet rows like "Certification of Proposal" / bidder certification forms.
+    re.compile(
+        r"(?i)^\s*(?:\d+(?:\.\d+)*\s*[.—–\-:]?\s*)?"
+        r"(?:agency\s+|firm\s+|company\s+|business\s+)?"
+        r"certifications?\s*$"
+    ),
+    re.compile(
+        r"(?i)\b(?:agency|firm|company|business)\s+certifications?\b"
+    ),
+    re.compile(r"(?i)\blicenses?\s+(?:and|&)\s+certifications?\b"),
     re.compile(r"\binsurance\s+information\b", re.IGNORECASE),
     # Coverage narrative / COI delivery is owned by Section 1.5 — do not draft a
     # second essay under "Certificate of Insurance" in Phase 3.
@@ -305,6 +315,289 @@ _NOT_X_ITS_Y_RES = re.compile(
     re.IGNORECASE,
 )
 
+# Rev 6 pattern shapes — deterministic strip on every narrative path + persist.
+_TAGLINE_EXEMPT_RE = re.compile(
+    r"we are more than your agency\.?\s*we are your strongest advocate\.?",
+    re.IGNORECASE,
+)
+# "We'd rather X than Y" → keep X as the affirmative commitment.
+_WED_RATHER_THAN_RE = re.compile(
+    r"\bwe(?:'d| would)\s+rather\s+(.+?)\s+than\b[^.;\n]{0,180}",
+    re.IGNORECASE | re.DOTALL,
+)
+# "X rather than Y" → drop the contrast tail (keep X).
+_RATHER_THAN_TAIL_RE = re.compile(
+    r"\s+rather than\b[^.;\n]{0,180}",
+    re.IGNORECASE,
+)
+_NEGATION_INSTEAD_OF_RE = re.compile(
+    r"\s+instead of\b[^.;\n]{0,160}",
+    re.IGNORECASE,
+)
+# "X, not Y" / "X; not Y" — any trailing contrast after comma/semicolon.
+_NEGATION_X_NOT_Y_RE = re.compile(
+    r"[,;]\s+not\s+(?:a|an|the|just|only|merely|simply\s+)?[^.;\n]{0,160}",
+    re.IGNORECASE,
+)
+_NEGATION_PHRASE_RES = (
+    re.compile(r"\bnot just\b", re.IGNORECASE),
+    re.compile(r"\bnot only\b", re.IGNORECASE),
+    re.compile(r"\bnot simply\b", re.IGNORECASE),
+    re.compile(r"\bnot merely\b", re.IGNORECASE),
+    re.compile(r"\bisn't just\b", re.IGNORECASE),
+    re.compile(r"\bisn't only\b", re.IGNORECASE),
+    re.compile(r"\bwasn't just\b", re.IGNORECASE),
+    re.compile(r"\bdon't just\b", re.IGNORECASE),
+    re.compile(r"\bdoesn't just\b", re.IGNORECASE),
+    re.compile(r"\bdo not just\b", re.IGNORECASE),
+    re.compile(r"\bmore than just\b", re.IGNORECASE),
+    re.compile(r"\bbeyond just\b", re.IGNORECASE),
+    re.compile(r"\bless about\b.{0,40}?\bthan\b", re.IGNORECASE),
+)
+_SIGNIFICANCE_CLOSE_SENTENCE_RES = (
+    re.compile(
+        r"(?i)([.!?]\s+)?That's the kind of\b[^.!?\n]{0,200}[.!]?",
+    ),
+    re.compile(
+        r"(?i)([.!?]\s+)?That is the kind of\b[^.!?\n]{0,200}[.!]?",
+    ),
+    re.compile(
+        r"(?i),\s+which is what makes\b[^.!?\n]{0,120}",
+    ),
+    re.compile(
+        r"(?i)\s+that runs through every\b[^.!?\n]{0,80}",
+    ),
+)
+_HEDGE_ANNOUNCE_RES = (
+    re.compile(
+        r"(?i)([.!?]\s+)?That's a real tradeoff worth naming:?\s*",
+    ),
+    re.compile(
+        r"(?i)([.!?]\s+)?(?:It(?:'s| is)\s+)?worth noting(?:\s+that)?:?\s*",
+    ),
+    re.compile(
+        r"(?i)([.!?]\s+)?(?:It(?:'s| is)\s+)?worth mentioning(?:\s+that)?:?\s*",
+    ),
+    re.compile(
+        r"(?i)([.!?]\s+)?Keep in mind(?:\s+that)?:?\s*",
+    ),
+)
+_CASE_STUDY_FALSE_FRAMING_RES = (
+    re.compile(
+        r"(?i)\s+instead of starting from a blank page\.?",
+    ),
+    re.compile(
+        r"(?i)\ban existing asset we (?:built|worked) on\b",
+    ),
+    re.compile(
+        r"(?i)\bbuilt on (?:an |what a client already has as an )?existing asset\b",
+    ),
+)
+# Dangling sentence-final "before." (dropped continuation).
+_DANGLING_BEFORE_RE = re.compile(r"\s+before\s*(?=[.!?…]|$)", re.IGNORECASE)
+
+
+_PLACEHOLDER_TAG_RE = re.compile(
+    r"\[(?:VERIFY|MANUAL FILL|FLAG|TBD|INSERT|DESIGNER NOTE)[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def _scrub_rev6_fragment(text: str, logs: list[str]) -> str:
+    """Apply Rev 6 voice bans to a prose fragment (paragraph or table cell)."""
+    if not (text or "").strip():
+        return text
+
+    placeholders: list[str] = []
+
+    def _stash(m: re.Match[str]) -> str:
+        placeholders.append(m.group(0))
+        return f"\x00TAG{len(placeholders) - 1}\x00"
+
+    # Protect tagline + VERIFY / MANUAL FILL spans — "not in KB" inside a tag
+    # must not be treated as negation-contrast (destroyed Review VERIFY flags).
+    out = _TAGLINE_EXEMPT_RE.sub(_stash, text)
+    out = _PLACEHOLDER_TAG_RE.sub(_stash, out)
+
+    def _wed_rather_keep(m: re.Match[str]) -> str:
+        kept = (m.group(1) or "").strip(" ,;")
+        if not kept:
+            logs.append("Rev6: removed rather-than clause")
+            return ""
+        logs.append("Rev6: scrubbed we'd-rather-than negation-contrast")
+        if kept[0].islower():
+            kept = kept[0].upper() + kept[1:]
+        # Prefer future-tense commitment when the scrap starts with a bare verb.
+        if re.match(r"(?i)^(spend|run|build|keep|ship|fix)\b", kept):
+            kept = f"We'll {kept[0].lower() + kept[1:]}"
+        return kept
+
+    if _WED_RATHER_THAN_RE.search(out):
+        out = _WED_RATHER_THAN_RE.sub(_wed_rather_keep, out)
+
+    if _RATHER_THAN_TAIL_RE.search(out):
+        out = _RATHER_THAN_TAIL_RE.sub("", out)
+        logs.append("Rev6: scrubbed rather-than negation-contrast")
+
+    if _NEGATION_INSTEAD_OF_RE.search(out):
+        out = _NEGATION_INSTEAD_OF_RE.sub("", out)
+        logs.append("Rev6: scrubbed instead-of negation-contrast")
+
+    if _NEGATION_X_NOT_Y_RE.search(out):
+        out = _NEGATION_X_NOT_Y_RE.sub("", out)
+        logs.append("Rev6: scrubbed X-not-Y negation-contrast")
+
+    for pat in _NEGATION_PHRASE_RES:
+        if pat.search(out):
+            out = pat.sub("", out)
+            logs.append("Rev6: scrubbed negation-contrast phrase")
+
+    for pat in _SIGNIFICANCE_CLOSE_SENTENCE_RES:
+        if pat.search(out):
+            out = pat.sub(lambda m: m.group(1) if m.lastindex else "", out)
+            logs.append("Rev6: scrubbed significance-close")
+
+    for pat in _HEDGE_ANNOUNCE_RES:
+        if pat.search(out):
+            out = pat.sub(lambda m: m.group(1) if m.lastindex else "", out)
+            logs.append("Rev6: scrubbed hedging announcement")
+
+    for pat in _CASE_STUDY_FALSE_FRAMING_RES:
+        if pat.search(out):
+            if "existing asset" in pat.pattern.casefold():
+                out = pat.sub("a prior engagement", out)
+            else:
+                out = pat.sub("", out)
+            logs.append("Rev6: scrubbed case-study false framing")
+
+    if _DANGLING_BEFORE_RE.search(out):
+        out = _DANGLING_BEFORE_RE.sub("", out)
+        logs.append("Rev6: scrubbed dangling 'before'")
+
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r" +([,.;:!?])", r"\1", out)
+    out = re.sub(r"\s+\.", ".", out)
+    out = out.strip(" ,;")
+
+    for i, original in enumerate(placeholders):
+        out = out.replace(f"\x00TAG{i}\x00", original)
+    return out
+
+
+def find_rev6_voice_violations(content: str) -> list[str]:
+    """Detect leftover Rev 6 hard-ban patterns (Review check after scrub).
+
+    Same shapes as ``scrub_rev6_voice_patterns`` / ZO_BRAND_AND_WRITING_STANDARDS_REV6.
+    Skips MANUAL FILL / VERIFY / heading / designer-note lines and the registered
+    tagline exemption. Not RFP-specific.
+    """
+    if not (content or "").strip():
+        return []
+
+    hits: list[str] = []
+    seen: set[str] = set()
+
+    def _add(label: str) -> None:
+        if label not in seen:
+            seen.add(label)
+            hits.append(label)
+
+    for line in content.splitlines():
+        lead = line.lstrip()
+        if (
+            lead.startswith("[MANUAL FILL")
+            or lead.startswith("[VERIFY")
+            or lead.startswith("#")
+            or lead.startswith("[DESIGNER NOTE")
+        ):
+            continue
+        sample = _TAGLINE_EXEMPT_RE.sub("", line)
+        if "—" in sample:
+            _add("em dash (—)")
+        if _WED_RATHER_THAN_RE.search(sample) or _RATHER_THAN_TAIL_RE.search(sample):
+            _add("negation-contrast (rather than)")
+        if _NEGATION_INSTEAD_OF_RE.search(sample):
+            _add("negation-contrast (instead of)")
+        if _NEGATION_X_NOT_Y_RE.search(sample):
+            _add("negation-contrast (X, not Y)")
+        for pat in _NEGATION_PHRASE_RES:
+            if pat.search(sample):
+                _add("negation-contrast phrase (not just / not only / …)")
+                break
+        for pat in _SIGNIFICANCE_CLOSE_SENTENCE_RES:
+            if pat.search(sample):
+                _add("significance-close")
+                break
+        for pat in _HEDGE_ANNOUNCE_RES:
+            if pat.search(sample):
+                _add("hedging announcement (worth noting / worth naming / …)")
+                break
+        for pat in _BANNED_HYPE_WORD_RES:
+            if pat.search(sample):
+                word = pat.pattern.replace(r"\b", "")
+                _add(f"empty hype word ({word})")
+                break
+    return hits
+
+
+def scrub_rev6_voice_patterns(content: str) -> tuple[str, list[str]]:
+    """Deterministic Rev 6 voice bans: negation-contrast, significance-close, hedges.
+
+    Scrubs prose lines AND markdown table cells (voice bans hide in Fee / Commitment
+    tables). Skips MANUAL FILL / VERIFY / heading lines. Exempts the registered
+    tagline in Section 10 of the standards file.
+    """
+    if not (content or "").strip():
+        return content or "", []
+
+    logs: list[str] = []
+    lines_out: list[str] = []
+    for line in content.splitlines(keepends=True):
+        stripped = line.rstrip("\n")
+        ending = "\n" if line.endswith("\n") else ""
+        lead = stripped.lstrip()
+        if (
+            lead.startswith("[MANUAL FILL")
+            or lead.startswith("[VERIFY")
+            or lead.startswith("#")
+        ):
+            lines_out.append(line)
+            continue
+
+        # Table row: scrub each cell; keep structure.
+        if lead.startswith("|"):
+            # Separator rows (| --- | --- |) — leave alone.
+            if re.match(r"^\s*\|[\s:|\-]+\|\s*$", stripped):
+                lines_out.append(line)
+                continue
+            raw_cells = stripped.strip().strip("|").split("|")
+            new_cells: list[str] = []
+            changed = False
+            for cell in raw_cells:
+                original = cell.strip()
+                scrubbed = _scrub_rev6_fragment(original, logs).strip()
+                if scrubbed != original:
+                    changed = True
+                new_cells.append(scrubbed)
+            if changed:
+                lines_out.append("| " + " | ".join(new_cells) + " |" + ending)
+            else:
+                lines_out.append(line)
+            continue
+
+        text = _scrub_rev6_fragment(stripped, logs)
+        lines_out.append(text + ending)
+
+    cleaned = "".join(lines_out)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    seen: set[str] = set()
+    uniq_logs: list[str] = []
+    for entry in logs:
+        if entry not in seen:
+            seen.add(entry)
+            uniq_logs.append(entry)
+    return cleaned, uniq_logs
+
 
 def scrub_generic_ai_prose(content: str) -> str:
     """Strip rev-3 banned hype words and obvious generic-AI openers."""
@@ -318,6 +611,7 @@ def scrub_generic_ai_prose(content: str) -> str:
         text = pattern.sub("", text)
     text = _BANNED_HYPE_SOLUTION_RES.sub("", text)
     text = _NOT_X_ITS_Y_RES.sub("", text)
+    text, _ = scrub_rev6_voice_patterns(text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r" +([,.;:!?])", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -325,7 +619,7 @@ def scrub_generic_ai_prose(content: str) -> str:
 
 
 def apply_writing_standards_mechanics(content: str) -> str:
-    """Deterministic rev 3 mechanics: company name + no em dashes."""
+    """Deterministic Rev 6 mechanics: company name + no em dashes + voice bans."""
     if not content.strip():
         return content
 
@@ -342,7 +636,98 @@ def apply_writing_standards_mechanics(content: str) -> str:
     # Cleanup double commas / spaces from dash swaps
     text = re.sub(r",\s*,", ",", text)
     text = re.sub(r"[ \t]+,", ",", text)
+    text, _ = scrub_rev6_voice_patterns(text)
     return text
+
+
+def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
+    """Manuscript-wide Rev 6 voice scrub for Complete Scan / ZF persist."""
+    from app.models.proposal import ProposalDraft as _Draft
+
+    if not isinstance(draft, _Draft):
+        return draft, []
+
+    logs: list[str] = []
+    sections = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        if not body.strip():
+            sections.append(section)
+            continue
+        cleaned, section_logs = scrub_rev6_voice_patterns(body)
+        # Em dash + company name without a second full scrub pass.
+        cleaned = cleaned.replace("—", ",")
+        cleaned = cleaned.replace("–", "-")
+        cleaned = re.sub(r"\bZO\s+Agency\b", "zö agency", cleaned)
+        cleaned = re.sub(r"\bZÖ\s+Agency\b", "zö agency", cleaned)
+        cleaned = re.sub(r"\bZö\s+Agency\b", "zö agency", cleaned)
+        cleaned = re.sub(r"\bZo\s+Agency\b", "zö agency", cleaned)
+        cleaned = re.sub(r"\bzo\s+agency\b", "zö agency", cleaned)
+        cleaned = re.sub(r",\s*,", ",", cleaned)
+        cleaned = re.sub(r"[ \t]+,", ",", cleaned)
+        if cleaned != body:
+            changed = True
+            sections.append(section.model_copy(update={"content": cleaned}))
+            for line in section_logs:
+                logs.append(f"{section.id}: {line}")
+            if cleaned != body and not section_logs:
+                logs.append(f"{section.id}: Rev6: mechanics (em dash / company name)")
+        else:
+            sections.append(section)
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
+
+
+def apply_chat_rev6_voice_to_draft(
+    draft: "ProposalDraft",
+    *,
+    section_ids: set[str] | list[str] | frozenset[str] | None = None,
+) -> tuple["ProposalDraft", list[str]]:
+    """Rev 6 enforcement before section-chat persist.
+
+    When ``section_ids`` is provided, only those tabs are scrubbed — chat must not
+    rewrite untouched bios / narrative tabs as a side effect of one Improve turn.
+    When ``section_ids`` is None, every non-empty section is scrubbed (legacy /
+    manuscript-wide callers).
+    """
+    from app.models.proposal import ProposalDraft as _Draft
+
+    if not isinstance(draft, _Draft):
+        return draft, []
+
+    allow: set[str] | None = None
+    if section_ids is not None:
+        allow = {str(x) for x in section_ids if str(x).strip()}
+
+    logs: list[str] = []
+    sections = []
+    changed = False
+    for section in draft.sections:
+        sid = section.id or ""
+        if allow is not None and sid not in allow:
+            sections.append(section)
+            continue
+        body = section.content or ""
+        if not body.strip():
+            sections.append(section)
+            continue
+        cleaned = enforce_narrative_voice(
+            body,
+            section_id=sid,
+            title=section.title or "",
+            zo_mode=getattr(section, "mode", None) or "write",
+        )
+        if cleaned != body:
+            changed = True
+            sections.append(section.model_copy(update={"content": cleaned}))
+            logs.append(f"{sid}: Rev6 chat voice enforced")
+        else:
+            sections.append(section)
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
 
 
 def fix_narrative_register(content: str) -> str:
@@ -389,6 +774,30 @@ def enforce_narrative_voice(
     return fix_narrative_register(content)
 
 
+def apply_compulsory_rev6_to_section(
+    section: "ProposalSection",
+) -> tuple["ProposalSection", list[str]]:
+    """Hard Rev 6 pass on one section after any LLM edit (chat, contradiction, fill)."""
+    from app.models.proposal import ProposalSection as _PS
+
+    if not isinstance(section, _PS):
+        return section, []
+    body = section.content or ""
+    if not body.strip():
+        return section, []
+    voiced = enforce_narrative_voice(
+        body,
+        section_id=section.id,
+        title=section.title or "",
+        zo_mode=getattr(section, "mode", None) or "write",
+    )
+    voiced, logs = scrub_rev6_voice_patterns(voiced)
+    voiced = voiced.replace("—", ",").replace("–", "-")
+    if voiced == body:
+        return section, logs
+    return section.model_copy(update={"content": voiced}), logs
+
+
 def is_duplicate_static_rfp_section(
     title: str, *, static_section_text: str | None = None
 ) -> bool:
@@ -419,6 +828,16 @@ def is_duplicate_static_rfp_section(
             r"scope\s+of\s+work|statement\s+of\s+work)\b",
             t,
             re.IGNORECASE,
+        ):
+            return False
+        # Signature / packet "Certification of …" is a buyer deliverable, never
+        # Section 1.4 agency certs (MBE/DBE/etc.).
+        if re.search(
+            r"(?i)\bcertification\s+of\s+(?:the\s+)?"
+            r"(?:proposal|bid|offer|compliance|non[-\s]?collusion)\b"
+            r"|\b(?:bidder|offeror|proposer|respondent)\s+certification\b"
+            r"|\bpreference\s+certification\b",
+            t,
         ):
             return False
         return True

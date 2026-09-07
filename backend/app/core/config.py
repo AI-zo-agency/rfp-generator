@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     phase4_adversarial_repair: bool = False
     # Final checks (build-finalize): skip dedupe/verify/Ralph passes that strip prose.
     build_finalize_lean: bool = True
+    # Final checks (build-finalize) is OFF BY DEFAULT — the ~19 min tail after
+    # Build my proposal. The code is intact, not deleted: set
+    # BUILD_FINALIZE_ENABLED=true to run it again.
+    # Gated at all THREE entry points, because two were not enough: the Build
+    # tail in proposal_generator, the /proposal/build-finalize endpoint, and
+    # run_build_finalize_pass itself — Celery's _PHASE_DISPATCH maps the phase
+    # straight to that function, so the phase chain bypassed the other two.
+    # The rail also hides the step unless this reports true, so the UI never
+    # advertises a phase that cannot run.
+    build_finalize_enabled: bool = False
     adversarial_repair_max_rounds: int = 3
     adversarial_repair_max_attempts_per_finding: int = 3
     adversarial_repair_time_budget_sec: int = 540
@@ -198,9 +208,21 @@ class Settings(BaseSettings):
     senior_editor_lean_in_generate: bool = True
     senior_editor_skip_llm_emit_in_generate: bool = True
     self_edit_repair_parallel: int = 1
+    # Review & Fix reviews this many sections' KB fact-checks concurrently.
+    # Only the pure per-section fact-check is parallel; every draft write
+    # stays sequential. 1 restores the old fully-sequential behaviour.
+    # Whole-manuscript contradiction runs once after all sections finish.
+    review_fix_section_concurrency: int = 8
+    # When False (default), Review only Sonnet-rewrites sections that fail
+    # groundedness heuristics — keeps a full manuscript pass in ~10–15 min.
+    # True restores the old always-rewrite behaviour (slow / expensive).
+    review_fix_force_full_check: bool = False
+    # Output budget for Review fact-check rewrites (section JSON, not plans).
+    review_fix_fact_check_max_tokens: int = 4096
     # Hard LLM run budgets (USD). 0 disables guard.
     generate_proposal_max_cost_usd: float = 3.0
-    complete_scan_max_cost_usd: float = 3.0
+    # Lean Review + structure should finish under this; raise only if needed.
+    complete_scan_max_cost_usd: float = 5.0
 
     # Financial workspace chat budgets (USD). Enforced in qb_chat against
     # financial_llm_calls, not against the proposal run budget above — the two

@@ -149,10 +149,6 @@ def _priority_kb_queries(
     rfp_context: str = "",
 ) -> list[str]:
     """Deterministic queries for known legal / critique gaps (not title mash / LLM filler)."""
-    from app.services.evidence_trust.legal_attestation_gate import (
-        rfp_needs_health_coalition_proof,
-    )
-
     title = (section.title or "").casefold()
     body = (section.content or "").casefold()
     sid = section.id or ""
@@ -186,12 +182,14 @@ def _priority_kb_queries(
             "relevant experience",
         )
     ) or sid.startswith("section-3")
-    if rfp_needs_health_coalition_proof(rfp, rfp_context) and refs_or_exp:
+    if refs_or_exp:
+        # Retrieve by what THIS RFP asks for. Naming a specific client here
+        # steered every bid toward one case study regardless of fit.
         out.append(
-            "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition stigma health"
-        )
-        out.append(
-            "Recovery Network of Oregon zö agency case study outcomes references contact"
+            (
+                "03_CS zö agency case study references contacts outcomes "
+                f"{(getattr(rfp, 'sector', '') or '').strip()}"
+            ).strip()
         )
 
     seen: set[str] = set()
@@ -553,6 +551,11 @@ async def _fact_check_bio_subsections(
     return section.model_copy(update={"content": new_content}), total_fills, logs
 
 
+def _title_is_toc_only(title: str) -> bool:
+    t = (title or "").casefold()
+    return "table of contents" in t or t.strip() in {"toc", "contents"}
+
+
 def _should_run_requirement_agent(
     section: ProposalSection,
     mapped: RfpSectionMap | None,
@@ -560,6 +563,9 @@ def _should_run_requirement_agent(
 ) -> bool:
     body = content or ""
     title_cf = (section.title or "").casefold()
+    # TOC is a page map — never worth a full rewrite on Review.
+    if _title_is_toc_only(section.title or ""):
+        return False
     if any(hint in title_cf for hint in _PLAN_DRIVEN_SKIP_FACT_CHECK_HINTS):
         if _substantive_prose(body) and "[VERIFY:" not in body:
             return False
@@ -569,6 +575,12 @@ def _should_run_requirement_agent(
         # Subsection-scoped bio repair handles VERIFY blocks without rewriting Key Accounts, etc.
         return False
     if "[VERIFY:" in body:
+        return True
+    if "[MANUAL FILL: Draft" in body or "[MANUAL FILL: Draft this RFP" in body:
+        return True
+    # Hollow Cost claim (intro without table) — must rewrite / fill.
+    body_cf = body.casefold()
+    if "hourly-rate instrument" in body_cf and "| role" not in body_cf:
         return True
     if mapped and mapped.uncovered_requirements:
         return True
@@ -591,10 +603,11 @@ async def _plan_kb_queries(
     rfp: RfpRecord,
     mapped: RfpSectionMap | None = None,
     rfp_context: str = "",
+    use_llm_planner: bool = True,
 ) -> list[str]:
     priority = _priority_kb_queries(section, rfp=rfp, rfp_context=rfp_context)
     planned: list[str] = []
-    if llm.is_configured():
+    if use_llm_planner and llm.is_configured():
         try:
             from app.services.proposal_langchain_agents import (
                 AgentRole,
@@ -614,7 +627,6 @@ async def _plan_kb_queries(
                     "Fact-check pass: plan Supermemory queries from the mapped RFP "
                     "requirements and this section's draft gaps. Prefer specific "
                     "01_companyfacts / 03_CS / 04_Bio queries. For health/coalition RFPs "
-                    "include Recovery Network of Oregon when experience/references are "
                     "needed. NEVER plan queries that would invent E-Verify enrollment or "
                     "conflict-free disclosures — those stay VERIFY unless companyfacts "
                     "explicitly confirm."
@@ -689,6 +701,8 @@ async def _run_requirement_aligned_fact_check_agent(
     kb_context: str,
     rfp: RfpRecord,
     brand_voice: dict[str, Any] | None,
+    compact_voice: bool = False,
+    max_tokens: int = 16000,
 ) -> tuple[ProposalSection, bool, str]:
     """Read requirements → RFP excerpt → KB; rewrite only when gaps or fabrications exist."""
     if not llm.is_configured():
@@ -702,6 +716,7 @@ async def _run_requirement_aligned_fact_check_agent(
         brand_voice,
         rfp_client=rfp.client,
         register=register,
+        compact=compact_voice,
     )
     req_block = "\n".join(f"- {r}" for r in requirements) or "- (none mapped)"
     focus_block = (
@@ -720,6 +735,10 @@ async def _run_requirement_aligned_fact_check_agent(
 
     system = (
         "You are a senior proposal fact-check editor for zö agency.\n\n"
+        "COMPULSORY VOICE: Brand & Writing Standards rev 6 + the brand voice block "
+        "below govern every rewrite. First person we/our; company name 'zö agency'; "
+        "no em dashes; no negation-contrast; no empty hype; no hedging announcements. "
+        "Apply silently — never narrate the rule.\n\n"
         "WORK ORDER (mandatory order):\n"
         "1. Read mapped RFP requirements and the RFP excerpt — they define what "
         "this section MUST cover.\n"
@@ -735,7 +754,6 @@ async def _run_requirement_aligned_fact_check_agent(
         "requirements using KB evidence and brand voice. Do not invent a generic section.\n"
         "6. LEGAL ATTESTATIONS: Never assert E-Verify enrollment or 'no conflicts of "
         "interest' as fact. Keep or insert [VERIFY: … Sonja/Operations must confirm]. "
-        "For health/coalition RFPs, prefer Recovery Network of Oregon in experience/"
         "references when KB supports it; otherwise FLAG for Sonja. Never invent staffing "
         "hours or a '10-year partnership' credential (founded 2013).\n"
         f"{specs_note}\n"
@@ -756,15 +774,20 @@ async def _run_requirement_aligned_fact_check_agent(
         f"Mapped requirements:\n{req_block}\n\n"
         f"Retrieval focus:\n{focus_block}\n\n"
         f"RFP excerpt (authoritative for structure, checklists, evaluation):\n"
-        f"{rfp_excerpt[:24_000]}\n\n"
-        f"Knowledge base:\n{kb_context[:18_000]}\n\n"
-        f"Current draft:\n{(section.content or '')[:12_000]}"
+        f"{rfp_excerpt[: (12_000 if compact_voice else 24_000)]}\n\n"
+        f"Knowledge base:\n{kb_context[: (10_000 if compact_voice else 18_000)]}\n\n"
+        f"Current draft:\n{(section.content or '')[: (8_000 if compact_voice else 12_000)]}"
     )
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=16000,
+            max_tokens=max_tokens,
             temperature=0.0,
+            # Lean Review: Haiku avoids Sonnet reasoning draining a 4k budget
+            # into empty content (+ a second paid reinforce). Full Build keeps heavy.
+            tier="light" if compact_voice else "heavy",
+            node_name="kb_fact_check_section",
+            rfp_id=rfp.id,
         )
         content = str((raw or {}).get("content") or "").strip()
         changed = bool((raw or {}).get("changed"))
@@ -781,7 +804,20 @@ async def _run_requirement_aligned_fact_check_agent(
         if not changed and content == (section.content or "").strip():
             return section, False, notes
         if content != (section.content or "").strip():
-            return section.model_copy(update={"content": content}), True, notes
+            from app.services.proposal_voice_enforcement import (
+                enforce_narrative_voice,
+                scrub_rev6_voice_patterns,
+            )
+
+            cleaned = enforce_narrative_voice(
+                content,
+                section_id=section.id,
+                title=section.title,
+                zo_mode=section.mode,
+            )
+            cleaned, _ = scrub_rev6_voice_patterns(cleaned)
+            cleaned = cleaned.replace("—", ",").replace("–", "-")
+            return section.model_copy(update={"content": cleaned}), True, notes
         return section, False, notes
     except Exception as exc:  # noqa: BLE001
         logger.warning("Requirement-aligned fact-check agent failed for %s: %s", section.id, exc)
@@ -814,14 +850,6 @@ def _kb_query_for_section(
     if "disclosure" in title_cf or "conflict" in title_cf:
         return "01_companyfacts zö agency conflict of interest disclosure"[:240]
     if any(h in title_cf for h in ("reference", "previous experience", "past performance")):
-        from app.services.evidence_trust.legal_attestation_gate import (
-            rfp_needs_health_coalition_proof,
-        )
-
-        if rfp_needs_health_coalition_proof(rfp):
-            return (
-                "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition"
-            )[:240]
         return "03_CS zö agency client references past performance contacts"[:240]
 
     if mapped and mapped.retrieval_focus:
@@ -1050,11 +1078,18 @@ async def _fact_check_one_section(
     research: ProposalResearchCache | None,
     brand_voice: dict[str, Any] | None,
     force_full_check: bool = False,
+    lean_review: bool = False,
 ) -> tuple[ProposalSection, FactCheckReport]:
-    """Fact-check a single section; returns section + per-section report deltas."""
+    """Fact-check a single section; returns section + per-section report deltas.
+
+    ``lean_review=True`` (Review & Fix): skip LLM query planner, compact voice,
+    rewrite only when ``_should_run_requirement_agent`` says so (unless
+    ``force_full_check``). Deterministic VERIFY fill + Rev 6 scrub still run.
+    """
     report = FactCheckReport(sections_checked=1)
     current = section
     from app.services.proposal_bio_stub import skip_inline_bio_expansion
+    from app.core.config import settings as app_settings
 
     if (
         (current.id or "").startswith("section-2-bio")
@@ -1074,7 +1109,7 @@ async def _fact_check_one_section(
         requirements=requirements,
     )
     if not rfp_excerpt.strip():
-        rfp_excerpt = (rfp_context or "")[:35_000]
+        rfp_excerpt = (rfp_context or "")[: (20_000 if lean_review else 35_000)]
 
     bad_pcts = _eval_percent_claimed_without_rfp(current.content or "", rfp_context)
     if bad_pcts:
@@ -1137,6 +1172,7 @@ async def _fact_check_one_section(
             rfp=rfp,
             mapped=mapped,
             rfp_context=rfp_context,
+            use_llm_planner=not lean_review,
         )
         kb_context, sources = await _gather_kb_context(
             queries,
@@ -1151,6 +1187,11 @@ async def _fact_check_one_section(
                 section.id,
             )
             return current, report
+        rewrite_tokens = (
+            int(getattr(app_settings, "review_fix_fact_check_max_tokens", 4096) or 4096)
+            if lean_review
+            else 16000
+        )
         current, agent_fixed, notes = await _run_requirement_aligned_fact_check_agent(
             current,
             requirements=requirements,
@@ -1159,6 +1200,8 @@ async def _fact_check_one_section(
             kb_context=kb_context,
             rfp=rfp,
             brand_voice=brand_voice,
+            compact_voice=lean_review,
+            max_tokens=rewrite_tokens,
         )
         if agent_fixed:
             report.requirement_repairs += 1
@@ -1170,6 +1213,10 @@ async def _fact_check_one_section(
             if _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
                 report.stubs_repaired += 1
     else:
+        if lean_review:
+            report.logs.append(
+                f"{section.title}: lean Review — grounded prose, skipped Sonnet rewrite"
+            )
         # Still inject priority queries (RNO / hours / founded) even on light path.
         priority = _priority_kb_queries(current, rfp=rfp, rfp_context=rfp_context)
         if priority:
@@ -1223,14 +1270,14 @@ async def _fact_check_one_section(
                     f"Replaced false insufficient-evidence stub in {section.title}"
                 )
 
-    if current.id.startswith("section-3-work-") or force_full_check:
+    if current.id.startswith("section-3-work-") or (force_full_check and not lean_review):
         if not kb_context:
             kb_context, _ = await _kb_blob_for_section(current, rfp, mapped=mapped)
         if kb_context:
             current, metric_fixed = await _flag_unverified_metrics_in_case_study(
                 current,
                 kb_context,
-                any_section=force_full_check,
+                any_section=force_full_check and not lean_review,
             )
             if metric_fixed:
                 report.metric_flags += 1
@@ -1255,6 +1302,7 @@ async def run_kb_fact_check_pass(
     research: ProposalResearchCache | None = None,
     only_section_ids: list[str] | None = None,
     force_full_check: bool = False,
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, FactCheckReport]:
     """Cross-verify sections; repair from KB when evidence exists.
 
@@ -1293,8 +1341,12 @@ async def run_kb_fact_check_pass(
         work.append((idx, section))
 
     sem = asyncio.Semaphore(FACT_CHECK_SECTION_PARALLEL)
+    completed_count = 0
 
     async def _run(idx: int, section: ProposalSection) -> tuple[int, ProposalSection, FactCheckReport]:
+        nonlocal completed_count
+        if on_progress:
+            await on_progress(completed_count + 1, len(work), section.title or section.id)
         async with sem:
             updated, partial = await _fact_check_one_section(
                 section,
@@ -1304,6 +1356,7 @@ async def run_kb_fact_check_pass(
                 brand_voice=brand_voice,
                 force_full_check=force_full,
             )
+            completed_count += 1
             return idx, updated, partial
 
     if work:

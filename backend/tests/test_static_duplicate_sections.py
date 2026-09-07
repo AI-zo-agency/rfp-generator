@@ -104,6 +104,25 @@ class StaticDuplicateSectionTests(unittest.TestCase):
         self.assertNotIn("Certificate of Insurance", titles)
         self.assertTrue(any("owned by Sections 1" in d for d in dropped))
 
+    def test_certification_of_proposal_is_not_section_1_4(self) -> None:
+        """Signature packet ≠ agency Certifications list (Section 1.4)."""
+        for title in (
+            "Certification of Proposal",
+            "12. Certification of Proposal",
+            "Bidder Certification",
+            "NM Preference Certification Form",
+        ):
+            with self.subTest(title=title):
+                self.assertFalse(
+                    is_duplicate_static_rfp_section(title),
+                    msg=f"{title!r} must stay as its own RFP tab",
+                )
+
+    def test_agency_certifications_list_still_static(self) -> None:
+        self.assertTrue(is_duplicate_static_rfp_section("Certifications"))
+        self.assertTrue(is_duplicate_static_rfp_section("1.4 — Certifications"))
+        self.assertTrue(is_duplicate_static_rfp_section("Agency Certifications"))
+
 
 if __name__ == "__main__":
     unittest.main()

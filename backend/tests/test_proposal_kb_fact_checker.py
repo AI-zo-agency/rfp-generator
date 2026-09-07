@@ -201,7 +201,17 @@ class PriorityQueryTests(unittest.TestCase):
         qs = _priority_kb_queries(sec, rfp=rfp)  # type: ignore[arg-type]
         self.assertTrue(any("E-Verify" in q for q in qs))
 
-    def test_health_rfp_references_prioritize_rno(self) -> None:
+    def test_reference_queries_carry_no_hardcoded_client_name(self) -> None:
+        """Reference retrieval must be driven by the RFP, not by a client name
+        baked into the code.
+
+        This previously asserted the opposite — that a "health" RFP steers the
+        query toward Recovery Network of Oregon. That hardcode reached every
+        bid: its keyword detector matched "archi" inside "social media
+        architecture" and pushed a health-stigma case study into a garlic
+        festival proposal. Which past work fits is decided by retrieval and the
+        evidence gate, so the steering was removed.
+        """
         sec = ProposalSection(
             id="section-18",
             title="18. References",
@@ -214,7 +224,12 @@ class PriorityQueryTests(unittest.TestCase):
         )
         qs = _priority_kb_queries(sec, rfp=rfp)  # type: ignore[arg-type]
         blob = " ".join(qs)
-        self.assertIn("Recovery Network of Oregon", blob)
+        self.assertNotIn("Recovery Network of Oregon", blob)
+        # Still asks for what a References tab actually needs.
+        self.assertTrue(
+            any("reference" in q.casefold() for q in qs),
+            f"expected a references-oriented query, got {qs}",
+        )
 
     def test_merge_prefers_priority_over_vague_focus(self) -> None:
         merged = _merge_query_lists(

@@ -253,6 +253,110 @@ class LlmError(Exception):
         self.status_code = status_code
 
 
+# Reasoning models often burn thousands of completion tokens before writing JSON.
+# When finish_reason=length leaves truncated JSON, bump once up to this cap.
+_LENGTH_RETRY_TOKEN_CAP = 32768
+_LEAN_SCAN_LENGTH_RETRY_CAP = 8192
+_OUTPUT_LENGTH_FINISH = frozenset({"length", "max_tokens", "MAX_TOKENS"})
+
+
+def _is_lean_scan_node(node_name: str | None) -> bool:
+    """Review / fulfill-scan / fact-check must not burn 16k→32k length retries."""
+    n = (node_name or "").strip().casefold()
+    if not n:
+        try:
+            from app.core.step_debug_logger import get_pipeline_phase
+
+            phase = (get_pipeline_phase() or "").strip().casefold()
+        except Exception:  # noqa: BLE001
+            phase = ""
+        if phase == "fulfill-scan":
+            return True
+        return False
+    return any(
+        key in n
+        for key in (
+            "fulfill-scan",
+            "fulfill_scan",
+            "fact-check",
+            "fact_check",
+            "kb_fact",
+            "contradiction_audit",
+            "contradiction_rewrite",
+            "targeted_fix",
+        )
+    )
+
+
+def is_lean_fulfill_scan_context() -> bool:
+    """True during Review & Fix / Complete Scan fulfill-scan phase."""
+    try:
+        from app.core.step_debug_logger import get_pipeline_phase
+
+        return (get_pipeline_phase() or "").strip().casefold() == "fulfill-scan"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def contradiction_rewrite_chat_kwargs(*, node_name: str) -> dict[str, object]:
+    """Sonnet@16k per finding was ~15–20s each on Review final pass.
+
+    Lean Review uses Haiku + 4k targeted patches instead.
+    """
+    if is_lean_fulfill_scan_context() or _is_lean_scan_node(node_name):
+        return {
+            "max_tokens": 4096,
+            "tier": "light",
+            "temperature": 0.0,
+            "node_name": node_name,
+        }
+    return {
+        "max_tokens": 16000,
+        "temperature": 0.0,
+        "node_name": node_name,
+    }
+
+
+# Cap sequential contradiction rewrites on Review — remaining findings get VERIFY.
+LEAN_CONTRADICTION_REWRITE_CAP = 6
+
+
+def bump_max_tokens_after_length_hit(
+    requested: int | None,
+    *,
+    node_name: str | None = None,
+) -> int:
+    """Double the output budget after a length truncation (floor 8192, cap 32768).
+
+    Review / fulfill-scan nodes hard-cap at 8192 — a 16k→32k retry was the
+    main driver of ~$1/section Review costs.
+    """
+    base = int(requested) if requested and requested > 0 else 4096
+    if _is_lean_scan_node(node_name):
+        # One modest bump only; never climb toward the global 32k ceiling.
+        return min(max(base * 2, base + 1024), _LEAN_SCAN_LENGTH_RETRY_CAP)
+    return min(max(base * 2, 8192), _LENGTH_RETRY_TOKEN_CAP)
+
+
+def _finish_reason_hit_length(finish_reason: object) -> bool:
+    fr = str(finish_reason or "").strip()
+    return fr in _OUTPUT_LENGTH_FINISH or fr.upper() == "MAX_TOKENS"
+
+
+def _should_retry_after_length_truncation(
+    *,
+    finish_reason: object,
+    requested: int | None,
+    node_name: str | None = None,
+) -> bool:
+    if not _finish_reason_hit_length(finish_reason):
+        return False
+    current = int(requested) if requested and requested > 0 else 4096
+    if _is_lean_scan_node(node_name) and current >= _LEAN_SCAN_LENGTH_RETRY_CAP:
+        return False
+    return bump_max_tokens_after_length_hit(current, node_name=node_name) > current
+
+
 def is_configured() -> bool:
     gemini_key = settings.gemini_api_key.strip()
     if gemini_key and not _is_placeholder_key(gemini_key):
@@ -406,6 +510,7 @@ async def _post_gemini_chat(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "estimated": estimated,
+        "finish_reason": finish_reason,
     }
 
 
@@ -728,6 +833,7 @@ async def _post_chat(
             "cache_creation_input_tokens": cache_write_tokens,
             "cache_read_input_tokens": cache_read_tokens,
             "estimated": estimated,
+            "finish_reason": finish_reason,
         }
 
     if last_error:
@@ -920,6 +1026,47 @@ async def chat_json(
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            first_raw, first_usage = raw, usage
+            parsed: dict[str, Any] | None = None
+            parse_error: LlmError | None = None
+            try:
+                parsed = _parse_json_response(first_raw)
+            except LlmError as exc:
+                parse_error = exc
+
+            if _should_retry_after_length_truncation(
+                finish_reason=first_usage.get("finish_reason"),
+                requested=max_tokens,
+                node_name=node_name,
+            ):
+                bumped = bump_max_tokens_after_length_hit(
+                    max_tokens, node_name=node_name
+                )
+                logger.warning(
+                    "Gemini hit output length at max_tokens=%s — retrying once with %s",
+                    max_tokens or 4096,
+                    bumped,
+                )
+                started = time.perf_counter()
+                raw, usage = await _post_gemini_chat(
+                    api_key=gemini_key,
+                    model=settings.gemini_model,
+                    messages=inline_cache_prefix(messages, cache_prefix),
+                    max_tokens=bumped,
+                    temperature=temperature,
+                )
+                try:
+                    parsed = _parse_json_response(raw)
+                    parse_error = None
+                except LlmError as exc:
+                    if parsed is None:
+                        parse_error = exc
+                    else:
+                        usage = first_usage
+
+            if parse_error is not None:
+                raise parse_error
+            assert parsed is not None
             _record_successful_call(
                 model=settings.gemini_model,
                 tier=tier,
@@ -930,7 +1077,7 @@ async def chat_json(
                 rfp_id=rfp_id,
                 run_id=run_id,
             )
-            return _parse_json_response(raw), "gemini"
+            return parsed, "gemini"
         except LlmError as exc:
             errors.append(str(exc))
             logger.info("Gemini failed: %s", str(exc)[:200])
@@ -953,7 +1100,60 @@ async def chat_json(
                 temperature=temperature,
             )
             # Parse before recording success — HTTP 200 can still be invalid JSON.
-            parsed = _parse_json_response(raw)
+            # Reasoning models often hit finish_reason=length; truncated JSON may
+            # still "parse" via close-brace salvage (empty arrays). Always bump
+            # once when the output cap was hit so we do not ship half a plan.
+            first_raw, first_usage = raw, usage
+            parsed: dict[str, Any] | None = None
+            parse_error: LlmError | None = None
+            try:
+                parsed = _parse_json_response(first_raw)
+            except LlmError as exc:
+                parse_error = exc
+
+            if _should_retry_after_length_truncation(
+                finish_reason=first_usage.get("finish_reason"),
+                requested=max_tokens,
+                node_name=node_name,
+            ):
+                bumped = bump_max_tokens_after_length_hit(
+                    max_tokens, node_name=node_name
+                )
+                logger.warning(
+                    "OpenRouter hit output length at max_tokens=%s "
+                    "(finish_reason=%s) — retrying once with %s",
+                    max_tokens or 4096,
+                    first_usage.get("finish_reason"),
+                    bumped,
+                )
+                started = time.perf_counter()
+                raw, usage = await _post_chat(
+                    base_url=settings.openrouter_base_url,
+                    api_key=openrouter_key,
+                    model=openrouter_model,
+                    messages=messages,
+                    cache_prefix=cache_prefix,
+                    provider="OpenRouter",
+                    extra_headers={
+                        "HTTP-Referer": settings.app_url,
+                        "X-Title": settings.app_name,
+                    },
+                    max_tokens=bumped,
+                    temperature=temperature,
+                )
+                try:
+                    parsed = _parse_json_response(raw)
+                    parse_error = None
+                except LlmError as exc:
+                    if parsed is None:
+                        parse_error = exc
+                    else:
+                        # Prefer the first salvageable payload over a failed bump.
+                        usage = first_usage
+
+            if parse_error is not None:
+                raise parse_error
+            assert parsed is not None
             _record_successful_call(
                 model=openrouter_model,
                 tier=tier,
@@ -1102,12 +1302,33 @@ async def chat_json(
         and openrouter_key
         and not _is_placeholder_key(openrouter_key)
     ):
+        # Review / fact-check: empty Sonnet replies are almost always
+        # reasoning-budget exhaustion. A second Sonnet reinforce doubles cost
+        # and latency — keep the original section instead.
+        if _is_lean_scan_node(node_name) and any(
+            "empty content" in e.casefold() for e in errors
+        ):
+            raise LlmError(
+                "; ".join(errors)
+                + " (lean scan: skipped reinforcement retry after empty content)",
+                status_code=502,
+            )
         try:
             started = time.perf_counter()
             reinforced = [
                 *messages,
                 {"role": "user", "content": _JSON_REINFORCE_MSG},
             ]
+            # Same tight budget that truncated mid-JSON will truncate again —
+            # bump when recovering from a parse/length failure.
+            reinforce_tokens = max_tokens
+            if any(
+                "invalid json" in e.lower() or "truncated" in e.lower()
+                for e in errors
+            ):
+                reinforce_tokens = bump_max_tokens_after_length_hit(
+                    max_tokens, node_name=node_name
+                )
             raw, usage = await _post_chat(
                 base_url=settings.openrouter_base_url,
                 api_key=openrouter_key,
@@ -1119,7 +1340,7 @@ async def chat_json(
                     "HTTP-Referer": settings.app_url,
                     "X-Title": settings.app_name,
                 },
-                max_tokens=max_tokens,
+                max_tokens=reinforce_tokens,
                 temperature=0.0,
             )
             parsed = _parse_json_response(raw)
@@ -1135,8 +1356,9 @@ async def chat_json(
             )
             logger.info(
                 "Recovered a non-JSON/refused LLM response via reinforcement "
-                "retry (node=%s)",
+                "retry (node=%s, max_tokens=%s)",
                 node_name,
+                reinforce_tokens,
             )
             return parsed, "openrouter"
         except Exception as exc:  # noqa: BLE001 — fall through to the raise below

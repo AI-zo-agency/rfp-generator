@@ -39,7 +39,8 @@ async def run_work_breakdown_planner(
                 ),
             },
         ],
-        max_tokens=2048,
+        # Leave room after reasoning models; 2048 truncated WBS JSON mid-array.
+        max_tokens=8192,
         agent_name=AGENT,
     )
     try:

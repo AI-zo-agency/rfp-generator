@@ -780,7 +780,8 @@ const FULFILL_POLL_MAX_MS = 90 * 60 * 1000;
 
 async function waitForFulfillScan(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onResearchUpdate?: (updated: ProposalResearch | null) => void
 ): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
@@ -795,6 +796,10 @@ async function waitForFulfillScan(
     const snapshot = await fetchProposalDraft(rfpId);
     const cp = snapshot.research?.pipelineCheckpoint;
     const job = await fetchProposalJobStatus(rfpId);
+    
+    if (onResearchUpdate && snapshot.research) {
+      onResearchUpdate(snapshot.research);
+    }
 
     if (cp?.inProgressPhase === FULFILL_SCAN_PHASE) {
       observedRunning = true;
@@ -1891,7 +1896,7 @@ export async function runPhase4FinalizeGaps(
 
 export async function runFulfillRfpGaps(
   rfpId: string,
-  options?: { useLlm?: boolean; mode?: string; signal?: AbortSignal }
+  options?: { useLlm?: boolean; mode?: string; signal?: AbortSignal; onResearchUpdate?: (updated: ProposalResearch | null) => void }
 ): Promise<{
   review: PreSubmitReview;
   research: ProposalResearch;
@@ -1944,7 +1949,7 @@ export async function runFulfillRfpGaps(
       fulfillReport: {},
     };
   }
-  const waited = await waitForFulfillScan(rfpId, options?.signal);
+  const waited = await waitForFulfillScan(rfpId, options?.signal, options?.onResearchUpdate);
   if (!waited.draft || !waited.research) {
     throw new Error("Incomplete fulfill RFP gaps response");
   }
@@ -2553,7 +2558,10 @@ export async function improveProposalSection(
   };
 }
 
-export async function downloadProposalDocx(rfpId: string): Promise<void> {
+export async function downloadProposalDocx(rfpId: string): Promise<{
+  mode: "single" | "separate_cost";
+  filename: string;
+}> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/export/docx`, {
     method: "POST",
   });
@@ -2572,7 +2580,13 @@ export async function downloadProposalDocx(rfpId: string): Promise<void> {
   const disposition = res.headers.get("content-disposition") ?? "";
   const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i);
   const rawName = decodeURIComponent(match?.[1] || match?.[2] || "proposal.docx");
-  const filename = rawName.endsWith(".docx") ? rawName : `${rawName}.docx`;
+  const exportMode =
+    res.headers.get("x-zo-export-mode") === "separate_cost"
+      ? "separate_cost"
+      : "single";
+  const fallback =
+    exportMode === "separate_cost" ? "proposal-response-and-cost.zip" : "proposal.docx";
+  const filename = rawName.includes(".") ? rawName : fallback;
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -2581,6 +2595,7 @@ export async function downloadProposalDocx(rfpId: string): Promise<void> {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+  return { mode: exportMode, filename };
 }
 
 export async function exportProposalToGoogleDoc(rfpId: string): Promise<{

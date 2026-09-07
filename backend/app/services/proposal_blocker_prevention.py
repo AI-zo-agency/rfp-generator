@@ -295,6 +295,18 @@ async def apply_feedback_blocker_suite(
         + budget_contradiction_unresolved_titles
     )[:12]
 
+    # Contradiction rewrites can reintroduce banned Rev 6 patterns — scrub once.
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+        if rev6_logs:
+            logs.append(
+                f"Rev 6 zö voice scrub after contradiction suite: {len(rev6_logs)} fix(es)"
+            )
+    except Exception as rev6_exc:  # noqa: BLE001
+        logger.warning("Rev 6 scrub after blocker suite skipped: %s", rev6_exc)
+
     return BlockerPreventionResult(
         draft=draft,
         logs=logs,

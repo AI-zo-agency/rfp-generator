@@ -218,6 +218,12 @@ async def _rewrite_section_for_contradiction(
         "tag is the only trace of a gap; never explain or preface it.\n"
         + TARGETED_EDIT_CONTRACT
     )
+    try:
+        from app.services.proposal_brand_voice import CHAT_REV6_VOICE_HARD_RULES
+
+        system = CHAT_REV6_VOICE_HARD_RULES + "\n\n" + system
+    except Exception:  # noqa: BLE001
+        pass
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title} (id={section.id})\n\n"
@@ -228,12 +234,14 @@ async def _rewrite_section_for_contradiction(
         f"Current section (copy `find` text verbatim from here):\n{(section.content or '')[:10_000]}"
     )
     try:
+        from app.services.llm import contradiction_rewrite_chat_kwargs
+
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=16000,
-            temperature=0.0,
-            node_name=f"scan_rfp_contradiction_rewrite:{section.id}",
             rfp_id=rfp.id,
+            **contradiction_rewrite_chat_kwargs(
+                node_name=f"scan_rfp_contradiction_rewrite:{section.id}"
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Contradiction patch failed for %s: %s", section.id, exc)
@@ -248,8 +256,12 @@ async def _rewrite_section_for_contradiction(
         # to a whole-section rewrite. Leave the body untouched; the caller tags
         # VERIFY instead, so a good section is never regenerated to fix one span.
         return section, False, str(raw.get("notes") or reason)
+    updated = section.model_copy(update={"content": new_body, "status": "generated"})
+    from app.services.proposal_voice_enforcement import apply_compulsory_rev6_to_section
+
+    updated, _ = apply_compulsory_rev6_to_section(updated)
     return (
-        section.model_copy(update={"content": new_body, "status": "generated"}),
+        updated,
         True,
         str(raw.get("notes") or f"patched {applied} span(s) to resolve RFP contradiction"),
     )
@@ -346,6 +358,14 @@ async def run_scan_rfp_contradiction_pass(
     rfp_excerpt = (rfp_text or "")[:20_000]
 
     fixed_ids: set[str] = set()
+    from app.services.llm import (
+        LEAN_CONTRADICTION_REWRITE_CAP,
+        is_lean_fulfill_scan_context,
+    )
+
+    lean = is_lean_fulfill_scan_context()
+    rewrite_budget = LEAN_CONTRADICTION_REWRITE_CAP if lean else 10_000
+    rewrites_attempted = 0
     for finding in findings:
         idx = by_id.get(finding.section_id)
         if idx is None:
@@ -360,6 +380,15 @@ async def run_scan_rfp_contradiction_pass(
         # Always attempt a real rewrite for critical/major — tagging VERIFY is
         # a fallback only when rewrite fails (never the primary "fix").
         if finding.severity in {"critical", "major"}:
+            if rewrites_attempted >= rewrite_budget:
+                sections[idx] = _append_verify_note(sections[idx], finding)
+                result.verify_tags_added += 1
+                result.logs.append(
+                    f"{finding.section_id}: lean rewrite cap — tagged VERIFY "
+                    f"(human must resolve): {finding.manuscript_contradiction[:120]}"
+                )
+                continue
+            rewrites_attempted += 1
             updated, changed, notes = await _rewrite_section_for_contradiction(
                 section,
                 finding=finding,

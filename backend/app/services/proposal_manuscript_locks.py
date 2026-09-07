@@ -187,6 +187,7 @@ async def build_manuscript_locks(
         ),
         needsHumanConfirm=True,
         updatedAt=now,
+        builtWithPlan=bool(plan),
     )
 
     try:
@@ -272,7 +273,7 @@ async def build_manuscript_locks(
         )
 
     kpis = [str(k).strip() for k in locks.required_kpis if str(k).strip()]
-    locks = locks.model_copy(update={"required_kpis": kpis})
+    locks = locks.model_copy(update={"required_kpis": kpis, "built_with_plan": bool(plan)})
     logger.info(
         "Manuscript locks for %s: primary=%s kpis=%d humanConfirm=%s",
         rfp.id,

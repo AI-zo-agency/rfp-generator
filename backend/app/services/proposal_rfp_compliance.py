@@ -150,14 +150,63 @@ def _requirement_tokens(req: str) -> list[str]:
     return tokens[:8]
 
 
+# A requirement is answered in ONE PLACE, not sprinkled across a 50-page packet.
+# The original check asked only whether half a requirement's keywords appeared
+# ANYWHERE in the whole manuscript blob, which passed on two different lies:
+#   * vocabulary reuse that answers nothing ("Quality standards are described.
+#     Translating materials is discussed elsewhere.")
+#   * the same words scattered across unrelated tabs thousands of chars apart,
+#     so one section's prose marked another section's requirement satisfied.
+# Requiring the keywords to co-occur inside a bounded window fixes both without
+# changing any call site: prose that genuinely answers the requirement keeps its
+# terms close together, and scattered words never land in one window.
+#
+# The window spans a few paragraphs rather than one, because a real answer is
+# often a short subsection rather than a single block.
+_REQ_COVERAGE_WINDOW_CHARS = 1500
+
+
+def _token_positions(tokens: list[str], haystack: str) -> list[tuple[int, str]]:
+    """Every occurrence of every token, as (position, token). Plain str.find."""
+    found: list[tuple[int, str]] = []
+    for token in tokens:
+        start = haystack.find(token)
+        while start != -1:
+            found.append((start, token))
+            start = haystack.find(token, start + 1)
+    found.sort()
+    return found
+
+
 def requirement_likely_covered(req: str, manuscript: str) -> bool:
-    """Heuristic: enough requirement keywords appear in manuscript prose."""
+    """Heuristic: enough requirement keywords co-occur in one passage of prose."""
     tokens = _requirement_tokens(req)
     if not tokens:
         return True
-    manuscript_cf = manuscript.casefold()
-    hits = sum(1 for token in tokens if token in manuscript_cf)
-    return hits >= max(2, (len(tokens) + 1) // 2)
+    needed = max(2, (len(tokens) + 1) // 2)
+    haystack = (manuscript or "").casefold()
+    if not haystack:
+        return False
+
+    occurrences = _token_positions(tokens, haystack)
+    if len(occurrences) < needed:
+        return False
+
+    # Slide a character window over the occurrences; covered as soon as any one
+    # window holds `needed` DISTINCT requirement terms.
+    counts: dict[str, int] = {}
+    left = 0
+    for right, (pos, token) in enumerate(occurrences):
+        counts[token] = counts.get(token, 0) + 1
+        while pos - occurrences[left][0] > _REQ_COVERAGE_WINDOW_CHARS:
+            drop = occurrences[left][1]
+            counts[drop] -= 1
+            if counts[drop] == 0:
+                del counts[drop]
+            left += 1
+        if len(counts) >= needed:
+            return True
+    return False
 
 
 def scan_open_submission_tags(*, draft: ProposalDraft) -> list[ComplianceGap]:
@@ -726,13 +775,21 @@ def _build_added_requirement_section(requirement) -> ProposalSection:
     in without this function ever inventing a fact.
     """
     text = (requirement.text or "").strip() or requirement.id
+    # The explanation is wrapped in [NOTE: …] deliberately. It is BOTH internal
+    # machinery narration (which must never reach the designer — it was shipping
+    # as section prose) AND a detection marker four call sites match on
+    # (_LEDGER_STUB_MARKER, "never invent the answer"). The tag keeps the marker
+    # present in `content` through the whole pipeline, while
+    # proposal_manuscript.strip_inline_instruction_tags removes [NOTE: …] during
+    # manuscript cleanup, so the client-facing copy carries only the MANUAL FILL
+    # handoff — the shape scan_open_submission_tags already treats as legitimate.
     content = (
         f"[MANUAL FILL: {_ADDED_SECTION_MANUAL_FILL_OWNER} — {text[:200]}]\n\n"
-        "No section in the draft addressed this mandatory RFP requirement; "
+        "[NOTE: No section in the draft addressed this mandatory RFP requirement; "
         "the requirement-ledger reconciler added this section as a "
         "placeholder so it cannot silently ship missing. Search the KB for "
         "supporting facts and replace the tag above before submission — "
-        "never invent the answer."
+        "never invent the answer.]"
     )
     return ProposalSection(
         id=_ADDED_SECTION_ID_TEMPLATE.format(requirement_id=requirement.id),

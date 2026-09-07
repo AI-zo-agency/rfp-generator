@@ -87,6 +87,10 @@ Your ONLY jobs for ONE pass:
 5. BUDGET CROSS-SECTION (notes[] only): hours vs fee mismatch, double-billed PM/meetings.
    Never ticket-delete Budget & Pricing.
 6. Do NOT emit tickets for style/tone polish. Prefer few high-value tickets over many.
+7. ANTI-RFP-ECHO: When you write rewriteBrief / trimGuidance, tell the rewriter to answer
+   with proposal substance only — never paraphrase the RFP, Opportunity Understanding,
+   or requirement checklist into the body. Coverage tickets must demand interesting,
+   specific zö answers (concrete open + case proof), not restated buyer asks.
 
 Return ONLY JSON:
 {"deleteSectionTickets":[],
@@ -140,7 +144,12 @@ Rules:
     write a sentence ABOUT what must be verified, confirmed, or could jeopardize the bid —
     that is reasoning for you, not prose for the evaluator. Apply the rule silently: emit
     just the [VERIFY: ...] or [MANUAL FILL: ...] tag, with no sentence explaining why it's there.
-16. When done researching, respond with ONLY JSON:
+16. ANTI-RFP-ECHO: NEVER restate the RFP. Write the proposal answer only (what we will do
+    and prove). Never open by telling the client what they asked for or already built.
+17. INTERESTING (Rev 6 deliverable): concrete open + teach by showing with a verified case /
+    named tactic + admit a true cost when it matters + flat stop. No generic capability lists.
+    No empty hype words.
+18. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":"layout hint or null"}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).
@@ -164,12 +173,19 @@ Rules:
 2. Do NOT rewrite unrelated paragraphs, add new intros, or expand the section unless asked.
 3. Call KB tools only when the ask needs zö facts missing from the draft; call search_rfp_requirements for buyer rules.
 4. Never return the same [VERIFY] placeholder if tools found support for that field.
-5. PRESERVE zö BRAND VOICE: first person we/our, warm, confident, proof-led — never flatten into generic consultant prose.
-6. Budget/fee edits (critical):
+5. PRESERVE zö BRAND VOICE (Rev 6 compulsory): first person we/our, warm, confident, proof-led — never flatten into generic consultant prose. ANTI-RFP-ECHO: never paraphrase the RFP into the body. Interesting = concrete open + case show + true cost + flat stop — not hype words.
+5a. REV 6 HARD BANS on every rewrite: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just / more than just); no significance-closes ("That's the kind of…"); no hedging ("worth noting" / "worth naming"); no empty hype words (robust/seamless/leverage/…). State what the thing is. Company name always "zö agency".
+5b. RFP-GROUNDED ALWAYS: Read the COVERAGE CHECKLIST and RFP GAPS for THIS section. Even on voice/tone asks, keep covered substance and ADD proposal answers for gaps from evidence/KB. Never invent deliverables, metrics, clients, or case studies. Never ignore the mapped RFP section.
+6. Budget/fee edits (critical — ONLY when THIS section is Budget/Cost/Pricing OR the user
+   explicitly asks to change fees/rates/line items):
    - Do NOT query general KB for this client's budget/hours/rates — KB has no new-client pricing.
    - Use search_rfp_requirements for budget thresholds / cost criteria, then search_pricing_guide for 00_Guide_Pricing tiers.
    - Choose Low/Average/High from RFP + guide; never invent numbers or reverse-engineer totals.
    - Refuse invented dollars; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
+6a. NEVER call search_pricing_guide for narrative / strategy / approach / partnership / voice
+   restores. Example: restoring a "why regional partnerships move slower" caveat is NOT a
+   pricing ask — use search_rfp_requirements if needed, then edit the prose. Do not pull
+   00_Guide_Pricing.
 7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
    Clean/filter references with search_case_studies + RFP reference rules — not by searching the buyer's name in KB.
 8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
@@ -200,7 +216,6 @@ Rules:
 - Buyer requirements are NOT planned as KB queries — those use the RFP tool at edit time.
 - Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
 - When [VERIFY] gaps are listed, dedicate a query to each missing zö field.
-- For health/coalition/stigma RFPs, include Recovery Network of Oregon (RNO) / Oregon Recovers when the section is experience, references, or case studies.
 - Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
 - BUDGET / COST / FEES / PRICING sections: do NOT plan queries like "<client> marketing plan budget hours rate".
   Plan ONLY 00_Guide_Pricing queries (tier Low Average High, menu rates, PM floor) — RFP budget ceilings are read via the RFP tool, not Supermemory client docs.
@@ -540,12 +555,24 @@ def content_from_agent_payload(parsed: dict[str, Any], raw_text: str = "") -> st
 
 
 async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
-    stripped = text.strip()
+    """Parse agent output to a dict. Never call salvage LLM with empty messages.
+
+    OpenRouter/Anthropic reject requests when the user content is blank (system
+    is moved out of ``messages``, leaving an empty array → 400
+    "messages: at least one message is required").
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return {}
+
     if stripped.startswith("```"):
         stripped = stripped.split("```", 2)[1]
         if stripped.startswith("json"):
             stripped = stripped[4:]
         stripped = stripped.rsplit("```", 1)[0].strip()
+    if not stripped:
+        return {}
+
     try:
         parsed = json.loads(stripped)
         if isinstance(parsed, dict):
@@ -555,23 +582,40 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
             return parsed
     except json.JSONDecodeError:
         pass
-    structured, _ = await chat_json(
-        [
-            {"role": "system", "content": "Extract JSON object from agent output. Return only JSON."},
-            {"role": "user", "content": text[:12000]},
-        ],
-        max_tokens=16000,
-        temperature=0.0,
-        node_name="agent_json_salvage",
-    )
+
+    # Prefer local salvage before another LLM round.
+    salvaged = _salvage_content_string(stripped)
+    if salvaged:
+        return {"content": salvaged, "kbRefs": []}
+    if not stripped.startswith("{") and len(stripped) > 40:
+        return {"content": stripped, "kbRefs": []}
+
+    # LLM salvage only when there is real text to extract from.
+    try:
+        structured, _ = await chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract JSON object from agent output. Return only JSON "
+                        'with a non-empty "content" string when prose is present.'
+                    ),
+                },
+                {"role": "user", "content": stripped[:12000]},
+            ],
+            max_tokens=16000,
+            temperature=0.0,
+            node_name="agent_json_salvage",
+        )
+    except LlmError as exc:
+        logger.warning("agent_json_salvage failed (non-fatal): %s", exc)
+        return {}
+
     if isinstance(structured, dict):
-        content = content_from_agent_payload(structured, text)
+        content = content_from_agent_payload(structured, stripped)
         if content and not str(structured.get("content") or "").strip():
             structured = {**structured, "content": content}
         return structured
-    salvaged = _salvage_content_string(text)
-    if salvaged:
-        return {"content": salvaged, "kbRefs": []}
     return {}
 
 
@@ -632,10 +676,36 @@ async def run_tool_json_agent(
     client: str,
     user_content: str,
     sector: str = "",
+    section_title: str = "",
+    user_message: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
     """Multi-turn LangChain agent with KB tools — repair, revise, surgical fix."""
     profile = get_profile(role)
-    tools = build_proposal_tools(rfp_id, title, client, sector=sector)
+    blob = f"{section_title}\n{user_message}".casefold()
+    include_pricing = any(
+        k in blob
+        for k in (
+            "budget",
+            "pricing",
+            "cost proposal",
+            "cost of base",
+            "fee detail",
+            "hourly rate",
+            "compensation",
+            "00_guide",
+            "pricing guide",
+            "line item",
+            "restore verbatim",
+            "use verbatim",
+        )
+    )
+    tools = build_proposal_tools(
+        rfp_id,
+        title,
+        client,
+        sector=sector,
+        include_pricing_guide=include_pricing,
+    )
     final_text, provider, tool_log = await run_tool_agent_loop(
         system_prompt=profile.system_prompt,
         user_content=user_content,
@@ -649,14 +719,27 @@ async def run_tool_json_agent(
         node_name=profile.node_name,
     )
     parsed = await _parse_json_from_agent_text(final_text)
-    if not str(parsed.get("content") or "").strip():
-        logger.warning(
-            "%s agent empty content for %s after %d tool call(s) (final_chars=%d)",
-            profile.label,
-            rfp_id,
-            len(tool_log),
-            len(final_text),
+    content = str(parsed.get("content") or "").strip()
+    if not content:
+        prose = content_from_agent_payload(
+            parsed if isinstance(parsed, dict) else {},
+            final_text or "",
         )
+        if prose.strip():
+            parsed = {**(parsed if isinstance(parsed, dict) else {}), "content": prose}
+        else:
+            logger.warning(
+                "%s agent empty content for %s after %d tool call(s) (final_chars=%d)",
+                profile.label,
+                rfp_id,
+                len(tool_log),
+                len(final_text or ""),
+            )
+            raise LlmError(
+                f"{profile.label} agent returned empty content "
+                f"(final_chars={len(final_text or '')}, tools={len(tool_log)})",
+                status_code=502,
+            )
     return parsed, provider, tool_log
 
 
@@ -825,6 +908,8 @@ async def redraft_section_agent(
     rfp_client: str,
     user_content: str,
     rfp_sector: str = "",
+    section_title: str = "",
+    user_message: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
     """KB tool agent → JSON with content field."""
     return await run_tool_json_agent(
@@ -834,4 +919,6 @@ async def redraft_section_agent(
         title=rfp_title,
         client=rfp_client,
         user_content=user_content,
+        section_title=section_title,
+        user_message=user_message,
     )

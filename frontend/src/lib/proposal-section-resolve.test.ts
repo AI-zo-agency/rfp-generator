@@ -7,6 +7,7 @@ import {
   messageLooksOutlineStructure,
   messageLooksStructural,
   messageNeedsCaseStudyClarify,
+  messageAsksCaseStudyRelevance,
   messagePointsAtOpenSection,
   pinnedSectionConflictsWithMessage,
   resolveChatTarget,
@@ -51,6 +52,13 @@ describe("chatBusyStatusLabel", () => {
     const steps = chatLiveWorkSteps("Improving Cost Proposal…");
     expect(steps[0]).toBe("Improving Cost Proposal…");
     expect(steps.some((s) => /discrepanc/i.test(s))).toBe(true);
+    expect(steps.some((s) => /fee ledger/i.test(s))).toBe(true);
+  });
+
+  it("omits fee-ledger wording on non-budget live steps", () => {
+    const steps = chatLiveWorkSteps("Improving Strategic Growth Approach…");
+    expect(steps.some((s) => /fee ledger|\bbudget\b/i.test(s))).toBe(false);
+    expect(steps.some((s) => /placeholders/i.test(s))).toBe(true);
   });
 
   it("detects question-shaped messages", () => {
@@ -820,5 +828,21 @@ describe("resolveChatTarget", () => {
       expect(result.section.id).toBe("rfp-sec-23");
       expect(result.reason).toBe("in-place-bio");
     }
+  });
+});
+
+describe("messageAsksCaseStudyRelevance", () => {
+  it("detects relevance intent", () => {
+    expect(messageAsksCaseStudyRelevance("is this case study relevant?")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("strengthen relevance to the rfp")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("suggest a better case study")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("swap this case study")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("add the best-matching case studies from the knowledge base")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("tie outcomes to requirements")).toBe(true);
+  });
+
+  it("ignores non-relevance case study mentions", () => {
+    expect(messageAsksCaseStudyRelevance("rewrite this case study")).toBe(false);
+    expect(messageAsksCaseStudyRelevance("fix typos in the case study")).toBe(false);
   });
 });

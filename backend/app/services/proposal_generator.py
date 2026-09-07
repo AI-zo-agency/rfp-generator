@@ -4,7 +4,9 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from app.models.proposal import (
+    ManuscriptLocks,
     PreSubmitReview,
+    PricingAuditFlag,
     ProposalBrandVoice,
     ProposalBudget,
     ProposalDraft,
@@ -253,6 +255,26 @@ STATIC_SECTION_IDS = (
 
 # Pre-subsection monoliths — never keep these once 1.1–1.5 / bios / work cards exist.
 LEGACY_MONOLITH_SECTION_IDS = frozenset(STATIC_SECTION_IDS)
+
+
+def _locks_are_plan_informed(locks: ManuscriptLocks | None) -> bool:
+    """True when existing manuscript locks need not be rebuilt in phase-2.
+
+    Sections-1-3 can build locks on a cold run (plan=None) before phase-2's
+    execution plan exists; phase-2 then rebuilds them unconditionally with a
+    plan and a fresh roster fetch — genuinely better-informed on a cold run,
+    but wasted work if a prior phase-2 pass already produced complete,
+    plan-informed locks. Skip only when ALL of: locks exist, carry a primary
+    contact name, don't need human confirmation, and were built with the
+    execution plan available.
+    """
+    if locks is None:
+        return False
+    return bool(
+        (locks.primary_contact_name or "").strip()
+        and not locks.needs_human_confirm
+        and locks.built_with_plan
+    )
 
 
 def _is_legacy_monolith_section_id(section_id: str) -> bool:
@@ -529,32 +551,30 @@ async def _fill_static_section(
             f"{text[:3500]}"
         )
     elif mode == "select" and "case" in section.id.lower():
-        selection, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Select 2-4 case studies from the excerpts. Return JSON: "
-                        '{"selected":["filename"],"rationale":"...","designerNote":"..."} '
-                        "Use only documents explicitly listed. Never invent clients."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"RFP: {rfp.title} / {rfp.sector}\n\nCase studies:\n{text[:8000]}",
-                },
-            ],
-            max_tokens=16000,
-        )
-        selected = selection.get("selected", [])
-        rationale = selection.get("rationale", "")
-        body = (
-            f"{designer}\n\n"
-            f"Selected case studies: {', '.join(selected) if isinstance(selected, list) else selected}\n"
-            f"Rationale: {rationale}\n\n"
-            f"--- KB excerpts ---\n{text[:3000]}"
-        )
-        # KB references removed - not included in proposals
+        from app.services.proposal_case_study_match import match_case_studies_for_rfp
+        
+        try:
+            match_res = await match_case_studies_for_rfp(
+                rfp, save_to_cache=False, fetch_full_text=False
+            )
+            cs_block = ""
+            if match_res.studies:
+                for st in match_res.studies[:4]:
+                    cs_block += f"- **{st.title}** (Fit: {st.fit_label})\n"
+            else:
+                cs_block = "- No matching case studies found in KB."
+            
+            body = (
+                f"{designer}\n\n"
+                f"[DESIGNER NOTE: Pull standard designed assets for these case studies]\n\n"
+                f"=== Recommended Case Studies (via Auto-Match) ===\n\n"
+                f"{cs_block}"
+            )
+        except Exception as exc:
+            from app.core.logger import logger
+            logger.exception("Failed to match case studies during build for %s", rfp.id)
+            body = f"{designer}\n\nFailed to match case studies: {exc}\n\n{text[:3000]}"
+            
         section.kb_refs = []
     else:
         selection, _ = await llm.chat_json(
@@ -600,6 +620,24 @@ async def _write_custom_section(
     research_summary: str,
     rfp_context: str,
 ) -> ProposalSection:
+    extra_context = ""
+    if "reference" in section.title.lower() or "past performance" in section.title.lower():
+        from app.services.proposal_knowledge_base_tools import search_knowledge_base
+        try:
+            ref_text, _ = await search_knowledge_base(
+                "client references past performance 08_References",
+                limit=5,
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
+            )
+            if ref_text:
+                extra_context = f"\n\n=== VERIFIED KNOWLEDGE BASE REFERENCES ===\n{ref_text[:5000]}\nMUST USE these exact references to build the section."
+        except Exception as e:
+            from app.core.logger import logger
+            logger.warning("Failed to fetch references for custom section %s: %s", section.id, e)
+
+    from app.services.proposal_drafting_prompts import GLOBAL_AGENT_PROMPT_RULES
+
     raw, _ = await llm.chat_json(
         [
             {
@@ -609,7 +647,10 @@ async def _write_custom_section(
                     f"{format_register_block('narrative')}\n"
                     "Use ONLY facts from the research brief and RFP excerpt. "
                     "Flag unverified items as [VERIFY: ...]. "
-                    "Include [DESIGNER NOTE: ...] where layout is needed. "
+                    "Include [DESIGNER NOTE: ...] where layout is needed.\n"
+                    "ANTI-RFP-ECHO: NEVER restate the RFP. Write the proposal answer "
+                    "(what we will do and prove), not a paraphrase of the buyer's ask.\n"
+                    f"{GLOBAL_AGENT_PROMPT_RULES}\n"
                     'Return JSON: {"content":"full section prose","designerNote":"..."}'
                 ),
             },
@@ -620,7 +661,7 @@ async def _write_custom_section(
                     f"Word target: {section.word_target}\n"
                     f"Client: {rfp.client}\n"
                     f"RFP: {rfp.title}\n\n"
-                    f"Research brief:\n{research_summary[:14000]}\n\n"
+                    f"Research brief:\n{research_summary[:14000]}{extra_context}\n\n"
                     f"RFP excerpt:\n{rfp_context[:8000]}"
                 ),
             },
@@ -838,6 +879,57 @@ def _is_section_placeholder_id(section_id: str) -> bool:
     return (
         section_id in _SECTION_PLACEHOLDER_IDS
         or section_id.endswith("-placeholder")
+    )
+
+
+_GROUP_RECOVERY_SPECS: dict[str, tuple[str, str, str]] = {
+    # label -> (section id, title, what the human must supply)
+    "Section 2 (Team)": (
+        "section-2-team-pending-selection",
+        "Our Team",
+        "select the team members to feature and attach their approved 04_Bio PDFs",
+    ),
+    "Section 3 (Our Work)": (
+        "section-3-work-01-pending-selection",
+        "Our Work",
+        "select the approved case studies to feature and attach their PDFs",
+    ),
+}
+
+
+def _recovery_section_for_group(label: str) -> ProposalSection | None:
+    """An honest, human-actionable card for a group nothing could fill.
+
+    Last-resort safety net behind the per-builder fallbacks. A group can end up
+    empty for reasons that are ANSWERS rather than faults — most often an
+    evidence trust gate admitting nothing, which is deterministic — and raising
+    there told the user to "Click Reset and try again" on a run that would fail
+    identically every time (the Gilroy Garlic Festival build failed twice, 85
+    seconds apart, for exactly this).
+
+    Section 1 is deliberately absent from the recovery table: its subsections are
+    company facts that must come from the KB, so an empty Section 1 is a genuine
+    configuration problem worth surfacing loudly rather than papering over.
+    """
+    spec = _GROUP_RECOVERY_SPECS.get(label)
+    if spec is None:
+        return None
+    section_id, title, ask = spec
+    return ProposalSection(
+        id=section_id,
+        title=title,
+        content=(
+            f"## {title}\n\n"
+            f"[MANUAL FILL: Sonja — {ask}. The automated pass could not verify "
+            f"any entry for this section, so nothing has been asserted here "
+            f"rather than risk an unsupported claim.]\n"
+        ),
+        required=True,
+        custom=False,
+        source="template",
+        mode="select",
+        status="outline",
+        word_target=80,
     )
 
 
@@ -1331,26 +1423,35 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
         rfp_context=rfp_context,
     )
 
-    roster_excerpt = ""
-    try:
-        roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
-            rfp_client=rfp.client,
-            rfp_sector=rfp.sector,
-            rfp_context=rfp_context,
+    existing_locks = prior_research.manuscript_locks if prior_research else None
+    if _locks_are_plan_informed(existing_locks):
+        manuscript_locks = existing_locks
+        logger.info(
+            "Phase 2 reused plan-informed manuscript locks for %s (skipped roster "
+            "fetch + rebuild)",
+            rfp_id,
         )
-    except ProposalGenerationCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
+    else:
+        roster_excerpt = ""
+        try:
+            roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
+                rfp_context=rfp_context,
+            )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
 
-    from app.services.proposal_manuscript_locks import build_manuscript_locks
+        from app.services.proposal_manuscript_locks import build_manuscript_locks
 
-    manuscript_locks = await build_manuscript_locks(
-        rfp=rfp,
-        rfp_context=rfp_context,
-        plan=plan,
-        roster_excerpt=roster_excerpt or "",
-    )
+        manuscript_locks = await build_manuscript_locks(
+            rfp=rfp,
+            rfp_context=rfp_context,
+            plan=plan,
+            roster_excerpt=roster_excerpt or "",
+        )
 
     from app.core.config import settings as app_settings
     from app.services.evidence_allocator import build_evidence_allocation_ledger
@@ -1950,11 +2051,33 @@ async def _generate_sections_1_3_inner(
                     status_code=502,
                 )
         if still_missing:
-            raise ProposalError(
-                "Sections 1–3 incomplete after generation — missing: "
-                f"{', '.join(still_missing)}. Click Reset, then Draft Sections 1–3 again.",
-                status_code=502,
-            )
+            # Do not kill the build. A group can be empty because a gate gave a
+            # real answer ("nothing here is verifiable"), which no retry changes
+            # — so recover what can be recovered and surface the rest as an
+            # explicit human decision inside the draft. Only groups with no
+            # honest placeholder (Section 1 company facts) still raise.
+            unrecovered: list[str] = []
+            for label in still_missing:
+                recovery = _recovery_section_for_group(label)
+                if recovery is None:
+                    unrecovered.append(label)
+                    continue
+                sections_1_3 = [s for s in sections_1_3 if s.id != recovery.id]
+                sections_1_3.append(recovery)
+                logger.warning(
+                    "Sections 1–3 for %s: %s could not be filled — inserted a "
+                    "MANUAL FILL card instead of failing the run.",
+                    rfp_id,
+                    label,
+                )
+            if unrecovered:
+                raise ProposalError(
+                    "Sections 1–3 incomplete after generation — missing: "
+                    f"{', '.join(unrecovered)}. This is a knowledge-base gap, not a "
+                    "transient error: check the KB (02_ company overview) before "
+                    "re-running, because a retry alone will produce the same result.",
+                    status_code=502,
+                )
 
     now = datetime.now(timezone.utc).isoformat()
     existing = await aget_proposal_draft(rfp_id)
@@ -2309,6 +2432,15 @@ async def _run_phase3_drafting_inner(
         toc_logs.extend(stub_logs)
     draft, layout_logs = apply_rfp_toc_layout(draft, specs)
     toc_logs.extend(layout_logs)
+    try:
+        from app.services.proposal_table_of_contents import (
+            fill_table_of_contents_in_draft,
+        )
+
+        draft, toc_fill_logs = fill_table_of_contents_in_draft(draft)
+        toc_logs.extend(toc_fill_logs)
+    except Exception as toc_fill_exc:  # noqa: BLE001
+        logger.warning("Phase 3 TOC content fill skipped: %s", toc_fill_exc)
     for line in toc_logs[:12]:
         logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
     from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
@@ -2620,6 +2752,14 @@ async def run_phase3_5_budget_reconcile(
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped on reconcile for %s: %s", rfp_id, exc)
+
+    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
+
+    budget, coerce_logs = coerce_budget_to_phased_from_guide(
+        budget, None, rfp_text=rfp_context
+    )
+    for line in coerce_logs:
+        logger.info("Budget reconcile coerce for %s: %s", rfp_id, line)
 
     budget = prepare_budget_for_client_display(budget)
     research = research.model_copy(update={"budget": budget})
@@ -3022,6 +3162,31 @@ async def _run_phase3_5_budget_inner(
             conflicts=zf_report.phase_table_conflicts[:6],
         )
 
+    try:
+        from app.services.proposal_budget_sanity import (
+            collect_budget_sanity_flags,
+            collect_budget_scope_gap_flags,
+        )
+
+        sanity_flags = collect_budget_sanity_flags(budget)
+        sanity_flags += collect_budget_scope_gap_flags(
+            budget, research.rfp_sections if research else []
+        )
+        if sanity_flags:
+            for flag in sanity_flags:
+                logger.warning("Phase 3.5 budget sanity check for %s: %s", rfp_id, flag)
+            if hasattr(budget, "pricing_audit_flags"):
+                new_audit_flags = list(budget.pricing_audit_flags) + [
+                    PricingAuditFlag(severity="high", concern=flag)
+                    for flag in sanity_flags
+                ]
+                budget = budget.model_copy(update={"pricing_audit_flags": new_audit_flags})
+                if research:
+                    research = research.model_copy(update={"budget": budget})
+                    await asave_research_cache(research)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3.5 budget sanity check failed for %s: %s", rfp_id, exc)
+
     await asave_proposal_draft(draft)
 
     logger.info(
@@ -3090,8 +3255,15 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             in_progress_phase="phase-4-review",
         )
         draft, stub_logs = await draft_rfp_structure_stubs(
-            draft, rfp_id=rfp_id, rfp=rfp, max_sections=8
+            draft, rfp_id=rfp_id, rfp=rfp, max_sections=16
         )
+        # Second pass if more hollow tabs remain (first pass may hit time budget).
+        still = [s for s in draft.sections if section_needs_presubmit_fill(s)]
+        if still:
+            draft, more_logs = await draft_rfp_structure_stubs(
+                draft, rfp_id=rfp_id, rfp=rfp, max_sections=16
+            )
+            stub_logs = list(stub_logs) + list(more_logs)
         if stub_logs:
             await asave_proposal_draft(draft)
             for line in stub_logs[:12]:
@@ -3255,6 +3427,28 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             raise
         except Exception:
             logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
+
+    # Always scrub Rev 6 hard bans before Review so Build is voice-aligned, then
+    # the presubmit voice scan flags anything still leftover.
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+        if rev6_logs:
+            await asave_proposal_draft(draft)
+            logger.info(
+                "Phase 4 Rev 6 voice scrub for %s: %d fix(es)",
+                rfp_id,
+                len(rev6_logs),
+            )
+            step_trace(
+                "phase4_rev6_voice_scrub",
+                rfp_id=rfp_id,
+                fixes=len(rev6_logs),
+                samples=rev6_logs[:8],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Phase 4 Rev 6 voice scrub failed for %s", rfp_id)
 
     # Phase 4 steps (stub fill, adversarial repair, VERIFY scrub) can rewrite
     # reference tabs after Phase 3 — re-run deterministic reference guards last.
@@ -4197,7 +4391,15 @@ async def generate_full_proposal(
         )
 
         try:
+            from app.core.config import settings as app_settings
             from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
+
+            if not app_settings.build_finalize_enabled:
+                # Final checks is switched OFF (see config.build_finalize_enabled).
+                # The pass itself is untouched — this only skips running it.
+                logger.info("Build finalize tail disabled by config for %s", rfp_id)
+                step_trace("build_finalize_tail_disabled", rfp_id=rfp_id)
+                return draft, brand_voice, research
 
             _review, research, draft, _finalize_report = await run_fulfill_rfp_gaps(
                 rfp_id, mode="build_finalize"

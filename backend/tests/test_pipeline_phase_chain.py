@@ -33,7 +33,9 @@ class ChainNextGeneratePhaseTests(unittest.IsolatedAsyncioTestCase):
             task.delay.return_value = mock_result
             await _enqueue_next_generate_phase("rfp-1", "phase-2")
             check_cancel.assert_awaited()
-            started.assert_awaited_with("rfp-1", "phase-3")
+            # scan_profile is carried forward now — passing it as None used to
+            # blank the checkpoint's profile and reset Review & Fix progress.
+            started.assert_awaited_with("rfp-1", "phase-3", scan_profile=None)
             task.delay.assert_called_once_with(
                 "rfp-1", "phase-3", {"chain_next": True}
             )
@@ -59,7 +61,9 @@ class ChainNextGeneratePhaseTests(unittest.IsolatedAsyncioTestCase):
             settings.celery_enabled = False
             task.delay.return_value = mock_result
             await _enqueue_next_generate_phase("rfp-1", "phase-3-5-budget")
-            started.assert_awaited_with("rfp-1", "phase-3-6-self-edit")
+            started.assert_awaited_with(
+                "rfp-1", "phase-3-6-self-edit", scan_profile=None
+            )
             task.delay.assert_called_once_with(
                 "rfp-1", "phase-3-6-self-edit", {"chain_next": True}
             )

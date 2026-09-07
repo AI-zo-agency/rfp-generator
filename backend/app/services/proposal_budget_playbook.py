@@ -63,6 +63,24 @@ OPTION_C_CHAT_POLICY = """=== OPTION C — CHAT / REVISE ENFORCEMENT ===
 - Otherwise apply safe playbook edits and explain tradeoffs in the assistant reply when you push back.
 """
 
+BUDGET_FREEFORM_NARRATIVE_RULES = """=== BUDGET FREEFORM (Cost tab narrative edit) ===
+You MAY improve writing, clarity, Scope cell wording, and layout.
+You MUST NOT:
+- invent new dollar amounts, rates, hourly figures, or line items
+- change any Fee / Amount / Total cell away from the CANONICAL BUDGET OBJECT
+- add Investment Framing Component|Share|Amount mix tables when Fee Detail by Phase exists
+- reverse-engineer fees to hit a target total
+- paraphrase Investment Framing, Scope Protection, Reimbursable Expenses, or Revision Rounds
+  — those four blocks are Pricing Guide USE VERBATIM (post-process restores them)
+
+Prefer ONE fee breakdown: **Fee Detail by Phase** from the ledger.
+If Investment Framing has a Component|Share percentage table that disagrees with Fee Detail, DELETE that mix table and keep Fee Detail.
+Preserve Proposed Investment totals exactly as in the canonical object.
+RFP-specific reimbursable notes (e.g. festival tech platforms) may be ADDED under
+Reimbursable Expenses after the verbatim categories — never replace mileage / photo /
+software license language.
+"""
+
 _BUDGET_TOPIC_RE = re.compile(
     r"\b("
     r"budget|pricing|price proposal|fee schedule|cost proposal|"
@@ -403,7 +421,11 @@ def budget_playbook_prompt_block(
     max_canonical_chars: int = 4000,
     full_budget_detail: bool = False,
 ) -> str:
-    parts = [BUDGET_PLAYBOOK_CANONICAL.strip(), OPTION_C_CHAT_POLICY.strip()]
+    parts = [
+        BUDGET_PLAYBOOK_CANONICAL.strip(),
+        OPTION_C_CHAT_POLICY.strip(),
+        BUDGET_FREEFORM_NARRATIVE_RULES.strip(),
+    ]
     if research and research.budget:
         if full_budget_detail:
             parts.append(
@@ -458,25 +480,296 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
     return False
 
 
+def user_asks_budget_fee_structure_mutation(text: str) -> bool:
+    """True when the ask would change fees/rates/line items (keep canonical refresh)."""
+    raw = (text or "").casefold()
+    if not raw.strip():
+        return False
+    needles = (
+        "hourly",
+        "/hr",
+        "per hour",
+        "line item",
+        "line-item",
+        "new phase fee",
+        "add a phase",
+        "add phase",
+        "change the total",
+        "set the total",
+        "total should be",
+        "total to $",
+        "reprice",
+        "new fees",
+        "new fee",
+        "pricing guide",
+        "00_guide",
+        "00 guide",
+        "stage 3.5",
+        "stage 3.5",
+        "labor rate",
+        "burdened rate",
+        "add a line",
+        "add line item",
+    )
+    return any(n in raw for n in needles)
+
+
+def user_asks_budget_narrative_freeform(text: str) -> bool:
+    """True when Cost-tab chat should LLM-edit prose/layout without full re-render."""
+    raw = (text or "").casefold()
+    if not raw.strip():
+        return False
+    if user_asks_budget_fee_structure_mutation(raw):
+        return False
+    if user_asks_budget_rebuild(raw) or user_asks_global_cost_rebuild(raw):
+        return False
+    needles = (
+        "investment framing",
+        "component | share",
+        "component|share",
+        "share | amount",
+        "fee detail only",
+        "keep fee detail",
+        "only fee detail",
+        "remove investment",
+        "delete investment",
+        "drop investment",
+        "remove the table",
+        "delete the table",
+        "duplicate table",
+        "mix table",
+        "broken table",
+        "clean up terms",
+        "clean terms",
+        "shorten terms",
+        "rewrite terms",
+        "use verbatim",
+        "restore verbatim",
+        "verbatim terms",
+        "pricing guide verbatim",
+        "scope cell",
+        "scope column",
+        "detailed breakdown",
+        "more detail",
+        "more detailed",
+        "fix the framing",
+        "fix framing",
+        "reconcile the tables",
+        "tables don't agree",
+        "tables do not agree",
+        "don't agree",
+        "do not agree",
+    )
+    return any(n in raw for n in needles)
+
+
+def user_asks_budget_improve_if_needed(text: str) -> bool:
+    """True when user wants safe RFP-aligned fixes only (not a full fee rebuild)."""
+    raw = (text or "").casefold()
+    if not raw.strip():
+        return False
+    if user_asks_budget_rebuild(raw) or user_asks_global_cost_rebuild(raw):
+        return False
+    if user_asks_budget_fee_structure_mutation(raw):
+        return False
+    return bool(
+        re.search(
+            r"(?is)"
+            r"improve.{0,48}if\s+needed|"
+            r"if\s+needed.{0,48}(?:rfp|budget|cost)|"
+            r"according\s+to\s+(?:the\s+)?rfp|"
+            r"\bper\s+(?:the\s+)?rfp\b|"
+            r"align.{0,80}(?:with\s+)?(?:the\s+)?rfp|"
+            r"improve\s+(?:the\s+)?budget|"
+            r"fix\s+(?:the\s+)?budget.{0,48}rfp|"
+            r"needed.{0,24}(?:according|per|against).{0,16}rfp|"
+            r"restore\s+verbatim|"
+            r"use\s+verbatim|"
+            r"verbatim\s+terms",
+            raw,
+        )
+    )
+
+
+def user_explicitly_asks_to_change_budget(text: str) -> bool:
+    """True only when the user asked to mutate Cost/Budget — not voice / RFP-check asks."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if user_asks_budget_rebuild(raw) or user_asks_global_cost_rebuild(raw):
+        return True
+    if user_asks_budget_fee_structure_mutation(raw):
+        return True
+    if user_asks_budget_summary_reconcile(raw):
+        return True
+    if user_asks_budget_narrative_freeform(raw):
+        return True
+    from app.services.proposal_manual_flags import (
+        is_manual_fill_request,
+        user_asks_submit_handoff_fill,
+    )
+
+    if is_manual_fill_request(raw) or user_asks_submit_handoff_fill(raw):
+        return True
+    low = raw.casefold()
+    explicit = (
+        "change the budget",
+        "change budget",
+        "update the budget",
+        "update budget",
+        "update the fees",
+        "update fees",
+        "edit the fee",
+        "edit fees",
+        "rewrite the budget",
+        "rewrite budget",
+        "rebuild the budget",
+        "rebuild budget",
+        "replace the fee",
+        "fix the fee table",
+        "fix fee table",
+        "fix the cost",
+        "adjust the total",
+        "adjust pricing",
+    )
+    return any(n in low for n in explicit)
+
+
+def budget_ask_allows_freeform_narrative(text: str) -> bool:
+    """Cost-tab freeform only for explicit Terms/layout asks — never soft Improve/voice."""
+    if user_asks_budget_fee_structure_mutation(text):
+        return False
+    if user_asks_budget_rebuild(text) or user_asks_global_cost_rebuild(text):
+        return False
+    return user_asks_budget_narrative_freeform(text)
+
+
+def dollar_amount_tokens(text: str) -> set[str]:
+    """Normalized $amount tokens from prose/tables (no regex)."""
+    found: set[str] = set()
+    raw = text or ""
+    i = 0
+    while i < len(raw):
+        if raw[i] == "$":
+            j = i + 1
+            while j < len(raw) and (raw[j].isdigit() or raw[j] in ",."):
+                j += 1
+            token = raw[i + 1 : j].replace(",", "")
+            if token and any(ch.isdigit() for ch in token):
+                if "." in token:
+                    try:
+                        token = f"{float(token):.2f}".rstrip("0").rstrip(".")
+                    except ValueError:
+                        pass
+                found.add(token)
+            i = j
+        else:
+            i += 1
+    return found
+
+
+def ledger_dollar_tokens(budget: ProposalBudget | None) -> set[str]:
+    tokens: set[str] = set()
+    if budget is None:
+        return tokens
+    for item in budget.line_items or []:
+        for val in (item.extended, item.rate, item.quantity):
+            if isinstance(val, (int, float)) and float(val) > 0:
+                tokens.add(f"{float(val):.2f}".rstrip("0").rstrip("."))
+    for attr in (
+        "lump_sum_total",
+        "agency_revenue_estimate",
+        "client_media_passthrough",
+        "rfp_budget_cap",
+    ):
+        val = getattr(budget, attr, None)
+        if isinstance(val, (int, float)) and float(val) > 0:
+            tokens.add(f"{float(val):.2f}".rstrip("0").rstrip("."))
+    return tokens
+
+
+def apply_budget_freeform_postprocess(
+    content: str,
+    *,
+    budget: ProposalBudget | None = None,
+) -> tuple[str, list[str]]:
+    """Scrub conflicting mix tables + sync summary labels after freeform Cost edits."""
+    from app.services.proposal_budget_content import (
+        ensure_pricing_guide_verbatim_in_budget_markdown,
+        qualifying_language_has_pricing_guide_verbatim,
+        reconcile_budget_summary_prose,
+        scrub_duplicate_budget_breakdown_tables,
+    )
+
+    logs: list[str] = []
+    text = content or ""
+    text, mix_logs = scrub_duplicate_budget_breakdown_tables(text)
+    logs.extend(mix_logs)
+    if budget is not None and (budget.line_items or []):
+        text, n = reconcile_budget_summary_prose(text, budget)
+        if n:
+            logs.append(f"Reconciled {n} budget summary figure(s) to the fee ledger")
+    before_terms = text
+    text = ensure_pricing_guide_verbatim_in_budget_markdown(text)
+    if text != before_terms or not qualifying_language_has_pricing_guide_verbatim(text):
+        if "investment framing" in text.casefold() or "## terms" in text.casefold():
+            logs.append("Restored Pricing Guide USE VERBATIM Terms blocks")
+    return text, logs
+
+
 def refuse_noncompliant_budget_edit(
     user_message: str,
     new_text: str,
     *,
     prior_text: str = "",
+    budget: ProposalBudget | None = None,
 ) -> str | None:
-    """Return a user-facing refusal when option C blocks the edit.
-
-    $0 agency/commission lines never 422 the chat — leftover zeros surface in
-    the agent recap instead of blocking Improve.
-    """
-    del new_text, prior_text
+    """Return a user-facing refusal when option C blocks the edit."""
     if user_asked_reverse_engineered_total(user_message):
         return (
             "That request would reverse-engineer line items to hit a target total. "
             "Per the pricing playbook, each line must trace to the Pricing Guide — "
             "adjust tier or scope instead, or ask Sonja to review a flagged out-of-guide item."
         )
+    if not (new_text or "").strip():
+        return None
+    prior_amts = dollar_amount_tokens(prior_text)
+    new_amts = dollar_amount_tokens(new_text)
+    allowed = prior_amts | ledger_dollar_tokens(budget)
+    invented: set[str] = set()
+    for a in new_amts:
+        if a in allowed:
+            continue
+        try:
+            af = float(a)
+        except ValueError:
+            continue
+        if af < 100:
+            continue
+        if any(
+            abs(af - float(b)) < 0.02
+            for b in allowed
+            if _is_numeric_token(b)
+        ):
+            continue
+        invented.add(a)
+    if invented and prior_text.strip():
+        sample = ", ".join(f"${a}" for a in sorted(invented, key=float)[:4])
+        return (
+            "That edit would introduce dollar amounts that are not in the current "
+            f"Cost section or the Stage 3.5 fee ledger ({sample}). "
+            "Ask to rebuild Fee Detail from the ledger, or rebuild Cost from the "
+            "pricing guide — chat will not invent fees."
+        )
     return None
+
+
+def _is_numeric_token(token: str) -> bool:
+    try:
+        float(token)
+        return True
+    except ValueError:
+        return False
 
 
 BUDGET_TOOL_ROUTING = """=== BUDGET TOOL ROUTING (mandatory) ===

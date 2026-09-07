@@ -256,11 +256,12 @@ theme exists. Do not invent a replacement tagline as final.
 """
 
 _EXEC_INSTRUCTION = """\
-If this executive summary mainly restates RFP evaluation criteria back at the
-evaluator ('this proposal will be assessed on… we structured to address each
-criterion'), rewrite to lead with substantive Understanding: client goals,
-audiences, constraints, and why zö's approach fits — without telling the
-evaluator how to grade. Keep it concise. Do not invent metrics.
+If this executive summary mainly restates RFP evaluation criteria or the buyer's
+ask back at the evaluator ('this proposal will be assessed on…', 'you are not
+asking us to build…', 'what you need now is…'), rewrite to lead with the
+PROPOSAL ANSWER: what zö will do, how it fits, and proof — without telling the
+evaluator how to grade and without paraphrasing the RFP. Keep it concise. Do not
+invent metrics.
 """
 
 
@@ -298,6 +299,7 @@ async def run_content_risk_repair(
             body, ref_logs = apply_reference_content_scrubs(
                 section.content or "",
                 primary_contact_name=primary,
+                section_title=section.title or "",
             )
             if ref_logs:
                 sections[idx] = section.model_copy(update={"content": body})

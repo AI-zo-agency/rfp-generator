@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import logging
 import re
+import zipfile
+from dataclasses import dataclass
 from typing import Any
 
 from docx import Document
@@ -379,3 +381,146 @@ def build_proposal_docx_bytes(*, doc_title: str, draft: ProposalDraft) -> bytes:
 
 def build_proposal_docx_filename(*, rfp_title: str) -> str:
     return _sanitize_filename(rfp_title)
+
+
+# RFQ packaging: cost must be a separate upload (PlanetBids Cost File), not inside
+# the Response File. Principle-based — not client-specific.
+_SEPARATE_COST_FILE_RE = re.compile(
+    r"(?is)("
+    r"do\s+not\s+include\s+(?:a\s+copy\s+of\s+)?(?:your\s+)?cost\s+file"
+    r"|cost\s+file\s+with\s+the\s+main\s+proposal"
+    r"|separate\s+cost\s+file"
+    r"|cost\s+file\s+separately"
+    r"|upload\s+(?:the\s+)?cost\s+file\s+separately"
+    r"|response\s+file.{0,80}cost\s+file"
+    r"|cost\s+file.{0,80}response\s+file"
+    r"|budget.{0,40}separate\s+(?:attachment|file|document|upload)"
+    r"|separate\s+(?:budget|cost|fee)\s+(?:attachment|file|document|upload)"
+    r")"
+)
+
+
+def rfp_requires_separate_cost_file(rfp_text: str) -> bool:
+    """True when the solicitation requires budget/cost as its own uploaded file."""
+    return bool(_SEPARATE_COST_FILE_RE.search(rfp_text or ""))
+
+
+def split_draft_for_cost_packets(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, ProposalDraft]:
+    """Split manuscript into Response File (no budget) and Cost File (budget only)."""
+    from app.services.proposal_budget_content import (
+        budget_section_score,
+        find_budget_section_index,
+        section_looks_like_official_pricing_form,
+    )
+
+    sections = list(draft.sections or [])
+    cost_idxs: set[int] = set()
+    primary = find_budget_section_index(sections)
+    if primary is not None:
+        cost_idxs.add(primary)
+    for i, section in enumerate(sections):
+        title = section.title or ""
+        sid = (section.id or "").casefold()
+        if budget_section_score(title) >= 4:
+            cost_idxs.add(i)
+        if section_looks_like_official_pricing_form(section):
+            cost_idxs.add(i)
+        if "cost-file" in sid or sid.endswith("cost-file") or "cost_file" in sid:
+            cost_idxs.add(i)
+        if re.search(r"(?i)^\s*cost\s+file\b", title.strip()):
+            cost_idxs.add(i)
+
+    if not cost_idxs:
+        # No budget tab — return full draft as response, empty cost shell avoided
+        # by caller checking cost sections.
+        empty = draft.model_copy(update={"sections": []})
+        return draft, empty
+
+    response_sections = [s for i, s in enumerate(sections) if i not in cost_idxs]
+    cost_sections = [s for i, s in enumerate(sections) if i in cost_idxs]
+    return (
+        draft.model_copy(update={"sections": response_sections}),
+        draft.model_copy(update={"sections": cost_sections}),
+    )
+
+
+@dataclass(frozen=True)
+class ExportPacketFile:
+    filename: str
+    content: bytes
+    kind: str  # "response" | "cost" | "full"
+
+
+@dataclass(frozen=True)
+class ExportPackets:
+    mode: str  # "single" | "separate_cost"
+    files: list[ExportPacketFile]
+    zip_bytes: bytes | None = None
+    zip_filename: str | None = None
+
+
+def _packet_filename(rfp_title: str, label: str) -> str:
+    cleaned = re.sub(r"[^\w\s\-–—()]+", "", rfp_title or "").strip()
+    base = (cleaned[:80] or "Proposal").strip()
+    return f"{base} — {label}.docx"
+
+
+def build_export_packets(
+    *,
+    draft: ProposalDraft,
+    rfp_title: str,
+    rfp_text: str = "",
+) -> ExportPackets:
+    """Build one Word file, or Response+Cost files (+ zip) when RFQ requires split."""
+    title = (rfp_title or "Proposal").strip() or "Proposal"
+    if not rfp_requires_separate_cost_file(rfp_text):
+        payload = build_proposal_docx_bytes(
+            doc_title=f"{title} — Proposal",
+            draft=draft,
+        )
+        name = build_proposal_docx_filename(rfp_title=title)
+        return ExportPackets(
+            mode="single",
+            files=[ExportPacketFile(filename=name, content=payload, kind="full")],
+        )
+
+    response_draft, cost_draft = split_draft_for_cost_packets(draft)
+    if not cost_draft.sections:
+        # RFQ asks for separate cost file but no budget tab exists — fall back.
+        payload = build_proposal_docx_bytes(
+            doc_title=f"{title} — Proposal",
+            draft=draft,
+        )
+        name = build_proposal_docx_filename(rfp_title=title)
+        return ExportPackets(
+            mode="single",
+            files=[ExportPacketFile(filename=name, content=payload, kind="full")],
+        )
+
+    response_bytes = build_proposal_docx_bytes(
+        doc_title=f"{title} — Response File",
+        draft=response_draft,
+    )
+    cost_bytes = build_proposal_docx_bytes(
+        doc_title=f"{title} — Cost File",
+        draft=cost_draft,
+    )
+    response_name = _packet_filename(title, "Response File")
+    cost_name = _packet_filename(title, "Cost File")
+    files = [
+        ExportPacketFile(filename=response_name, content=response_bytes, kind="response"),
+        ExportPacketFile(filename=cost_name, content=cost_bytes, kind="cost"),
+    ]
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for packet in files:
+            zf.writestr(packet.filename, packet.content)
+    zip_name = _packet_filename(title, "Response and Cost Files").replace(".docx", ".zip")
+    return ExportPackets(
+        mode="separate_cost",
+        files=files,
+        zip_bytes=zip_buf.getvalue(),
+        zip_filename=zip_name,
+    )

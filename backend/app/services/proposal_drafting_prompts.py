@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.proposal_anti_rfp_echo import ANTI_RFP_ECHO_RULES
+
 # Anti-hallucination rules - CRITICAL for all proposal generation
 ANTI_HALLUCINATION_RULES = """
 ## CRITICAL: ANTI-HALLUCINATION RULES
@@ -28,6 +30,8 @@ YOU MUST NEVER:
 16. Invent individual ZO team-member hourly rates (Sonja/Curt/Justin/etc. $/hr) — those are NOT in the KB. Work/labor-category rates from 00_Guide_Pricing are OK; named-person rate cells must be [VERIFY: hourly rate — {name/role}]
 17. Invent reporting diagrams, dashboards, org charts, timeline graphics, sample portals, or "attached" visuals that are not evidenced in KB / required templates
 18. Add [DESIGNER NOTE] graphics/diagrams unless THIS RFP explicitly requires that visual or a verified template asset exists
+19. NEVER claim lost bids, finalist bids, or prospective clients (e.g. City of Northglenn) as active agency clients or partnerships. Active client roster is ONLY 01_ClientList_Approved.
+20. NEVER alter specific factual details in case studies (e.g. changing "regional airport" to "regional transit points" or modifying grant dollar amounts). Quote case study details verbatim from 03_CS case studies.
 
 LEGAL ATTESTATIONS (higher bar than ordinary claims):
 - E-Verify Affidavit / Contractor Affidavit: NEVER state participation as fact. Go/No-Go treats E-Verify as unconfirmed until Sonja/Operations verifies. Keep [VERIFY: E-Verify enrollment — …] even if surrounding form language is required.
@@ -41,7 +45,6 @@ PERCENT-TIME / FTE / STAFF ALLOCATION (mandatory):
 - Prefer a lean Role | Name | Relevant experience table over a fabricated Percent-Time column.
 
 HEALTH / COALITION / STIGMA RFPs:
-- Recovery Network of Oregon (RNO) is a near-direct KB proof point. Prefer it in references, previous experience, and case studies when the RFP asks for comparable health/coalition work. If absent, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
 
 VERIFIED FACTS ONLY:
 - Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
@@ -78,6 +81,27 @@ never preface it with a sentence about why it's there, never restate the rule th
 produced it.
 """
 
+# Re-export so writers that import drafting_prompts get the shared anti-echo block.
+__all__ = (
+    "ANTI_HALLUCINATION_RULES",
+    "ANTI_RFP_ECHO_RULES",
+    "DESIGNER_READY_BLOCK",
+    "GLOBAL_AGENT_PROMPT_RULES",
+    "MODULAR_APPROACH_BLOCK",
+    "format_proof_points_block",
+    "is_modular_approach_section",
+)
+
+GLOBAL_AGENT_PROMPT_RULES = """
+=== CORE AGENT RULES (MANDATORY FOR ALL TASKS) ===
+1. SINGLE SOURCE OF TRUTH: The Research Brief is absolute. Maintain strict consistency with it to ensure no contradictions across the proposal.
+2. THOROUGH RFP COMPLIANCE: You MUST explicitly address EVERY requirement the RFP demands for your specific section. Never silently skip a requirement.
+3. NO FABRICATION: NEVER invent missing data, clients, metrics, or pricing.
+4. NO BLANK REFUSALS: NEVER leave a section or response empty with a meta-comment like "Please provide...". Draft the absolute best complete section you can.
+5. USE [VERIFY] FOR GAPS: If you genuinely lack facts to fulfill a requirement, insert an inline `[VERIFY: missing fact description]` tag to hold the space instead of fabricating or omitting it.
+6. ANTI-RFP-ECHO: NEVER restate the RFP. Address requirements with proposal substance only. NEVER paraphrase, quote, or summarize the RFP / Opportunity Understanding / requirement checklist as section content. Write what zö will do and prove — not what the buyer already asked.
+"""
+
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)
 
 wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable structure, not pages they must cut.
@@ -88,7 +112,7 @@ wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable s
 1. **Lead** — 1–3 tight sentences: what this tab proves.
 2. **Body** — markdown tables, short bullets, or labeled rows matched to THIS tab's job (matrix, Q&A, references, phases, checklist). One row per RFP item when there are many asks. Same fact once — not in prose AND bullets.
 3. **Visual handoff** — when layout beats prose (timeline, comparison, grid, icons): one specific [DESIGNER NOTE: …] with columns/data. Do not write paragraphs a graphic would replace.
-4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs.
+4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs. ANTI-RFP-ECHO: never open by telling the client what they asked for; open with the proposal answer.
 
 Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density.
 
@@ -165,11 +189,25 @@ def format_proof_points_block(
             key=lambda p: -(p.get("evaluationWeight") or p.get("evaluation_weight") or 0),
         )[:6]
 
+    # Placeholders synthesised from the execution plan (assembler.py, relevance
+    # "planned") carry an evidence NEED in `caseStudy`, not a delivered project.
+    # Rendering them under a header that calls them verified case studies and
+    # says "lead with these" invited two failures at once: narrating planning
+    # text as content, and inventing a case study to match the requirement.
+    # Real proof points use high|medium|low.
+    verified = [
+        p
+        for p in relevant
+        if str(p.get("relevance") or "").strip().casefold() != "planned"
+    ]
+    if not verified:
+        return ""
+
     lines = [
         "## PROOF POINTS (lead with these, first person we/our)",
         "Use these verified case studies as 'why we win' evidence. Do not invent metrics.",
     ]
-    for point in relevant[:8]:
+    for point in verified[:8]:
         req = point.get("requirement") or ""
         case = point.get("caseStudy") or point.get("case_study") or ""
         hook = point.get("narrativeHook") or point.get("narrative_hook") or ""

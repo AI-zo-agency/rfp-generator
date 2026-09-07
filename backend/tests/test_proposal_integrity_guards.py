@@ -133,6 +133,40 @@ class TestReferenceIntegrity(unittest.TestCase):
         self.assertNotIn("\n- City of Bend", out)
         self.assertTrue(logs)
 
+    def test_gilroy_style_references_title_echo_and_orphan_row(self) -> None:
+        body = (
+            "## 24. References\n\n"
+            "We choose references the same way we choose case studies.\n\n"
+            "| Organization | Contact | Title | Phone | Email |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| City of Umatilla — Digital Campaign | David Stockdale | City Manager | | |\n"
+            "\n"
+            "| Hampton Lumber — Educational Packet | | | | |\n"
+            "\n"
+            "David Stockdale worked with our team on the City of Umatilla campaign.\n"
+        )
+        draft = ProposalDraft(
+            rfpId="t",
+            sections=[
+                ProposalSection(
+                    id="rfp-references",
+                    title="References",
+                    content=body,
+                    status="generated",
+                    source="rfp",
+                    mode="write",
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        updated, logs = apply_manuscript_integrity_guards(draft)
+        out = updated.sections[0].content or ""
+        self.assertNotIn("## 24.", out)
+        self.assertFalse(out.lstrip().startswith("24."))
+        self.assertIn("Hampton Lumber", out)
+        self.assertIn("[MANUAL FILL", out)
+        self.assertTrue(any("title-echo" in line.casefold() or "hollow" in line.casefold() or "blank" in line.casefold() for line in logs) or logs)
+
     def test_collapses_duplicate_sonja_exhibit_k_lines(self) -> None:
         body = (
             "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"

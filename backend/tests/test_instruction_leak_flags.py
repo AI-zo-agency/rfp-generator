@@ -125,6 +125,52 @@ def test_scrub_broken_reference_pipe_rows() -> None:
     assert logs
 
 
+def test_scrub_reattaches_orphan_org_only_pipe_row() -> None:
+    from app.services.proposal_manuscript import scrub_broken_reference_pipe_rows
+
+    body = (
+        "| Organization | Contact | Title | Phone | Email |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| City of Umatilla — Digital Campaign | David Stockdale | City Manager | | |\n"
+        "\n"
+        "| Hampton Lumber — Educational Packet | | | | |\n"
+        "\n"
+        "David Stockdale worked with our team on Umatilla.\n"
+    )
+    out, logs = scrub_broken_reference_pipe_rows(body)
+    assert "Hampton Lumber" in out
+    assert "[MANUAL FILL" in out
+    # Orphan row must stay a table row, not raw prose pipes.
+    assert "\n| Hampton Lumber" in out or out.startswith("| Hampton")
+    assert logs
+    # Empty phone/email on the first row also filled.
+    umatilla_line = next(
+        ln for ln in out.splitlines() if "Umatilla" in ln and ln.strip().startswith("|")
+    )
+    assert "[MANUAL FILL" in umatilla_line
+
+
+def test_strip_leading_title_echo_drops_stale_rfp_number() -> None:
+    from app.services.proposal_manuscript import strip_leading_title_echo
+
+    body = (
+        "## 24. References\n\n"
+        "We choose references the same way we choose case studies.\n"
+    )
+    out, logs = strip_leading_title_echo(body, "References")
+    assert not out.lstrip().startswith("#")
+    assert "24." not in out.split("\n", 1)[0]
+    assert "We choose references" in out
+    assert logs
+
+    bare, bare_logs = strip_leading_title_echo(
+        "24. References\n\nWe choose references carefully.\n",
+        "8. References",
+    )
+    assert bare.startswith("We choose")
+    assert bare_logs
+
+
 def test_strip_orphan_reference_header_above_bullets() -> None:
     from app.services.proposal_manuscript import scrub_broken_reference_pipe_rows
 

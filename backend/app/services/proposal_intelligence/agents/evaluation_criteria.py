@@ -55,6 +55,13 @@ Rules:
 """
 
 
+def _evaluation_excerpt(rfp_context: str) -> str:
+    """Evaluation-region excerpt with a prefix fallback (see call site)."""
+    from app.services.proposal_rfp_excerpt import evaluation_and_kpi_excerpt
+
+    return evaluation_and_kpi_excerpt(rfp_context) or rfp_context[:40000]
+
+
 async def run_evaluation_criteria(
     *,
     plan: ProposalExecutionPlan,
@@ -68,7 +75,14 @@ async def run_evaluation_criteria(
                 "role": "user",
                 "content": (
                     f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n\n"
-                    f"RFP excerpt:\n{rfp_context[:40000]}"
+                    # Targeted excerpt, NOT a blind prefix. Measured on a live
+                    # 77k-char RFP: the scoring table began at char 40,522 —
+                    # 522 past a [:40000] slice — so the agent was never shown
+                    # it and returned 1 of 8 criteria with no points. The
+                    # evaluation-focused excerpt captures the whole table in
+                    # 28k chars (smaller AND correct). Falls back to the old
+                    # prefix only if no evaluation region is detected at all.
+                    f"RFP excerpt:\n{_evaluation_excerpt(rfp_context)}"
                 ),
             },
         ],

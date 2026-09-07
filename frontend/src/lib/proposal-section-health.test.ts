@@ -99,4 +99,30 @@ describe("stripLeadingTitleEcho", () => {
     const content = "## who we are\n\nWe are zö agency.";
     expect(stripLeadingTitleEcho(content, "Who We Are")).toBe("We are zö agency.");
   });
+
+  it("strips a stale RFP number that does not match the sidebar mark", () => {
+    const content =
+      "## 24. References\n\nWe choose references the same way we choose case studies.";
+    expect(stripLeadingTitleEcho(content, "References")).toBe(
+      "We choose references the same way we choose case studies.",
+    );
+    expect(stripLeadingTitleEcho(content, "8. References")).toBe(
+      "We choose references the same way we choose case studies.",
+    );
+  });
+
+  it("strips bare and bold numbered title echoes without a # heading", () => {
+    expect(
+      stripLeadingTitleEcho(
+        "24. References\n\nWe choose references carefully.",
+        "References",
+      ),
+    ).toBe("We choose references carefully.");
+    expect(
+      stripLeadingTitleEcho(
+        "**24. References**\n\nWe choose references carefully.",
+        "8. References",
+      ),
+    ).toBe("We choose references carefully.");
+  });
 });

@@ -279,6 +279,166 @@ def _instruction_sentence_is_actionable(lowered_sentence: str) -> bool:
     )
 
 
+# --- Brief echo --------------------------------------------------------------
+# The section writer receives a private brief (purpose, writerInstructions,
+# successDefinition). When evidence is thin, the brief is the only substantive
+# text in its context, so the model paraphrases it into the section body and a
+# tab ships describing why it matters instead of answering it.
+#
+# convert_instruction_blocks catches known instruction PHRASINGS. This catches
+# the general case — a sentence that is a restatement of THIS section's own
+# brief — by comparing the body against the brief it was written from, which no
+# fixed phrase list can do.
+#
+# Two independent signals must both fire, because either alone is a false
+# positive generator: legitimate prose reuses the brief's vocabulary (that is
+# the point of a brief), and "this section" is sometimes a fair transition.
+_BRIEF_ECHO_META_MARKERS = (
+    "this section",
+    "this tab",
+    "this narrative",
+    "this response",
+    "this subsection",
+    "the purpose of this",
+    "the goal of this",
+    "the intent of this",
+    "the evaluator",
+    "evaluators will",
+    "evaluators should",
+    "the reader should",
+    "the reviewer should",
+    "should be able to",
+    "is intended to demonstrate",
+    "is designed to demonstrate",
+    "will demonstrate to",
+    "in this section we",
+    "here we will",
+    "below we will",
+    "we will describe",
+    "we will outline",
+    "we will address",
+)
+
+# Sentences short enough that overlap is noise, and tags that are deliverables.
+_BRIEF_ECHO_MIN_TOKENS = 5
+_BRIEF_ECHO_CONTAINMENT = 0.55
+_BRIEF_ECHO_PROTECTED_TAGS = ("[VERIFY", "[MANUAL FILL", "[DESIGNER NOTE", "[PRICING")
+
+
+def _brief_tokens(text: str) -> set[str]:
+    """Content words, lowercased. Plain string ops — no regex needed here."""
+    out: set[str] = set()
+    for raw in (text or "").casefold().split():
+        word = raw.strip(".,;:!?()[]{}\"'`—–-")
+        if len(word) > 3:
+            out.add(word)
+    return out
+
+
+def _is_brief_echo(sentence: str, directive_tokens: list[set[str]]) -> bool:
+    lowered = sentence.casefold()
+    if not any(marker in lowered for marker in _BRIEF_ECHO_META_MARKERS):
+        return False
+    tokens = _brief_tokens(sentence)
+    if len(tokens) < _BRIEF_ECHO_MIN_TOKENS:
+        return False
+    for directive in directive_tokens:
+        if not directive:
+            continue
+        # Containment, not Jaccard: the brief field and the echo are rarely the
+        # same length, but an echo is mostly made of the brief's own words.
+        if len(tokens & directive) / len(tokens) >= _BRIEF_ECHO_CONTAINMENT:
+            return True
+    return False
+
+
+def strip_brief_echo_sentences(text: str, directives: list[str]) -> str:
+    """Drop sentences that restate the section's own private brief.
+
+    ``directives`` are the META fields only — purpose, writerInstructions,
+    successDefinition. Key messages are deliberately excluded: those ARE the
+    content the section is supposed to make, so matching against them would
+    delete the section's substance.
+
+    Headings, table rows and handoff tags are never touched.
+    """
+    body = text or ""
+    directive_tokens = [_brief_tokens(d) for d in directives if (d or "").strip()]
+    if not body.strip() or not directive_tokens:
+        return body
+
+    out_lines: list[str] = []
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith("#")
+            or stripped.startswith("|")
+            or stripped.startswith(">")
+            or any(tag in stripped for tag in _BRIEF_ECHO_PROTECTED_TAGS)
+        ):
+            out_lines.append(line)
+            continue
+
+        prefix = ""
+        content = stripped
+        for bullet in ("- ", "* ", "+ "):
+            if content.startswith(bullet):
+                prefix = line[: len(line) - len(line.lstrip())] + bullet
+                content = content[len(bullet) :]
+                break
+
+        sentences = _INSTRUCTION_SENTENCE_SPLIT_RE.split(content)
+        kept = [s for s in sentences if not _is_brief_echo(s, directive_tokens)]
+        if len(kept) == len(sentences):
+            out_lines.append(line)
+            continue
+        remainder = " ".join(s.strip() for s in kept if s.strip()).strip()
+        if not remainder:
+            # Whole line was brief echo — drop it rather than leave a stub bullet.
+            continue
+        if prefix:
+            out_lines.append(f"{prefix}{remainder}")
+        else:
+            indent = line[: len(line) - len(line.lstrip())]
+            out_lines.append(f"{indent}{remainder}")
+
+    cleaned = "\n".join(out_lines)
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+
+    # When EVERY prose line was brief echo, the section is pure agent instruction
+    # and must not ship. Return it empty rather than preserving the text: an
+    # empty body is what `proposal_hollow_kb_fill.section_answers_missing`
+    # triggers on, and `fill_hollow_sections_for_pipeline` — wired into the main
+    # build — then refills the tab from the KB with real, grounded content.
+    #
+    # Preserving the instructions would ship the exact defect this function
+    # exists to remove; emptying hands the tab to the one pass that can actually
+    # rewrite it. Only RFP tabs reach here (the caller drafts source="rfp"), and
+    # `_skip_section` never skips those, so the refill always applies.
+    #
+    # Headings are dropped along with the prose deliberately: a lone surviving
+    # "## Executive Summary" is NOT matched by section_answers_missing's
+    # bare-heading rule (which covers only Qualifications/Experience/References/
+    # Team), so it would slip through the refill and ship as an empty heading.
+    if _has_prose(text) and not _has_prose(cleaned):
+        return ""
+    return cleaned
+
+
+def _has_prose(text: str) -> bool:
+    """True when text carries a line that is not a heading, table row or tag."""
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "|", ">")):
+            continue
+        if any(tag in stripped for tag in _BRIEF_ECHO_PROTECTED_TAGS):
+            continue
+        return True
+    return False
+
+
 def convert_instruction_blocks(text: str) -> str:
     """Turn narrated-instruction paragraphs/blockquotes into visible handoff tags.
 
@@ -439,6 +599,9 @@ def _is_hollow_reference_table_row(line: str) -> bool:
         and re.match(r"^\d+$", non_empty[0])
     ):
         return True
+    # Org-only / org+label rows with blank contact fields (common LLM truncate).
+    if len(cells) >= 4 and len(non_empty) <= 2:
+        return True
     return False
 
 
@@ -459,8 +622,24 @@ def _repair_hollow_reference_table_row(line: str, width: int, manual: str) -> st
     return "| " + " | ".join(cells) + " |"
 
 
+def _fill_empty_reference_table_cells(line: str, width: int, manual: str) -> str:
+    """Fill blank contact cells; keep named org/contact/title values."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    while len(cells) < width:
+        cells.append("")
+    cells = cells[:width]
+    changed = False
+    for i, cell in enumerate(cells):
+        if not cell:
+            cells[i] = manual
+            changed = True
+    if not changed:
+        return line
+    return "| " + " | ".join(cells) + " |"
+
+
 def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
-    """Repair hollow reference-table rows so markdown tables stay column-aligned."""
+    """Repair hollow / orphan reference-table rows so markdown tables stay intact."""
     if not text or "|" not in text:
         return text, []
     logs: list[str] = []
@@ -468,6 +647,7 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
     lines = text.split("\n")
     out: list[str] = []
     repaired = 0
+    filled = 0
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -488,11 +668,31 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
                     repaired += 1
                     out.append(_repair_hollow_reference_table_row(row, width, manual))
                 else:
-                    out.append(lines[i])
+                    filled_row = _fill_empty_reference_table_cells(row, width, manual)
+                    if filled_row != lines[i]:
+                        filled += 1
+                    out.append(filled_row)
                 i += 1
+            # Re-attach orphan pipe rows that landed after a blank line break.
+            while i < len(lines):
+                peek = lines[i].strip()
+                if not peek:
+                    i += 1
+                    continue
+                if peek.startswith("|") and not _is_reference_table_header_line(peek):
+                    if _is_all_empty_pipe_row(peek):
+                        i += 1
+                        continue
+                    repaired += 1
+                    out.append(_repair_hollow_reference_table_row(peek, width, manual))
+                    i += 1
+                    continue
+                break
             continue
-        if stripped.startswith("|") and _is_hollow_reference_table_row(stripped):
-            width = max(6, len(stripped.strip("|").split("|")))
+        if stripped.startswith("|") and (
+            _is_hollow_reference_table_row(stripped) or _looks_like_orphan_reference_row(stripped)
+        ):
+            width = max(5, len(stripped.strip("|").split("|")))
             repaired += 1
             out.append(_repair_hollow_reference_table_row(stripped, width, manual))
             i += 1
@@ -503,10 +703,74 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
         logs.append(
             f"Repaired {repaired} hollow reference table row(s) with aligned MANUAL FILL cells"
         )
+    if filled:
+        logs.append(
+            f"Filled {filled} blank reference contact cell(s) with MANUAL FILL"
+        )
     text = "\n".join(out)
     text, strip_logs = _strip_orphan_reference_table_headers(text)
     logs.extend(strip_logs)
     return text, logs
+
+
+def _looks_like_orphan_reference_row(line: str) -> bool:
+    """True for pipe rows that are not headers/separators but look like table data."""
+    if not line.strip().startswith("|"):
+        return False
+    if _is_markdown_table_separator_line(line):
+        return False
+    if _is_reference_table_header_line(line):
+        return False
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return len(cells) >= 3
+
+
+def normalize_title_echo(text: str) -> str:
+    """Normalize a title or heading for echo comparison (shared with stubs)."""
+    plain = (text or "").strip()
+    while plain.startswith("#"):
+        plain = plain[1:].lstrip()
+    plain = plain.strip().strip("*").strip()
+    i = 0
+    while i < len(plain) and plain[i] in "0123456789.":
+        i += 1
+    plain = plain[i:].strip()
+    while plain and plain[0] in "—–-,:· ":
+        plain = plain[1:].lstrip()
+    return " ".join(plain.casefold().replace("&", "and").split())
+
+
+def strip_leading_title_echo(content: str, title: str) -> tuple[str, list[str]]:
+    """Drop a leading body line that only repeats the section title (any number).
+
+    Writers often open with ``## 24. References`` or bare ``24. References`` while
+    the sidebar mark is ``8. References``. That stale RFP/outline number must not
+    ship in the body next to the workspace title.
+    """
+    text = content or ""
+    title_echo = normalize_title_echo(title)
+    if not text.strip() or not title_echo:
+        return text, []
+    lines = text.split("\n")
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start >= len(lines):
+        return text, []
+    first = lines[start].strip()
+    # Heading, bold heading, or bare numbered title line.
+    candidate = first
+    if candidate.startswith("#") or (
+        candidate.startswith("**") and candidate.endswith("**")
+    ) or re.match(r"^\d+(?:\.\d+)*[.)]?\s+\S", candidate):
+        if normalize_title_echo(candidate) == title_echo:
+            end = start + 1
+            while end < len(lines) and not lines[end].strip():
+                end += 1
+            return "\n".join(lines[end:]), [
+                f"Stripped leading title-echo heading ({first[:60]})"
+            ]
+    return text, []
 
 
 def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:
@@ -746,6 +1010,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
     cleaned = collapse_empty_subheadings(cleaned)
     cleaned = normalize_designer_note_markup(cleaned)
+    cleaned = strip_schema_description_tables(cleaned)
     cleaned = repair_flattened_markdown_tables(cleaned)
     return cleaned
 
@@ -1013,6 +1278,114 @@ def _split_flattened_table_line(line: str) -> list[str]:
         padded = (row + [""] * width)[:width]
         out.append("| " + " | ".join(padded) + " |")
     return out
+
+
+# A table that describes its own schema instead of carrying data.
+#
+# Observed on the Gilroy References tab, which shipped:
+#
+#   | FIELD          | WHAT WE PROVIDE                                  |
+#   | Organization   | Client name and sector                           |
+#   | Contact        | Name and title of the person who directed ...    |
+#   | Phone & Email  | Direct contact information, not routed through us|
+#
+# That is the writer explaining what a reference entry WOULD contain rather
+# than naming three references. It reads as content to a reviewer and is
+# useless to a designer, and it is invisible to strip_brief_echo_sentences
+# because that function deliberately never touches table rows.
+#
+# Detection is by HEADER only, which keeps it precise: a real reference table's
+# headers are the data's own field names ("Organization | Contact | Phone"),
+# never a generic left-hand "Field" paired with a right-hand "what we provide".
+_SCHEMA_TABLE_LEFT_HEADERS = frozenset(
+    {
+        "field",
+        "fields",
+        "item",
+        "items",
+        "element",
+        "elements",
+        "category",
+        "component",
+        "attribute",
+        "data point",
+        "information",
+    }
+)
+_SCHEMA_TABLE_RIGHT_HINTS = (
+    "what we provide",
+    "what we will provide",
+    "what we include",
+    "what we supply",
+    "what you get",
+    "what we submit",
+    "description",
+    "details provided",
+    "what this includes",
+    "contents",
+)
+
+
+def _is_table_separator_row(line: str) -> bool:
+    """`| --- | :--- |` — only pipes, dashes, colons and whitespace."""
+    stripped = (line or "").strip()
+    if not stripped.startswith("|") or "-" not in stripped:
+        return False
+    return set(stripped) <= set("|-: \t")
+
+
+def _is_schema_table_header(line: str) -> bool:
+    cells = [c.strip().casefold() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    if cells[0] not in _SCHEMA_TABLE_LEFT_HEADERS:
+        return False
+    rest = " ".join(cells[1:])
+    return any(hint in rest for hint in _SCHEMA_TABLE_RIGHT_HINTS)
+
+
+def strip_schema_description_tables(text: str) -> str:
+    """Drop tables that describe what a section would contain instead of containing it.
+
+    Surrounding prose and handoff tags are untouched — the section keeps its real
+    narrative and its [MANUAL FILL], losing only the fake data block.
+    """
+    body = text or ""
+    if "|" not in body:
+        return body
+
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    removed = False
+    while i < n:
+        line = lines[i]
+        if (
+            line.strip().startswith("|")
+            and i + 1 < n
+            and _is_table_separator_row(lines[i + 1])
+            and _is_schema_table_header(line)
+        ):
+            i += 2
+            while i < n and lines[i].strip().startswith("|"):
+                i += 1
+            removed = True
+            # Drop a heading that introduced only this table ("### Reference Format").
+            while out and not out[-1].strip():
+                out.pop()
+            if out and out[-1].lstrip().startswith("#"):
+                out.pop()
+            continue
+        out.append(line)
+        i += 1
+
+    if not removed:
+        return body
+    cleaned = "\n".join(out)
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned.strip() + "\n"
 
 
 def repair_flattened_markdown_tables(text: str) -> str:

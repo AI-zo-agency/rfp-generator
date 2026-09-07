@@ -914,6 +914,74 @@ class SplitSectionTests(unittest.IsolatedAsyncioTestCase):
         msg = "replace Hampton Lumber case study with Bend from KB"
         self.assertFalse(_is_in_place_kb_or_verify_edit(msg))
 
+    def test_case_study_rfp_rematch_detects_instead_of_another(self) -> None:
+        from app.services.proposal_chat_structure import user_asks_case_study_rfp_rematch
+
+        msg = (
+            "instead of this 2 case studies can we use another case studies "
+            "align with rfp needs?"
+        )
+        self.assertTrue(user_asks_case_study_rfp_rematch(msg))
+        self.assertTrue(
+            user_asks_case_study_rfp_rematch(
+                "swap these case studies for better RFP matches from KB"
+            )
+        )
+        self.assertFalse(
+            user_asks_case_study_rfp_rematch("add another case study from the KB")
+        )
+
+    async def test_plan_does_not_add_random_study_on_rematch_ask(self) -> None:
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "rfp-structure-case-studies",
+                    "21 — Case Studies",
+                    "Hampton Lumber | Umatilla",
+                ),
+                _sec(
+                    "section-2-bio-ella",
+                    "2.3 — Ella Lindau",
+                    "Ella bio",
+                ),
+            ],
+            updatedAt="2026-09-07T00:00:00+00:00",
+        )
+        msg = (
+            "instead of this 2 case studies can we use another case studies "
+            "align with rfp needs?"
+        )
+        with patch(
+            "app.services.proposal_chat_structure._next_unused_kb_case_study_name",
+            new_callable=AsyncMock,
+        ) as mock_next:
+            mock_next.return_value = (
+                "Update: Ella Lindau Promoted to Operations Director"
+            )
+            with patch(
+                "app.services.proposal_chat_structure._structure_plan_llm_once",
+                new_callable=AsyncMock,
+            ) as mock_llm:
+                mock_llm.return_value = StructurePlan(
+                    action="edit",
+                    editSectionId="rfp-structure-case-studies",
+                )
+                plan = await plan_chat_structure_action(
+                    draft=draft,
+                    user_message=msg,
+                    focus_section_id="rfp-structure-case-studies",
+                    rfp_title="Gilroy",
+                    rfp_client="Gilroy",
+                    rfp_context="",
+                    chat_intent="structure",
+                )
+        mock_next.assert_not_called()
+        self.assertEqual(plan.action, "edit")
+        self.assertNotEqual(plan.action, "clarify")
+
 
 class BioResumeAttachmentStubTests(unittest.IsolatedAsyncioTestCase):
     USER_MSG = (

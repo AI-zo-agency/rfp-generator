@@ -66,7 +66,7 @@ export function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) 
             animate={{ opacity: [0.4, 1, 0.4] }}
             transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
           >
-            ZO AGENCY
+            zö agency
           </motion.span>
         </motion.div>
       ) : (

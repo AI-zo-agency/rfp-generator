@@ -308,6 +308,37 @@ def _verbatim_bullets_from_kb(kb_text: str, *, limit: int = 3) -> list[str]:
     return bullets[:limit]
 
 
+def _role_is_just_the_person(role: str, member: str) -> bool:
+    """True when the 'role' carries no role information — it is the person again.
+
+    Team selection returns a role per member, and it has returned the KB
+    DOCUMENT identity instead of a job title: every one of twelve bios rendered
+    "**Role on this engagement:** Bio AlejandroPerez", derived from
+    04_Bio_AlejandroPerez.pdf.
+
+    Structural, not a word list: strip everything except letters and digits from
+    both strings and ask whether what is left is the person's own name. A real
+    title ("Creative Director") shares no such containment; a filename echo
+    ("Bio AlejandroPerez", "04_Bio_AlejandroPerez") reduces to exactly the name.
+    Nothing here needs to know what job titles look like, so it cannot go stale.
+    """
+    if not role or not member:
+        return False
+    def _letters(text: str) -> str:
+        return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+    role_key = _letters(role)
+    member_key = _letters(member)
+    if not role_key or not member_key:
+        return False
+    if role_key == member_key:
+        return True
+    # "bioalejandroperez" -> strip the document-word noise the name is wrapped in
+    # by checking whether removing the name empties the role of substance.
+    remainder = role_key.replace(member_key, "")
+    return member_key in role_key and len(remainder) <= 6
+
+
 def format_bio_stub_content(
     *,
     member: str,
@@ -320,7 +351,10 @@ def format_bio_stub_content(
 ) -> str:
     """Build manuscript bio stub — never invents Key Accounts."""
     pdf = pdf_filename or expected_bio_pdf_filename(member)
-    role_line = (role or "").strip() or "Team member on this engagement"
+    role_line = (role or "").strip()
+    if _role_is_just_the_person(role_line, member):
+        role_line = ""
+    role_line = role_line or "Team member on this engagement"
     parts = [
         f"### {member}",
         f"**Role on this engagement:** {role_line}",

@@ -144,6 +144,10 @@ function normalizeTitleEcho(text: string): string {
   while (plain.startsWith("#")) {
     plain = plain.slice(1).trimStart();
   }
+  // Bold-only title lines ("**24. References**") must normalize like headings.
+  if (plain.startsWith("**") && plain.endsWith("**")) {
+    plain = plain.slice(2, -2).trim();
+  }
   let i = 0;
   while (i < plain.length && "0123456789.".includes(plain[i] ?? "")) {
     i += 1;
@@ -227,6 +231,8 @@ export function isThinUnfilledShell(
  * starting with "## 2. Foo" when the section title is "2. Foo"). Generation
  * sometimes repeats the heading inside the body, which is redundant next to the
  * article's own title and, in a raw-markdown editor, shows as literal "##" text.
+ * Also strips bare/bold numbered echoes ("24. References" / "**24. References**")
+ * when the sidebar title is a different mark for the same label.
  */
 export function stripLeadingTitleEcho(content: string, title: string): string {
   const titleEcho = normalizeTitleEcho(title);
@@ -235,7 +241,12 @@ export function stripLeadingTitleEcho(content: string, title: string): string {
   let start = 0;
   while (start < lines.length && (lines[start] ?? "").trim() === "") start += 1;
   const firstLine = (lines[start] ?? "").trim();
-  if (!firstLine.startsWith("#")) return content;
+  if (!firstLine) return content;
+  const looksLikeTitleLine =
+    firstLine.startsWith("#") ||
+    (firstLine.startsWith("**") && firstLine.endsWith("**")) ||
+    /^\d+(?:\.\d+)*[.)]?\s+\S/.test(firstLine);
+  if (!looksLikeTitleLine) return content;
   if (normalizeTitleEcho(firstLine) !== titleEcho) return content;
   let end = start + 1;
   while (end < lines.length && (lines[end] ?? "").trim() === "") end += 1;

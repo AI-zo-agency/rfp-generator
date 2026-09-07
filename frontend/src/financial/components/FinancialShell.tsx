@@ -7,6 +7,7 @@ import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { IconSwitch } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
 import { prefersReducedMotion } from "../lib/fin-motion";
@@ -50,21 +51,7 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
   };
 
   if (!isAuthenticated) {
-    return (
-      <div className="flex h-dvh w-full items-center justify-center bg-[var(--zo-bg)]">
-        <motion.div
-          className="flex flex-col items-center gap-4"
-          initial={{ opacity: 0, scale: 0.92 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5, ease: expoOutEase }}
-        >
-          <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-[#3C5A56] border-t-transparent" />
-          <span className="text-sm font-medium tracking-widest uppercase text-[var(--zo-text-muted)]">
-            ZO AGENCY
-          </span>
-        </motion.div>
-      </div>
-    );
+    return <ZoAmuletLoader fullScreen label="Loading financial workspace" />;
   }
 
   return (

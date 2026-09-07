@@ -10,7 +10,6 @@ from app.services.evidence_trust.legal_attestation_gate import (
     apply_legal_attestation_gates,
     gate_section_legal_attestations,
     is_locked_legal_verify_tag,
-    rfp_needs_health_coalition_proof,
 )
 from app.services.proposal_manual_flags import _replace_verify_tags_from_blob
 
@@ -180,79 +179,52 @@ class HoursAndFillerTests(unittest.TestCase):
         self.assertNotIn("10-year corporate-creative", updated.content or "")
 
 
-class RnoFlagTests(unittest.TestCase):
-    def test_health_rfp_detection(self) -> None:
-        self.assertTrue(rfp_needs_health_coalition_proof(_rfp()))  # type: ignore[arg-type]
-        self.assertFalse(
-            rfp_needs_health_coalition_proof(
-                _rfp(title="Website Redesign", client="City IT", sector="Technology")  # type: ignore[arg-type]
+class NoHardcodedClientSteeringTests(unittest.TestCase):
+    """The RNO injection mechanism is gone and must not come back.
+
+    A keyword detector classified each RFP and, on a "health/coalition" match,
+    appended a FLAG naming Recovery Network of Oregon into references or
+    experience. Its acronym alternative `ARCHI` was unanchored under a global
+    (?i) flag, so "social media architecture" matched — and a garlic-festival
+    proposal was told to cite a health-stigma case study.
+
+    Which past work fits an RFP is decided by KB retrieval and the evidence
+    trust gate. A client name in a module or prompt cannot know that, so the
+    detector, the flag, and the scrubber written to clean up after it were all
+    removed rather than re-tuned.
+    """
+
+    def test_the_injection_api_is_gone(self) -> None:
+        import app.services.evidence_trust.legal_attestation_gate as gate
+
+        for removed in (
+            "ensure_rno_flagged_for_health_rfp",
+            "strip_rno_flags_when_not_health_rfp",
+            "rfp_needs_health_coalition_proof",
+            "_HEALTH_COALITION_RFP_RE",
+            "_RNO_FLAG",
+        ):
+            self.assertFalse(
+                hasattr(gate, removed), f"{removed} should no longer exist"
             )
-        )
 
-    def test_flags_missing_rno_on_health_rfp(self) -> None:
-        draft = _draft(
-            ProposalSection(
-                id="section-18",
-                title="18. References",
-                content=(
-                    "1. Oregon Employment Department — [VERIFY: contact]\n"
-                    "2. Ninkasi Brewing — beer rebrand"
-                ),
-            ),
-            ProposalSection(
-                id="section-3-work-1",
-                title="Case Studies",
-                content="Oregon Employment Department digital campaign.",
-            ),
-        )
-        updated, report = apply_legal_attestation_gates(
-            draft,
-            rfp=_rfp(),  # type: ignore[arg-type]
-            rfp_context="ARCHI stigma reduction coalition health policy",
-        )
-        self.assertEqual(report.rno_flags, 1)
-        blob = "\n".join(s.content or "" for s in updated.sections)
-        self.assertIn("Recovery Network of Oregon", blob)
-        self.assertIn("FLAG FOR SONJA", blob)
+    def test_no_client_name_steering_left_in_generic_prompts(self) -> None:
+        """Prompts must not tell the model which client to cite."""
+        import pathlib as _pl
 
-    def test_skips_rno_flag_when_already_present(self) -> None:
-        draft = _draft(
-            ProposalSection(
-                id="section-18",
-                title="18. References",
-                content="1. Recovery Network of Oregon — comparable coalition work",
-            ),
-        )
-        _, report = apply_legal_attestation_gates(draft, rfp=_rfp())  # type: ignore[arg-type]
-        self.assertEqual(report.rno_flags, 0)
-
-    def test_strips_rno_flag_on_non_health_rfp(self) -> None:
-        draft = _draft(
-            ProposalSection(
-                id="section-3-work-deschutes",
-                title="3.1 — Deschutes Brewery",
-                content=(
-                    "Deschutes Brewery case study.\n\n"
-                    "[FLAG FOR SONJA: Add Recovery Network of Oregon (RNO) — near-direct "
-                    "coalition health/stigma communications proof with metrics; strongest "
-                    "KB match for this RFP scope; prefer for references / previous "
-                    "experience / case studies]\n"
-                ),
-            ),
-        )
-        updated, report = apply_legal_attestation_gates(
-            draft,
-            rfp=_rfp(
-                title="KVCC Marketing Plan",
-                client="KVCC",
-                sector="Higher Education",
-            ),  # type: ignore[arg-type]
-            rfp_context="community college enrollment marketing plan",
-        )
-        blob = "\n".join(s.content or "" for s in updated.sections)
-        self.assertNotIn("Recovery Network of Oregon", blob)
-        self.assertNotIn("FLAG FOR SONJA", blob)
-        self.assertTrue(any("cross-RFP" in log for log in report.logs))
+        root = _pl.Path(__file__).resolve().parents[1] / "app" / "services"
+        offenders: list[str] = []
+        for path in root.rglob("*.py"):
+            if "__pycache__" in str(path):
+                continue
+            for num, line in enumerate(path.read_text().splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "Recovery Network of Oregon" not in line:
+                    continue
+                lowered = line.lower()
+                if any(verb in lowered for verb in ("include", "prefer", "proof point")):
+                    offenders.append(f"{path.name}:{num}")
+        self.assertEqual(offenders, [], f"client-name steering found: {offenders}")
 
 
 class ConferenceAttendanceGateTests(unittest.TestCase):

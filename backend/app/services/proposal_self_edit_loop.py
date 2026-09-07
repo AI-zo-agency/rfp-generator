@@ -46,7 +46,6 @@ LEGAL ATTESTATIONS — DO NOT "CLEAN UP" THESE:
 - Do not invent annual staffing hours (400/320/280/200/160 etc.) without KB evidence — keep [VERIFY: staffing hours].
 - Do not invent percent-time / FTE % (10%/35%/25% etc.) — omit the column if RFP does not require it, else [VERIFY: percent time].
 - Do not invent a "10-year corporate-creative partnership" — agency founded 2013 (13 years as of 2026).
-- For health/coalition/stigma RFPs: include Recovery Network of Oregon (RNO) in references / previous experience / case studies when comparable work is required; if missing, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
 
 ANTI-DUPLICATION: This section has ONE job. Do NOT re-copy Who We Are, full bios, full case studies, FEIN/certs,
 or brand story from other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
@@ -823,7 +822,6 @@ async def _repair_one_section(
     if not (before.content or "").strip():
         # Never call improve_proposal_section here — empty sections re-enter
         # _try_draft_empty_section and loop forever.
-        from datetime import datetime, timezone
 
         from app.services.agency_facts import (
             default_business_information_markdown,

@@ -64,6 +64,59 @@ def _prefer_fit_ranked(
     return out
 
 
+# "website_build" is the STRICTEST claim in the registry gate: it demands the
+# client's work type literally name a website build, which most branding /
+# campaign clients do not. Inferring it from the bare token "website" was
+# therefore catastrophic rather than merely imprecise.
+#
+# Gilroy Garlic Festival is the case in point. Its RFP says "website" throughout
+# — and explicitly says "this RFP does not seek a total creative overhaul or a
+# new website build", asking instead to MAINTAIN and OPTIMIZE a site that was
+# just rebuilt. The old check saw "website", claimed website_build, and the gate
+# then rejected every candidate: 0 case studies, no references, and a dead
+# Section 3.
+#
+# So require an actual BUILD signal, and let an explicit disclaimer veto it.
+_WEBSITE_BUILD_SIGNALS = (
+    "new website",
+    "website build",
+    "build a website",
+    "web build",
+    "site build",
+    "website redesign",
+    "web redesign",
+    "redesign the website",
+    "rebuild the website",
+    "website development",
+    "web development",
+    "develop a website",
+    "design and build",
+)
+
+# Wording that means "we already have a site — look after it", not "build one".
+_WEBSITE_BUILD_DISCLAIMERS = (
+    "does not seek",
+    "not seeking",
+    "no new website",
+    "rather than rebuilding",
+    "rather than a new",
+    "already rebuilt",
+    "recently rebuilt",
+    "recently modernized",
+    "existing website",
+    "website maintenance",
+    "maintain and optimize",
+    "optimizing existing",
+    "building on existing",
+)
+
+
+def _wants_website_build(blob: str) -> bool:
+    if not any(signal in blob for signal in _WEBSITE_BUILD_SIGNALS):
+        return False
+    return not any(no in blob for no in _WEBSITE_BUILD_DISCLAIMERS)
+
+
 def _infer_services_claim(proposal_context: ProposalContext, rfp_context: str) -> str:
     blob = " ".join(
         [
@@ -72,7 +125,7 @@ def _infer_services_claim(proposal_context: ProposalContext, rfp_context: str) -
             (rfp_context or "")[:2000],
         ]
     ).casefold()
-    if any(t in blob for t in ("website", "web site", "web redesign", "web development")):
+    if _wants_website_build(blob):
         return "website_build"
     if "mci" in blob or ("meeting" in blob and "conference" in blob):
         return "tourism_mci"
@@ -233,7 +286,7 @@ async def run_evidence_selection_agent(
             "evidence_trust_gate",
         )
 
-    fit_titles, _fit_report, match_quality = await _fit_rank_case_studies(
+    fit_titles, fit_report, match_quality = await _fit_rank_case_studies(
         proposal_context=proposal_context,
         rfp_context=rfp_context,
         rfp_client=rfp_client,
@@ -245,16 +298,45 @@ async def run_evidence_selection_agent(
         fit_titles, filtered, limit=max(5, len(fit_titles) or 2)
     )
     if fit_selected:
-        rationale = (
-            "RFP capability strong fit"
-            if match_quality == "strong"
-            else "Closest KB match — review before use"
-        )
+        # Name the RFP capability this study actually matched, per study.
+        #
+        # "RFP capability strong fit" told the reader nothing, so the Relevance
+        # column downstream had nothing to show and degraded to "TBD — Needs
+        # your input" / a MANUAL FILL asking a human to supply it. But relevance
+        # is a JUDGEMENT, not a fact needing KB verification — the fit ranker
+        # already computed which capability each study answers, and that
+        # capability came from this RFP. Surfacing it is reporting, not
+        # inventing.
+        capability_by_title: dict[str, str] = {}
+        for result in getattr(fit_report, "results", None) or []:
+            capability = (getattr(result, "capability", "") or "").strip()
+            if not capability:
+                continue
+            for candidate in getattr(result, "candidates", None) or []:
+                name = (getattr(candidate, "title", "") or "").strip()
+                if name and name.casefold() not in capability_by_title:
+                    capability_by_title[name.casefold()] = capability
+
+        def _rationale_for(title: str) -> str:
+            capability = capability_by_title.get((title or "").casefold(), "")
+            if capability:
+                lead = (
+                    "Matches the RFP requirement for"
+                    if match_quality == "strong"
+                    else "Closest match in the KB for"
+                )
+                return f"{lead} {capability}"
+            return (
+                "RFP capability strong fit"
+                if match_quality == "strong"
+                else "Closest KB match — review before use"
+            )
+
         scores = [
             EvidenceScore(
                 title=t,
                 score=1.0 if match_quality == "strong" else 0.5,
-                rationale=rationale,
+                rationale=_rationale_for(t),
             )
             for t in fit_selected
         ]

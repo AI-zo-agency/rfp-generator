@@ -471,16 +471,21 @@ def apply_reference_content_scrubs(
     content: str,
     *,
     primary_contact_name: str = "",
+    section_title: str = "",
 ) -> tuple[str, list[str]]:
     """Run all deterministic reference integrity scrubs on one section body."""
     from app.services.proposal_manuscript import (
         convert_instruction_blocks,
         convert_note_to_staff_lines,
         scrub_broken_reference_pipe_rows,
+        strip_leading_title_echo,
     )
 
     logs: list[str] = []
     text = content or ""
+    if section_title:
+        text, echo_logs = strip_leading_title_echo(text, section_title)
+        logs.extend(echo_logs)
     text, pipe_logs = scrub_broken_reference_pipe_rows(text)
     logs.extend(pipe_logs)
     text = convert_instruction_blocks(text)
@@ -506,16 +511,21 @@ def apply_reference_post_fill_scrubs(
     content: str,
     *,
     primary_contact_name: str = "",
+    section_title: str = "",
 ) -> tuple[str, list[str]]:
     """Dedupe + agency-contact scrub only — after contact rows are filled."""
     from app.services.proposal_manuscript import (
         convert_instruction_blocks,
         convert_note_to_staff_lines,
         scrub_broken_reference_pipe_rows,
+        strip_leading_title_echo,
     )
 
     logs: list[str] = []
     text = content or ""
+    if section_title:
+        text, echo_logs = strip_leading_title_echo(text, section_title)
+        logs.extend(echo_logs)
     text, pipe_logs = scrub_broken_reference_pipe_rows(text)
     logs.extend(pipe_logs)
     text = convert_instruction_blocks(text)
@@ -606,16 +616,25 @@ def apply_manuscript_integrity_guards(
 
         if "reference" in title_cf or "reference" in sid.casefold():
             if preserve_reference_narrative:
-                new, ref_logs = apply_reference_post_fill_scrubs(new)
+                new, ref_logs = apply_reference_post_fill_scrubs(
+                    new, section_title=section.title or ""
+                )
                 section_logs.extend(ref_logs)
             else:
-                new, ref_logs = apply_reference_content_scrubs(new)
+                new, ref_logs = apply_reference_content_scrubs(
+                    new, section_title=section.title or ""
+                )
                 section_logs.extend(ref_logs)
         else:
+            from app.services.proposal_manuscript import strip_leading_title_echo
+
+            new, echo_logs = strip_leading_title_echo(new, section.title or "")
+            section_logs.extend(echo_logs)
             # Still strip upon-request deferrals anywhere (RFP often forbids withholding).
             scrubbed, ref_logs = scrub_reference_withholding(new)
             if ref_logs:
-                new, section_logs = scrubbed, list(ref_logs)
+                new = scrubbed
+                section_logs.extend(ref_logs)
             # Non-title reference packages (e.g. buried under Qualifications)
             if re.search(r"(?i)\breference\s+\d+\b", new) and _INCOMPLETE_REF_VERIFY_RE.search(
                 new
@@ -1246,6 +1265,10 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
     cleaned = _normalize_inline_case_study_headings(cleaned)
     cleaned, cap_logs = _cap_case_study_section_lengths(cleaned)
     logs.extend(cap_logs)
+    from app.services.proposal_voice_enforcement import scrub_rev6_voice_patterns
+
+    cleaned, framing_logs = scrub_rev6_voice_patterns(cleaned)
+    logs.extend(framing_logs)
     return cleaned, logs
 
 

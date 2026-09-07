@@ -24,6 +24,7 @@ import re
 from typing import Any, Iterable
 
 from app.models.go_no_go import GoNoGoCapabilityRow
+from app.services.go_no_go_requirements import SUBMISSION_CATEGORY
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,7 @@ def gap_matrix_from_requirements(
                 disqualifying=bool(getattr(requirement, "disqualifying", False)),
                 category=str(getattr(requirement, "category", "") or "service"),
                 downgradeReason=reason,
+                track=str(getattr(requirement, "track", "") or ""),
             )
         )
     return rows
@@ -375,6 +377,7 @@ def build_matrix_from_requirements(
         is_core = bool(getattr(requirement, "is_core", False))
         category = str(getattr(requirement, "category", "") or "service")
         disqualifying = bool(getattr(requirement, "disqualifying", False))
+        track = str(getattr(requirement, "track", "") or "")
         hits = hits_by_requirement.get(name, [])
         index = build_source_index(hits)
 
@@ -396,6 +399,7 @@ def build_matrix_from_requirements(
                     isCore=is_core,
                     disqualifying=disqualifying,
                     category=category,
+                    track=track,
                 )
             )
         else:
@@ -408,6 +412,7 @@ def build_matrix_from_requirements(
                     isCore=is_core,
                     disqualifying=disqualifying,
                     category=category,
+                    track=track,
                     downgradeReason=(
                         "no retrieved KB document evidences this requirement"
                         if hits
@@ -657,12 +662,19 @@ def unmet_disqualifying_requirements(rows: list[GoNoGoCapabilityRow]) -> list[st
     Averaging one into a matrix produced a 2.8/5 "GO WITH CONDITIONS" on an RFP
     the agency could not answer without inventing case studies. An unmet
     disqualifier ends the pursuit regardless of what the other dimensions say.
+
+    Proposal-content rows are excluded no matter how they are flagged. "Provide
+    three client references" is a form every bidder can fill out; it is not a
+    threshold zö can fail. On the Gilroy run two such rows arrived
+    disqualifying=true, forced NO-GO outright, and suppressed every calibration
+    floor while the scope itself matched a won proposal already in the KB.
     """
     return [
         row.requirement
         for row in rows
         if getattr(row, "disqualifying", False)
         and row.status not in {"verified", "partial"}
+        and (row.category or "service").casefold() != SUBMISSION_CATEGORY
     ]
 
 
@@ -758,3 +770,58 @@ def derive_resource_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | N
     if possible <= 0:
         return None
     return max(0, min(5, int((earned / possible) * 5 + 0.5)))
+
+
+def tracks_in_rows(rows: list[GoNoGoCapabilityRow]) -> list[str]:
+    """Distinct non-empty track labels, in first-seen order.
+
+    Empty when the RFP is single-scope (every row's track is "") — callers use
+    this to detect whether per-track segmentation applies at all.
+    """
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for row in rows:
+        track = (row.track or "").strip()
+        if not track or track in seen_set:
+            continue
+        seen_set.add(track)
+        seen.append(track)
+    return seen
+
+
+def rows_for_track(rows: list[GoNoGoCapabilityRow], track: str) -> list[GoNoGoCapabilityRow]:
+    """Rows for one track PLUS the track-agnostic rows (track == "").
+
+    Compliance/insurance/reference requirements apply to every track, so they
+    belong in each track's denominator; scoping them out would make a track
+    look artificially clean.
+    """
+    return [row for row in rows if (row.track or "") in {"", track}]
+
+
+def per_track_technical_scores(rows: list[GoNoGoCapabilityRow]) -> dict[str, int]:
+    """``calibrate_technical_capability_score`` run per track.
+
+    Empty dict when the RFP is single-scope, so callers keep today's behaviour.
+    """
+    tracks = tracks_in_rows(rows)
+    scores: dict[str, int] = {}
+    for track in tracks:
+        score = calibrate_technical_capability_score(rows_for_track(rows, track))
+        if score is not None:
+            scores[track] = score
+    return scores
+
+
+def per_track_resource_scores(rows: list[GoNoGoCapabilityRow]) -> dict[str, int]:
+    """``derive_resource_capability_score`` run per track.
+
+    Empty dict when the RFP is single-scope, so callers keep today's behaviour.
+    """
+    tracks = tracks_in_rows(rows)
+    scores: dict[str, int] = {}
+    for track in tracks:
+        score = derive_resource_capability_score(rows_for_track(rows, track))
+        if score is not None:
+            scores[track] = score
+    return scores

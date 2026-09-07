@@ -68,6 +68,33 @@ class WantsSectionEditTests(unittest.TestCase):
             )
         )
 
+    def test_case_study_rfp_rematch_skips_structure_and_routes_edit(self) -> None:
+        from app.services.proposal_section_editor import (
+            _should_skip_structure_planner,
+            decide_chat_route,
+        )
+
+        msg = (
+            "instead of this 2 case studies can we use another case studies "
+            "align with rfp needs?"
+        )
+        self.assertTrue(
+            _should_skip_structure_planner(
+                "structure",
+                user_message=msg,
+                selection_mode=False,
+                apply_fix=False,
+                improve_section_pinned=False,
+            )
+        )
+        route = decide_chat_route(
+            chat_intent="structure",
+            user_message=msg,
+            selection_mode=False,
+        )
+        self.assertFalse(route.advisory)
+        self.assertEqual(route.reason, "case_study_rfp_rematch")
+
     def test_whole_new_section_runs_structure_planner_not_open_tab_edit(self) -> None:
         from app.services.proposal_section_editor import _should_skip_structure_planner
 

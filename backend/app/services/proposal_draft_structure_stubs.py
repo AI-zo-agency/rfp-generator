@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 # re-fetches the draft — running them concurrently risks a lost update where
 # two calls save from stale snapshots.
 _STUB_DRAFT_CALL_TIMEOUT_SEC = 150.0
-_STUB_DRAFT_TIME_BUDGET_SEC = 480.0
+# Enough wall time to draft every leftover mandated tab in one Phase 4 pass
+# (capped per-call above; this is the outer budget across sequential calls).
+_STUB_DRAFT_TIME_BUDGET_SEC = 900.0
 
 _SKIP_FILL_ID_PREFIXES = (
     "section-2-bio-",
@@ -264,6 +266,34 @@ def _meaningful_body(content: str, title: str) -> str:
     return "\n".join(keep)
 
 
+def _verifiable_record_count(body: str) -> tuple[int, int]:
+    """(contact-ish tokens, table data rows) — the checkable facts in a body.
+
+    Deliberately structural, not semantic: an address token is anything with an
+    "@" and a dot inside it, a data row is a pipe row that is not the header
+    separator. No vocabulary, no topic matching — the same body is compared
+    against itself before and after, so shape is all that is needed.
+    """
+    contacts = 0
+    rows = 0
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if line.startswith("|"):
+            cells = line.strip("|").split("|")
+            if not (set(line) <= set("|-: \t")):
+                rows += 1
+            for cell in cells:
+                token = cell.strip()
+                if "@" in token and "." in token.split("@")[-1]:
+                    contacts += 1
+        else:
+            for token in line.split():
+                stripped = token.strip("<>(),;:[]")
+                if "@" in stripped and "." in stripped.split("@")[-1]:
+                    contacts += 1
+    return contacts, rows
+
+
 def restore_sections_emptied_by_scan(
     draft: ProposalDraft,
     prior_sections: "list[ProposalSection] | None",
@@ -342,6 +372,27 @@ def restore_sections_emptied_by_scan(
             return True
         if regression_vs_prior(prior, section):
             return True
+        # STRUCTURED-DATA LOSS. Length and shape checks both miss the worst
+        # regression: a section whose verifiable records were deleted and
+        # replaced with fluent prose of similar length that asserts nothing.
+        #
+        # Real case — the References tab held three named contacts in a table
+        # with working email addresses, and came back as 162 words saying "We
+        # are not able to publish complete reference contact records." It is
+        # well written, it is a similar length, it is not stub-shaped, and it
+        # passes every check above while having lost every checkable fact the
+        # RFP actually asked for.
+        #
+        # Contacts and table rows are the checkable payload of a section. If a
+        # prior body carried them and the new one carries none, real evidence
+        # was dropped — restore it. (Only fires when the prior HAD records, so
+        # a prose section that never had any is untouched.)
+        prior_contacts, prior_rows = _verifiable_record_count(prior.content or "")
+        new_contacts, new_rows = _verifiable_record_count(body)
+        if prior_contacts and not new_contacts:
+            return True
+        if prior_rows >= 2 and not new_rows:
+            return True
         # regression_vs_prior only engages above a 120-word prior and compares
         # raw word counts, so a moderate-length section (like a compact forms
         # tab) that collapses to a MANUAL FILL placeholder plus a couple of
@@ -377,16 +428,30 @@ def restore_sections_emptied_by_scan(
             if cand is not None and cand.id not in current_ids:
                 prior = cand
         if prior is not None and _degraded(section, prior):
+            degraded_body = section.content or ""
             section = section.model_copy(
                 update={
                     "content": prior.content or "",
                     "status": prior.status or section.status or "generated",
                 }
             )
+            # Name the actual reason. A log that says "reduced to a stub" when
+            # the real loss was deleted contact records sends the next person
+            # debugging this down the wrong path.
+            prior_contacts, prior_rows = _verifiable_record_count(prior.content or "")
+            new_contacts, new_rows = _verifiable_record_count(degraded_body)
+            if prior_contacts and not new_contacts:
+                why = (
+                    f"lost all {prior_contacts} contact record(s) — replaced with "
+                    "prose that asserts nothing checkable"
+                )
+            elif prior_rows >= 2 and not new_rows:
+                why = f"lost all {prior_rows} table data row(s)"
+            else:
+                why = "reduced a good section to a stub / bio-stub / empty body"
             logs.append(
                 f"Restored “{section.title or section.id}” — Complete & Clean had "
-                "reduced a good section to a stub / bio-stub / empty body; pre-scan "
-                "content kept."
+                f"{why}; pre-scan content kept."
             )
             changed = True
         new_sections.append(section)
@@ -462,31 +527,67 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
     return _is_thin_unfilled_shell(section)
 
 
+_ADVISORY_STUB_CHAT_RE = re.compile(
+    r"(?i)^\s*(?:"
+    r"here'?s\s+what\s+i'?d\b"
+    r"|i'?d\s+(?:draft|do|suggest|recommend)\b"
+    r"|this\s+tab\s+is\s+a\s+fill[- ]in"
+    r"|sidebar\s+\d+"
+    r")"
+)
+
+
 def stub_fill_landed(before: ProposalSection, after: ProposalSection) -> bool:
     """Persist when a shell became real prose — ignore the repair 'improvement' gate."""
     if not (after.content or "").strip():
         return False
-    if _DRAFT_STUB_MARKER in (after.content or "").casefold():
+    body = after.content or ""
+    if _DRAFT_STUB_MARKER in body.casefold():
         return False
-    after_n = word_count(_meaningful_body(after.content or "", after.title or ""))
+    # Meta chat ("Here's what I'd draft…") is not a form fill — reject so we retry.
+    if _ADVISORY_STUB_CHAT_RE.search(body.lstrip()[:400]):
+        return False
+    after_n = word_count(_meaningful_body(body, after.title or ""))
     before_n = word_count(_meaningful_body(before.content or "", before.title or ""))
     return after_n >= 25 and after_n > before_n + 12
 
 
 def _stub_draft_brief(section: ProposalSection) -> str:
     title = (section.title or "this section").strip()
+    # Do NOT embed a literal "[MANUAL FILL: …]" string here — that trips
+    # is_manual_fill_request and short-circuits Improve into tag-resolve mode.
     base = (
         f"This tab is an unfilled RFP-required section (“{title}”). "
         "Write submission-ready prose for THIS tab's unique ask only. "
         "Use KB + THIS RFP. Do not invent clients, contacts, certs, carriers, "
-        "or metrics. If a figure is not in the RFP or KB, use [VERIFY: …]. "
-        "Do NOT leave [MANUAL FILL: Draft this RFP-required section…] tags. "
+        "or metrics. If a figure is not in the RFP or KB, use [VERIFY: …] or a "
+        "precise Sonja handoff tag — never invent. "
+        "Draft real prose over any whole-section draft-stub placeholder; "
+        "do not leave the shell outline as the answer. "
+        "Write in zö brand voice (warm, proof-led, first person we/our). "
         "Do not recopy Who We Are, full bios, or full case studies — "
         "one short cross-ref is enough, then new detail for this tab. "
         "Licenses, certifications, and insurance Compliant claims belong in "
         "Section 1.4 / 1.5 with companyfacts proof — this tab may cross-ref them, "
-        "never invent Compliant, carriers, or KPI numbers the RFP/KB do not state."
+        "never invent Compliant, carriers, or KPI numbers the RFP/KB do not state. "
+        "OUTPUT THE SECTION BODY ONLY — never meta coaching "
+        "('Here's what I'd draft', 'Sidebar N/M', 'this tab is a fill-in form')."
     )
+    title_cf = title.casefold()
+    if "other information" in title_cf or title_cf.strip().endswith("other"):
+        base = (
+            f"{base}\n\n"
+            "OTHER INFORMATION — answer EVERY RFP bullet in the stub outline with "
+            "real prose (not a restated checklist):\n"
+            "- Staffing / on-time / on-budget delivery record (from KB case studies "
+            "and process — no invented metrics)\n"
+            "- Community involvement (from companyfacts / KB only)\n"
+            "- Previous involvement with THIS City/client (state plainly if none; "
+            "do not invent a relationship)\n"
+            "- Conflict of interest certification (companyfacts language, or a "
+            "precise Sonja handoff tag if KB has no attestation)\n"
+            "Strip corrupted mid-sentence RFP-echo splices from the stub body."
+        )
     if is_cover_letter_section_title(title):
         return (
             f"{base}\n\n"
@@ -494,10 +595,38 @@ def _stub_draft_brief(section: ProposalSection) -> str:
             "- Salutation + short statement of intent to bid on THIS RFP\n"
             "- Firm contact (from companyfacts / Section 1.3 — no invented phones)\n"
             "- Address each RFP cover-letter element in letter prose\n"
-            "- Closing + [MANUAL FILL: authorized signature / date]\n"
+            "- Closing + a precise authorized-signature / date handoff tag\n"
             "- Keep [DESIGNER NOTE: Attach physically signed cover letter PDF] "
             "— do not invent signature dates, notary, or claim the PDF is attached\n"
             "Do NOT output a meta list titled 'Cover Letter Requirements' alone."
+        )
+    if any(
+        tok in title_cf
+        for tok in (
+            "statement of compliance",
+            "affidavit",
+            "certification",
+            "attestation",
+            "non-collusion",
+            "non-discrimination",
+            "debarment",
+            "conflict of interest",
+        )
+    ):
+        return (
+            f"{base}\n\n"
+            "SIGNED FORM / CERTIFICATION TAB — write the completed form body now:\n"
+            "- Open as zö / Z'Onion Creative Group LLC certifying for THIS RFP\n"
+            "- Use a Certification | Vendor Response table (or clear checkbox rows)\n"
+            "- For Statement of Compliance: mark No Exceptions Taken on RFQ "
+            "Instructions/Terms and Scope unless KB/RFP states a real exception "
+            "(never invent exceptions to a draft agreement the RFP forbids)\n"
+            "- Fill every certifiable row with Certified / No Exceptions / applicable "
+            "companyfacts language — do not leave the whole tab as a draft stub\n"
+            "- End with a short signature-block handoff (printed name / title / date "
+            "tags) and a designer note to attach the signed PDF — do NOT invent a "
+            "wet signature date or claim the PDF is already attached\n"
+            "Do NOT write advisory chat about how you would fill the form."
         )
     return base
 

@@ -857,6 +857,8 @@ def derive_legacy_fields(
                 retrievalFocus=focus or ["company facts"],
                 zoMode=_zo_mode_for_title(section.title),  # type: ignore[arg-type]
                 evaluationWeight=weight,
+                protectFromCap=bool(getattr(section, "protect_from_cap", False)),
+                submissionInstrument=getattr(section, "submission_instrument", None),
             )
         )
 
@@ -867,7 +869,15 @@ def derive_legacy_fields(
                 ProofPoint(
                     requirement=need,
                     caseStudy=need,
-                    narrativeHook=brief.purpose,
+                    # NOT brief.purpose. narrativeHook's contract is an
+                    # outcome statement ("We built… / We led…", see
+                    # proposal_proof_points.py) that the writer is told to LEAD
+                    # WITH. Putting the section's meta purpose here
+                    # ("Demonstrate to the evaluator that…") handed the writer
+                    # its own brief labelled as proof content — a root cause of
+                    # agent instructions appearing in section bodies. A planned
+                    # placeholder has no hook yet; leave it empty.
+                    narrativeHook="",
                     relevance="planned",
                     sectionIds=[brief.section_id],
                     evaluationWeight=None,
@@ -958,6 +968,8 @@ def derive_legacy_fields(
             requirements=[str(raw.get("conditionalReason") or raw["title"])],
             evaluationWeight=raw.get("evaluationWeight"),
             sectionType="narrative",
+            protectFromCap=True,
+            submissionInstrument=raw.get("submissionInstrument"),
         ),
     )
     if scored_added:
@@ -973,11 +985,17 @@ def derive_legacy_fields(
             scored_dropped[:12],
         )
 
+    from app.services.proposal_outline_dedup import section_is_rfp_derived
+
     section_cap = max_rfp_outline_sections(
         page_limit,
         min_sections=min_outline_sections_for_evaluation(evaluation),
     )
-    rfp_sections, cap_dropped = enforce_outline_section_cap(rfp_sections, section_cap)
+    # Mirror the planner: never hard-cap below the count of RFP-derived /
+    # protected tabs (mandated format rows carry protectFromCap).
+    rfp_derived_count = sum(1 for s in rfp_sections if section_is_rfp_derived(s))
+    effective_cap = max(section_cap, rfp_derived_count)
+    rfp_sections, cap_dropped = enforce_outline_section_cap(rfp_sections, effective_cap)
     still_uncovered = uncovered_scored_criteria(rfp_sections, evaluation)
     if still_uncovered:
         # Should be unreachable — injected tabs are protected from the cap.

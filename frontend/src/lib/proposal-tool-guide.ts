@@ -50,8 +50,8 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     id: "completeClean",
     name: "Review & fix",
-    does: "Optional second pass after you edit — full fact-check, compliance, and page-limit audit (all 18 checks).",
-    doesnt: "Need to run after every Build — that already runs final checks and Ralph trim.",
+    does: "Optional second pass after you edit — checks for missing sections, flags fabrications with [VERIFY], and catches contradictions.",
+    doesnt: "Run deep full-document rewrites (saves you time and tokens).",
   },
   {
     id: "ralph",

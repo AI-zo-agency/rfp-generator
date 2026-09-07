@@ -26,6 +26,7 @@ import { toggleWrapMarkers } from "@/lib/markdown-inline-format";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import { QueuedJobBanner } from "@/components/QueuedJobBanner";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -177,6 +178,9 @@ const baseWorkspaceTabs = [
   { id: "content", label: "Review" },
   { id: "export", label: "Download" },
 ];
+
+/** Flip to false when Review & fix is ready for users again. */
+const REVIEW_FIX_TEMPORARILY_DISABLED = true;
 
 function getProposalPlainStatus(options: {
   fullProposalDone: boolean;
@@ -371,6 +375,9 @@ function ProposalDraftWorkspaceInner({
   const [isDownloadingDocx, setIsDownloadingDocx] = useState(false);
   const [docxDownloadError, setDocxDownloadError] = useState<string | null>(null);
   const [docxDownloaded, setDocxDownloaded] = useState(false);
+  const [docxExportMode, setDocxExportMode] = useState<
+    "single" | "separate_cost" | null
+  >(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [scanSummary, setScanSummary] = useState<ScanRfpSummary | null>(null);
@@ -2184,6 +2191,19 @@ function ProposalDraftWorkspaceInner({
     if (isFulfillingRfpGaps) {
       return;
     }
+    // Flip REVIEW_FIX_TEMPORARILY_DISABLED when ready for users again.
+    if (REVIEW_FIX_TEMPORARILY_DISABLED) {
+      await confirm({
+        title: "Review & fix unavailable",
+        description:
+          "We're testing Review & fix and making some changes right now. " +
+          "Please don't use it for the moment — it will be available again soon.",
+        confirmLabel: "Got it",
+        cancelLabel: "Close",
+        tone: "default",
+      });
+      return;
+    }
     const completeCleanGuide = formatDoesDoesntBlock("completeClean", "ralph");
     const scanOk = await confirm(
       scanAlreadyDone && !canResumeFulfillScan
@@ -2197,16 +2217,7 @@ function ProposalDraftWorkspaceInner({
             confirmLabel: "Run again anyway",
             tone: "default",
           }
-        : canResumeFulfillScan
-        ? {
-            title: "Resume Review & fix?",
-            description:
-              `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
-              "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.\n\n" +
-              completeCleanGuide,
-            confirmLabel: "Resume",
-            tone: "default",
-          }
+
         : hasCompletedScanBefore
         ? {
             title: "Run Review & fix again?",
@@ -2218,13 +2229,16 @@ function ProposalDraftWorkspaceInner({
             tone: "default",
           }
         : {
-            title: "Review & fix (optional)",
+            title: "Review & fix (Missing sections + Contradictions)",
             description:
               "Build my proposal already matched RFP order, fact-checked, and ran Ralph trim. " +
-              "Use Review & fix only if you edited the draft and want a full re-audit. " +
-              "It re-reads the whole proposal and spends extra tokens.\n\n" +
-              `${completeCleanGuide}\n\n` +
+              "Use Review & fix if you want to quickly check for missing sections and catch contradictions after manual edits.\n\n" +
               "If you continue:\n" +
+              "• Identifies missing sections based on RFP criteria and adds them\n" +
+              "• Uses the KB to securely generate content ONLY for newly added sections\n" +
+              "• Checks every section for fabrications against the KB, flagging gaps with [VERIFY]\n" +
+              "• Runs a fast contradiction sweep to ensure no manual edits conflict with the RFP\n" +
+              "• Skips deep full-document rewrites to save time and tokens\n" +
               "• A saved version is stored first\n" +
               "• You can keep working while it runs\n" +
               `• ${capabilityById("completeClean").doesnt}`,
@@ -2263,7 +2277,8 @@ function ProposalDraftWorkspaceInner({
       // job-status watcher so completion is detected either way.
       const requestOutcome = runFulfillRfpGaps(rfp.id, {
         signal: abort.signal,
-        mode: "full",
+        mode: "targeted_fix",
+        onResearchUpdate: handleResearchPoll,
       })
         .then((r) => ({ via: "request" as const, r }))
         .catch((e) => ({ via: "error" as const, e }));
@@ -3261,9 +3276,10 @@ function ProposalDraftWorkspaceInner({
     setDocxDownloadError(null);
     setIsDownloadingDocx(true);
     try {
-      await downloadProposalDocx(rfp.id);
+      const result = await downloadProposalDocx(rfp.id);
+      setDocxExportMode(result.mode);
       setDocxDownloaded(true);
-      setTimeout(() => setDocxDownloaded(false), 3000);
+      setTimeout(() => setDocxDownloaded(false), 4000);
     } catch (error) {
       setDocxDownloadError(
         error instanceof Error ? error.message : "Word download failed."
@@ -3295,15 +3311,12 @@ function ProposalDraftWorkspaceInner({
           </div>
         </div>
         <div
-          className="flex min-h-[min(28rem,70vh)] flex-col items-center justify-center gap-4 px-6 py-12 text-center"
+          className="flex min-h-[min(28rem,70vh)] flex-col items-center justify-center gap-5 px-6 py-12 text-center"
           role="status"
           aria-live="polite"
           aria-busy="true"
         >
-          <span
-            className="h-9 w-9 animate-spin rounded-full border-[3px] border-zo-border border-t-zo-orange"
-            aria-hidden
-          />
+          <ZoAmuletLoader label="Loading proposal" />
           <div className="space-y-1.5">
             <p className="text-sm font-semibold text-foreground">
               Loading proposal…
@@ -4136,9 +4149,7 @@ function ProposalDraftWorkspaceInner({
                       ? "Review & fix…"
                       : scanAlreadyDone && !canResumeFulfillScan
                         ? "✓ Review & fix done"
-                        : canResumeFulfillScan
-                          ? "Continue Review & fix"
-                          : "Review & fix"}
+                        : "Review & fix"}
                   </button>
                 </CapabilityHoverTip>
                 {outline.lastFulfillReport ? (
@@ -4534,6 +4545,9 @@ function ProposalDraftWorkspaceInner({
               onViewLastResults={handleOpenLastResults}
               goRfpCount={goRfpCount}
               onOpenGoRfpPicker={onOpenGoRfpPicker}
+              outline={outline}
+              optimisticScanProfile={isFulfillingRfpGaps ? "targeted_fix" : null}
+              buildFinalizeEnabled={pipelineStatus?.buildFinalizeEnabled}
             />
             </div>
             </div>
@@ -4725,14 +4739,17 @@ function ProposalDraftWorkspaceInner({
                   className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-[#0b2f6b] bg-[#0b2f6b] px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#0a2758] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {isDownloadingDocx
-                    ? "Preparing Word file…"
+                    ? "Preparing download…"
                     : docxDownloaded
-                      ? "Download started"
-                      : "Download Word (.docx)"}
+                      ? docxExportMode === "separate_cost"
+                        ? "Zip download started"
+                        : "Download started"
+                      : "Download Word"}
                 </button>
                 <p className="text-[11px] leading-relaxed text-zo-text-muted">
-                  Same headings, lists, tables, and designer notes as the preview
-                  — opens in Microsoft Word or Google Docs.
+                  {docxExportMode === "separate_cost"
+                    ? "This RFQ needs two uploads: a Response File and a Cost File. Download is a zip with both Word docs — upload Response to the Response File slot and Cost to the Cost File slot."
+                    : "Same headings, lists, tables, and designer notes as the preview — opens in Microsoft Word or Google Docs. If the RFQ requires a separate cost file, download becomes a zip with Response + Cost Word docs."}
                 </p>
 
                 {docxDownloadError ? (

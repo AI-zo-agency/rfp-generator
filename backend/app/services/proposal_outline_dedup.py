@@ -243,6 +243,59 @@ def section_protect_from_cap(section: Any) -> bool:
     return instrument in {"cost", "form", "disclosure", "references"}
 
 
+def section_is_rfp_derived(section: Any) -> bool:
+    """True when this tab traces to the RFP itself rather than planner invention.
+
+    Deliberately broad: any evaluation weight, any submission instrument,
+    any required/protect flag, or an RFP-sourced origin. Being wrong in
+    the 'keep' direction costs one extra tab; being wrong the other way
+    deletes a scored section from a live bid.
+    """
+    # Any non-None points value counts — INCLUDING 0. A scored row whose
+    # points the upstream evaluation extractor failed to read is still a
+    # scored row; only a section that was never scored at all has points=None.
+    if _section_evaluation_points(section) is not None:
+        return True
+    # A real submission instrument the buyer must receive. Deliberately NOT
+    # "any value": the planner also stamps "narrative" on ordinary tabs, so
+    # accepting every value would protect invented padding too — the same
+    # no-signal trap as `required` below.
+    if _section_submission_instrument(section) in {
+        "cost",
+        "form",
+        "disclosure",
+        "references",
+    }:
+        return True
+    # NOT `required`: OutlineSection.required defaults to True
+    # (schemas.py:417), so it carries no signal — every section looks required
+    # unless a caller explicitly passes False. Treating it as proof of RFP
+    # origin marked ALL tabs RFP-derived and disabled the cap completely.
+    protected = False
+    if hasattr(section, "protect_from_cap"):
+        protected = bool(getattr(section, "protect_from_cap", False))
+    if not protected and isinstance(section, dict):
+        protected = bool(
+            section.get("protectFromCap") or section.get("protect_from_cap")
+        )
+    if protected:
+        return True
+    # Dict-shaped sections from other pipelines (e.g. RfpSectionMap-derived
+    # rows) may carry an explicit source/origin marker. OutlineSection itself
+    # has no such field today, so this branch is a no-op for it — kept for
+    # any pipeline that does stamp one, so the predicate stays general.
+    if isinstance(section, dict):
+        origin = str(
+            section.get("source")
+            or section.get("origin")
+            or section.get("rfpSource")
+            or ""
+        ).strip().casefold()
+        if origin and "rfp" in origin:
+            return True
+    return False
+
+
 def is_important_or_closing_outline_title(title: str) -> bool:
     """Deprecated title-only check — always False.
 
@@ -529,10 +582,19 @@ def enforce_outline_section_cap(
     sections: list[Any],
     max_n: int,
 ) -> tuple[list[Any], list[str]]:
-    """Keep at most ``max_n`` outline tabs, preferring closing + scored + required.
+    """Keep at most ``max_n`` outline tabs — but NEVER drop an RFP-derived tab.
 
-    Never drops important/closing/scored tabs for the hard-cap — those are
-    RFP instruments. Cap only trims optional narrative padding.
+    The page budget may reduce how MUCH we write; it must never reduce WHICH
+    required sections EXIST. Every section that traces to the RFP itself
+    (scored, a submission instrument, required/protected, or RFP-sourced —
+    see ``section_is_rfp_derived``) survives the cap unconditionally, even if
+    that means the returned outline finishes over ``max_n``. Only sections the
+    planner invented on its own — no RFP anchor at all — are trimmed to fit,
+    highest evaluation weight first, and never silently: every trim is logged
+    in the returned dropped-list, and an RFP-derived overflow past the cap is
+    logged too, naming both numbers. That overflow is a human page-count
+    decision to make, never a licence for this function to delete a scored
+    section from a live bid.
     """
     if max_n <= 0 or len(sections) <= max_n:
         return list(sections), []
@@ -544,13 +606,6 @@ def enforce_outline_section_cap(
             return str(section.get("title") or "")
         return ""
 
-    def _required(section: Any) -> bool:
-        if hasattr(section, "required"):
-            return bool(section.required)
-        if isinstance(section, dict):
-            return bool(section.get("required"))
-        return False
-
     def _weight(section: Any) -> float:
         pts = _section_evaluation_points(section)
         try:
@@ -558,37 +613,161 @@ def enforce_outline_section_cap(
         except (TypeError, ValueError):
             return 0.0
 
-    def _protected(section: Any) -> bool:
-        return section_protect_from_cap(section)
+    rfp_derived = [sec for sec in sections if section_is_rfp_derived(sec)]
+    invented = [sec for sec in sections if not section_is_rfp_derived(sec)]
 
-    protected = [sec for sec in sections if _protected(sec)]
-    optional = [sec for sec in sections if not _protected(sec)]
-    # Always keep every protected tab; fill remaining slots with optional.
-    room = max(0, max_n - len(protected))
-    ranked_optional = sorted(
-        enumerate(optional),
+    # Always keep every RFP-derived tab; fill remaining slots with the
+    # highest-weighted invented tabs, exactly as the old "protected" path did.
+    room = max(0, max_n - len(rfp_derived))
+    ranked_invented = sorted(
+        enumerate(invented),
         key=lambda pair: (
             -_weight(pair[1]),
             pair[0],
         ),
     )
-    keep_optional = {id(sec) for _, sec in ranked_optional[:room]}
+    keep_invented_ids = {id(sec) for _, sec in ranked_invented[:room]}
     kept = [
         sec
         for sec in sections
-        if _protected(sec) or id(sec) in keep_optional
+        if section_is_rfp_derived(sec) or id(sec) in keep_invented_ids
     ]
     dropped = [
         f"{_title(sec)} (outline hard-cap {max_n})"
         for sec in sections
         if sec not in kept
     ]
+    if len(rfp_derived) > max_n:
+        # The RFP itself demands more tabs than the page budget allows. We
+        # still keep them all — this is a page-count tension for a human to
+        # resolve, not something this function may silently delete to fix.
+        dropped.append(
+            f"RFP requires {len(rfp_derived)} section(s) but the page-budget "
+            f"cap is {max_n} — all {len(rfp_derived)} RFP-derived tab(s) were "
+            "kept anyway; the page budget needs review, not fewer sections."
+        )
     for i, section in enumerate(kept, start=1):
         if hasattr(section, "order"):
             section.order = i
         elif isinstance(section, dict):
             section["order"] = i
     return kept, dropped
+
+
+_STRONG_BOUNDARY_MARKERS = (";", " — ", " – ", " (", ":")
+
+
+# A letter or summary the offeror WRITES to the buyer. It may quote the same
+# firm facts as the company block (legal name, contact, address) without ever
+# being a duplicate of it, a label for it, or a form that cross-references it.
+TRANSMITTAL_TITLE_HINTS = (
+    "cover letter",
+    "cover page",
+    "letter of transmittal",
+    "transmittal letter",
+    "executive summary",
+)
+
+
+def title_is_transmittal_deliverable(title: str) -> bool:
+    """True for authored prose addressed to the buyer — never boilerplate."""
+    t = (title or "").casefold()
+    return any(hint in t for hint in TRANSMITTAL_TITLE_HINTS)
+
+
+def humanize_outline_title(title: str, *, max_chars: int = 72) -> str:
+    """A section TAB heading, from whatever the model returned.
+
+    Titles arrive from several agents and are sometimes a full RFP
+    requirement sentence or a raw machine key. A tab label is a short
+    noun phrase; the full requirement belongs in the section's
+    instructions, never in its heading.
+
+    Returns empty when the title is packaging / eligibility instruction
+    prose (never truncate those into a fake TOC label).
+    """
+    text = (title or "").strip()
+    if not text:
+        return ""
+
+    from app.services.proposal_fulfill_rfp_structure import (
+        recover_deliverable_title_from_instruction,
+        title_is_rfp_instruction_not_deliverable,
+    )
+
+    if title_is_rfp_instruction_not_deliverable(text):
+        recovered = recover_deliverable_title_from_instruction(text)
+        return recovered or ""
+
+    # MACHINE KEY: no space, but has "_" or "-" — humanize into words.
+    if " " not in text and ("_" in text or "-" in text):
+        raw_words = text.replace("_", " ").replace("-", " ").split()
+        words = [w if w.isupper() else w.capitalize() for w in raw_words]
+        text = " ".join(words)
+
+    # Collapse internal whitespace early so length checks are accurate.
+    text = " ".join(text.split())
+
+    if len(text) > max_chars:
+        cut_at = -1
+        for marker in _STRONG_BOUNDARY_MARKERS:
+            idx = text.find(marker)
+            if idx > 0 and (cut_at == -1 or idx < cut_at):
+                cut_at = idx
+        if cut_at > 0:
+            text = text[:cut_at].strip()
+        if len(text) > max_chars:
+            truncated = text[:max_chars]
+            last_space = truncated.rfind(" ")
+            if last_space > 0:
+                truncated = truncated[:last_space]
+            text = truncated.rstrip(" .,;:—–-")
+            words = text.split(" ")
+            while words and words[-1].casefold() in (
+                "and",
+                "or",
+                "but",
+                "with",
+                "for",
+                "the",
+                "a",
+                "an",
+                "of",
+                "to",
+                "in",
+                # Linking and modal words too: a word-boundary cut can otherwise
+                # leave "...Cost Proposal Attachment that must be", which reads
+                # as a broken sentence rather than as a heading.
+                "on",
+                "at",
+                "by",
+                "from",
+                "as",
+                "that",
+                "which",
+                "who",
+                "whose",
+                "is",
+                "are",
+                "was",
+                "were",
+                "be",
+                "been",
+                "being",
+                "must",
+                "shall",
+                "will",
+                "should",
+                "may",
+                "can",
+            ):
+                words.pop()
+            text = " ".join(words)
+
+    text = " ".join(text.split())
+    if text.endswith("."):
+        text = text[:-1]
+    return text.strip()
 
 
 def is_generic_filler_outline_title(title: str) -> bool:
@@ -732,6 +911,25 @@ def filter_lean_outline_sections(
         if is_kb_artefact_outline_title(original_title):
             dropped.append(f"{original_title} (knowledge-base filename, not a section)")
             continue
+        # Instruction / eligibility / packaging prose is never a TOC tab —
+        # check before humanize/enrich so truncation cannot turn a DQ warning
+        # into a fake heading.
+        from app.services.proposal_fulfill_rfp_structure import (
+            _title_is_non_deliverable,
+            recover_deliverable_title_from_instruction,
+        )
+
+        if _title_is_non_deliverable(original_title):
+            recovered = recover_deliverable_title_from_instruction(original_title)
+            if recovered:
+                _set_title(section, recovered)
+                # Continue with the real form name — do not drop the deliverable.
+                original_title = recovered
+            else:
+                dropped.append(
+                    f"{original_title} (RFP instruction / eligibility — not a deliverable)"
+                )
+                continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
         # Strip points-table wording a wrapped PDF row leaks into a heading
         # ("SECTION III Strategic Planning - UP TO 160"). Applied at this shared

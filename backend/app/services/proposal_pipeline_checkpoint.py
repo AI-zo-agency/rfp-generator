@@ -215,7 +215,7 @@ async def heal_false_interrupted_checkpoint(
     return True
 
 
-async def record_phase_started(rfp_id: str, phase: str) -> None:
+async def record_phase_started(rfp_id: str, phase: str, scan_profile: str | None = None) -> None:
     await clear_stale_in_progress_checkpoint(rfp_id)
     research = await _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
@@ -227,12 +227,27 @@ async def record_phase_started(rfp_id: str, phase: str) -> None:
         step_index: int | None = 1
         step_total: int | None = 3
     else:
-        activity_label = phase_label
-        activity_detail = None
+        activity_label = "Review Sections" if phase == "fulfill-scan" and scan_profile == "targeted_fix" else phase_label
+        activity_detail = "Scanning proposal for missing sections..." if phase == "fulfill-scan" and scan_profile == "targeted_fix" else None
         step_index = None
         step_total = None
     checkpoint = ProposalPipelineCheckpoint(
+        scanProfile=scan_profile,
         lastCompletedPhase=prior.last_completed_phase if prior else None,
+        # ALWAYS carry the Review & Fix progress across a phase start, whatever
+        # profile is starting. These fields are targeted_fix-specific by name,
+        # so another profile cannot misread them — and gating the carry on the
+        # STARTING profile meant one Complete & clean run silently erased a
+        # half-finished Review & Fix, sending the next one back to section 1.
+        # Only complete_fulfill_scan (a finished pass) clears them.
+        targetedFixDoneSectionIds=(
+            list(prior.targeted_fix_done_section_ids or []) if prior else []
+        ),
+        targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+        targetedFixContradictionDone=bool(
+            prior and prior.targeted_fix_contradiction_done
+        ),
+        targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
         inProgressPhase=phase,
         lastFailedPhase=None,
         lastError=None,
@@ -243,12 +258,12 @@ async def record_phase_started(rfp_id: str, phase: str) -> None:
         stepTotal=step_total,
         resumeFulfillStep=(
             prior.resume_fulfill_step
-            if phase == "fulfill-scan" and prior
+            if phase == "fulfill-scan" and prior and scan_profile != "targeted_fix"
             else None
         ),
         lastCompletedFulfillStep=(
             prior.last_completed_fulfill_step
-            if phase == "fulfill-scan" and prior
+            if phase == "fulfill-scan" and prior and scan_profile != "targeted_fix"
             else None
         ),
         updatedAt=_now_iso(),
@@ -279,15 +294,26 @@ async def record_pipeline_activity(
     step_index: int | None = None,
     step_total: int | None = None,
     in_progress_phase: str | None = None,
+    scan_profile: str | None = None,
+    active_section_ids: list[str] | None = None,
 ) -> None:
     """Update live sub-step text while a phase runs (polled by the UI)."""
     research = await _ensure_research(rfp_id)
     cp = research.pipeline_checkpoint
+    profile = scan_profile or (cp.scan_profile if cp else None)
     resume_step = step_index if (
         (in_progress_phase or (cp.in_progress_phase if cp else None))
         in ("fulfill-scan", "build-finalize")
+        # targeted_fix counts SECTIONS, not FULFILL_STEPS — writing its counter
+        # into resume_fulfill_step would make a later full scan skip real steps.
+        and profile != TARGETED_FIX_PROFILE
     ) else None
     last_done = (step_index - 1) if resume_step and step_index and step_index > 1 else None
+    active_ids = (
+        [str(sid) for sid in active_section_ids if sid]
+        if active_section_ids is not None
+        else None
+    )
     if cp is None:
         cp = ProposalPipelineCheckpoint(
             # Same fabricate-a-phase anti-pattern as the old record_generation_stopped
@@ -297,8 +323,10 @@ async def record_pipeline_activity(
             activityDetail=detail[:500] if detail else None,
             stepIndex=step_index,
             stepTotal=step_total,
+            scanProfile=scan_profile,
             resumeFulfillStep=resume_step,
             lastCompletedFulfillStep=last_done,
+            targetedFixActiveSectionIds=active_ids or [],
             updatedAt=_now_iso(),
         )
     else:
@@ -307,6 +335,7 @@ async def record_pipeline_activity(
             "activity_detail": detail[:500] if detail else None,
             "step_index": step_index,
             "step_total": step_total,
+            "scan_profile": scan_profile or cp.scan_profile,
             "updated_at": _now_iso(),
         }
         if in_progress_phase is not None:
@@ -315,6 +344,8 @@ async def record_pipeline_activity(
             updates["resume_fulfill_step"] = resume_step
             if last_done:
                 updates["last_completed_fulfill_step"] = last_done
+        if active_ids is not None:
+            updates["targeted_fix_active_section_ids"] = active_ids
         cp = cp.model_copy(update=updates)
     await _save_checkpoint(rfp_id, cp)
 
@@ -324,6 +355,10 @@ def fulfill_resume_step(research: ProposalResearchCache | None) -> int:
     if not research or not research.pipeline_checkpoint:
         return 1
     cp = research.pipeline_checkpoint
+    if (cp.scan_profile or "") == TARGETED_FIX_PROFILE:
+        # Review & Fix keeps its own per-section checkpoint; its counter is not
+        # a FULFILL_STEPS index, so a full scan after it must start at step 1.
+        return 1
     for raw in (
         cp.resume_fulfill_step,
         cp.step_index if cp.in_progress_phase in ("fulfill-scan", "build-finalize") else None,
@@ -363,6 +398,13 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
         "step_total": None,
         "resume_fulfill_step": None,
         "last_completed_fulfill_step": None,
+        # Review & Fix finished a full pass — the next click starts from
+        # section 1 again instead of skipping everything.
+        "targeted_fix_done_section_ids": [],
+        "targeted_fix_active_section_ids": [],
+        "targeted_fix_structure_done": False,
+        "targeted_fix_contradiction_done": False,
+        "targeted_fix_won_fill_done": False,
         "updated_at": _now_iso(),
     }
     if scan_hash:
@@ -371,6 +413,154 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
         # because it is persisted here by the Celery task, not in a browser.
         updates["last_clean_fulfill_scan_at"] = _now_iso()
     await _save_checkpoint(rfp_id, cp.model_copy(update=updates))
+
+
+TARGETED_FIX_PROFILE = "targeted_fix"
+
+
+def targeted_fix_done_sections(research: ProposalResearchCache | None) -> set[str]:
+    """Section ids an interrupted Review & Fix run already reviewed.
+
+    Keyed by section id, not by index: the order pass can insert mandated stubs
+    between runs, so a stored ordinal would resume on the wrong section.
+    """
+    if not research or not research.pipeline_checkpoint:
+        return set()
+    cp = research.pipeline_checkpoint
+    # No scan_profile gate: the field is Review & Fix's own, and an intervening
+    # run under another profile must not cost the user their place.
+    return {str(sid) for sid in (cp.targeted_fix_done_section_ids or []) if sid}
+
+
+def targeted_fix_structure_is_done(research: ProposalResearchCache | None) -> bool:
+    """True when a prior interrupted Review & Fix already ran the structure pass."""
+    if not research or not research.pipeline_checkpoint:
+        return False
+    cp = research.pipeline_checkpoint
+    return bool(cp.targeted_fix_structure_done)
+
+
+def targeted_fix_contradiction_is_done(research: ProposalResearchCache | None) -> bool:
+    """True when a prior interrupted Review & Fix already ran the cross-section contradiction pass."""
+    if not research or not research.pipeline_checkpoint:
+        return False
+    cp = research.pipeline_checkpoint
+    return bool(cp.targeted_fix_contradiction_done)
+
+
+def targeted_fix_won_fill_is_done(research: ProposalResearchCache | None) -> bool:
+    """True when a prior interrupted Review & Fix already ran the past-WON-proposal gap fill."""
+    if not research or not research.pipeline_checkpoint:
+        return False
+    cp = research.pipeline_checkpoint
+    return bool(cp.targeted_fix_won_fill_done)
+
+
+async def record_targeted_fix_section_done(
+    rfp_id: str,
+    section_id: str,
+    *,
+    step_index: int | None = None,
+    step_total: int | None = None,
+) -> None:
+    """Mark one Review & Fix section finished, durably, right after its save."""
+    if not section_id:
+        return
+    research = await _ensure_research(rfp_id)
+    cp = research.pipeline_checkpoint
+    if cp is None:
+        cp = ProposalPipelineCheckpoint(
+            inProgressPhase="fulfill-scan",
+            scanProfile=TARGETED_FIX_PROFILE,
+            stepIndex=step_index,
+            stepTotal=step_total,
+            targetedFixDoneSectionIds=[str(section_id)],
+            targetedFixActiveSectionIds=[],
+            updatedAt=_now_iso(),
+        )
+    else:
+        done = list(cp.targeted_fix_done_section_ids or [])
+        if str(section_id) not in done:
+            done.append(str(section_id))
+        cp = cp.model_copy(
+            update={
+                "scan_profile": TARGETED_FIX_PROFILE,
+                "step_index": step_index if step_index is not None else cp.step_index,
+                "step_total": step_total if step_total is not None else cp.step_total,
+                "targeted_fix_done_section_ids": done,
+                # Batch finished — clear in-flight chips so the UI does not keep
+                # lighting sections that already checkpointed as done.
+                "targeted_fix_active_section_ids": [],
+                "updated_at": _now_iso(),
+            }
+        )
+    await _save_checkpoint(rfp_id, cp)
+
+
+async def record_targeted_fix_structure_done(rfp_id: str) -> None:
+    """The RFP structure/order pass finished — a resume must not redo it."""
+    research = await _ensure_research(rfp_id)
+    cp = research.pipeline_checkpoint
+    if cp is None:
+        cp = ProposalPipelineCheckpoint(
+            inProgressPhase="fulfill-scan",
+            scanProfile=TARGETED_FIX_PROFILE,
+            targetedFixStructureDone=True,
+            updatedAt=_now_iso(),
+        )
+    else:
+        cp = cp.model_copy(
+            update={
+                "scan_profile": TARGETED_FIX_PROFILE,
+                "targeted_fix_structure_done": True,
+                "updated_at": _now_iso(),
+            }
+        )
+    await _save_checkpoint(rfp_id, cp)
+
+
+async def record_targeted_fix_contradiction_done(rfp_id: str) -> None:
+    """The cross-section contradiction pass finished — a resume must not redo it."""
+    research = await _ensure_research(rfp_id)
+    cp = research.pipeline_checkpoint
+    if cp is None:
+        cp = ProposalPipelineCheckpoint(
+            inProgressPhase="fulfill-scan",
+            scanProfile=TARGETED_FIX_PROFILE,
+            targetedFixContradictionDone=True,
+            updatedAt=_now_iso(),
+        )
+    else:
+        cp = cp.model_copy(
+            update={
+                "scan_profile": TARGETED_FIX_PROFILE,
+                "targeted_fix_contradiction_done": True,
+                "updated_at": _now_iso(),
+            }
+        )
+    await _save_checkpoint(rfp_id, cp)
+
+
+async def record_targeted_fix_won_fill_done(rfp_id: str) -> None:
+    """The past-WON-proposal gap fill finished — a resume must not redo it."""
+    research = await _ensure_research(rfp_id)
+    cp = research.pipeline_checkpoint
+    if cp is None:
+        cp = ProposalPipelineCheckpoint(
+            inProgressPhase="fulfill-scan",
+            scanProfile=TARGETED_FIX_PROFILE,
+            targetedFixWonFillDone=True,
+            updatedAt=_now_iso(),
+        )
+    else:
+        cp = cp.model_copy(
+            update={
+                "scan_profile": TARGETED_FIX_PROFILE,
+                "targeted_fix_won_fill_done": True,
+                "updated_at": _now_iso(),
+            }
+        )
+    await _save_checkpoint(rfp_id, cp)
 
 
 def compute_fulfill_scan_hash(draft: ProposalDraft, rfp_text: str = "") -> str:
@@ -559,10 +749,19 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
         # Do not set resumeFromPhase to align — that would break Generate Continue.
         checkpoint = ProposalPipelineCheckpoint(
             lastCompletedPhase=prior.last_completed_phase if prior else None,
+            # Carry the Review & Fix per-section checkpoint across rebuilds —
+            # a stop/fail must not lose the sections already reviewed.
+            targetedFixDoneSectionIds=(
+                list(prior.targeted_fix_done_section_ids or []) if prior else []
+            ),
+            targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+            targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+            targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
             inProgressPhase=None,
             lastFailedPhase=phase,
             lastError=error[:2000] if error else None,
             resumeFromPhase=prior.resume_from_phase if prior else None,
+            scanProfile=prior.scan_profile if prior else None,
             updatedAt=_now_iso(),
         )
         await _save_checkpoint(rfp_id, checkpoint)
@@ -575,10 +774,19 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
     if phase == "packet-redistribute":
         checkpoint = ProposalPipelineCheckpoint(
             lastCompletedPhase=prior.last_completed_phase if prior else None,
+            # Carry the Review & Fix per-section checkpoint across rebuilds —
+            # a stop/fail must not lose the sections already reviewed.
+            targetedFixDoneSectionIds=(
+                list(prior.targeted_fix_done_section_ids or []) if prior else []
+            ),
+            targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+            targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+            targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
             inProgressPhase=None,
             lastFailedPhase=phase,
             lastError=error[:2000] if error else None,
             resumeFromPhase=prior.resume_from_phase if prior else None,
+            scanProfile=prior.scan_profile if prior else None,
             updatedAt=_now_iso(),
         )
         await _save_checkpoint(rfp_id, checkpoint)
@@ -590,10 +798,19 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
         return
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
+        # Carry the Review & Fix per-section checkpoint across rebuilds —
+        # a stop/fail must not lose the sections already reviewed.
+        targetedFixDoneSectionIds=(
+            list(prior.targeted_fix_done_section_ids or []) if prior else []
+        ),
+        targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+        targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+        targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
         inProgressPhase=None,
         lastFailedPhase=phase,
         lastError=error[:2000] if error else None,
         resumeFromPhase=phase,
+        scanProfile=prior.scan_profile if prior else None,
         updatedAt=_now_iso(),
     )
     await _save_checkpoint(rfp_id, checkpoint)
@@ -626,10 +843,19 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     ):
         checkpoint = ProposalPipelineCheckpoint(
             lastCompletedPhase=prior.last_completed_phase if prior else None,
+            # Carry the Review & Fix per-section checkpoint across rebuilds —
+            # a stop/fail must not lose the sections already reviewed.
+            targetedFixDoneSectionIds=(
+                list(prior.targeted_fix_done_section_ids or []) if prior else []
+            ),
+            targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+            targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+            targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
             inProgressPhase=None,
             lastFailedPhase=None,
             lastError="Align to RFP outline stopped",
             resumeFromPhase=prior.resume_from_phase if prior else None,
+            scanProfile=prior.scan_profile if prior else None,
             updatedAt=_now_iso(),
         )
         await _save_checkpoint(rfp_id, checkpoint)
@@ -640,10 +866,19 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     ):
         checkpoint = ProposalPipelineCheckpoint(
             lastCompletedPhase=prior.last_completed_phase if prior else None,
+            # Carry the Review & Fix per-section checkpoint across rebuilds —
+            # a stop/fail must not lose the sections already reviewed.
+            targetedFixDoneSectionIds=(
+                list(prior.targeted_fix_done_section_ids or []) if prior else []
+            ),
+            targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+            targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+            targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
             inProgressPhase=None,
             lastFailedPhase=None,
             lastError="Place content stopped",
             resumeFromPhase=prior.resume_from_phase if prior else None,
+            scanProfile=prior.scan_profile if prior else None,
             updatedAt=_now_iso(),
         )
         await _save_checkpoint(rfp_id, checkpoint)
@@ -665,6 +900,14 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
                 resume_step = prior.last_completed_fulfill_step + 1
         checkpoint = ProposalPipelineCheckpoint(
             lastCompletedPhase=prior.last_completed_phase if prior else None,
+            # Carry the Review & Fix per-section checkpoint across rebuilds —
+            # a stop/fail must not lose the sections already reviewed.
+            targetedFixDoneSectionIds=(
+                list(prior.targeted_fix_done_section_ids or []) if prior else []
+            ),
+            targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+            targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+            targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
             inProgressPhase=None,
             lastFailedPhase=prior.last_failed_phase if prior else None,
             lastError=(
@@ -676,6 +919,7 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
             activityDetail=prior.activity_detail if prior else None,
             stepIndex=prior.step_index if prior else None,
             stepTotal=prior.step_total if prior else None,
+            scanProfile=prior.scan_profile if prior else None,
             lastCompletedFulfillStep=prior.last_completed_fulfill_step if prior else None,
             resumeFulfillStep=resume_step,
             updatedAt=_now_iso(),
@@ -699,6 +943,14 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     failed = active if active in PIPELINE_PHASES else (prior.last_failed_phase if prior else None)
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
+        # Carry the Review & Fix per-section checkpoint across rebuilds —
+        # a stop/fail must not lose the sections already reviewed.
+        targetedFixDoneSectionIds=(
+            list(prior.targeted_fix_done_section_ids or []) if prior else []
+        ),
+        targetedFixStructureDone=bool(prior and prior.targeted_fix_structure_done),
+        targetedFixContradictionDone=bool(prior and prior.targeted_fix_contradiction_done),
+        targetedFixWonFillDone=bool(prior and prior.targeted_fix_won_fill_done),
         inProgressPhase=None,
         lastFailedPhase=failed,
         lastError="Stopped by user. Progress is saved — use Continue proposal to resume.",
@@ -924,6 +1176,16 @@ async def resolve_resume_phase(
     return "complete"
 
 
+def _build_finalize_enabled() -> bool:
+    """Whether the Final checks phase is switched on (config.build_finalize_enabled)."""
+    try:
+        from app.core.config import settings as _settings
+
+        return bool(_settings.build_finalize_enabled)
+    except Exception:  # noqa: BLE001 — a config read must never break status
+        return True
+
+
 async def build_pipeline_status(
     rfp_id: str,
     *,
@@ -976,5 +1238,9 @@ async def build_pipeline_status(
         "lastError": cp.last_error if cp else None,
         "inProgressPhase": cp.in_progress_phase if cp else None,
         "phaseLabels": PHASE_LABELS,
+        # The UI renders a fixed seven-phase list. When Final checks is switched
+        # off it never runs, so without this flag the rail advertised a step
+        # that could only ever sit grey — the config and the UI disagreeing.
+        "buildFinalizeEnabled": _build_finalize_enabled(),
         "checkpoint": cp.model_dump(by_alias=True) if cp else None,
     }

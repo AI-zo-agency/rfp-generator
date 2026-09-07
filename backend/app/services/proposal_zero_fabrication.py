@@ -98,6 +98,26 @@ def apply_zero_fabrication_guards(
     for line in integrity_logs:
         report.logs.append(f"{label}: integrity — {line}")
 
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        draft, voice_logs = apply_rev6_voice_scrub_to_draft(draft)
+        for line in voice_logs:
+            report.logs.append(f"{label}: rev6 voice — {line}")
+    except Exception as exc:  # noqa: BLE001 — never block persist on voice scrub
+        report.logs.append(f"{label}: rev6 voice scrub skipped ({exc})")
+
+    try:
+        from app.services.proposal_pointer_page_integrity import (
+            apply_pointer_page_integrity_to_draft,
+        )
+
+        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+        for line in ptr_logs:
+            report.logs.append(f"{label}: cross-ref — {line}")
+    except Exception as exc:  # noqa: BLE001
+        report.logs.append(f"{label}: cross-ref integrity skipped ({exc})")
+
     draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
     for line in phone_logs:
         report.logs.append(f"{label}: reference phone — {line}")
@@ -118,6 +138,26 @@ def apply_zero_fabrication_guards(
                 f"{label}: reconciled budget summary prose in {reconciled} section(s)"
             )
 
+        from app.services.proposal_budget_content import (
+            find_budget_section_index,
+            scrub_duplicate_budget_breakdown_tables,
+        )
+
+        budget_idx = find_budget_section_index(draft.sections)
+        if budget_idx is not None:
+            section = draft.sections[budget_idx]
+            scrubbed_body, mix_logs = scrub_duplicate_budget_breakdown_tables(
+                section.content or ""
+            )
+            if mix_logs:
+                sections = list(draft.sections)
+                sections[budget_idx] = section.model_copy(
+                    update={"content": scrubbed_body}
+                )
+                draft = draft.model_copy(update={"sections": sections})
+                for line in mix_logs:
+                    report.logs.append(f"{label}: budget breakdown — {line}")
+
         from app.services.proposal_pricing_sync_repair import scrub_invented_ceiling_claims
 
         draft, scrubbed = scrub_invented_ceiling_claims(draft, resolved_budget)
@@ -133,6 +173,60 @@ def apply_zero_fabrication_guards(
         for item in mismatches[:6]:
             note = getattr(item, "note", None) or str(item)
             report.logs.append(f"{label}: budget mismatch — {note[:160]}")
+
+    try:
+        from app.services.proposal_anti_rfp_echo import (
+            opportunity_understanding_directives,
+            strip_rfp_requirement_echo_sentences,
+        )
+
+        understanding: dict | list | str | None = None
+        plan = None
+        if research is not None:
+            plan = getattr(research, "proposal_execution_plan", None) or getattr(
+                research, "execution_plan", None
+            )
+        if plan:
+            if isinstance(plan, dict):
+                understanding = (plan.get("opportunity") or {}).get("understanding")
+            else:
+                opportunity = getattr(plan, "opportunity", None)
+                if isinstance(opportunity, dict):
+                    understanding = opportunity.get("understanding")
+                else:
+                    understanding = getattr(opportunity, "understanding", None)
+        extra = opportunity_understanding_directives(understanding)
+        req_by_id: dict[str, list] = {}
+        for mapped in (research.rfp_sections if research else None) or []:
+            mid = getattr(mapped, "id", None) or (
+                mapped.get("id") if isinstance(mapped, dict) else None
+            )
+            reqs = getattr(mapped, "requirements", None)
+            if reqs is None and isinstance(mapped, dict):
+                reqs = mapped.get("requirements")
+            if mid:
+                req_by_id[str(mid)] = list(reqs or [])
+        changed = 0
+        new_sections = []
+        for section in draft.sections:
+            body = section.content or ""
+            scrubbed = strip_rfp_requirement_echo_sentences(
+                body,
+                req_by_id.get(section.id, []),
+                extra_directives=extra,
+            )
+            if scrubbed != body:
+                changed += 1
+                new_sections.append(section.model_copy(update={"content": scrubbed}))
+            else:
+                new_sections.append(section)
+        if changed:
+            draft = draft.model_copy(update={"sections": new_sections})
+            report.logs.append(
+                f"{label}: anti-RFP-echo scrubbed {changed} section(s)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s anti-RFP-echo scrub skipped: %s", label, exc)
 
     try:
         from app.services.proposal_fulfill_fabrication_guard import (
