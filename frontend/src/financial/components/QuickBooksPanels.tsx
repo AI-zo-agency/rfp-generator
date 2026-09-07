@@ -13,12 +13,17 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceArea,
+  ReferenceDot,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { RefreshCw, Sparkles } from "lucide-react";
+import { RefreshCw, Sparkles, TrendingUp } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -40,6 +45,7 @@ const VIEWS = [
   { id: "revenue", label: "Revenue" },
   { id: "clients", label: "Clients" },
   { id: "costs", label: "Costs" },
+  { id: "forecast", label: "Forecast" },
 ] as const;
 
 /* ── chart chrome ──────────────────────────────────────────────────────── */
@@ -348,6 +354,313 @@ function isAbortError(err: unknown) {
   return (
     (err instanceof DOMException && err.name === "AbortError") ||
     (err instanceof Error && err.name === "AbortError")
+  );
+}
+
+/* ── forecast ──────────────────────────────────────────────────────────────── */
+
+/** Beyond this the two year methods are treated as disagreeing rather than
+ *  agreeing imprecisely, and the reader is told instead of shown one number. */
+const _DIVERGENCE_PCT = 10;
+
+/** "2026-09-24" -> "Sep 24". Dates on an axis need no year and no weekday. */
+function _shortDate(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  return Number.isNaN(d.getTime())
+    ? iso.slice(5)
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+/**
+ * "Week 3" over "Sep 24". The week number is what the prose refers to; the date
+ * is what the reader checks against their own calendar. One line holding both
+ * is unreadable at thirteen columns.
+ */
+function WeekTick({ x, y, payload }: {
+  x?: number; y?: number; payload?: { value?: string };
+}) {
+  const [week, date] = String(payload?.value ?? "").split("|");
+  return (
+    <g transform={`translate(${x ?? 0},${y ?? 0})`}>
+      <text textAnchor="middle" dy={14} className="qb-tick-week">{week}</text>
+      <text textAnchor="middle" dy={30} className="qb-tick-date">{date}</text>
+    </g>
+  );
+}
+
+/** "medium confidence" is a modelling term. This is how a person says it. */
+const CONFIDENCE_WORDS: Record<string, string> = {
+  low: "not very sure",
+  medium: "reasonably sure",
+  high: "quite sure",
+};
+
+/**
+ * The forecast view. Only forecasts — the ledger's open items, aging and
+ * segment splits already have their own tabs, and repeating them here would
+ * bury the two figures this view exists for.
+ *
+ * The year is deliberately shown twice: Gemini's and the Python line. They were
+ * within noise of each other across eighteen backtested origins, so neither
+ * earns the right to be the single number, and their disagreement is the most
+ * honest confidence signal available.
+ */
+function ForecastView({ data }: { data: QuickBooksOverview }) {
+  const f = data.forecast;
+  const llm = f?.llm ?? null;
+  const cash = llm?.cash_13w ?? null;
+  const llmYear = llm?.year ?? null;
+  const plain = llm?.plain ?? null;
+  const pyYear = f?.year ?? null;
+
+  const weeks = useMemo(
+    () =>
+      (cash?.weeks ?? []).map((w) => ({
+        // "Week 3|Sep 24" — split by WeekTick into two rows.
+        label: `Week ${w.week}|${_shortDate(w.ending)}`,
+        committed: w.from_open_invoices ?? 0,
+        forecast: w.from_new_billing ?? 0,
+        outflow: -(w.outflow ?? 0),
+        balance: w.closing_balance ?? 0,
+      })),
+    [cash],
+  );
+
+  const divergence =
+    llmYear?.point && pyYear?.point
+      ? Math.abs(llmYear.point - pyYear.point) / pyYear.point * 100
+      : null;
+
+  // The shaded band runs from zero down to the deepest thing on the chart, so
+  // it always reaches the axis floor rather than stopping mid-air.
+  const dangerFloor = useMemo(
+    () => Math.min(0, ...weeks.map((w) => w.outflow), ...weeks.map((w) => w.balance)),
+    [weeks],
+  );
+
+  const troughIsLastWeek =
+    cash?.trough != null && weeks.length > 0 && cash.trough.week >= weeks.length;
+
+  if (!f) return <Empty>No forecast yet — it is built during the nightly sync.</Empty>;
+
+  return (
+    <>
+      <div className="qb-moneyline">
+        {cash?.trough ? (
+          <Figure
+            label="Lowest your cash gets"
+            size="lg"
+            metric="risk"
+            tone={cash.trough.amount < 0 ? "warn" : undefined}
+            value={usd(cash.trough.amount)}
+            sub={
+              troughIsLastWeek && cash.low != null && cash.high != null
+                ? // The suppressed sibling carried the band; it moves here
+                  // rather than disappearing with the card.
+                  `week ${cash.trough.week}, the last · range ${compact(cash.low)} – ${compact(cash.high)}`
+                : `week ${cash.trough.week} of ${weeks.length || 13}`
+            }
+          />
+        ) : null}
+        {/* Suppressed when the low point *is* the final week — otherwise the
+            strip prints the same figure twice under two labels, which reads as
+            a bug rather than as the two facts coinciding. */}
+        {weeks.length && !troughIsLastWeek ? (
+          <Figure
+            label="Cash in three months"
+            size="lg"
+            metric="cash"
+            value={usd(weeks[weeks.length - 1].balance)}
+            sub={cash?.low != null && cash?.high != null
+              ? `range ${compact(cash.low)} – ${compact(cash.high)}`
+              : undefined}
+          />
+        ) : null}
+        {llmYear ? (
+          <Figure
+            label={`Expected income, ${data.year}`}
+            size="lg"
+            metric="booked"
+            value={usd(llmYear.point)}
+            sub={llmYear.low != null && llmYear.high != null
+              ? `range ${compact(llmYear.low)} – ${compact(llmYear.high)}`
+              : undefined}
+          />
+        ) : null}
+        {pyYear ? (
+          <Figure
+            label="If the year keeps this pace"
+            size="lg"
+            metric="income"
+            value={usd(pyYear.point)}
+            sub={`${pyYear.months_booked} months in · give or take ${pyYear.expected_error_pct}%`}
+          />
+        ) : null}
+      </div>
+
+      <Panel
+        title="Your cash over the next three months"
+        meta={
+          cash?.trough ? (
+            <span className="qb-subhead">
+              Lowest cash balance:{" "}
+              <strong>
+                {usd(cash.trough.amount)} in week {cash.trough.week}
+              </strong>
+            </span>
+          ) : undefined
+        }
+        hint="Dark green is money from invoices you have already sent — that is close to certain. Orange is money from work you have not billed yet, so it depends on the months ahead going normally. Bars below the line are money going out."
+      >
+        {weeks.length ? (
+          <>
+            <div className="qb-legend">
+              <span>
+                <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                Coming in — already invoiced
+              </span>
+              <span>
+                <span className="qb-swatch" style={{ background: "var(--zo-coral)" }} aria-hidden />
+                Coming in — not billed yet
+              </span>
+              <span>
+                <span className="qb-swatch" style={{ background: "#8095b3" }} aria-hidden />
+                Going out
+              </span>
+              <span>
+                <span className="qb-swatch qb-swatch-line" aria-hidden />
+                Cash balance
+              </span>
+            </div>
+            <ResponsiveContainer width="100%" height={330}>
+              <ComposedChart data={weeks} margin={{ top: 8, right: 8, bottom: 28, left: -8 }}>
+                <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+                {/* Below zero the company cannot pay its bills. Drawn behind the
+                    bars at low opacity: outflow bars legitimately sit down here
+                    too, and the band must not read as "these bars are bad". */}
+                <ReferenceArea
+                  y1={dangerFloor}
+                  y2={0}
+                  fill="var(--zo-danger)"
+                  fillOpacity={0.05}
+                  ifOverflow="extendDomain"
+                />
+                <XAxis
+                  dataKey="label"
+                  {...AXIS}
+                  interval={0}
+                  height={44}
+                  tick={<WeekTick />}
+                />
+                <YAxis {...AXIS} width={62} tickFormatter={(v: number) => compact(v)} />
+                <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+                <ReferenceLine y={0} stroke="var(--zo-text)" strokeWidth={1.4} />
+                <Bar dataKey="committed" stackId="in" name="Already invoiced" fill="var(--zo-teal)" maxBarSize={30} isAnimationActive={false} />
+                <Bar dataKey="forecast" stackId="in" name="Not billed yet" fill="var(--zo-coral)" radius={[4, 4, 0, 0]} maxBarSize={30} isAnimationActive={false} />
+                {/* [4,4,0,0], not [0,0,4,4]. Recharts applies the radius array as though
+                    every bar grew upward, so on a downward bar it rounds the $0 end and
+                    squares off the far end — the opposite of what a bar hanging from the
+                    axis should look like. */}
+                <Bar dataKey="outflow" name="Going out" fill="#8095b3" radius={[4, 4, 0, 0]} maxBarSize={30} isAnimationActive={false} />
+                <Line
+                  dataKey="balance"
+                  name="Cash balance"
+                  stroke="var(--zo-text)"
+                  strokeWidth={2.2}
+                  isAnimationActive={false}
+                  dot={{ r: 3.5, fill: "var(--zo-card-bg)", stroke: "var(--zo-text)", strokeWidth: 2 }}
+                  activeDot={{ r: 5 }}
+                />
+                {/* The one week worth naming on the chart itself. */}
+                {cash?.trough ? (
+                  <ReferenceDot
+                    x={weeks[Math.min(cash.trough.week, weeks.length) - 1]?.label}
+                    y={cash.trough.amount}
+                    r={5}
+                    fill="var(--zo-primary)"
+                    stroke="var(--zo-card-bg)"
+                    strokeWidth={2}
+                    isFront
+                  />
+                ) : null}
+              </ComposedChart>
+            </ResponsiveContainer>
+            {plain?.cash ? (
+              <p className="qb-takeaway">
+                <span className="qb-takeaway-mark" aria-hidden>
+                  <TrendingUp size={15} />
+                </span>
+                <span>{plain.cash}</span>
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <Empty>No cash forecast in the latest run.</Empty>
+        )}
+      </Panel>
+
+      <Panel
+        title={`Income for all of ${data.year}`}
+        meta={pyYear ? `${usd(pyYear.ytd)} earned so far` : undefined}
+        hint="Two different ways of estimating the same thing. When they agree, you can trust the figure. When they drift apart, treat it as a range."
+      >
+        {llmYear || pyYear ? (
+          <>
+            <div className="qb-two">
+              {llmYear ? (
+                <Figure
+                  label="Our best estimate"
+                  metric="booked"
+                  value={usd(llmYear.point)}
+                  sub={llmYear.confidence ? CONFIDENCE_WORDS[llmYear.confidence] : undefined}
+                />
+              ) : null}
+              {pyYear ? (
+                <Figure
+                  label="If the rest of the year matches"
+                  metric="income"
+                  value={usd(pyYear.point)}
+                  sub={`based on your first ${pyYear.months_booked} months`}
+                />
+              ) : null}
+            </div>
+            {divergence != null ? (
+              <Note>
+                {divergence >= _DIVERGENCE_PCT ? (
+                  <>
+                    <strong>These two answers are {Math.round(divergence)}% apart.</strong>{" "}
+                    Treat the year as a range rather than a single figure for now.
+                  </>
+                ) : (
+                  <>Both ways of working this out give a similar answer.</>
+                )}
+              </Note>
+            ) : null}
+            {plain?.year ? <Note>{plain.year}</Note> : null}
+          </>
+        ) : (
+          <Empty>No revenue forecast in the latest run.</Empty>
+        )}
+      </Panel>
+
+      {plain?.watch ? (
+        <Panel title="What to keep an eye on">
+          <p className="qb-watch">{plain.watch}</p>
+        </Panel>
+      ) : null}
+      {f.llm_stale ? (
+        <Note>
+          These estimates were last updated {f.llm_as_of ?? "earlier"}. Last night&rsquo;s
+          update did not run, so they are older than the rest of this page.
+        </Note>
+      ) : null}
+      {/* `month_omitted_reason` is deliberately not rendered. It explains to a
+          developer why there is no monthly figure; on the tab it reads as an
+          apology for something the reader never asked for. The reason stays in
+          the API payload so nobody adds a monthly forecast back without meeting
+          it first. */}
+    </>
   );
 }
 
@@ -856,6 +1169,11 @@ export function QuickBooksPanels() {
                 )}
               </Panel>
             </div>
+          </TabsContent>
+
+          {/* ── forecast ── */}
+          <TabsContent value="forecast" className="qb-view">
+            <ForecastView data={data} />
           </TabsContent>
             </>
           ) : null}

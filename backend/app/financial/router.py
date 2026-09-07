@@ -51,6 +51,8 @@ from app.financial.qb_repository import list_customers
 from app.financial.qb_panels_from_db import list_invoices
 from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
+from app.financial.qb_forecast_llm import SOURCE as QB_FORECAST_SOURCE
+from app.financial.qb_forecast import forecast as build_forecast_panel
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -1295,6 +1297,26 @@ async def link_client_map(payload: ClientMapLinkBody):
     return result
 
 
+@router.post("/client-map/sync")
+async def client_map_sync(request: Request):
+    """Nightly: seed tags from sheet, then exact/tag/AI link. Cron-secret only."""
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning("operation=client_map_sync status=unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    logger.info("operation=client_map_sync status=started")
+    imported = import_tags_sheet()
+    linked = await run_client_map_link(include_ai=True)
+    result = {"import": imported, "link": linked}
+    logger.info(
+        "operation=client_map_sync status=completed inserted=%s confirmed=%s suggested=%s",
+        imported.get("inserted"),
+        linked.get("confirmed"),
+        linked.get("suggested"),
+    )
+    return result
+
+
 @router.get("/agency/overview")
 def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
     payload = build_agency_overview(year=year)
@@ -1599,6 +1621,8 @@ _QB_PANEL_KEYS = (
     "client_profitability",
     "monthly_trend",
     "pl_summary",
+    "cost_completeness",
+    "forecast",
     "unattached_cost",
     "activity",
     "cash_collections",
@@ -1749,7 +1773,96 @@ def quickbooks_overview(
             refresh,
             since is not None,
         )
+    result["forecast"] = _merge_llm_forecast(
+        _forecast_panel_or_compute(result, realm_id),
+        realm_id,
+    )
     return result
+
+
+def _forecast_panel_or_compute(
+    overview: dict[str, Any], realm_id: str
+) -> dict[str, Any] | None:
+    """Use the cached forecast panel, or rebuild it from monthly_trend.
+
+    Caches written before the forecast panel shipped have no `forecast` key.
+    Recomputing from the trend already on the overview avoids a full Intuit
+    sync just to unblank the tab; the next nightly write stores it again.
+    """
+    panel = overview.get("forecast")
+    if isinstance(panel, dict):
+        return panel
+    trend = overview.get("monthly_trend")
+    year = overview.get("year")
+    if not isinstance(trend, dict) or not isinstance(year, int):
+        return None
+    as_of_raw = overview.get("as_of")
+    try:
+        as_of = (
+            date.fromisoformat(str(as_of_raw)[:10])
+            if as_of_raw
+            else date.today()
+        )
+    except ValueError:
+        as_of = date.today()
+    try:
+        rebuilt = build_forecast_panel(
+            realm_id, year, as_of=as_of, monthly_trend=trend
+        )
+    except Exception as exc:  # noqa: BLE001 — blank tab is worse than a soft miss
+        logger.warning(
+            "operation=quickbooks_overview status=forecast_recompute_failed "
+            "realm_id=%s year=%s error=%s",
+            realm_id,
+            year,
+            str(exc)[:200],
+        )
+        return None
+    logger.info(
+        "operation=quickbooks_overview status=forecast_recomputed "
+        "realm_id=%s year=%s",
+        realm_id,
+        year,
+    )
+    return rebuilt
+
+
+def _merge_llm_forecast(
+    panel: dict[str, Any] | None, realm_id: str
+) -> dict[str, Any] | None:
+    """Attach the model's forecasts to the Python ones under a single key.
+
+    Kept out of `build_overview` because the model runs after the panel cache is
+    written — it forecasts from the same numbers the tab shows, which it could
+    not do if it ran inside the build. Merging here means the frontend makes one
+    request and reads one shape.
+
+    A lookup failure, a missing table, or a night the model produced nothing all
+    leave `llm` as None. The Python year and quarter figures still render, which
+    is the whole reason they are computed separately.
+    """
+    if panel is None:
+        return None
+    try:
+        row = get_latest_insight(QB_FORECAST_SOURCE, realm_id)
+    except Exception as exc:  # noqa: BLE001 — a missing table must not blank the tab
+        logger.warning(
+            "operation=quickbooks_overview status=forecast_lookup_failed "
+            "realm_id=%s error=%s",
+            realm_id,
+            str(exc)[:200],
+        )
+        return {**panel, "llm": None}
+    payload = (row or {}).get("payload") or {}
+    return {
+        **panel,
+        "llm": payload or None,
+        "llm_as_of": (row or {}).get("as_of"),
+        "llm_model": (row or {}).get("model"),
+        # The model forecasts nightly; a stale stamp means last night's run
+        # failed and the reader is looking at an older view than the ledger.
+        "llm_stale": bool(row) and (row or {}).get("as_of") != _today_iso(),
+    }
 
 
 def _today_iso() -> str:

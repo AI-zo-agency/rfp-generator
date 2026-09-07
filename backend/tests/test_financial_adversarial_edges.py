@@ -245,6 +245,7 @@ def test_chat_rejects_oversized_message_before_llm(source, monkeypatch):
     [
         "/quickbooks/sync",
         "/teamwork/sync",
+        "/client-map/sync",
         "/agency/ai-insights/snapshot",
         "/agency/ai-insights/generate",
     ],
@@ -260,6 +261,7 @@ def test_cron_routes_reject_missing_secret(path, monkeypatch):
     [
         "/quickbooks/sync",
         "/teamwork/sync",
+        "/client-map/sync",
         "/agency/ai-insights/snapshot",
         "/agency/ai-insights/generate",
     ],

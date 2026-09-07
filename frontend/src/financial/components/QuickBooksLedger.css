@@ -2799,3 +2799,76 @@ a.tw-task-card__name:hover {
   .agency-resolve-button { transition: none; }
   .agency-resolve-button:active:not(:disabled) { transform: none; }
 }
+
+/* The one sentence the reader should act on. Larger than a note and given its
+   own panel, because burying it in body copy is how it gets skipped. */
+.qb-watch {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--zo-text);
+}
+
+/* ── forecast chart ────────────────────────────────────────────────────── */
+
+/* The one figure worth reading before the chart itself. */
+.qb-subhead {
+  display: block;
+  width: 100%;
+  font-size: 15px;
+  color: var(--zo-text-muted);
+}
+
+.qb-subhead strong {
+  font-weight: 650;
+  color: var(--zo-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A line, not a block — the balance is a line on the chart and the legend
+   should say so without the reader having to work it out. */
+.qb-swatch-line {
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--zo-text);
+}
+
+/* Week number over date. The prose says "week 2"; the reader thinks "which
+   week is that?" — both labels answer at once. */
+.qb-tick-week {
+  fill: var(--zo-text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.qb-tick-date {
+  fill: var(--zo-text-muted);
+  font-size: 11px;
+}
+
+/* The sentence under the chart. Given a mark and more weight than a footnote
+   because it is the part most readers will actually read. */
+.qb-takeaway {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin: 16px 0 0;
+  padding-top: 15px;
+  border-top: 1px solid var(--zo-border);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--zo-text-secondary);
+}
+
+.qb-takeaway-mark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  color: var(--zo-white);
+  background: var(--zo-teal);
+}

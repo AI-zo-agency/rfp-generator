@@ -113,6 +113,28 @@ def test_teamwork_job_is_staggered_before_quickbooks():
     assert job.timeout_seconds == 600
 
 
+def test_client_map_job_runs_after_quickbooks():
+    job = scheduler_jobs.job_by_id("client_map_nightly")
+    assert job is not None
+    assert job.cron == "15 23 * * *"
+    assert job.timezone == "America/Los_Angeles"
+    assert job.method == "POST"
+    assert job.path == "/api/v1/financials/client-map/sync"
+    assert job.body is None
+    assert job.timeout_seconds == 600
+
+
+def test_build_scheduler_registers_client_map_job():
+    scheduler = build_scheduler(
+        _settings(
+            scheduler_backend_url="http://127.0.0.1:8001",
+            scheduler_timezone="America/Los_Angeles",
+            quickbooks_cron_secret="s3cret",
+        )
+    )
+    assert scheduler.get_job("client_map_nightly") is not None
+
+
 def test_scheduler_settings_defaults():
     assert Settings.model_fields["scheduler_backend_url"].default == (
         "http://127.0.0.1:8001"

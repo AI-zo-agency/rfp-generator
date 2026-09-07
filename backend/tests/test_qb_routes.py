@@ -95,6 +95,58 @@ def test_overview_reads_cache_not_qbo(monkeypatch):
     query.assert_not_called()
 
 
+def test_overview_recomputes_forecast_when_cache_lacks_it(monkeypatch):
+    monkeypatch.setattr(
+        "app.financial.router.settings.quickbooks_realm_id",
+        "r1",
+    )
+    cache = {
+        "payload": {
+            "year": 2026,
+            "errors": {},
+            "monthly_trend": {"months": [{"amount": 100}]},
+        },
+        "as_of": "2026-09-07",
+        "computed_at": "2026-09-07T06:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        "app.financial.router.get_panel_cache",
+        lambda realm, year: cache,
+    )
+    monkeypatch.setattr(
+        "app.financial.router.get_sync_state",
+        lambda realm: {
+            "last_success_at": "2026-09-07T06:00:00+00:00",
+            "last_error": None,
+            "backfill_completed_at": "x",
+        },
+    )
+    monkeypatch.setattr(
+        "app.financial.router.build_forecast_panel",
+        lambda realm_id, year, *, as_of, monthly_trend: {
+            "as_of": as_of.isoformat(),
+            "year": {"point": 1200},
+            "quarter": None,
+            "billing_gaps": {"clients": []},
+        },
+    )
+    monkeypatch.setattr(
+        "app.financial.router.get_latest_insight",
+        lambda source, scope: {
+            "as_of": "2026-09-03",
+            "model": "test-model",
+            "payload": {"cash_13w": {"weeks": []}, "year": {"point": 1100}},
+        },
+    )
+
+    response = client.get("/api/v1/financials/quickbooks/overview?year=2026")
+    assert response.status_code == 200
+    forecast = response.json()["forecast"]
+    assert forecast["year"]["point"] == 1200
+    assert forecast["llm"]["year"]["point"] == 1100
+    assert forecast["llm_as_of"] == "2026-09-03"
+
+
 def test_overview_missing_cache_returns_null_panels(monkeypatch):
     monkeypatch.setattr(
         "app.financial.router.settings.quickbooks_realm_id",

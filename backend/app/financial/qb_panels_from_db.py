@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from app.financial import qb_repository as repo
 from app.financial.qb_cost_completeness import cost_completeness
+from app.financial.qb_forecast import forecast
 from app.financial.qb_map import params_hash
 from app.financial.quickbooks import (
     AGING_BUCKETS,
@@ -1222,6 +1223,10 @@ def build_overview(
         # Reads panels["monthly_trend"], so it must stay after it: jobs run in
         # insertion order and a failed trend leaves this one to degrade on None.
         "cost_completeness": lambda: cost_completeness(
+            realm_id, year, as_of=as_of, monthly_trend=panels.get("monthly_trend")
+        ),
+        # Same ordering rule as cost_completeness: reads the trend built above.
+        "forecast": lambda: forecast(
             realm_id, year, as_of=as_of, monthly_trend=panels.get("monthly_trend")
         ),
         "unattached_cost": lambda: unattached_cost(realm_id, year),
