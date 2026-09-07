@@ -61,6 +61,29 @@ def test_sync_lease_conflict_409(monkeypatch):
     assert response.status_code == 409
 
 
+def test_refresh_runs_auto_sync_without_cron_secret(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "app.financial.router.run_sync",
+        lambda mode="auto": calls.append(mode) or {"status": "success", "mode": "nightly", "run_id": "r1"},
+    )
+    response = client.post("/api/v1/financials/quickbooks/refresh")
+    assert response.status_code == 200
+    assert response.json()["mode"] == "nightly"
+    assert calls == ["auto"]
+
+
+def test_refresh_lease_conflict_409(monkeypatch):
+    from app.financial.qb_sync import LeaseHeld
+
+    monkeypatch.setattr(
+        "app.financial.router.run_sync",
+        lambda mode="auto": (_ for _ in ()).throw(LeaseHeld("busy")),
+    )
+    response = client.post("/api/v1/financials/quickbooks/refresh")
+    assert response.status_code == 409
+
+
 def test_overview_reads_cache_not_qbo(monkeypatch):
     monkeypatch.setattr(
         "app.financial.router.settings.quickbooks_realm_id",

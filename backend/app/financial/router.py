@@ -1657,6 +1657,23 @@ def _cron_authorized(secret: str | None) -> bool:
     return compare_digest(secret, expected)
 
 
+def _run_quickbooks_sync(mode: str, *, operation: str) -> dict[str, str]:
+    """Shared entry for cron and the ledger Refresh button."""
+    logger.info("operation=%s mode=%s status=started", operation, mode)
+    try:
+        result = run_sync(mode)
+    except LeaseHeld as exc:
+        logger.warning("operation=%s mode=%s status=lease_held", operation, mode)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "operation=%s mode=%s status=completed run_id=%s",
+        operation,
+        result.get("mode", mode),
+        result.get("run_id"),
+    )
+    return result
+
+
 @router.post("/quickbooks/sync")
 def quickbooks_sync(
     request: Request,
@@ -1669,22 +1686,17 @@ def quickbooks_sync(
             mode,
         )
         raise HTTPException(status_code=401, detail="Invalid cron secret")
+    return _run_quickbooks_sync(mode, operation="quickbooks_sync")
 
-    logger.info("operation=quickbooks_sync mode=%s status=started", mode)
-    try:
-        result = run_sync(mode)
-    except LeaseHeld as exc:
-        logger.warning(
-            "operation=quickbooks_sync mode=%s status=lease_held",
-            mode,
-        )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    logger.info(
-        "operation=quickbooks_sync mode=%s status=completed run_id=%s",
-        result.get("mode", mode),
-        result.get("run_id"),
-    )
-    return result
+
+@router.post("/quickbooks/refresh")
+def quickbooks_refresh():
+    """Ledger UI Refresh — same `run_sync(auto)` path the nightly cron uses.
+
+    Open like ai-insights/regenerate (internal financial dashboard). Cron
+    continues to hit `/quickbooks/sync` with the secret.
+    """
+    return _run_quickbooks_sync("auto", operation="quickbooks_refresh")
 
 
 @router.post("/quickbooks/forecast/monthly/backfill")

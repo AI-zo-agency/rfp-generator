@@ -406,11 +406,16 @@ const CONFIDENCE_WORDS: Record<string, string> = {
  * earns the right to be the single number, and their disagreement is the most
  * honest confidence signal available.
  */
-function ForecastView({ data }: { data: QuickBooksOverview }) {
+function ForecastView({
+  data,
+  grain,
+}: {
+  data: QuickBooksOverview;
+  grain: "weekly" | "monthly";
+}) {
   const f = data.forecast;
   const currentYear = new Date().getFullYear();
   const isPastYear = data.year < currentYear;
-  const [grain, setGrain] = useState<"weekly" | "monthly">("weekly");
 
   if (!f) return <Empty>No forecast yet — it is built during the nightly sync.</Empty>;
 
@@ -418,28 +423,10 @@ function ForecastView({ data }: { data: QuickBooksOverview }) {
     return <MonthlyScorecard year={data.year} monthly={f.monthly ?? null} past />;
   }
 
-  return (
-    <>
-      <div className="qb-toolbar-actions" style={{ marginBottom: 12, justifyContent: "flex-start" }}>
-        <ToggleGroup
-          type="single"
-          value={grain}
-          onValueChange={(v) => {
-            if (v === "weekly" || v === "monthly") setGrain(v);
-          }}
-          className="qb-years"
-          aria-label="Forecast grain"
-        >
-          <ToggleGroupItem value="weekly">Weekly cash</ToggleGroupItem>
-          <ToggleGroupItem value="monthly">Monthly revenue</ToggleGroupItem>
-        </ToggleGroup>
-      </div>
-      {grain === "weekly" ? (
-        <WeeklyCashForecast data={data} />
-      ) : (
-        <MonthlyScorecard year={data.year} monthly={f.monthly ?? null} past={false} />
-      )}
-    </>
+  return grain === "weekly" ? (
+    <WeeklyCashForecast data={data} />
+  ) : (
+    <MonthlyScorecard year={data.year} monthly={f.monthly ?? null} past={false} />
   );
 }
 
@@ -854,20 +841,23 @@ export function QuickBooksPanels() {
   const years = [currentYear, currentYear - 1, currentYear - 2];
   const [year, setYear] = useState(currentYear);
   const [view, setView] = useState<string>("today");
+  const [grain, setGrain] = useState<"weekly" | "monthly">("weekly");
   const [data, setData] = useState<QuickBooksOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (y: number) => {
+  const load = useCallback(async (y: number, opts?: { soft?: boolean }) => {
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
     setLoading(true);
     setError(null);
     // Drop the previous year immediately so stale totals cannot linger
-    // while the overview request is in flight.
-    setData(null);
+    // while the overview request is in flight — unless this is a soft
+    // reload after sync, where keeping the old panel is less jarring.
+    if (!opts?.soft) setData(null);
     try {
       const res = await fetch(
         `${API_BASE}/api/v1/financials/quickbooks/overview?year=${y}`,
@@ -884,6 +874,26 @@ export function QuickBooksPanels() {
       if (!ac.signal.aborted) setLoading(false);
     }
   }, []);
+
+  const refresh = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/financials/quickbooks/refresh`, {
+        method: "POST",
+      });
+      if (res.status === 409) {
+        throw new Error("A sync is already running — try again in a minute.");
+      }
+      if (!res.ok) throw new Error(`Sync returned ${res.status}`);
+      await load(year, { soft: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not refresh QuickBooks");
+    } finally {
+      setSyncing(false);
+    }
+  }, [load, syncing, year]);
 
   useEffect(() => {
     void load(year);
@@ -905,25 +915,28 @@ export function QuickBooksPanels() {
   const managers = am?.managers.filter((m) => !m.is_overhead && m.income > 0) ?? [];
   const managerMax = Math.max(...managers.map((m) => m.income), 1);
   const bookedRows = trend ? trimTrailing(trend.months, (m) => m.amount > 0) : [];
-  const syncFailed = !loading && data?.sync_status === "failed";
+  const busy = loading || syncing;
+  const syncFailed = !busy && data?.sync_status === "failed";
   let syncLabel = "Synced";
-  if (loading) syncLabel = `Reading ${year}…`;
+  if (syncing) syncLabel = "Syncing ledger…";
+  else if (loading) syncLabel = `Reading ${year}…`;
   else if (syncFailed) syncLabel = "Sync failed";
+  const showForecastGrain = view === "forecast" && year === currentYear;
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="qb-ledger" aria-busy={loading || undefined}>
+      <div className="qb-ledger" aria-busy={busy || undefined}>
         <div className="qb-toolbar">
           <p className="qb-sync" data-failed={syncFailed ? "true" : undefined}>
-            <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
+            <span className="qb-sync-dot" data-busy={busy ? "true" : undefined} aria-hidden />
             {syncLabel}
-            {!loading && data?.synced_at ? (
+            {!busy && data?.synced_at ? (
               <span className="qb-sync-meta">{new Date(data.synced_at).toLocaleString()}</span>
             ) : null}
-            {!loading && data?.company ? (
+            {!busy && data?.company ? (
               <span className="qb-sync-meta">{data.company.legal_name}</span>
             ) : null}
-            {!loading && data?.activity ? (
+            {!busy && data?.activity ? (
               <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
             ) : null}
           </p>
@@ -941,13 +954,28 @@ export function QuickBooksPanels() {
                 <span className="qb-ai-trigger-count">{insights.highImpact}</span>
               ) : null}
             </button>
+            <button
+              type="button"
+              className="qb-retry"
+              onClick={() => void refresh()}
+              disabled={busy}
+              data-active={syncing ? "true" : undefined}
+            >
+              <RefreshCw
+                className={syncing ? "animate-spin" : undefined}
+                size={13}
+                strokeWidth={2.25}
+                aria-hidden
+              />
+              Refresh
+            </button>
             <ToggleGroup
               type="single"
               value={String(year)}
               onValueChange={(v) => v && setYear(Number(v))}
               className="qb-years"
               aria-label="Fiscal year"
-              aria-busy={loading || undefined}
+              aria-busy={busy || undefined}
             >
               {years.map((y) => (
                 <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
@@ -959,24 +987,54 @@ export function QuickBooksPanels() {
         </div>
 
         <Tabs value={view} onValueChange={setView} className="qb-tabs">
-          <TabsList className="qb-tablist">
-            {VIEWS.map((v) => (
-              <TabsTrigger key={v.id} value={v.id}>
-                {v.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <div className="qb-tabs-head">
+            <TabsList className="qb-tablist">
+              {VIEWS.map((v) => (
+                <TabsTrigger key={v.id} value={v.id}>
+                  {v.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {showForecastGrain ? (
+              <ToggleGroup
+                type="single"
+                value={grain}
+                onValueChange={(v) => {
+                  if (v === "weekly" || v === "monthly") setGrain(v);
+                }}
+                className="qb-years"
+                aria-label="Forecast grain"
+              >
+                <ToggleGroupItem value="weekly">Weekly cash</ToggleGroupItem>
+                <ToggleGroupItem value="monthly">Monthly revenue</ToggleGroupItem>
+              </ToggleGroup>
+            ) : null}
+          </div>
 
-          {loading ? <LedgerSkeleton /> : null}
-          {!loading && (error || !data) ? (
+          {loading && !data ? <LedgerSkeleton /> : null}
+          {!loading && error ? (
             <div className="qb-error">
-              <p>{error ?? "No QuickBooks data"}</p>
+              <p>{error}</p>
+              <button
+                type="button"
+                onClick={() => void (data ? refresh() : load(year))}
+                className="qb-retry"
+                disabled={busy}
+              >
+                <RefreshCw size={13} strokeWidth={2.25} aria-hidden />
+                {data ? "Retry sync" : "Try again"}
+              </button>
+            </div>
+          ) : null}
+          {!loading && !error && !data ? (
+            <div className="qb-error">
+              <p>No QuickBooks data</p>
               <button type="button" onClick={() => void load(year)} className="qb-retry">
                 <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
               </button>
             </div>
           ) : null}
-          {!loading && data ? (
+          {data ? (
             <>
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
@@ -1358,7 +1416,7 @@ export function QuickBooksPanels() {
 
           {/* ── forecast ── */}
           <TabsContent value="forecast" className="qb-view">
-            <ForecastView data={data} />
+            <ForecastView data={data} grain={grain} />
           </TabsContent>
             </>
           ) : null}

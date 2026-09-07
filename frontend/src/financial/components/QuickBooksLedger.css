@@ -475,6 +475,24 @@ html.fin-lock main .text-\[10px\] {
   gap: 0;
 }
 
+.qb-tabs-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  border-bottom: 1px solid var(--zo-border);
+}
+
+.qb-tabs-head .qb-tablist {
+  border-bottom: 0;
+  min-width: 0;
+}
+
+.qb-tabs-head .qb-years {
+  margin-bottom: 4px;
+}
+
 .qb-tablist {
   display: flex;
   justify-content: flex-start;
@@ -647,6 +665,58 @@ html.fin-lock main .text-\[10px\] {
 
 .qb-panel-action {
   margin-left: auto;
+}
+
+.mapping-create-pop {
+  border-color: var(--zo-border);
+  background: var(--zo-card-bg);
+  color: var(--zo-text);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+.mapping-create-form {
+  display: grid;
+  gap: 10px;
+}
+
+.mapping-create-form__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--zo-text-secondary);
+}
+
+.mapping-create-form__field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--zo-text-muted);
+}
+
+.mapping-create-form__field .h-11 {
+  height: 2.5rem;
+  min-width: 0;
+  width: 100%;
+  font-size: 14px;
+}
+
+.mapping-create-form__internal {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--zo-text-secondary);
+}
+
+.mapping-create-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--zo-border);
 }
 
 .qb-caveat {

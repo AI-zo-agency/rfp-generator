@@ -309,28 +309,63 @@ function CreateClientForm({
   busy: boolean;
   onCreate: (patch: ClientMapCorePatch) => Promise<unknown>;
 }) {
+  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(emptyRow);
+
+  const setOpenAndReset = (next: boolean) => {
+    setOpen(next);
+    if (!next) setDraft(emptyRow());
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft.tag_code.trim() || !draft.client_name.trim()) return;
     await onCreate(draft);
-    setDraft(emptyRow());
+    setOpenAndReset(false);
   };
 
   return (
-    <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void submit(event)}>
-      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Tag<input className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} required /></label>
-      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Client<input className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} required /></label>
-      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">AM<input className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></label>
-      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Status<input className={INPUT} value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} /></label>
-      <InternalFlag
-        className="mb-2 inline-flex items-center gap-2 text-base text-[var(--zo-text-secondary)]"
-        checked={draft.is_internal}
-        onChange={(is_internal) => setDraft({ ...draft, is_internal })}
-      />
-      <button type="submit" className="qb-retry" disabled={busy}>Add client</button>
-    </form>
+    <Popover open={open} onOpenChange={setOpenAndReset}>
+      <PopoverTrigger asChild>
+        <button type="button" className="qb-retry" disabled={busy}>
+          Add client
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" sideOffset={8} className="mapping-create-pop w-[min(22rem,calc(100vw-2rem))] p-3">
+        <form className="mapping-create-form" onSubmit={(event) => void submit(event)}>
+          <p className="mapping-create-form__title">New client</p>
+          <label className="mapping-create-form__field">
+            Tag
+            <input className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} autoFocus required />
+          </label>
+          <label className="mapping-create-form__field">
+            Client
+            <input className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} required />
+          </label>
+          <label className="mapping-create-form__field">
+            AM
+            <input className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} />
+          </label>
+          <label className="mapping-create-form__field">
+            Status
+            <input className={INPUT} value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} />
+          </label>
+          <InternalFlag
+            className="mapping-create-form__internal"
+            checked={draft.is_internal}
+            onChange={(is_internal) => setDraft({ ...draft, is_internal })}
+          />
+          <div className="mapping-create-form__actions">
+            <button type="button" className="mapping-action" onClick={() => setOpenAndReset(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="mapping-action mapping-action--primary" disabled={busy || !draft.tag_code.trim() || !draft.client_name.trim()}>
+              Save client
+            </button>
+          </div>
+        </form>
+      </PopoverContent>
+    </Popover>
   );
 }
 
