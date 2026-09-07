@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import fs from "fs";
 import path from "path";
 
@@ -12,7 +12,19 @@ export interface AuthContext {
   context: BrowserContext;
 }
 
-async function isLoginPage(page: import("playwright").Page): Promise<boolean> {
+export function invalidateSession(): boolean {
+  if (!fs.existsSync(SESSION_PATH)) return false;
+  try {
+    fs.unlinkSync(SESSION_PATH);
+    console.log(`[justwin-sync] cleared stale session at ${SESSION_PATH}`);
+    return true;
+  } catch (err) {
+    console.warn(`[justwin-sync] could not clear session:`, err);
+    return false;
+  }
+}
+
+async function isLoginPage(page: Page): Promise<boolean> {
   const url = page.url();
   if (url.includes("/login") || url.includes("/sign")) {
     return true;
@@ -25,7 +37,7 @@ async function isLoginPage(page: import("playwright").Page): Promise<boolean> {
   return emailInputs > 0 && passwordInputs > 0;
 }
 
-async function performLogin(page: import("playwright").Page): Promise<void> {
+async function performLogin(page: Page): Promise<void> {
   const email = process.env.JUSTWIN_EMAIL;
   const password = process.env.JUSTWIN_PASSWORD;
   if (!email || !password) {
@@ -54,38 +66,100 @@ async function performLogin(page: import("playwright").Page): Promise<void> {
   await page.waitForTimeout(2000);
 }
 
-export async function getAuthenticatedContext(): Promise<AuthContext> {
+async function openLeads(context: BrowserContext): Promise<Page> {
+  const page = await context.newPage();
+  await page.goto(`${BASE_URL}/leads`, {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+  await page.waitForTimeout(2500);
+  return page;
+}
+
+export async function getAuthenticatedContext(
+  options: { forceFresh?: boolean } = {}
+): Promise<AuthContext> {
+  const forceFresh = Boolean(options.forceFresh);
+  if (forceFresh) invalidateSession();
+
   const browser = await chromium.launch({
     headless: process.env.HEADLESS !== "false",
   });
 
+  let usedSavedSession = fs.existsSync(SESSION_PATH) && !forceFresh;
   let context: BrowserContext;
-  if (fs.existsSync(SESSION_PATH)) {
+  if (usedSavedSession) {
     const storage = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
     context = await browser.newContext({ storageState: storage });
   } else {
     context = await browser.newContext();
   }
 
-  const page = await context.newPage();
-  await page.goto(`${BASE_URL}/leads`, {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
+  let page = await openLeads(context);
 
   if (await isLoginPage(page)) {
+    if (usedSavedSession) {
+      console.warn(
+        "[justwin-sync] saved session expired — logging in again with credentials"
+      );
+      await page.close();
+      await context.close();
+      invalidateSession();
+      context = await browser.newContext();
+      page = await openLeads(context);
+    }
     await performLogin(page);
     fs.mkdirSync(path.dirname(SESSION_PATH), { recursive: true });
     await context.storageState({ path: SESSION_PATH });
   }
 
-  if (page.url().includes("/login")) {
+  if ((await isLoginPage(page)) || page.url().includes("/login")) {
     await browser.close();
-    throw new Error("JustWin login failed — still on login page");
+    throw new Error(
+      "JustWin login failed — still on login page. Check JUSTWIN_EMAIL / JUSTWIN_PASSWORD."
+    );
   }
 
   await page.close();
   return { browser, context };
+}
+
+export async function ensureAuthenticatedPage(
+  auth: AuthContext,
+  page: Page
+): Promise<{ auth: AuthContext; page: Page }> {
+  await page.waitForTimeout(1500);
+  if (!(await isLoginPage(page)) && !page.url().includes("/login")) {
+    return { auth, page };
+  }
+
+  console.warn(
+    "[justwin-sync] session lost after open — re-authenticating automatically"
+  );
+  try {
+    await page.close();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await auth.context.close();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await auth.browser.close();
+  } catch {
+    /* ignore */
+  }
+
+  const fresh = await getAuthenticatedContext({ forceFresh: true });
+  const next = await openLeads(fresh.context);
+  if ((await isLoginPage(next)) || next.url().includes("/login")) {
+    throw new Error(
+      "JustWin login failed after auto re-auth. Check JUSTWIN_EMAIL / JUSTWIN_PASSWORD."
+    );
+  }
+  return { auth: fresh, page: next };
 }
 
 export function getJustWinBaseUrl(): string {

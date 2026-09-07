@@ -50,6 +50,10 @@ ANTI-REPETITION:
 4. Do NOT re-copy Who We Are, FEIN/address/certs, full bios, or full case
    studies. One short cross-reference, then NEW detail only for THIS tab.
 5. Do NOT paraphrase another RFP tab (Approach ≠ Methodology rewrite).
+5b. ANTI-RFP-ECHO: Do NOT paraphrase the RFP, Opportunity Understanding, or
+   requirement checklists into the section body. Write the proposal answer only
+   (what we will do and prove). Never open with what the client asked for or
+   already built.
 
 ANTI-INVENTION (assets / diagrams / tools):
 6. Do NOT invent reporting dashboards, process diagrams, org charts, timeline

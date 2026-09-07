@@ -1085,20 +1085,41 @@ def format_qualifying_language_for_client(
     *,
     line_items: list | None = None,
     total: float | None = None,
+    suppress_mix_tables: bool = False,
 ) -> str:
-    """Turn Terms walls of dollars/percentages into headings, tables, and bullets."""
+    """Turn Terms walls of dollars/percentages into headings, tables, and bullets.
+
+    When ``suppress_mix_tables`` is True (Fee Detail by Phase is the canonical
+    breakdown), Investment Framing keeps short prose/bullets only — never a
+    Component|Share|Amount table that can disagree with the phase fee rollup.
+    """
     raw = _unstick_stacked_bullets(text or "").strip()
     if total and float(total) > 0:
         raw = _sync_year1_investment_phrase(raw, float(total))
     if not raw:
         return raw
-    ledger_table = _mix_table_from_line_items(line_items, total)
-    if _qualifying_language_already_scannable(raw) and not ledger_table:
+    ledger_table = (
+        ""
+        if suppress_mix_tables
+        else _mix_table_from_line_items(line_items, total)
+    )
+    if (
+        _qualifying_language_already_scannable(raw)
+        and not ledger_table
+        and not suppress_mix_tables
+    ):
+        return raw
+    if (
+        suppress_mix_tables
+        and _qualifying_language_already_scannable(raw)
+        and not _text_has_component_share_table(raw)
+    ):
         return raw
     parts: list[str] = []
     for title, body in _split_qualifying_blocks(raw):
         use_ledger = bool(
             ledger_table
+            and not suppress_mix_tables
             and (not title or title.casefold().startswith("investment"))
         )
         parts.append(
@@ -1106,6 +1127,7 @@ def format_qualifying_language_for_client(
                 title,
                 body,
                 ledger_table=ledger_table if use_ledger else None,
+                suppress_mix_tables=suppress_mix_tables,
             )
         )
     return "\n\n".join(p for p in parts if p.strip()) or raw
@@ -1114,16 +1136,21 @@ def format_qualifying_language_for_client(
 def reformat_budget_terms_in_markdown(content: str) -> str:
     """Rewrite a persisted ## Terms wall into tables + bullets without changing numbers."""
     text = content or ""
+    suppress = _text_has_fee_detail_heading(text)
     match = re.search(r"(?im)^##\s+Terms\s*$", text)
     if not match:
-        if re.search(r"(?i)investment framing", text) and "%" in text and "$" in text:
-            return format_qualifying_language_for_client(text)
+        if "investment framing" in text.casefold() and "%" in text and "$" in text:
+            return format_qualifying_language_for_client(
+                text, suppress_mix_tables=suppress
+            )
         return text
     start = match.end()
     next_h = re.search(r"(?im)^##\s+\S", text[start:])
     end = start + next_h.start() if next_h else len(text)
     body = text[start:end].strip()
-    formatted = format_qualifying_language_for_client(body)
+    formatted = format_qualifying_language_for_client(
+        body, suppress_mix_tables=suppress
+    )
     if formatted.strip() == body:
         return text
     suffix = text[end:]
@@ -1183,24 +1210,44 @@ def _format_qualifying_block(
     body: str,
     *,
     ledger_table: str | None = None,
+    suppress_mix_tables: bool = False,
 ) -> str:
     heading = f"### {title}" if title else ""
-    extracted, leftover = _extract_allocation_table(body)
-    if extracted or ledger_table:
+    if suppress_mix_tables:
+        # Fee Detail by Phase is authoritative — drop any Component|Share mix.
+        leftover = _strip_component_share_markdown_tables(body)
         leftover = _drop_percent_money_sentences(leftover)
         leftover = _drop_extraction_debris(leftover)
-        if ledger_table:
-            leftover = _drop_dollar_sentences(leftover)
-            year1 = _YEAR1_INVESTMENT_RE.search(body)
-            if year1 and "$" not in leftover:
-                leftover = (
-                    f"- {year1.group(0)} reflects the scope as understood at proposal stage.\n"
-                    f"{leftover}"
-                ).strip()
-    table_md = ledger_table or extracted
-    lead = _prose_to_qualifying_bullets(leftover)
+        table_md = None
+        lead = _prose_to_qualifying_bullets(leftover)
+        if (
+            title
+            and title.casefold().startswith("investment")
+            and not lead.strip()
+        ):
+            lead = (
+                "- Fees are organized by delivery phase in **Fee Detail by Phase** "
+                "below — that table is the fee breakdown."
+            )
+    else:
+        extracted, leftover = _extract_allocation_table(body)
+        if extracted or ledger_table:
+            leftover = _drop_percent_money_sentences(leftover)
+            leftover = _drop_extraction_debris(leftover)
+            if ledger_table:
+                leftover = _drop_dollar_sentences(leftover)
+                year1 = _YEAR1_INVESTMENT_RE.search(body)
+                if year1 and "$" not in leftover:
+                    leftover = (
+                        f"- {year1.group(0)} reflects the scope as understood at "
+                        f"proposal stage.\n{leftover}"
+                    ).strip()
+            table_md = ledger_table or extracted
+        else:
+            table_md = None
+        lead = _prose_to_qualifying_bullets(leftover)
     chunks = [heading, lead, table_md]
-    return "\n\n".join(c for c in chunks if c.strip())
+    return "\n\n".join(c for c in chunks if c and c.strip())
 
 
 def _allocation_rows_from_text(text: str) -> list[tuple[str, str, str, str, str]]:
@@ -1267,6 +1314,101 @@ def _allocation_table_markdown(rows: list[tuple[str, str, str, str]]) -> str:
     for label, pct, amt, note in rows:
         lines.append(f"| {label} | {pct} | {amt} | {note} |")
     return "\n".join(lines)
+
+
+def _markdown_pipe_cells(line: str) -> list[str]:
+    stripped = (line or "").strip()
+    if "|" not in stripped:
+        return []
+    return [c.strip() for c in stripped.strip("|").split("|")]
+
+
+def _is_component_share_header_line(line: str) -> bool:
+    cells = [c.casefold() for c in _markdown_pipe_cells(line)]
+    if len(cells) < 3:
+        return False
+    return "component" in cells and "share" in cells and "amount" in cells
+
+
+def _is_markdown_separator_row(line: str) -> bool:
+    cells = _markdown_pipe_cells(line)
+    if not cells:
+        return False
+    return all((not c) or set(c) <= set("-: ") for c in cells)
+
+
+def _heading_label(line: str) -> str:
+    plain = (line or "").strip()
+    while plain.startswith("#"):
+        plain = plain[1:].lstrip()
+    if plain.startswith("**") and plain.endswith("**"):
+        plain = plain[2:-2].strip()
+    return plain.casefold()
+
+
+def _text_has_fee_detail_heading(text: str) -> bool:
+    for line in (text or "").splitlines():
+        label = _heading_label(line)
+        if label.startswith("fee detail by phase") or label.startswith(
+            "supporting fee detail"
+        ):
+            return True
+    return False
+
+
+def _text_has_component_share_table(text: str) -> bool:
+    return any(_is_component_share_header_line(ln) for ln in (text or "").splitlines())
+
+
+def _strip_component_share_markdown_tables(text: str) -> str:
+    """Remove Component|Share|Amount mix tables via line structure (no regex)."""
+    if not text or "Component" not in text:
+        return text
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _is_component_share_header_line(lines[i]):
+            i += 1
+            if i < len(lines) and _is_markdown_separator_row(lines[i]):
+                i += 1
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                i += 1
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            if out and out[-1].strip():
+                out.append("")
+            continue
+        out.append(lines[i])
+        i += 1
+    cleaned = "\n".join(out)
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned.strip()
+
+
+def scrub_duplicate_budget_breakdown_tables(content: str) -> tuple[str, list[str]]:
+    """When Fee Detail by Phase exists, drop conflicting Investment Framing mix tables.
+
+    Both tables can independently sum to the same total while disagreeing on how
+    categories roll up (e.g. Creative+Sponsorship vs one phase line). Fee Detail
+    by Phase is the client-facing source of truth.
+    """
+    text = content or ""
+    logs: list[str] = []
+    if not text.strip():
+        return text, logs
+    if not _text_has_fee_detail_heading(text):
+        return text, logs
+    if not _text_has_component_share_table(text):
+        return text, logs
+    cleaned = _strip_component_share_markdown_tables(text)
+    if cleaned.strip() != text.strip():
+        logs.append(
+            "Removed Investment Framing Component|Share table — Fee Detail by Phase "
+            "is the sole fee breakdown"
+        )
+    return cleaned, logs
 
 
 def _mix_table_from_line_items(line_items: list | None, total: float | None) -> str:
@@ -1462,8 +1604,30 @@ def _scrub_internal_budget_jargon(text: str) -> str:
     out = re.sub(r"(?i), not agency revenue", "", out)
     out = re.sub(r"(?i)not agency revenue", "not professional fees", out)
     out = re.sub(r"\[PRICING FLAG:[^\]]+\]", "", out, flags=re.I)
+    out = _drop_internal_cost_mix_lines(out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+def _drop_internal_cost_mix_lines(text: str) -> str:
+    """Drop client-facing lines that leak the internal 50/30/20 cost mix."""
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        compact = "".join(line.casefold().split())
+        if (
+            "50%wages" in compact
+            and "30%g&a" in compact
+            and "20%profit" in compact
+        ):
+            continue
+        if (
+            "50%labor" in compact
+            and ("30%g&a" in compact or "30%overhead" in compact)
+            and ("20%profit" in compact or "20%margin" in compact)
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _client_deliverable_label(description: str) -> str:
@@ -1497,6 +1661,68 @@ def _md_cell(text: str) -> str:
     return cleaned or "—"
 
 
+def _no_em_dash(text: str) -> str:
+    """House rule: no em/en dashes in client-facing budget text.
+
+    A dash separating a label from its detail becomes a colon; anywhere else it
+    becomes a comma, so "Group 1 — Media Planning" reads "Group 1: Media
+    Planning" rather than losing the break entirely.
+    """
+    out = (text or "").replace("\u2014", "-").replace("\u2013", "-")
+    out = out.replace(" - ", ": ", 1) if " - " in out else out
+    return " ".join(out.replace(" - ", ", ").split())
+
+
+def _scope_sentence(phase: str, descs: list[str]) -> str:
+    """Readable scope prose, with the phase label not repeated in every item.
+
+    Each line item's description carries its own phase prefix; joined raw they
+    produced "Group 1 X - A; Group 1 X - B", restating the Phase column twice
+    in one cell. The prefix is only stripped when a SEPARATOR follows it (the
+    real shape: "Group 1 Media Planning & Advertising - Digital Campaign..."),
+    so an item that merely starts with the same word - "Brand guidelines" under
+    a "Brand" phase - keeps every word.
+    """
+
+    def _key(t: str) -> str:
+        # "&" vs "and" is the difference between the phase label and the line
+        # description on real data — without folding it the prefix survives and
+        # the Phase column gets restated inside every Scope cell.
+        return " ".join(
+            _no_em_dash(t).casefold().replace("&", "and").replace(":", " ").split()
+        )
+
+    phase_key = _key(phase)
+    cleaned: list[str] = []
+    for raw in descs:
+        d = _no_em_dash(raw).strip()
+        if phase_key:
+            # Walk the original string to the end of the phase prefix, comparing
+            # on normalised keys so "&"/"and" and spacing cannot desync it.
+            for cut in range(len(d), 0, -1):
+                if _key(d[:cut]) == phase_key:
+                    matched = d[:cut].rstrip()
+                    rest = d[cut:].lstrip()
+                    # The separator can sit on EITHER side: _no_em_dash already
+                    # rewrites " - " to ": ", and _key folds ":" to a space, so
+                    # the colon is often absorbed into the matched prefix.
+                    sep_after = rest[:1] in {":", ",", "-"}
+                    sep_inside = matched[-1:] in {":", ",", "-"}
+                    if sep_after or sep_inside:
+                        if sep_after:
+                            rest = rest[1:].strip()
+                        # Require real remaining content — never leave a fragment.
+                        if len(rest.split()) >= 2:
+                            d = rest
+                    break
+        d = d.rstrip(" .;")
+        if d and d not in cleaned:
+            cleaned.append(d)
+    if not cleaned:
+        return "Professional services"
+    return ". ".join(cleaned) + "."
+
+
 def _rollup_phase_fee_rows(
     budget: ProposalBudget,
 ) -> list[tuple[str, str, float | None]]:
@@ -1520,7 +1746,7 @@ def _rollup_phase_fee_rows(
         if kind == "client_passthrough" and not is_manual_fill:
             continue
         phase, desc = _client_line_label(item)
-        phase = _md_cell(phase)
+        phase = _md_cell(_no_em_dash(phase))
         bucket = buckets.get(phase)
         if bucket is None:
             bucket = {"descs": [], "amount": 0.0, "has_amount": False}
@@ -1538,9 +1764,9 @@ def _rollup_phase_fee_rows(
     for phase, data in buckets.items():
         descs = list(data["descs"])  # type: ignore[arg-type]
         if len(descs) > 4:
-            scope = f"{'; '.join(descs[:4])}; +{len(descs) - 4} more"
+            scope = _scope_sentence(phase, descs[:4]) + f" Plus {len(descs) - 4} more."
         else:
-            scope = "; ".join(descs) if descs else "Professional services"
+            scope = _scope_sentence(phase, descs)
         amount: float | None
         if data["has_amount"]:
             amount = round(float(data["amount"]), 2)
@@ -1621,17 +1847,143 @@ def _professional_zo_budget_framing(*, client_name: str = "") -> str:
     )
 
 
+# 00_Guide_Pricing.docx — marked USE VERBATIM. Do not paraphrase in Build Proposal.
+PRICING_GUIDE_VERBATIM_INVESTMENT_FRAMING = (
+    "zö agency works on a project-based fee schedule. We provide the cost for the "
+    "project and we abide by those terms as does our client. When we are your partner, "
+    "we work together to assess priorities and the overarching needs, timelines, and "
+    "message so that the budget is wisely allocated to the highest-priority objectives. "
+    "The following pricing represents estimates based on current information. Each "
+    "engagement is scoped in detail at kickoff to reflect final requirements."
+)
+PRICING_GUIDE_VERBATIM_SCOPE_PROTECTION = (
+    "Pricing reflects the scope as understood at proposal stage. As discovery progresses "
+    "and priorities sharpen, we will refine specific deliverables with your team. Any "
+    "material change in scope will be documented in a scope addendum before work proceeds."
+)
+PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES = (
+    "The following expenses will be billed at cost with prior approval: travel "
+    "(mileage at current IRS rate, lodging, meals); photography/videography location "
+    "fees and permits; specialized software licenses required for project-specific needs; "
+    "stock photography/video licensing beyond standard subscriptions."
+)
+PRICING_GUIDE_VERBATIM_REVISION_ROUNDS = (
+    "Standard engagement includes three rounds of review and revision on creative "
+    "deliverables. Additional rounds available at scope addendum."
+)
+
+_VERBATIM_ANCHORS = (
+    "we abide by those terms as does our client",
+    "as discovery progresses and priorities sharpen",
+    "mileage at current irs rate",
+    "photography/videography location fees and permits",
+)
+
+
 def _professional_zo_budget_terms() -> str:
+    """Pricing Guide USE VERBATIM Terms blocks (Investment / Scope / Reimbursables / Revisions)."""
     return (
         "### Investment Framing\n\n"
-        "- zö agency prices this work as defined project phases with clear deliverables "
-        "and predictable totals aligned to the RFP pricing table.\n\n"
+        f"{PRICING_GUIDE_VERBATIM_INVESTMENT_FRAMING}\n\n"
         "### Scope Protection\n\n"
-        "- Fees reflect the scope at proposal stage.\n"
-        "- Material scope changes are documented and approved in writing before additional fees apply.\n\n"
-        "### Reimbursables\n\n"
-        "- Approved travel and pass-through costs are billed at cost with prior written approval."
+        f"{PRICING_GUIDE_VERBATIM_SCOPE_PROTECTION}\n\n"
+        "### Reimbursable Expenses\n\n"
+        f"{PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES}\n\n"
+        "### Revision Rounds\n\n"
+        f"{PRICING_GUIDE_VERBATIM_REVISION_ROUNDS}"
     )
+
+
+def qualifying_language_has_pricing_guide_verbatim(text: str) -> bool:
+    blob = (text or "").casefold()
+    return all(anchor in blob for anchor in _VERBATIM_ANCHORS)
+
+
+def _additive_reimbursable_extras(qualifying_language: str) -> str:
+    """Keep RFP-specific reimbursable notes that sit alongside (not instead of) verbatim."""
+    raw = (qualifying_language or "").strip()
+    if not raw:
+        return ""
+    # Take the Reimbursable block body if headed; else whole string.
+    blocks = _split_qualifying_blocks(raw)
+    body = raw
+    for title, block_body in blocks:
+        label = (title or "").casefold()
+        if "reimburs" in label:
+            body = block_body
+            break
+    extras: list[str] = []
+    for para in re.split(r"\n{2,}", body):
+        chunk = para.strip().lstrip("-•* ").strip()
+        if not chunk:
+            continue
+        low = chunk.casefold()
+        if "mileage at current irs rate" in low:
+            continue
+        if "photography/videography location fees" in low:
+            continue
+        if chunk.casefold() == PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES.casefold():
+            continue
+        # Skip paraphrases of the standard categories sentence.
+        if (
+            "billed at cost" in low
+            and "travel" in low
+            and ("lodging" in low or "meals" in low)
+            and "software" in low
+        ):
+            continue
+        extras.append(chunk)
+    if not extras:
+        return ""
+    return "\n\n".join(extras)
+
+
+def force_pricing_guide_verbatim_qualifying_language(qualifying_language: str = "") -> str:
+    """Always ship Pricing Guide USE VERBATIM; append additive reimbursable notes only."""
+    extras = _additive_reimbursable_extras(qualifying_language)
+    reimbursable = PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES
+    if extras:
+        reimbursable = f"{reimbursable}\n\n{extras}"
+    return (
+        "### Investment Framing\n\n"
+        f"{PRICING_GUIDE_VERBATIM_INVESTMENT_FRAMING}\n\n"
+        "### Scope Protection\n\n"
+        f"{PRICING_GUIDE_VERBATIM_SCOPE_PROTECTION}\n\n"
+        "### Reimbursable Expenses\n\n"
+        f"{reimbursable}\n\n"
+        "### Revision Rounds\n\n"
+        f"{PRICING_GUIDE_VERBATIM_REVISION_ROUNDS}"
+    )
+
+
+def ensure_pricing_guide_verbatim_in_budget_markdown(content: str) -> str:
+    """Rewrite ## Terms (or bare qualifying blocks) to Pricing Guide USE VERBATIM."""
+    text = content or ""
+    if not text.strip():
+        return text
+    match = re.search(r"(?im)^##\s+Terms\s*$", text)
+    if match:
+        start = match.end()
+        next_h = re.search(r"(?im)^##\s+\S", text[start:])
+        end = start + next_h.start() if next_h else len(text)
+        body = text[start:end].strip()
+        forced = force_pricing_guide_verbatim_qualifying_language(body)
+        formatted = format_qualifying_language_for_client(
+            forced,
+            suppress_mix_tables=_text_has_fee_detail_heading(text),
+        )
+        suffix = text[end:]
+        joiner = "\n\n" if suffix.strip() else "\n"
+        return text[:start] + "\n\n" + formatted + joiner + suffix
+    if any(
+        h in text.casefold()
+        for h in ("investment framing", "scope protection", "reimbursable")
+    ):
+        if qualifying_language_has_pricing_guide_verbatim(text):
+            return text
+        # Whole-section qualifying language without a ## Terms wrapper.
+        return force_pricing_guide_verbatim_qualifying_language(text)
+    return text
 
 
 def normalize_fixed_pricing_narrative(
@@ -1646,13 +1998,10 @@ def normalize_fixed_pricing_narrative(
         return budget
     if not rfp_indicates_fixed_pricing_table(rfp_text):
         return budget
-    ql = _scrub_internal_budget_jargon(budget.qualifying_language or "")
+    ql = force_pricing_guide_verbatim_qualifying_language(
+        _scrub_internal_budget_jargon(budget.qualifying_language or "")
+    )
     scope = _scrub_internal_budget_jargon(budget.scope_summary or "")
-    if not ql.strip() or any(
-        token in (budget.qualifying_language or "").casefold()
-        for token in ("hourly", "00_guide", "pricing guide", "industry low", "industry average")
-    ):
-        ql = _professional_zo_budget_terms()
     if not scope.strip() or any(
         token in (budget.scope_summary or "").casefold()
         for token in ("hourly", "00_guide", "pricing guide", "industry low", "industry average")
@@ -1741,30 +2090,30 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
         scope = _scrub_unverified_benchmark_clients(scope)
         if scope != (cleaned.scope_summary or ""):
             updates["scope_summary"] = scope
-        if ql != (cleaned.qualifying_language or ""):
-            updates["qualifying_language"] = ql
+        # Pricing Guide USE VERBATIM — never ship paraphrased Terms from the LLM.
+        ql = force_pricing_guide_verbatim_qualifying_language(ql)
+        updates["qualifying_language"] = ql
         synced_scope = _sync_labeled_fee_subtotal(
             updates.get("scope_summary", cleaned.scope_summary or ""), fees
         )
-        synced_ql = _sync_labeled_fee_subtotal(
-            updates.get("qualifying_language", cleaned.qualifying_language or ""),
-            fees,
-        )
         if synced_scope != (updates.get("scope_summary", cleaned.scope_summary or "")):
             updates["scope_summary"] = synced_scope
-        if synced_ql != (
-            updates.get("qualifying_language", cleaned.qualifying_language or "")
-        ):
-            updates["qualifying_language"] = synced_ql
         formatted_ql = format_qualifying_language_for_client(
             updates.get("qualifying_language", cleaned.qualifying_language or ""),
             line_items=list(cleaned.line_items or []),
             total=display_total,
+            # Fee Detail by Phase is appended on render — never dual-publish a
+            # Component|Share mix that can disagree with the phase rollup.
+            suppress_mix_tables=bool(cleaned.line_items),
         )
         if formatted_ql != (
             updates.get("qualifying_language", cleaned.qualifying_language or "")
         ):
             updates["qualifying_language"] = formatted_ql
+        # Re-assert verbatim after format (format must not paraphrase guide copy).
+        updates["qualifying_language"] = force_pricing_guide_verbatim_qualifying_language(
+            updates.get("qualifying_language", "")
+        )
     opt = (cleaned.option_term_notes or "").strip()
     if opt:
         # Internal jargon only — no topic/keyword rewrites of fee structure.
@@ -1787,8 +2136,8 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
         cleaned = cleaned.model_copy(
             update={
                 "scope_summary": _scrub_internal_budget_jargon(cleaned.scope_summary or ""),
-                "qualifying_language": _scrub_internal_budget_jargon(
-                    cleaned.qualifying_language or ""
+                "qualifying_language": force_pricing_guide_verbatim_qualifying_language(
+                    _scrub_internal_budget_jargon(cleaned.qualifying_language or "")
                 ),
                 "option_term_notes": _scrub_internal_budget_jargon(
                     cleaned.option_term_notes or ""
@@ -1800,8 +2149,8 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
     cleaned = cleaned.model_copy(
         update={
             "scope_summary": _scrub_internal_budget_jargon(cleaned.scope_summary or ""),
-            "qualifying_language": _scrub_internal_budget_jargon(
-                cleaned.qualifying_language or ""
+            "qualifying_language": force_pricing_guide_verbatim_qualifying_language(
+                _scrub_internal_budget_jargon(cleaned.qualifying_language or "")
             ),
             "option_term_notes": _scrub_internal_budget_jargon(
                 cleaned.option_term_notes or ""
@@ -1885,6 +2234,13 @@ def render_budget_markdown(
 ) -> str:
     """Client-facing budget: one total, phase/deliverable fee table, short terms."""
     budget = prepare_budget_for_client_display(budget)
+    # Defensive: personnel_loading with priced fixed lines but no hourly rates
+    # must not claim an hourly schedule or suppress Fee Detail.
+    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
+
+    budget, _coerce_logs = coerce_budget_to_phased_from_guide(
+        budget, None, rfp_text=rfp_text
+    )
     lines: list[str] = []
     fmt = (budget.budget_format or "").casefold()
     wants_personnel = fmt == "personnel_loading"
@@ -1941,6 +2297,7 @@ def render_budget_markdown(
         (budget.qualifying_language or "").strip(),
         line_items=list(budget.line_items or []),
         total=total,
+        suppress_mix_tables=bool(budget.line_items) and not wants_personnel,
     )
     if ql:
         if strict_form:
@@ -1959,6 +2316,21 @@ def render_budget_markdown(
         )
         _append_fee_detail_by_phase_table(lines, budget, heading=heading)
 
+    # Honest gap when narrative mentions Additional Work hourly but we have no rates.
+    scope_cf = (budget.scope_summary or "").casefold()
+    if (
+        not wants_personnel
+        and ("hour" in scope_cf or "hourly" in scope_cf)
+        and not _budget_line_has_hourly_rate(budget)
+    ):
+        lines.append("## Additional Work — Hourly Rates")
+        lines.append("")
+        lines.append(
+            "[MANUAL FILL: Sonja — labor-category / role hourly rates for Additional "
+            "Work outside the annual scope, per RFP. Do not invent rates.]"
+        )
+        lines.append("")
+
     opt = (budget.option_term_notes or "").strip()
     if opt:
         opt2 = opt.replace("agency revenue estimate", "proposed fees")
@@ -1976,11 +2348,20 @@ def render_budget_markdown(
             lines.append(opt2)
             lines.append("")
 
-    rendered = "\n".join(lines).strip() + "\n"
+    rendered = "\n".join(lines).strip()
+    rendered, _mix_logs = scrub_duplicate_budget_breakdown_tables(rendered)
     from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 
     rendered = scrub_client_facing_section_artifacts(rendered)
     return _scrub_internal_budget_jargon(rendered) + "\n"
+
+
+def _budget_line_has_hourly_rate(budget: ProposalBudget) -> bool:
+    for item in budget.line_items or []:
+        unit = (item.unit or "").casefold()
+        if unit in {"hour", "hours", "hr", "hrs"} and float(item.rate or 0) > 0:
+            return True
+    return False
 
 
 def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:

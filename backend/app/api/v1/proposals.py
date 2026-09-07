@@ -323,6 +323,23 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
         )
         if ref_logs:
             scrubbed = scrubbed.model_copy(update={"sections": ref_sections})
+        # Free: strip packaging / DQ / instruction sentences minted as tabs —
+        # no intelligence re-run, no tokens.
+        from app.services.proposal_fulfill_rfp_structure import (
+            drop_non_deliverable_rfp_sections,
+            scrub_non_deliverable_titles_from_research,
+        )
+
+        scrubbed, junk_logs = drop_non_deliverable_rfp_sections(scrubbed)
+        research_heal_logs: list[str] = []
+        if research is not None:
+            research, research_heal_logs = scrub_non_deliverable_titles_from_research(
+                research
+            )
+            if research_heal_logs:
+                from app.services.proposal_repository import asave_research_cache
+
+                await asave_research_cache(research)
         snapshots_changed = [s.saved_at for s in (pruned.snapshots or [])] != [
             s.saved_at for s in (draft.snapshots or [])
         ]
@@ -334,6 +351,8 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
             *integrity_logs,
             *dup_logs,
             *ref_logs,
+            *junk_logs,
+            *research_heal_logs,
         ]
         if snapshots_changed or heal_logs:
             await asave_proposal_draft(scrubbed)
@@ -1016,16 +1035,27 @@ def _improve_activity_for_turn(
     from app.services.proposal_chat_activity import build_improve_agent_activity
 
     prior = _section_by_id(prior_draft, section.id)
+    focus_id = (section.id or "").casefold()
+    focus_is_bio = focus_id.startswith("section-2-bio-") or "bio" in (
+        section.title or ""
+    ).casefold()
     extra_changes: list[str] = []
     if prior_draft:
         before_map = {s.id: s.content or "" for s in prior_draft.sections}
-        other = [
-            s.title
-            for s in draft.sections
-            if s.id != section.id
-            and s.id in before_map
-            and (s.content or "") != before_map[s.id]
-        ]
+        other = []
+        for s in draft.sections:
+            if s.id == section.id or s.id not in before_map:
+                continue
+            if (s.content or "") == before_map[s.id]:
+                continue
+            sid = (s.id or "").casefold()
+            # Persist-time ZF / voice side-effects on bios must not pollute Recap
+            # when the open tab was References / Approach / etc.
+            if not focus_is_bio and (
+                sid.startswith("section-2-bio-") or "bio" in (s.title or "").casefold()
+            ):
+                continue
+            other.append(s.title)
         if other:
             extra_changes.append(
                 "Also updated: " + ", ".join(other[:8]) + ("…" if len(other) > 8 else "")
@@ -1432,13 +1462,16 @@ async def restore_proposal_snapshot_endpoint(
 
 @router.post("/{rfp_id}/proposal/export/docx")
 async def export_proposal_docx(rfp_id: str) -> Response:
-    """Download full proposal as Word (.docx) — same structure as in-app manuscript."""
+    """Download proposal Word (.docx).
+
+    When the RFQ requires a separate Cost File (e.g. PlanetBids Response File +
+    Cost File), returns a ZIP with both Word docs so the user does not have to
+    cut Budget & Pricing out by hand.
+    """
     from app.services.proposal_docx_export import (
         ProposalDocxExportError,
-        build_proposal_docx_bytes,
-        build_proposal_docx_filename,
+        build_export_packets,
     )
-    from app.services.proposal_google_doc_export import _sanitize_doc_title
     from app.services.proposal_repository import aget_proposal_draft
 
     try:
@@ -1450,16 +1483,25 @@ async def export_proposal_docx(rfp_id: str) -> Response:
             raise HTTPException(status_code=400, detail="No proposal draft to export.")
 
         title = "Proposal"
+        rfp_text = ""
         try:
             rfp = get_rfp(rfp_id)
             if rfp and rfp.title:
                 title = rfp.title
         except Exception:
             pass
+        try:
+            from app.services.proposal_common import load_rfp_for_proposal
 
-        doc_title = _sanitize_doc_title(f"{title} — Proposal")
-        payload = build_proposal_docx_bytes(doc_title=doc_title, draft=draft)
-        filename = build_proposal_docx_filename(rfp_title=title)
+            rfp_text = load_rfp_for_proposal(rfp_id)[2] or ""
+        except Exception:
+            rfp_text = ""
+
+        packets = build_export_packets(
+            draft=draft,
+            rfp_title=title,
+            rfp_text=rfp_text,
+        )
     except HTTPException:
         raise
     except ProposalDocxExportError as exc:
@@ -1475,9 +1517,23 @@ async def export_proposal_docx(rfp_id: str) -> Response:
             detail=f"Word export failed: {exc}",
         ) from exc
 
-    encoded = quote(filename)
+    if packets.mode == "separate_cost" and packets.zip_bytes and packets.zip_filename:
+        encoded = quote(packets.zip_filename)
+        return Response(
+            content=packets.zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
+                ),
+                "X-Zo-Export-Mode": "separate_cost",
+            },
+        )
+
+    file = packets.files[0]
+    encoded = quote(file.filename)
     return Response(
-        content=payload,
+        content=file.content,
         media_type=(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ),
@@ -1485,6 +1541,7 @@ async def export_proposal_docx(rfp_id: str) -> Response:
             "Content-Disposition": (
                 f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
             ),
+            "X-Zo-Export-Mode": "single",
         },
     )
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ZoLogo } from "@/components/ZoLogo";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { IconSwitch } from "@/components/ui/icons";
 import "./QuickBooksLedger.css";
 
@@ -32,16 +33,7 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
   };
 
   if (!isAuthenticated) {
-    return (
-      <div className="flex h-dvh w-full items-center justify-center bg-[var(--zo-bg)]">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-[#3C5A56] border-t-transparent" />
-          <span className="text-sm font-medium tracking-widest uppercase text-[var(--zo-text-muted)]">
-            ZO AGENCY
-          </span>
-        </div>
-      </div>
-    );
+    return <ZoAmuletLoader fullScreen label="Loading financial workspace" />;
   }
 
   return (

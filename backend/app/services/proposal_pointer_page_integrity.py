@@ -34,6 +34,40 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
 
 
+def _pipe_cells(line: str) -> list[str]:
+    stripped = (line or "").strip()
+    if "|" not in stripped:
+        return []
+    return [c.strip() for c in stripped.strip("|").split("|")]
+
+
+def _is_cross_ref_location_header(line: str) -> bool:
+    """True for Addressed-In / Where-to-Find / Required-Component location tables.
+
+    Structural header check only — no topic synonym tables.
+    """
+    if _ADDRESSED_IN_HEADER_RE.match((line or "").rstrip("\n")):
+        return True
+    cells = [c.casefold() for c in _pipe_cells(line)]
+    if len(cells) < 2:
+        return False
+    left, right = cells[0], cells[1]
+    left_ok = (
+        "requirement" in left
+        or "component" in left
+        or left.startswith("required")
+        or "submission" in left
+    )
+    right_ok = (
+        "addressed" in right
+        or "where to find" in right
+        or "location" in right
+        or right.startswith("see")
+        or "find it" in right
+    )
+    return left_ok and right_ok
+
+
 @dataclass(frozen=True)
 class _TocEntry:
     section: ProposalSection
@@ -238,8 +272,9 @@ def rewrite_prose_section_citations(
         cited_mark = match.group(2)
         paren = (match.group(3) or "").strip()
         # Prefer parenthetical topic text — that is how wrong "Section 3
-        # (Experience…)" gets remapped to §21.
-        query = paren or f"Section {cited_mark}"
+        # (Experience…)" gets remapped to §21. Never fall back to cited_mark
+        # when the paren invents a tab that is not in the live TOC (e.g.
+        # "Section 3 (Schedule tab)" while §3 is Our Work).
         entry = None
         if paren:
             entry = resolve_addressed_in_target(
@@ -250,15 +285,33 @@ def rewrite_prose_section_citations(
             if hit is not None and (
                 self_section_id is None or hit.id != self_section_id
             ):
-                entry = _toc_entry_for_section(hit)
+                candidate = _toc_entry_for_section(hit)
+                if paren and (
+                    candidate is None
+                    or not _paren_topic_matches_entry(paren, candidate)
+                ):
+                    # Wrong number + phantom topic — do not re-point at unrelated §N
+                    # (including when the live §N title is stopword-only, e.g. Our Work).
+                    logs.append(
+                        f"phantom prose citation cleared: {match.group(0).strip()[:100]}"
+                    )
+                    changed += 1
+                    fill = (
+                        "[MANUAL FILL: map to a live proposal tab — "
+                        "cited section does not exist in this manuscript]"
+                    )
+                    if prefix.strip():
+                        return f"{prefix}{fill}"
+                    return fill
+                if candidate is not None:
+                    entry = candidate
         if entry is None:
             logs.append(
                 f"unresolved prose citation: {match.group(0).strip()[:100]}"
             )
-            return match.group(0)
-        # Already correct live mark with matching paren short-title — keep.
+            return match.group(0)        # Already correct live mark with matching paren short-title — keep.
         if entry.mark == cited_mark and (
-            not paren or _short_title(entry.title).casefold() in paren.casefold()
+            not paren or _paren_topic_matches_entry(paren, entry)
         ):
             # Normalize "Section N" → "§N (short)" for consistency.
             if match.group(0).startswith("§") and paren:
@@ -343,28 +396,17 @@ def rewrite_prose_section_citations_in_draft(
     return draft.model_copy(update={"sections": sections}), logs
 
 
-def rewrite_cross_ref_addressed_in_table(
-    content: str,
+def _rewrite_one_cross_ref_table(
+    lines: list[str],
+    header_idx: int,
     draft: ProposalDraft,
     *,
-    self_section_id: str | None = None,
-) -> tuple[str, int, list[str]]:
-    """Rewrite Addressed-In cells to real § marks from the live TOC.
+    self_section_id: str | None,
+) -> tuple[int, list[str]]:
+    """Rewrite one cross-ref table in ``lines`` starting at ``header_idx``.
 
-    Returns ``(body, remapped_count, unresolved_logs)``. Unresolved rows are
-    left as-is and logged so Completeness / Scan can surface orphans.
+    Returns ``(changed_count, unresolved_logs)``. Mutates ``lines`` in place.
     """
-    body = content or ""
-    lines = body.splitlines(keepends=True)
-    header_idx = None
-    for i, line in enumerate(lines):
-        if _ADDRESSED_IN_HEADER_RE.match(line.rstrip("\n")):
-            header_idx = i
-            break
-    if header_idx is None:
-        return body, 0, []
-
-    # Skip separator row
     row_start = header_idx + 1
     if row_start < len(lines) and _TABLE_SEP_RE.match(lines[row_start].rstrip("\n")):
         row_start += 1
@@ -380,7 +422,12 @@ def rewrite_cross_ref_addressed_in_table(
         if len(cells) < 2:
             continue
         requirement, addressed = cells[0], cells[1]
-        if not requirement or requirement.casefold() in {"rfp requirement", "requirement"}:
+        if not requirement or requirement.casefold() in {
+            "rfp requirement",
+            "requirement",
+            "required component",
+            "component",
+        }:
             continue
         # Keep multi-target static refs that already cite 1.1 / 1.3 accurately.
         if re.search(r"\b1\.\d+\b", addressed) and "who we are" in addressed.casefold():
@@ -390,26 +437,136 @@ def rewrite_cross_ref_addressed_in_table(
         # Already a live § mark that exists in the TOC — leave alone.
         live_mark = re.search(r"§\s*(\d+(?:\.\d+)?)", addressed)
         if live_mark and _find_section_by_mark(draft, live_mark.group(1)):
-            continue
+            # Still fix wrong parenthetical labels that invent missing tabs.
+            if _addressed_cites_missing_tab(addressed, draft):
+                pass  # fall through to remap
+            else:
+                continue
         entry = resolve_addressed_in_target(
             draft, requirement, self_section_id=self_section_id
         )
+        # Also try resolving from the parenthetical topic in the cell itself.
         if entry is None:
-            unresolved.append(
-                f"unresolved Addressed-In: {requirement[:100].strip()}"
-            )
+            paren = re.search(r"\(([^)]{3,140})\)", addressed or "")
+            if paren:
+                entry = resolve_addressed_in_target(
+                    draft, paren.group(1), self_section_id=self_section_id
+                )
+        if entry is None:
+            # Phantom Section-N (Schedule tab) with no live match — do not ship.
+            if _addressed_cites_missing_tab(addressed, draft) or re.search(
+                r"(?i)(?:§\s*|section\s+)\d+", addressed or ""
+            ):
+                cells[1] = (
+                    "[MANUAL FILL: map this requirement to a live proposal tab — "
+                    "cited section does not exist in this manuscript]"
+                )
+                newline = "\n" if raw.endswith("\n") else ""
+                lines[i] = "| " + " | ".join(cells) + " |" + newline
+                changed += 1
+                unresolved.append(
+                    f"phantom cross-ref cleared: {requirement[:100].strip()}"
+                )
+            else:
+                unresolved.append(
+                    f"unresolved Addressed-In: {requirement[:100].strip()}"
+                )
             continue
         new_cell = format_addressed_in_cell(entry)
         if new_cell.casefold() in addressed.casefold() and f"§{entry.mark}" in addressed:
-            continue
+            if not _addressed_cites_missing_tab(addressed, draft):
+                continue
         cells[1] = new_cell
         newline = "\n" if raw.endswith("\n") else ""
         lines[i] = "| " + " | ".join(cells) + " |" + newline
         changed += 1
+    return changed, unresolved
+
+
+def rewrite_cross_ref_addressed_in_table(
+    content: str,
+    draft: ProposalDraft,
+    *,
+    self_section_id: str | None = None,
+) -> tuple[str, int, list[str]]:
+    """Rewrite location cells to real § marks from the live TOC.
+
+    Covers ``Addressed In`` and ``Where to Find It`` / Required Component tables.
+    Processes every matching table in the body. Unresolved rows that point at
+    phantom tabs (e.g. ``Section 3 (Schedule tab)`` when no Schedule exists)
+    become MANUAL FILL — never ship a citation to a section that is not here.
+    """
+    body = content or ""
+    lines = body.splitlines(keepends=True)
+    header_idxs = [
+        i
+        for i, line in enumerate(lines)
+        if _is_cross_ref_location_header(line.rstrip("\n"))
+    ]
+    if not header_idxs:
+        return body, 0, []
+
+    changed = 0
+    unresolved: list[str] = []
+    for header_idx in header_idxs:
+        n, unresolved_chunk = _rewrite_one_cross_ref_table(
+            lines, header_idx, draft, self_section_id=self_section_id
+        )
+        changed += n
+        unresolved.extend(unresolved_chunk)
 
     if not changed and not unresolved:
         return body, 0, []
     return "".join(lines) if changed else body, changed, unresolved
+
+
+def _paren_topic_matches_entry(paren: str, entry: _TocEntry) -> bool:
+    """True when parenthetical topic text plausibly names this TOC entry."""
+    topic = (paren or "").strip()
+    if not topic:
+        return False
+    topic_cf = topic.casefold()
+    for noise in (" tabs", " tab", " sections", " section"):
+        if topic_cf.endswith(noise.strip()):
+            topic_cf = topic_cf[: -len(noise.strip())].strip()
+            break
+    if not topic_cf:
+        return False
+    title_cf = (entry.title or "").casefold()
+    short_cf = _short_title(entry.title).casefold()
+    if topic_cf in title_cf or topic_cf in short_cf:
+        return True
+    if short_cf and short_cf in topic_cf:
+        return True
+    topic_toks = _tokens(topic)
+    if topic_toks and topic_toks <= set(entry.tokens):
+        return True
+    # Shared substantive tokens (≥2) — same bar as outline eval-weight stamps.
+    shared = topic_toks & set(entry.tokens)
+    return len(shared) >= 2
+
+
+def _addressed_cites_missing_tab(addressed: str, draft: ProposalDraft) -> bool:
+    """True when the cell invents a tab label that is not in the live TOC titles."""
+    text = addressed or ""
+    # Parenthetical topic: "Section 3 (Schedule tab)"
+    paren = re.search(r"\(([^)]{2,120})\)", text)
+    if not paren:
+        # Bare "Section 3 tabs" with no live mark match handled elsewhere.
+        return bool(re.search(r"(?i)section\s+\d+\s+tabs?\b", text))
+    topic = paren.group(1).strip()
+    topic_cf = topic.casefold()
+    # Strip trailing "tab(s)" noise for matching.
+    for noise in (" tabs", " tab", " sections", " section"):
+        if topic_cf.endswith(noise.strip()):
+            topic_cf = topic_cf[: -len(noise.strip())].strip()
+            break
+    if not topic_cf or len(topic_cf) < 3:
+        return False
+    for entry in _toc_entries(draft):
+        if _paren_topic_matches_entry(topic, entry):
+            return False
+    return True
 
 
 def _parse_markdown_table_block(block: str) -> list[list[str]]:
@@ -697,8 +854,9 @@ def section_needs_pointer_page_integrity(section: ProposalSection) -> bool:
     body = section.content or ""
     if not body.strip():
         return False
-    if _ADDRESSED_IN_HEADER_RE.search(body):
-        return True
+    for line in body.splitlines():
+        if _is_cross_ref_location_header(line):
+            return True
     if re.search(r"(?i)EDITOR\s+NOTES?|INSERT\s+INTO\s+(?:§|sec)", body):
         return True
     return False

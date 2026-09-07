@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { RfpDetailSkeleton } from "@/components/loading/RfpDetailSkeleton";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 
 export default function RfpDetailLoading() {
   return (
@@ -10,7 +10,14 @@ export default function RfpDetailLoading() {
       >
         ← Back to RFPs
       </Link>
-      <RfpDetailSkeleton />
+      <div
+        className="flex min-h-[min(28rem,60vh)] flex-col items-center justify-center py-16"
+        role="status"
+        aria-busy="true"
+        aria-label="Loading RFP"
+      >
+        <ZoAmuletLoader label="Loading RFP" />
+      </div>
     </div>
   );
 }

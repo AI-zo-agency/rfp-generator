@@ -125,3 +125,17 @@ export const TARGETED_FIX_FINISH_STEP_LABELS = [
   "Filling gaps from past won proposals",
   "Checking budget against RFP limits",
 ] as const;
+
+/** Review-section chip state from checkpoint ids (parallel-aware). */
+export function targetedFixSectionChipState(
+  sectionId: string,
+  doneIds: Iterable<string>,
+  activeIds: Iterable<string>
+): { done: boolean; active: boolean } {
+  const done = new Set([...doneIds].map(String));
+  const active = new Set([...activeIds].map(String));
+  return {
+    done: done.has(sectionId),
+    active: active.has(sectionId) && !done.has(sectionId),
+  };
+}

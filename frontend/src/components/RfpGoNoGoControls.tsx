@@ -8,6 +8,7 @@ import { GoSign } from "@/components/GoSign";
 import { MarkGoButton } from "@/components/MarkGoButton";
 import { RunGoNoGoButton } from "@/components/RunGoNoGoButton";
 import { PriorityBadge, StatusBadge } from "@/components/StatusBadge";
+import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { formatOverallGoScore, alignGoNoGoRecommendation, computeOverallGoScore, alignGoNoGoSummary } from "@/lib/format";
 import type { GoNoGoAnalysis, RfpPriority, RfpStatus } from "@/types/rfp";
 
@@ -140,31 +141,18 @@ export function RfpGoNoGoControls({
 
       {analyzing && (
         <section
-          className="go-nogo-loading zo-card p-8"
+          className="zo-card flex flex-col items-center gap-4 p-10"
           aria-busy="true"
           aria-live="polite"
         >
-          <div className="flex flex-wrap items-center gap-5">
-            <div className="go-nogo-loading-meter" aria-hidden>
-              {[0, 1, 2, 3, 4].map((i) => (
-                <span
-                  key={i}
-                  className="go-nogo-loading-bar"
-                  style={{ animationDelay: `${i * 0.14}s` }}
-                />
-              ))}
-              <span className="go-nogo-loading-scan" />
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-foreground">
-                Running Go/No-Go analysis…
-              </p>
-              <p className="go-nogo-loading-steps mt-1.5 text-xs text-zo-text-muted">
-                <span>Scoring matrix</span>
-                <span>Checking KB</span>
-                <span>Worth &amp; win path</span>
-              </p>
-            </div>
+          <ZoAmuletLoader label="Running Go/No-Go analysis" />
+          <div className="text-center">
+            <p className="text-sm font-semibold text-foreground">
+              Running Go/No-Go analysis…
+            </p>
+            <p className="mt-1.5 text-xs text-zo-text-muted">
+              Scoring matrix · Checking KB · Worth &amp; win path
+            </p>
           </div>
         </section>
       )}

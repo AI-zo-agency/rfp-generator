@@ -95,7 +95,7 @@ class TargetedFixLoopSmokeTests(unittest.IsolatedAsyncioTestCase):
         # Matches config.review_fix_section_concurrency's shipped default, so the
         # suite exercises the parallel path that production actually runs. Tests
         # asserting strictly per-section activity pin concurrency=1 explicitly.
-        concurrency: int = 3,
+        concurrency: int = 8,
         fact_check_delays: dict[str, float] | None = None,
         fact_check_exceptions: dict[str, Exception] | None = None,
         record_done_raise_after: int | None = None,
@@ -448,8 +448,8 @@ class TargetedFixLoopSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(structure_recorded, ["r1"])
         # None of the sections were hollow or marked insufficient evidence.
         self.assertEqual(report["manualReview"], [])
-        # 3 dynamic sections: 3 in-loop blocker calls + 1 cross-section pass.
-        self.assertEqual(len(blocker_calls), 4)
+        # Whole-proposal contradiction only (no per-section blocker suite).
+        self.assertEqual(len(blocker_calls), 1)
         self.assertEqual(contradiction_recorded, ["r1"])
         # One continuous step space: 2 prep stages + 3 reviewed sections + 3
         # finishing stages = 8 total. The 3 sections are steps 3, 4, 5 — not
@@ -618,8 +618,8 @@ class TargetedFixLoopSmokeTests(unittest.IsolatedAsyncioTestCase):
                 for line in report["logs"]
             )
         )
-        # 2 dynamic sections: 2 in-loop blocker calls + 1 cross-section pass.
-        self.assertEqual(len(blocker_calls), 3)
+        # Whole-proposal contradiction only (no per-section blocker suite).
+        self.assertEqual(len(blocker_calls), 1)
         self.assertEqual(contradiction_recorded, ["r1"])
 
         # One continuous step space: 2 prep stages + 2 reviewed (dynamic)
@@ -667,8 +667,8 @@ class TargetedFixLoopSmokeTests(unittest.IsolatedAsyncioTestCase):
         ) = await self._run(contradiction_done=True)
         self.assertEqual(checked, ["sec-a", "sec-b", "sec-c"])
         self.assertEqual(recorded, ["sec-a", "sec-b", "sec-c"])
-        # Only the 3 in-loop blocker calls run — the cross-section pass is skipped.
-        self.assertEqual(len(blocker_calls), 3)
+        # No per-section blocker; cross-section contradiction skipped via checkpoint.
+        self.assertEqual(len(blocker_calls), 0)
         self.assertEqual(contradiction_recorded, [])
         self.assertTrue(
             any(
@@ -1193,6 +1193,18 @@ class TargetedFixLoopSmokeTests(unittest.IsolatedAsyncioTestCase):
         # Every section checkpointed exactly once, and in draft order — not
         # the order the concurrent fact-checks happened to complete in.
         self.assertEqual(recorded, list(section_ids))
+
+        parallel_batches = [
+            a
+            for a in _activity_calls
+            if str(a.get("label") or "").startswith("Reviewing ")
+            and "in parallel" in str(a.get("label") or "")
+        ]
+        self.assertGreaterEqual(len(parallel_batches), 1)
+        self.assertEqual(
+            parallel_batches[0].get("active_section_ids"),
+            ["sec-a", "sec-b", "sec-c"],
+        )
 
     async def test_one_section_exception_does_not_abort_the_batch(self):
         section_ids = ("sec-a", "sec-b", "sec-c", "sec-d", "sec-e")

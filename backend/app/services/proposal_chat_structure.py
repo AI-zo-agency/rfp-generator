@@ -564,6 +564,45 @@ def _is_in_place_section_budget_fill(
     )
 
 
+def user_asks_case_study_rfp_rematch(text: str) -> bool:
+    """Swap/replace featured case studies with better RFP-aligned KB studies.
+
+    In-place content rewrite on the open Case Studies / Our Work tab — NOT
+    outline add of a random unused KB title. "instead of these case studies…
+    use another… align with rfp" must not hit the unnamed "add another case
+    study" heuristic (that path once tried to ADD a staff-news document).
+    """
+    raw = (text or "").strip()
+    if not raw or not re.search(r"(?i)\bcase\s*stud", raw):
+        return False
+    if re.search(
+        r"(?is)\b(?:instead\s+of|replace|swap(?:\s+out)?|switch|substitute)\b"
+        r".{0,100}\b(?:case\s*stud|these|those|this|the\s+(?:current|existing))",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\b(?:use|pick|choose|feature|show|pull|bring)\b.{0,80}\b"
+        r"(?:another|other|different|better|best|matching|relevant|aligned)\b"
+        r".{0,60}\bcase\s*stud",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\bcase\s*stud(?:y|ies)\b.{0,80}\b"
+        r"(?:align|match|fit|relevant)\b.{0,50}\b(?:rfp|requirements?|needs?)\b",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\b(?:best[- ]?match(?:ing)?|better[- ]?match(?:ing)?|"
+        r"rfp[- ]?align(?:ed)?)\b.{0,50}\bcase\s*stud",
+        raw,
+    ):
+        return True
+    return False
+
+
 def _is_in_place_kb_or_verify_edit(text: str) -> bool:
     """True when the user wants to fill/edit the current tab — not add a sidebar section.
 
@@ -1980,10 +2019,17 @@ async def plan_chat_structure_action(
 
     # Unnamed "add a case study" — add the next unused 03_CS tab. Clarify only
     # when the KB has no leftover eligible study.
+    # NEVER take this path for rematch/swap/instead-of asks — those rewrite the
+    # open Case Studies body from RFP match scores, they do not mint a random tab.
     msg_cf = user_message.casefold()
     if (
         "case stud" in msg_cf
         and any(w in msg_cf for w in ("add", "create", "another", "more", "include"))
+        and not user_asks_case_study_rfp_rematch(user_message)
+        and not re.search(
+            r"(?i)\b(?:instead\s+of|replace|swap|switch|substitute)\b",
+            user_message,
+        )
         and not _extract_case_study_name_from_add_message(user_message)
     ):
         picked = await _next_unused_kb_case_study_name(draft)
@@ -2053,9 +2099,18 @@ async def plan_chat_structure_action(
                 await asyncio.sleep(1.0)
                 continue
             # Useful fallback — never strand "add a case study" on a generic error.
+            # Rematch/swap asks must not mint a random unused tab here either.
             msg_cf = user_message.casefold()
-            if "case stud" in msg_cf and any(
-                w in msg_cf for w in ("add", "create", "another", "more", "include")
+            if (
+                "case stud" in msg_cf
+                and any(
+                    w in msg_cf for w in ("add", "create", "another", "more", "include")
+                )
+                and not user_asks_case_study_rfp_rematch(user_message)
+                and not re.search(
+                    r"(?i)\b(?:instead\s+of|replace|swap|switch|substitute)\b",
+                    user_message,
+                )
             ):
                 picked = await _next_unused_kb_case_study_name(draft)
                 if picked:

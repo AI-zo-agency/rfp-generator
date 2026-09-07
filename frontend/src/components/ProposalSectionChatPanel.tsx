@@ -76,6 +76,54 @@ interface ProposalSectionChatPanelProps {
   onClose?: () => void;
 }
 
+function normalizeChatPlain(text: string): string {
+  return text
+    .replace(/\*\*/g, "")
+    .replace(/[_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** True when assistant markdown adds info beyond the structured Recap card. */
+export function assistantBodyAddsUniqueDetail(
+  content: string,
+  activity: SectionChatAgentActivity | null | undefined
+): boolean {
+  const body = (content || "").trim();
+  if (!body) return false;
+  if (!activity) return true;
+
+  const plain = normalizeChatPlain(body)
+    .replace(/\u2192/g, "->") // →
+    .replace(/[“”]/g, '"');
+  if (!plain) return false;
+
+  // Pure apply-fix / word-count echos already covered under Changes.
+  if (
+    /^(applied the suggested fix to .+ \(\d+\s*->\s*\d+ words\)\.?)$/i.test(plain) ||
+    /^(updated ["']?.+["']? \(\d+\s*->\s*\d+ words\)\.?)$/i.test(plain) ||
+    /^(i could not apply the fix to .+)$/i.test(plain)
+  ) {
+    return false;
+  }
+
+  const covered = normalizeChatPlain(
+    [...activity.steps, ...activity.changes, ...activity.discrepancies].join(" ")
+  );
+  if (covered && (covered.includes(plain) || plain.length < 120 && covered.includes(plain.slice(0, 40)))) {
+    return false;
+  }
+
+  // Short body that only restates the first change line.
+  const firstChange = normalizeChatPlain(activity.changes[0] || "");
+  if (firstChange && (plain === firstChange || firstChange.includes(plain) || plain.includes(firstChange))) {
+    return false;
+  }
+
+  return true;
+}
+
 const QUICK_PROMPTS = [
   "Designer-compact: tables + layout, keep every RFP ask.",
   "Check duplicates thoroughly.",
@@ -661,7 +709,9 @@ export function ProposalSectionChatPanel({
                   {msg.agentActivity ? (
                     <AgentActivityCard activity={msg.agentActivity} />
                   ) : null}
-                  <MarkdownReportBody body={msg.content} variant="chat" />
+                  {assistantBodyAddsUniqueDetail(msg.content, msg.agentActivity) ? (
+                    <MarkdownReportBody body={msg.content} variant="chat" />
+                  ) : null}
                   {msg.suggestedFix && !msg.suggestedFixApplied ? (
                     <div className="proposal-section-chat-apply">
                       {pendingApply?.messageId === msg.id ? (

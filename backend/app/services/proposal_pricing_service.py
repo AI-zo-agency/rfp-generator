@@ -306,18 +306,22 @@ PHASE 6 — Client-facing copy (MUST be short and clear for the buyer):
   (+ directExpensesTotal if used). Never cite a second conflicting dollar total.
 - No internal jargon (no "guide line", "Sonja", "00_Guide_Pricing", "agency revenue estimate",
   "double-count").
-- qualifyingLanguage: four SHORT markdown blocks — ### Investment Framing, ### Scope Protection,
-  ### Reimbursable Expenses, ### Revision Rounds. Each block: 1–2 bullets OR a mix table
-  (| Component | Share | Amount | Notes |). NEVER one wall paragraph of percentages and dollars.
-  Plain English a procurement officer can skim in under a minute.
+- qualifyingLanguage: four markdown blocks — ### Investment Framing, ### Scope Protection,
+  ### Reimbursable Expenses, ### Revision Rounds. Copy the 00_Guide_Pricing USE VERBATIM
+  paragraphs exactly (abide by those terms; discovery progresses and priorities sharpen;
+  mileage at current IRS rate / photography/videography location fees and permits /
+  specialized software licenses; three rounds of review). NEVER paraphrase those four.
+  Optional: add ONE RFP-specific reimbursable note AFTER the verbatim reimbursable sentence
+  (do not replace it). NEVER a Component|Share mix table when Fee Detail by Phase exists.
 - rfpBudgetNotes: optional one short paragraph OR empty — never a multi-page methodology essay.
 - lineItem descriptions: phase + deliverable tied to RFP items. Put guide citations in rateSource only.
 - Do NOT write long "build-out" prose that re-explains every math step in the section narrative.
 - optionTermNotes: client language only ("proposed fees") — never "agency revenue estimate".
 
-PHASE 6b — qualifyingLanguage MUST include all four blocks as markdown headings + bullets/tables
-(not one paragraph): Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds.
-qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never mention a different tier as "baseline."
+PHASE 6b — qualifyingLanguage MUST include all four USE VERBATIM Pricing Guide blocks as
+markdown headings (not paraphrased bullets): Investment Framing, Scope Protection,
+Reimbursable Expenses, Revision Rounds. qualifyingLanguage MUST use the SAME pricingTier
+selected in PHASE 2 — never mention a different tier as "baseline."
 
 MATH (mandatory — verify before returning):
 1. For EACH lineItem: extended MUST equal rate × quantity (recalculate if needed).
@@ -695,6 +699,33 @@ def _personnel_loading_missing_bindable_hourly(
     )
 
 
+def _budget_has_bindable_hourly_line(budget: ProposalBudget) -> bool:
+    for item in budget.line_items or []:
+        unit = (item.unit or "").casefold()
+        if unit not in {"hour", "hours", "hr", "hrs"}:
+            continue
+        if float(item.rate or 0) > 0:
+            return True
+    return False
+
+
+def _budget_has_priced_non_hourly_fees(budget: ProposalBudget) -> bool:
+    """True when ledger already has fixed/phased fee dollars (not hour stubs)."""
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    for item in budget.line_items or []:
+        unit = (item.unit or "").casefold()
+        if unit in {"hour", "hours", "hr", "hrs"}:
+            continue
+        if infer_line_item_type(item) in {"direct_expense", "client_passthrough"}:
+            continue
+        if float(item.extended or 0) > 0:
+            return True
+        if float(item.rate or 0) > 0 and float(item.quantity or 0) > 0:
+            return True
+    return False
+
+
 def coerce_budget_to_phased_from_guide(
     budget: ProposalBudget,
     rate_card: Any | None,
@@ -710,6 +741,26 @@ def coerce_budget_to_phased_from_guide(
 
     logs: list[str] = []
     fmt = (budget.budget_format or "phased").casefold()
+
+    # Priced page/project/year (or other non-hour) fees under a personnel_loading
+    # label: flip format only — keep the ledger. Rebuilding from the guide would
+    # destroy a correct NTE / lump-sum schedule and leave a hollow hourly claim.
+    if (
+        fmt == "personnel_loading"
+        and not _budget_has_bindable_hourly_line(budget)
+        and _budget_has_priced_non_hourly_fees(budget)
+    ):
+        logs.append(
+            "Budget: coerced personnel_loading → phased (kept priced fixed lines; "
+            "no bindable hourly rates on ledger)."
+        )
+        return budget.model_copy(
+            update={
+                "budget_format": "phased",
+                "fee_structure": (budget.fee_structure or "fixed phased fees"),
+            }
+        ), logs
+
     labor_stubs = [
         item
         for item in budget.line_items
@@ -873,6 +924,10 @@ _LINE_ITEMS_RETRY_USER = (
 
 
 def _normalize_qualifying_language(raw: Any) -> str:
+    from app.services.proposal_budget_content import (
+        force_pricing_guide_verbatim_qualifying_language,
+    )
+
     if isinstance(raw, dict):
         labels = {
             "investmentFraming": "Investment Framing",
@@ -885,8 +940,10 @@ def _normalize_qualifying_language(raw: Any) -> str:
             if value and str(value).strip():
                 label = labels.get(key, key)
                 parts.append(f"{label}\n{str(value).strip()}")
-        return "\n\n".join(parts)
-    return str(raw or "").strip()
+        text = "\n\n".join(parts)
+    else:
+        text = str(raw or "").strip()
+    return force_pricing_guide_verbatim_qualifying_language(text)
 
 
 def _parse_tiers(raw_tiers: Any) -> list[PricingTier]:

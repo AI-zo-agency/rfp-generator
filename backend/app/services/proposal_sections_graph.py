@@ -1669,6 +1669,7 @@ def _narrative_section_preamble(state: SectionsGraphState) -> str:
         f"{format_register_block('narrative')}\n\n"
         "Facts (clients, certs, team, case studies) must come ONLY from knowledge-base excerpts.\n"
         "Voice must follow BOTH zö core brand voice AND the RFP-specific adaptation block.\n"
+        "ANTI-RFP-ECHO: NEVER restate the RFP as section content — write the proposal answer only.\n"
         f"{format_anti_duplication_rules()}\n"
         "Within Sections 1–3: Who We Are = brand essence only; Org/Business/Certs/Insurance = facts only; "
         "Team = bios only; Case Studies = proof only — never repeat the same company pitch across subsections.\n"

@@ -39,6 +39,8 @@ async def fetch_company_truth_corpus(
     rfp_client: str = "",
     rfp_sector: str = "",
     rfp_context: str = "",
+    max_chars: int = 120_000,
+    log_label: str = "Company Truth Agent",
 ) -> tuple[str, list[str]]:
     """Run fixed company queries — snippets only, no RFP client, no bulk full-doc dump.
 
@@ -52,7 +54,8 @@ async def fetch_company_truth_corpus(
 
     async def _one(query: str, index: int) -> list[dict[str, Any]]:
         logger.info(
-            "  └─ [Company Truth Agent] JIT query %d/%d: %s",
+            "  └─ [%s] JIT query %d/%d: %s",
+            log_label,
             index,
             len(COMPANY_TRUTH_QUERIES),
             query[:100],
@@ -101,7 +104,7 @@ async def fetch_company_truth_corpus(
     parts: list[str] = []
     sources: list[str] = []
     total = 0
-    max_chars = 120_000
+    char_budget = max(2_000, int(max_chars))
 
     for hit in selected:
         from app.services.proposal_generation_cancel import check_cancelled_for_active
@@ -113,7 +116,7 @@ async def fetch_company_truth_corpus(
             content = supermemory.hit_text(hit)
         if not content.strip():
             continue
-        remaining = max_chars - total
+        remaining = char_budget - total
         if remaining <= 0:
             break
         block = f"### {label}\n{content}"[:remaining]
@@ -122,7 +125,8 @@ async def fetch_company_truth_corpus(
         total += len(block)
 
     logger.info(
-        "  └─ [Company Truth Agent] shortlisted %d company docs (%d chars) — no RFP client in queries",
+        "  └─ [%s] shortlisted %d company docs (%d chars) — no RFP client in queries",
+        log_label,
         len(sources),
         total,
     )

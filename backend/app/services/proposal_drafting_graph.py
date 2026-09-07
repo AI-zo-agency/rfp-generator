@@ -19,6 +19,12 @@ from app.services.proposal_brand_voice import (
     format_register_block,
 )
 from app.services.proposal_loss_lessons import format_avoidance_block
+from app.services.proposal_anti_rfp_echo import (
+    ANTI_RFP_ECHO_RULES,
+    format_requirements_coverage_block,
+    opportunity_understanding_directives,
+    strip_rfp_requirement_echo_sentences,
+)
 from app.services.proposal_drafting_prompts import (
     MODULAR_APPROACH_BLOCK,
     format_proof_points_block,
@@ -157,10 +163,12 @@ IF YOU CANNOT VERIFY A COMPANY FACT IN EVIDENCE:
 - Do not embellish or extrapolate from partial information
 
 ALLOWED WITHOUT inventing company facts (plan-driven structure):
-- Restate RFP requirements, goals, constraints, and stated spend ceilings from the section requirements / Opportunity Understanding / Proposal Memory
-- Describe methodology phases, timeline logic, governance cadence, and persuasion structure from Delivery Plan + Winning Pattern
+- Use stated spend ceilings / envelopes from HARD FACTS or Proposal Memory as facts about the buyer's budget — never invent ceilings
+- Describe methodology phases, timeline logic, governance cadence, and persuasion structure from Delivery Plan + Winning Pattern as OUR plan — never as a paraphrase of the RFP scope list
 - For Budget narrative: use transparency/pass-through language + 00_Guide_Pricing excerpts when present; defer invented role-hour fee tables to Phase 3.5
-- NEVER return empty content for Understanding / Methodology / Timeline / Budget — write the section using plan + RFP requirements, and [VERIFY] only discrete missing facts
+- NEVER return empty content for Understanding / Methodology / Timeline / Budget — write the proposal answer (what we will do and prove). Requirements / Opportunity Understanding are a private coverage checklist only — NEVER copy or paraphrase them into the body. Use [VERIFY] only for discrete missing facts
+
+""" + ANTI_RFP_ECHO_RULES + """
 
 Rules (strict):
 1. Never invent unverified company facts (metrics, clients, certifications, team members, contract awards). Those require evidence [E#] or [VERIFY].
@@ -190,13 +198,13 @@ Rules (strict):
 26. Project management fees must stay within 5–8% of agency fees — do not leave unresolved PM ratio flags in budget prose.
 27. Address every Phase 2 uncovered requirement explicitly — compliance tables, forms, or narrative; do not assume a titled section alone satisfies the RFP.
 28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose.
-29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview) MUST be drafted even when evidence is thin or empty. Use RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory. Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body.
-30. Understanding sections should restate the client's goals, constraints, audiences, success measures, and risks in zö voice before pitching solution — show we read the RFP carefully.
+29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview / Executive Summary) MUST be drafted even when evidence is thin or empty. Read RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory as private direction — then write ONLY the proposal answer (our diagnosis, plan, proof, commitments). Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body. NEVER fill thin evidence by echoing the RFP.
+30. Understanding / Executive Summary sections must open with zö's proposal stance: what we will do, why it fits, and proof. Do NOT open by paraphrasing the client's ask, what they already built, or what they need. The evaluator already has the RFP.
 31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
 32. Do NOT invent dashboards, reporting diagrams, org charts, timeline graphics, or "see attached" visuals. Describe reporting cadence in prose unless KB evidence / RFP-required template exists.
 33. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. NEVER replace an entire scored RFP tab with only "see Section 1" / "Sections 1.1–1.5 below" pointer text — evaluators read each tab separately; substance is required even when long. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler. Offeror / Vendor / Company Identification forms: ONE short FIELD|RESPONSE table synced from Section 1.3 Business Information + a one-line cross-reference — NEVER a second full company profile / Who We Are dump.
 34. LENGTH (Ralph): wordTarget is a HARD CEILING. Hit the scored RFP asks, then stop. Never write extra pages "for the designer to cut later." Dense and short beats long and repetitive.
-35. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. Include ONLY references with full KB contact fields. If zö lacks enough qualifying references, state the gap honestly with [MANUAL FILL: leadership decision] — do not invent orgs and do not pad with [VERIFY: phone/email] shells.
+35. References sections: meet the RFP's required reference count and institution type when specified. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. Include ONLY references with full KB contact fields. If zö lacks enough qualifying references, state the gap honestly with [MANUAL FILL: leadership decision] — do not invent orgs and do not pad with [VERIFY: phone/email] shells. Do not paste the RFP's reference instructions as prose.
 36. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
 37. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
 38. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
@@ -721,8 +729,10 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
     understanding = (plan.get("opportunity") or {}).get("understanding") or {}
     if isinstance(understanding, dict) and any(understanding.values()):
         lines.append(
-            "Opportunity Understanding (write these facts into the section in zö "
-            "voice; do not invent facts, and do not narrate that you were given them):"
+            "Opportunity Understanding (PRIVATE coverage facts — use them to shape "
+            "OUR proposal answer in zö voice. NEVER write these facts back into the "
+            "section as a paraphrase of what the client asked or already built. "
+            "Do not narrate that you were given them):"
         )
         lines.append(json.dumps(understanding, indent=2)[:3000])
     brief = _plan_section_brief(state, section_id)
@@ -858,9 +868,12 @@ async def _retry_plan_driven_section(
         f"RFP: {state.get('rfp_title')}\n\n"
         f"Draft ONLY this narrative section now. Return non-empty prose.\n"
         f"Retry reason: {reason}.\n"
-        "Use plan context, proof points, agency capabilities, and RFP requirements. "
+        "Use plan context, proof points, and agency capabilities to write the "
+        "PROPOSAL ANSWER for this section. RFP requirements are a private checklist — "
+        "never paraphrase them into the body. "
         "Cite [E#] only if evidence is present.\n"
         "Do NOT return empty content. Do NOT return a whole-section VERIFY.\n"
+        "Do NOT open by telling the client what they asked for or already built.\n"
         "For qualifications: use KB case studies and agency facts when present; "
         "otherwise write capability-aligned narrative from plan memory (no invented client names).\n\n"
         f"Plan context:\n{plan_ctx[:6000]}\n\n"
@@ -1187,6 +1200,10 @@ def _build_draft_prompt_zones(
     )
 
     zone_a += f"{format_anti_duplication_rules()}\n\n"
+    zone_a += f"{ANTI_RFP_ECHO_RULES}\n\n"
+    from app.services.proposal_brand_voice import INTERESTING_PROPOSAL_ANSWER_BLOCK
+
+    zone_a += f"{INTERESTING_PROPOSAL_ANSWER_BLOCK}\n\n"
     from app.services.proposal_budget_slots import money_slots_prompt_hint
 
     zone_a += f"{money_slots_prompt_hint()}\n\n"
@@ -1306,9 +1323,12 @@ def _build_draft_prompt_zones(
                 zone_c += (
                     f"IMPORTANT for {payload.get('sectionId')} ({payload.get('title')}): "
                     "Evidence is thin or empty. Still draft full submission-ready narrative "
-                    "from Opportunity Understanding, Section Strategy, Winning Pattern, "
-                    "RFP requirements, and Proposal Memory. Do not return an empty content "
-                    "field or a whole-section VERIFY about insufficient evidence.\n\n"
+                    "as the PROPOSAL ANSWER (what we will do, how, and with what proof), "
+                    "using Opportunity Understanding, Section Strategy, Winning Pattern, "
+                    "and Proposal Memory as private direction only. Do NOT paraphrase RFP "
+                    "requirements or Opportunity Understanding into the body. Do not return "
+                    "an empty content field or a whole-section VERIFY about insufficient "
+                    "evidence.\n\n"
                 )
             if _is_qualifications_narrative(str(payload.get("title") or "")):
                 zone_c += (
@@ -1381,10 +1401,25 @@ def _build_draft_prompt_zones(
         zone_c += (
             f"DESIGNER-COMPACT {payload.get('sectionId')}: "
             f"wordTarget {payload.get('wordTarget')} max — cover EVERY RFP ask in dense "
-            "tables/bullets + [DESIGNER NOTE]. Complete substance, compact layout.\n\n"
+            "tables/bullets + [DESIGNER NOTE]. Complete substance, compact layout. "
+            "ANTI-RFP-ECHO: answer the asks; never paraphrase them.\n\n"
         )
 
-    zone_c += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
+    prompt_payloads: list[dict[str, Any]] = []
+    for payload in batch_payload:
+        item = dict(payload)
+        reqs = list(item.pop("requirements", None) or [])
+        uncovered = list(item.pop("uncoveredRequirements", None) or [])
+        coverage = format_requirements_coverage_block([*reqs, *uncovered])
+        if coverage:
+            item["requirementsCoverageChecklist"] = coverage
+        prompt_payloads.append(item)
+    zone_c += (
+        "Sections to draft:\n"
+        "(requirementsCoverageChecklist is PRIVATE coverage only — answer with "
+        "proposal substance; never quote or paraphrase those lines)\n"
+        f"{json.dumps(prompt_payloads, indent=2)}"
+    )
 
     return zone_a, zone_b, zone_c
 
@@ -1580,6 +1615,20 @@ async def _draft_batch_once(
                     str(echo_brief.get("successDefinition") or ""),
                 ],
             )
+
+        # Strip sentences that paraphrase RFP requirements / Opportunity Understanding
+        # into the body (Gilroy-style "you are not asking… you built…" openers).
+        understanding = (
+            ((state.get("execution_plan") or {}).get("opportunity") or {}).get(
+                "understanding"
+            )
+            or {}
+        )
+        content = strip_rfp_requirement_echo_sentences(
+            content,
+            section.get("requirements") or [],
+            extra_directives=opportunity_understanding_directives(understanding),
+        )
 
         kb_refs = _extract_kb_refs(content, item.get("kbRefs") or item.get("kb_refs"))
         results.append(

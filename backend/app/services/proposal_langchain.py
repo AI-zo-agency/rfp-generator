@@ -272,6 +272,8 @@ def build_proposal_tools(
     title: str,
     client: str,
     sector: str = "",
+    *,
+    include_pricing_guide: bool = True,
 ) -> list[StructuredTool]:
     async def search_knowledge_base(query: str) -> str:
         """Search zö verified KB for company facts, bios, case studies, certifications.
@@ -339,9 +341,17 @@ def build_proposal_tools(
 
         Pass pricing vocabulary only (tiers, rates, PM floor). NEVER pass the RFP
         client name or RFP title — the guide has no client-specific prices.
+        Do NOT call for narrative strategy / partnership / voice restores.
         """
+        raw_topic = (topic or "").strip()
+        if raw_topic and not _pricing_guide_topic_is_about_fees(raw_topic):
+            return (
+                "(search_pricing_guide skipped — topic is not a fee/rate/tier ask. "
+                "For narrative restores use search_rfp_requirements or search_knowledge_base; "
+                "do not pull 00_Guide_Pricing.)"
+            )
         hint = proposal_knowledge_base_tools.sanitize_pricing_guide_query(
-            topic or "tier ranges Low Average High discovery strategy fees",
+            raw_topic or "tier ranges Low Average High discovery strategy fees",
             rfp_client=client,
             rfp_title=title,
         )
@@ -367,7 +377,7 @@ def build_proposal_tools(
         )
         return text2 or "(No 00_Guide_Pricing content found.)"
 
-    return [
+    tools = [
         StructuredTool.from_function(
             coroutine=search_knowledge_base,
             name="search_knowledge_base",
@@ -406,16 +416,57 @@ def build_proposal_tools(
                 "what the buyer demands (not zö facts)."
             ),
         ),
-        StructuredTool.from_function(
-            coroutine=search_pricing_guide,
-            name="search_pricing_guide",
-            description=(
-                "Search 00_Guide_Pricing only — Low/Average/High tiers and approved rate menu. "
-                "Args: pricing terms ONLY (e.g. 'Average tier PM floor discovery'). "
-                "NEVER include RFP client name or RFP title."
-            ),
-        ),
     ]
+    if include_pricing_guide:
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=search_pricing_guide,
+                name="search_pricing_guide",
+                description=(
+                    "Search 00_Guide_Pricing only — Low/Average/High tiers and approved "
+                    "rate menu. ONLY for Budget/Cost/fee asks. Args: pricing terms ONLY "
+                    "(e.g. 'Average tier PM floor discovery'). NEVER for narrative "
+                    "strategy/partnership/voice restores. NEVER include RFP client name."
+                ),
+            )
+        )
+    return tools
+
+
+def _pricing_guide_topic_is_about_fees(topic: str) -> bool:
+    """Reject narrative topics that agents mis-route into 00_Guide_Pricing."""
+    raw = (topic or "").casefold()
+    if not raw.strip():
+        return True
+    fee_tokens = (
+        "tier",
+        "rate",
+        "rates",
+        "fee",
+        "fees",
+        "pricing",
+        "price",
+        "hourly",
+        "budget",
+        "cost",
+        "pm floor",
+        "project management",
+        "00_guide",
+        "guide_pricing",
+        "low",
+        "average",
+        "high",
+        "retainer",
+        "lump sum",
+        "pass-through",
+        "passthrough",
+        "commission",
+        "dollar",
+        "$",
+    )
+    if any(tok in raw for tok in fee_tokens):
+        return True
+    return False
 
 
 async def run_tool_research_agent(

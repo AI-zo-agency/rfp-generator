@@ -52,6 +52,13 @@ describe("chatBusyStatusLabel", () => {
     const steps = chatLiveWorkSteps("Improving Cost Proposal…");
     expect(steps[0]).toBe("Improving Cost Proposal…");
     expect(steps.some((s) => /discrepanc/i.test(s))).toBe(true);
+    expect(steps.some((s) => /fee ledger/i.test(s))).toBe(true);
+  });
+
+  it("omits fee-ledger wording on non-budget live steps", () => {
+    const steps = chatLiveWorkSteps("Improving Strategic Growth Approach…");
+    expect(steps.some((s) => /fee ledger|\bbudget\b/i.test(s))).toBe(false);
+    expect(steps.some((s) => /placeholders/i.test(s))).toBe(true);
   });
 
   it("detects question-shaped messages", () => {

@@ -2558,7 +2558,10 @@ export async function improveProposalSection(
   };
 }
 
-export async function downloadProposalDocx(rfpId: string): Promise<void> {
+export async function downloadProposalDocx(rfpId: string): Promise<{
+  mode: "single" | "separate_cost";
+  filename: string;
+}> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/export/docx`, {
     method: "POST",
   });
@@ -2577,7 +2580,13 @@ export async function downloadProposalDocx(rfpId: string): Promise<void> {
   const disposition = res.headers.get("content-disposition") ?? "";
   const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i);
   const rawName = decodeURIComponent(match?.[1] || match?.[2] || "proposal.docx");
-  const filename = rawName.endsWith(".docx") ? rawName : `${rawName}.docx`;
+  const exportMode =
+    res.headers.get("x-zo-export-mode") === "separate_cost"
+      ? "separate_cost"
+      : "single";
+  const fallback =
+    exportMode === "separate_cost" ? "proposal-response-and-cost.zip" : "proposal.docx";
+  const filename = rawName.includes(".") ? rawName : fallback;
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -2586,6 +2595,7 @@ export async function downloadProposalDocx(rfpId: string): Promise<void> {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+  return { mode: exportMode, filename };
 }
 
 export async function exportProposalToGoogleDoc(rfpId: string): Promise<{

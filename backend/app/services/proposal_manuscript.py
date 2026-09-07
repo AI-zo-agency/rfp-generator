@@ -599,6 +599,9 @@ def _is_hollow_reference_table_row(line: str) -> bool:
         and re.match(r"^\d+$", non_empty[0])
     ):
         return True
+    # Org-only / org+label rows with blank contact fields (common LLM truncate).
+    if len(cells) >= 4 and len(non_empty) <= 2:
+        return True
     return False
 
 
@@ -619,8 +622,24 @@ def _repair_hollow_reference_table_row(line: str, width: int, manual: str) -> st
     return "| " + " | ".join(cells) + " |"
 
 
+def _fill_empty_reference_table_cells(line: str, width: int, manual: str) -> str:
+    """Fill blank contact cells; keep named org/contact/title values."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    while len(cells) < width:
+        cells.append("")
+    cells = cells[:width]
+    changed = False
+    for i, cell in enumerate(cells):
+        if not cell:
+            cells[i] = manual
+            changed = True
+    if not changed:
+        return line
+    return "| " + " | ".join(cells) + " |"
+
+
 def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
-    """Repair hollow reference-table rows so markdown tables stay column-aligned."""
+    """Repair hollow / orphan reference-table rows so markdown tables stay intact."""
     if not text or "|" not in text:
         return text, []
     logs: list[str] = []
@@ -628,6 +647,7 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
     lines = text.split("\n")
     out: list[str] = []
     repaired = 0
+    filled = 0
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -648,11 +668,31 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
                     repaired += 1
                     out.append(_repair_hollow_reference_table_row(row, width, manual))
                 else:
-                    out.append(lines[i])
+                    filled_row = _fill_empty_reference_table_cells(row, width, manual)
+                    if filled_row != lines[i]:
+                        filled += 1
+                    out.append(filled_row)
                 i += 1
+            # Re-attach orphan pipe rows that landed after a blank line break.
+            while i < len(lines):
+                peek = lines[i].strip()
+                if not peek:
+                    i += 1
+                    continue
+                if peek.startswith("|") and not _is_reference_table_header_line(peek):
+                    if _is_all_empty_pipe_row(peek):
+                        i += 1
+                        continue
+                    repaired += 1
+                    out.append(_repair_hollow_reference_table_row(peek, width, manual))
+                    i += 1
+                    continue
+                break
             continue
-        if stripped.startswith("|") and _is_hollow_reference_table_row(stripped):
-            width = max(6, len(stripped.strip("|").split("|")))
+        if stripped.startswith("|") and (
+            _is_hollow_reference_table_row(stripped) or _looks_like_orphan_reference_row(stripped)
+        ):
+            width = max(5, len(stripped.strip("|").split("|")))
             repaired += 1
             out.append(_repair_hollow_reference_table_row(stripped, width, manual))
             i += 1
@@ -663,10 +703,74 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
         logs.append(
             f"Repaired {repaired} hollow reference table row(s) with aligned MANUAL FILL cells"
         )
+    if filled:
+        logs.append(
+            f"Filled {filled} blank reference contact cell(s) with MANUAL FILL"
+        )
     text = "\n".join(out)
     text, strip_logs = _strip_orphan_reference_table_headers(text)
     logs.extend(strip_logs)
     return text, logs
+
+
+def _looks_like_orphan_reference_row(line: str) -> bool:
+    """True for pipe rows that are not headers/separators but look like table data."""
+    if not line.strip().startswith("|"):
+        return False
+    if _is_markdown_table_separator_line(line):
+        return False
+    if _is_reference_table_header_line(line):
+        return False
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return len(cells) >= 3
+
+
+def normalize_title_echo(text: str) -> str:
+    """Normalize a title or heading for echo comparison (shared with stubs)."""
+    plain = (text or "").strip()
+    while plain.startswith("#"):
+        plain = plain[1:].lstrip()
+    plain = plain.strip().strip("*").strip()
+    i = 0
+    while i < len(plain) and plain[i] in "0123456789.":
+        i += 1
+    plain = plain[i:].strip()
+    while plain and plain[0] in "—–-,:· ":
+        plain = plain[1:].lstrip()
+    return " ".join(plain.casefold().replace("&", "and").split())
+
+
+def strip_leading_title_echo(content: str, title: str) -> tuple[str, list[str]]:
+    """Drop a leading body line that only repeats the section title (any number).
+
+    Writers often open with ``## 24. References`` or bare ``24. References`` while
+    the sidebar mark is ``8. References``. That stale RFP/outline number must not
+    ship in the body next to the workspace title.
+    """
+    text = content or ""
+    title_echo = normalize_title_echo(title)
+    if not text.strip() or not title_echo:
+        return text, []
+    lines = text.split("\n")
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start >= len(lines):
+        return text, []
+    first = lines[start].strip()
+    # Heading, bold heading, or bare numbered title line.
+    candidate = first
+    if candidate.startswith("#") or (
+        candidate.startswith("**") and candidate.endswith("**")
+    ) or re.match(r"^\d+(?:\.\d+)*[.)]?\s+\S", candidate):
+        if normalize_title_echo(candidate) == title_echo:
+            end = start + 1
+            while end < len(lines) and not lines[end].strip():
+                end += 1
+            return "\n".join(lines[end:]), [
+                f"Stripped leading title-echo heading ({first[:60]})"
+            ]
+    return text, []
 
 
 def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:

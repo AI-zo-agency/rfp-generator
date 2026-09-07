@@ -36,6 +36,12 @@ class RfpSectionMap(BaseModel):
     duplicate_of_static_section: str | None = Field(
         default=None, alias="duplicateOfStaticSection"
     )
+    # Carry OutlineSection.protectFromCap through Phase 2 → research so lean/cap
+    # cannot drop mandated submission-format tabs after legacy conversion.
+    protect_from_cap: bool = Field(default=False, alias="protectFromCap")
+    submission_instrument: str | None = Field(
+        default=None, alias="submissionInstrument"
+    )
 
 
 class EvidenceItem(BaseModel):
@@ -604,6 +610,15 @@ class ProposalPipelineCheckpoint(BaseModel):
             "Section ids already reviewed by an interrupted Review & Fix "
             "(targeted_fix) run. The next run skips these and picks up where "
             "it stopped; cleared when the run completes."
+        ),
+    )
+    targeted_fix_active_section_ids: list[str] = Field(
+        default_factory=list,
+        alias="targetedFixActiveSectionIds",
+        description=(
+            "Section ids currently fact-checked in parallel during Review & Fix. "
+            "The UI lights all of these chips at once; cleared when the batch "
+            "finishes or the run moves to a later stage."
         ),
     )
     targeted_fix_structure_done: bool = Field(

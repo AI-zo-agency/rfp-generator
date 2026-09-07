@@ -834,7 +834,24 @@ async def _run_fulfill_rfp_gaps_body(
                 draft_rfp_structure_stubs,
                 section_needs_presubmit_fill,
             )
-            
+
+            # Compulsory Rev 6 / zö voice scrub before Review Sections rewrites.
+            try:
+                from app.services.proposal_voice_enforcement import (
+                    apply_rev6_voice_scrub_to_draft,
+                )
+
+                draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+                if rev6_logs:
+                    await asave_proposal_draft(draft)
+                    report["logs"].append(
+                        f"Rev 6 zö voice scrub (compulsory): {len(rev6_logs)} fix(es) "
+                        "before Review Sections"
+                    )
+            except Exception as rev6_exc:  # noqa: BLE001
+                logger.warning("Review & Fix Rev 6 scrub skipped: %s", rev6_exc)
+                report["logs"].append(f"Rev 6 voice scrub skipped: {rev6_exc}")
+
             brand_voice = _brand_voice_payload(research)
             # Same rfp_context every other fact-check caller passes: the raw RFP
             # text. research.rfp_sections holds RfpSectionMap entries
@@ -869,7 +886,11 @@ async def _run_fulfill_rfp_gaps_body(
                 # report into draft.sections[idx] and blew up on .copy().
                 checked_section, section_report = await _fact_check_one_section(
                     sec, rfp=rfp, rfp_context=rfp_context_str, research=research,
-                    brand_voice=brand_voice, force_full_check=True
+                    brand_voice=brand_voice,
+                    force_full_check=bool(
+                        getattr(app_settings, "review_fix_force_full_check", False)
+                    ),
+                    lean_review=True,
                 )
                 return checked_section, section_report
 
@@ -884,21 +905,30 @@ async def _run_fulfill_rfp_gaps_body(
                     continue
 
                 first_section = draft.sections[batch[0]]
+                batch_titles = [
+                    (draft.sections[idx].title or draft.sections[idx].id).strip()
+                    for idx in batch
+                ]
+                batch_ids = [draft.sections[idx].id for idx in batch]
                 if len(batch) > 1:
+                    batch_label = f"Reviewing {len(batch)} sections in parallel"
                     batch_detail = (
-                        f"Scanning {len(batch)} sections in parallel against "
-                        "RFP requirements..."
+                        f"In flight ({len(batch)}): "
+                        + " · ".join(batch_titles[:8])
+                        + ("…" if len(batch_titles) > 8 else "")
                     )
                 else:
+                    batch_label = batch_titles[0] or first_section.id
                     batch_detail = "Scanning section against RFP requirements..."
                 await record_pipeline_activity(
                     rfp_id,
-                    label=first_section.title or first_section.id,
+                    label=batch_label,
                     detail=batch_detail,
                     step_index=prep_steps + reviewed_count + 1,
                     step_total=total_steps,
                     in_progress_phase="fulfill-scan",
                     scan_profile="targeted_fix",
+                    active_section_ids=batch_ids,
                 )
 
                 # Fan-out: run the pure per-section fact-check concurrently.
@@ -937,7 +967,10 @@ async def _run_fulfill_rfp_gaps_body(
 
                 # Sequential apply, strictly in the batch's original order —
                 # everything here reads or writes the whole draft, so
-                # concurrent writers would lose updates.
+                # concurrent writers would lose updates. No per-section
+                # Company-Truth / contradiction LLM — that runs once after
+                # all Review Sections finish (whole-proposal scan below).
+                batch_done_ids: list[str] = []
                 for idx in batch:
                     if idx >= len(draft.sections):
                         # An earlier entry in THIS batch's tail can also have
@@ -946,16 +979,6 @@ async def _run_fulfill_rfp_gaps_body(
                     reviewed_count += 1
                     section = batch_sections.get(idx, draft.sections[idx])
                     draft.sections[idx] = section
-
-                    res_blocker = await apply_feedback_blocker_suite(
-                        draft, rfp=rfp, research=research, rfp_text=rfp_text,
-                        skip_section_ids={s.id for s in draft.sections if s.id != section.id}
-                    )
-                    draft = res_blocker.draft
-                    if idx < len(draft.sections):
-                        section = draft.sections[idx]
-                    if res_blocker.logs:
-                        report["logs"].extend(res_blocker.logs)
 
                     # Signature is (draft, *, rfp_id, rfp, max_sections) — it
                     # picks its own pending list, so there is no per-section
@@ -987,20 +1010,51 @@ async def _run_fulfill_rfp_gaps_body(
                                 f"required by the RFP in {scrub_target.title or scrub_target.id}"
                             )
 
-                    await asave_proposal_draft(draft)
-                    # Checkpoint only AFTER the section's fixes are persisted,
-                    # so a crash between the two replays the section rather
-                    # than losing it.
-                    done_id = draft.sections[idx].id if idx < len(draft.sections) else section.id
-                    done_section_ids.add(done_id)
-                    await record_targeted_fix_section_done(
-                        rfp_id,
-                        done_id,
-                        step_index=prep_steps + reviewed_count,
-                        step_total=total_steps,
-                    )
+                    # Compulsory Rev 6 / zö voice on every reviewed section before persist.
+                    if idx < len(draft.sections):
+                        from app.services.proposal_voice_enforcement import (
+                            enforce_narrative_voice,
+                            scrub_rev6_voice_patterns,
+                        )
 
-                    final_section = draft.sections[idx] if idx < len(draft.sections) else section
+                        voice_target = draft.sections[idx]
+                        body = voice_target.content or ""
+                        if body.strip():
+                            voiced = enforce_narrative_voice(
+                                body,
+                                section_id=voice_target.id,
+                                title=voice_target.title,
+                                zo_mode=voice_target.mode,
+                            )
+                            voiced, rev6_section_logs = scrub_rev6_voice_patterns(voiced)
+                            voiced = voiced.replace("—", ",").replace("–", "-")
+                            if voiced != body:
+                                draft.sections[idx] = voice_target.model_copy(
+                                    update={"content": voiced}
+                                )
+                                section = draft.sections[idx]
+                                if rev6_section_logs:
+                                    report["logs"].append(
+                                        f"Rev 6 voice on {voice_target.title or voice_target.id}: "
+                                        + "; ".join(rev6_section_logs[:3])
+                                    )
+                                else:
+                                    report["logs"].append(
+                                        f"Rev 6 voice mechanics on "
+                                        f"{voice_target.title or voice_target.id}"
+                                    )
+
+                    done_id = (
+                        draft.sections[idx].id
+                        if idx < len(draft.sections)
+                        else section.id
+                    )
+                    batch_done_ids.append(done_id)
+                    done_section_ids.add(done_id)
+
+                    final_section = (
+                        draft.sections[idx] if idx < len(draft.sections) else section
+                    )
                     reason: str | None = None
                     if section_needs_presubmit_fill(final_section):
                         reason = (
@@ -1039,6 +1093,41 @@ async def _run_fulfill_rfp_gaps_body(
                             f"Manual review needed — {title}: {reason}"
                         )
 
+                # One draft save + checkpoints for the whole parallel batch
+                # (fact-checks already ran concurrently above).
+                if batch_done_ids:
+                    await asave_proposal_draft(draft)
+                    for offset, done_id in enumerate(batch_done_ids):
+                        step_i = (
+                            prep_steps
+                            + reviewed_count
+                            - len(batch_done_ids)
+                            + offset
+                            + 1
+                        )
+                        await record_targeted_fix_section_done(
+                            rfp_id,
+                            done_id,
+                            step_index=step_i,
+                            step_total=total_steps,
+                        )
+
+            # Deterministic TOC page from the live sidebar — always, including
+            # resume. Review skips Sonnet rewrites for TOC titles, so without
+            # this the tab stays MANUAL FILL while still marked "reviewed".
+            try:
+                from app.services.proposal_table_of_contents import (
+                    fill_table_of_contents_in_draft,
+                )
+
+                draft, toc_logs = fill_table_of_contents_in_draft(draft)
+                if toc_logs:
+                    report["logs"].extend(toc_logs)
+                    await asave_proposal_draft(draft)
+            except Exception as toc_exc:  # noqa: BLE001
+                logger.warning("Table of Contents fill skipped: %s", toc_exc)
+                report["logs"].append(f"Table of Contents fill skipped: {toc_exc}")
+
             if targeted_fix_contradiction_is_done(research):
                 report["logs"].append(
                     "Resume: cross-section contradiction pass already done — skipped."
@@ -1048,14 +1137,17 @@ async def _run_fulfill_rfp_gaps_body(
                     rfp_id,
                     label="Checking contradictions across sections",
                     detail=(
-                        "Comparing every section against the others and "
-                        "patching conflicts..."
+                        "Scanning the whole proposal for fact / RFP / budget "
+                        "contradictions, then patching conflicts..."
                     ),
                     step_index=prep_steps + review_total + 1,
                     step_total=total_steps,
                     in_progress_phase="fulfill-scan",
                     scan_profile="targeted_fix",
+                    active_section_ids=[],
                 )
+                # Single whole-manuscript pass (Company Truth corpus + combined
+                # audit) — never once per Review section.
                 res_cross = await apply_feedback_blocker_suite(
                     draft, rfp=rfp, research=research, rfp_text=rfp_text
                 )
@@ -1111,6 +1203,20 @@ async def _run_fulfill_rfp_gaps_body(
                     )
                     if hollow_logs:
                         report["logs"].extend(hollow_logs)
+                    try:
+                        from app.services.proposal_voice_enforcement import (
+                            apply_rev6_voice_scrub_to_draft,
+                        )
+
+                        draft, won_rev6 = apply_rev6_voice_scrub_to_draft(draft)
+                        if won_rev6:
+                            report["logs"].append(
+                                f"Rev 6 zö voice scrub after WON fill: {len(won_rev6)} fix(es)"
+                            )
+                    except Exception as won_rev6_exc:  # noqa: BLE001
+                        logger.warning(
+                            "Rev 6 scrub after WON fill skipped: %s", won_rev6_exc
+                        )
                     await asave_proposal_draft(draft)
                     await record_targeted_fix_won_fill_done(rfp_id)
                 except Exception as exc:  # noqa: BLE001
@@ -3274,6 +3380,18 @@ async def _run_fulfill_rfp_gaps_body(
     # rewrote (compliance/fabrication repairs, fact-contradiction fixes, ZF passes
     # above) never gets that same check — so a defect introduced here would ship
     # unnoticed. Run the same non-static detect+repair pass here too.
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        draft, final_rev6 = apply_rev6_voice_scrub_to_draft(draft)
+        if final_rev6:
+            await asave_proposal_draft(draft)
+            report["logs"].append(
+                f"Final Rev 6 zö voice scrub (compulsory): {len(final_rev6)} fix(es)"
+            )
+    except Exception as final_rev6_exc:  # noqa: BLE001
+        logger.warning("Final Rev 6 scrub skipped: %s", final_rev6_exc)
+
     try:
         from app.services.proposal_submission_polish import run_submission_polish_pass
 

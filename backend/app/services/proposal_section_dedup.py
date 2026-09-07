@@ -20,9 +20,11 @@ OWNED BY STATIC SECTIONS (mention once with a short pointer, never re-write):
 - Offeror / Vendor / Company Identification forms → short FIELD table + pointer to 1.3 only
   (never a second Business Information essay)
 
-OWNED BY RFP TABS (write only the part THIS tab scores):
-- Understanding / Opportunity → client goals, constraints, audiences — NOT company bio
-- Methodology / Approach → process steps for THIS scope — NOT case studies or Who We Are
+OWNED BY RFP TABS (write only the PROPOSAL ANSWER THIS tab scores — never RFP paraphrase):
+- Understanding / Opportunity / Executive Summary → our diagnosis, fit, and proof —
+  NOT a restatement of client goals / what they already built / what the RFP asks
+- Methodology / Approach → our process for THIS scope — NOT case-study dumps or Who We Are,
+  and NOT a rewrite of the RFP scope list
 - Timeline / Schedule → phases and dates — NOT methodology paragraphs again
 - Budget / Fees → compensation model and transparency — NOT approach restatement
 - References → contacts only — NOT experience narratives

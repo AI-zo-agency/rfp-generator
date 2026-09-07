@@ -73,6 +73,47 @@ def test_a_real_company_background_label_still_wraps():
     assert any(COMPANY_BLOCK_NOTE in (s.content or "") for s in out.sections)
 
 
+def test_insurance_toc_row_is_not_company_block_header():
+    """Bare '9. Insurance' must not become the Sections 1.1–1.5 header label."""
+    draft = _draft()
+    draft.sections.append(
+        ProposalSection(
+            id="section-1-insurance",
+            title="1.5 — Insurance Information",
+            content="We maintain GL and E&O coverage.",
+            source="generated",
+            mode="write",
+            status="generated",
+        )
+    )
+    specs = [
+        RfpSectionSpec(rfp_title="9. Insurance", satisfied_by_static_company_block=True),
+        RfpSectionSpec(rfp_title="Company Background", satisfied_by_static_company_block=True),
+    ]
+    assert _spec_is_static_company_ask(draft, specs[0]) is False
+    out, _logs = ensure_company_block_wrapper_heading(draft, specs)
+    insurance_headers = [
+        s
+        for s in out.sections
+        if s.id == "rfp-structure-company-block-header"
+        and "insurance" in (s.title or "").casefold()
+    ]
+    assert not insurance_headers, (
+        f"Insurance became company-block header: {[s.title for s in insurance_headers]}"
+    )
+    assert any(
+        s.id == "rfp-structure-company-block-header"
+        and (s.title or "") == "Company Background"
+        for s in out.sections
+    )
+
+
+def test_certification_of_proposal_is_not_static_company_ask():
+    draft = _draft()
+    spec = RfpSectionSpec(rfp_title="12. Certification of Proposal")
+    assert _spec_is_static_company_ask(draft, spec) is False
+
+
 # --- second site: the company-identity FORM compressor ---------------------
 
 from app.services.proposal_section_dedup import (  # noqa: E402

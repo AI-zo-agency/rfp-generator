@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from app.models.proposal import (
     ManuscriptLocks,
     PreSubmitReview,
+    PricingAuditFlag,
     ProposalBrandVoice,
     ProposalBudget,
     ProposalDraft,
@@ -647,6 +648,8 @@ async def _write_custom_section(
                     "Use ONLY facts from the research brief and RFP excerpt. "
                     "Flag unverified items as [VERIFY: ...]. "
                     "Include [DESIGNER NOTE: ...] where layout is needed.\n"
+                    "ANTI-RFP-ECHO: NEVER restate the RFP. Write the proposal answer "
+                    "(what we will do and prove), not a paraphrase of the buyer's ask.\n"
                     f"{GLOBAL_AGENT_PROMPT_RULES}\n"
                     'Return JSON: {"content":"full section prose","designerNote":"..."}'
                 ),
@@ -2429,6 +2432,15 @@ async def _run_phase3_drafting_inner(
         toc_logs.extend(stub_logs)
     draft, layout_logs = apply_rfp_toc_layout(draft, specs)
     toc_logs.extend(layout_logs)
+    try:
+        from app.services.proposal_table_of_contents import (
+            fill_table_of_contents_in_draft,
+        )
+
+        draft, toc_fill_logs = fill_table_of_contents_in_draft(draft)
+        toc_logs.extend(toc_fill_logs)
+    except Exception as toc_fill_exc:  # noqa: BLE001
+        logger.warning("Phase 3 TOC content fill skipped: %s", toc_fill_exc)
     for line in toc_logs[:12]:
         logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
     from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
@@ -2740,6 +2752,14 @@ async def run_phase3_5_budget_reconcile(
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped on reconcile for %s: %s", rfp_id, exc)
+
+    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
+
+    budget, coerce_logs = coerce_budget_to_phased_from_guide(
+        budget, None, rfp_text=rfp_context
+    )
+    for line in coerce_logs:
+        logger.info("Budget reconcile coerce for %s: %s", rfp_id, line)
 
     budget = prepare_budget_for_client_display(budget)
     research = research.model_copy(update={"budget": budget})
@@ -3142,6 +3162,31 @@ async def _run_phase3_5_budget_inner(
             conflicts=zf_report.phase_table_conflicts[:6],
         )
 
+    try:
+        from app.services.proposal_budget_sanity import (
+            collect_budget_sanity_flags,
+            collect_budget_scope_gap_flags,
+        )
+
+        sanity_flags = collect_budget_sanity_flags(budget)
+        sanity_flags += collect_budget_scope_gap_flags(
+            budget, research.rfp_sections if research else []
+        )
+        if sanity_flags:
+            for flag in sanity_flags:
+                logger.warning("Phase 3.5 budget sanity check for %s: %s", rfp_id, flag)
+            if hasattr(budget, "pricing_audit_flags"):
+                new_audit_flags = list(budget.pricing_audit_flags) + [
+                    PricingAuditFlag(severity="high", concern=flag)
+                    for flag in sanity_flags
+                ]
+                budget = budget.model_copy(update={"pricing_audit_flags": new_audit_flags})
+                if research:
+                    research = research.model_copy(update={"budget": budget})
+                    await asave_research_cache(research)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3.5 budget sanity check failed for %s: %s", rfp_id, exc)
+
     await asave_proposal_draft(draft)
 
     logger.info(
@@ -3210,8 +3255,15 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             in_progress_phase="phase-4-review",
         )
         draft, stub_logs = await draft_rfp_structure_stubs(
-            draft, rfp_id=rfp_id, rfp=rfp, max_sections=8
+            draft, rfp_id=rfp_id, rfp=rfp, max_sections=16
         )
+        # Second pass if more hollow tabs remain (first pass may hit time budget).
+        still = [s for s in draft.sections if section_needs_presubmit_fill(s)]
+        if still:
+            draft, more_logs = await draft_rfp_structure_stubs(
+                draft, rfp_id=rfp_id, rfp=rfp, max_sections=16
+            )
+            stub_logs = list(stub_logs) + list(more_logs)
         if stub_logs:
             await asave_proposal_draft(draft)
             for line in stub_logs[:12]:
@@ -3375,6 +3427,28 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             raise
         except Exception:
             logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
+
+    # Always scrub Rev 6 hard bans before Review so Build is voice-aligned, then
+    # the presubmit voice scan flags anything still leftover.
+    try:
+        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
+
+        draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+        if rev6_logs:
+            await asave_proposal_draft(draft)
+            logger.info(
+                "Phase 4 Rev 6 voice scrub for %s: %d fix(es)",
+                rfp_id,
+                len(rev6_logs),
+            )
+            step_trace(
+                "phase4_rev6_voice_scrub",
+                rfp_id=rfp_id,
+                fixes=len(rev6_logs),
+                samples=rev6_logs[:8],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Phase 4 Rev 6 voice scrub failed for %s", rfp_id)
 
     # Phase 4 steps (stub fill, adversarial repair, VERIFY scrub) can rewrite
     # reference tabs after Phase 3 — re-run deterministic reference guards last.

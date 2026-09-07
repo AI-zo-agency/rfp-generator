@@ -451,6 +451,8 @@ async def _llm_fill_section(
         "[VERIFY: phone], [VERIFY: email] beats a generic instructions list "
         "every time.\n"
         "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
+        "- ANTI-RFP-ECHO: write the proposal answer for THIS section only — never "
+        "paraphrase RFP requirement lists or evaluation criteria into the body.\n"
         "- A judgement is not a gap. Which past project fits this RFP, why it is "
         "relevant, how to frame it — you have the case studies and the RFP, so "
         "decide and write it. Never emit a tag asking a human to confirm "

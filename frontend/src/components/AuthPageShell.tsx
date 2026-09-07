@@ -69,7 +69,7 @@ export function AuthPageShell({
           animate={{ letterSpacing: "0.34em", opacity: 1 }}
           transition={{ duration: 1, ease: expoOutEase, delay: 0.25 }}
         >
-          ZO AGENCY
+          zö agency
         </motion.div>
         <h1 className="auth-headline mt-3 text-3xl font-heading font-light text-white md:text-4xl">
           {headline}

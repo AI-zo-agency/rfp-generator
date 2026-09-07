@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.proposal_anti_rfp_echo import ANTI_RFP_ECHO_RULES
+
 # Anti-hallucination rules - CRITICAL for all proposal generation
 ANTI_HALLUCINATION_RULES = """
 ## CRITICAL: ANTI-HALLUCINATION RULES
@@ -79,6 +81,17 @@ never preface it with a sentence about why it's there, never restate the rule th
 produced it.
 """
 
+# Re-export so writers that import drafting_prompts get the shared anti-echo block.
+__all__ = (
+    "ANTI_HALLUCINATION_RULES",
+    "ANTI_RFP_ECHO_RULES",
+    "DESIGNER_READY_BLOCK",
+    "GLOBAL_AGENT_PROMPT_RULES",
+    "MODULAR_APPROACH_BLOCK",
+    "format_proof_points_block",
+    "is_modular_approach_section",
+)
+
 GLOBAL_AGENT_PROMPT_RULES = """
 === CORE AGENT RULES (MANDATORY FOR ALL TASKS) ===
 1. SINGLE SOURCE OF TRUTH: The Research Brief is absolute. Maintain strict consistency with it to ensure no contradictions across the proposal.
@@ -86,6 +99,7 @@ GLOBAL_AGENT_PROMPT_RULES = """
 3. NO FABRICATION: NEVER invent missing data, clients, metrics, or pricing.
 4. NO BLANK REFUSALS: NEVER leave a section or response empty with a meta-comment like "Please provide...". Draft the absolute best complete section you can.
 5. USE [VERIFY] FOR GAPS: If you genuinely lack facts to fulfill a requirement, insert an inline `[VERIFY: missing fact description]` tag to hold the space instead of fabricating or omitting it.
+6. ANTI-RFP-ECHO: NEVER restate the RFP. Address requirements with proposal substance only. NEVER paraphrase, quote, or summarize the RFP / Opportunity Understanding / requirement checklist as section content. Write what zö will do and prove — not what the buyer already asked.
 """
 
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)
@@ -98,7 +112,7 @@ wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable s
 1. **Lead** — 1–3 tight sentences: what this tab proves.
 2. **Body** — markdown tables, short bullets, or labeled rows matched to THIS tab's job (matrix, Q&A, references, phases, checklist). One row per RFP item when there are many asks. Same fact once — not in prose AND bullets.
 3. **Visual handoff** — when layout beats prose (timeline, comparison, grid, icons): one specific [DESIGNER NOTE: …] with columns/data. Do not write paragraphs a graphic would replace.
-4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs.
+4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs. ANTI-RFP-ECHO: never open by telling the client what they asked for; open with the proposal answer.
 
 Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density.
 

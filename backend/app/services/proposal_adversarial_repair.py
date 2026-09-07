@@ -162,6 +162,7 @@ def _apply_deterministic_reference_repair(
     new, _logs = apply_reference_content_scrubs(
         section.content or "",
         primary_contact_name=primary,
+        section_title=section.title or "",
     )
     if new == (section.content or ""):
         return None
@@ -573,8 +574,9 @@ def _build_repair_message_for_finding(
     ]
     if repair_plan.safe_plan_driven_draft:
         parts.append(
-            "Methodology and process content may be drafted from the RFP requirements "
-            "and execution plan without inventing company-specific facts."
+            "Methodology and process content may be drafted from the execution plan "
+            "as OUR proposal answer without inventing company-specific facts. "
+            "Never paraphrase RFP requirements or scope lists into the section body."
         )
     if use_strong_model or repair_plan.needs_strong_model:
         parts.append(

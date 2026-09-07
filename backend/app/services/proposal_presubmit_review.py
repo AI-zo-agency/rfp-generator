@@ -612,6 +612,8 @@ def _scan_copy_paste(
 
 
 def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
+    from app.services.proposal_voice_enforcement import find_rev6_voice_violations
+
     issues: list[PreSubmitIssue] = []
     for section in draft.sections:
         if not section.content.strip():
@@ -629,6 +631,26 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
                     severity="warning",
                     category="voice",
                     message='Narrative section uses "The Vendor" / third-person procurement language',
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                )
+            )
+        # Rev 6 hard bans — compulsory; leftover patterns are Review blockers.
+        rev6_hits = find_rev6_voice_violations(section.content)
+        if rev6_hits:
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="voice",
+                    message=(
+                        "Rev 6 zö voice (compulsory) not followed: "
+                        + "; ".join(rev6_hits[:4])
+                        + (
+                            f" (+{len(rev6_hits) - 4} more)"
+                            if len(rev6_hits) > 4
+                            else ""
+                        )
+                    ),
                     sectionId=section.id,
                     sectionTitle=section.title,
                 )

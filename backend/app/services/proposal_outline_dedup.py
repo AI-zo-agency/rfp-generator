@@ -682,10 +682,22 @@ def humanize_outline_title(title: str, *, max_chars: int = 72) -> str:
     requirement sentence or a raw machine key. A tab label is a short
     noun phrase; the full requirement belongs in the section's
     instructions, never in its heading.
+
+    Returns empty when the title is packaging / eligibility instruction
+    prose (never truncate those into a fake TOC label).
     """
     text = (title or "").strip()
     if not text:
         return ""
+
+    from app.services.proposal_fulfill_rfp_structure import (
+        recover_deliverable_title_from_instruction,
+        title_is_rfp_instruction_not_deliverable,
+    )
+
+    if title_is_rfp_instruction_not_deliverable(text):
+        recovered = recover_deliverable_title_from_instruction(text)
+        return recovered or ""
 
     # MACHINE KEY: no space, but has "_" or "-" — humanize into words.
     if " " not in text and ("_" in text or "-" in text):
@@ -899,6 +911,25 @@ def filter_lean_outline_sections(
         if is_kb_artefact_outline_title(original_title):
             dropped.append(f"{original_title} (knowledge-base filename, not a section)")
             continue
+        # Instruction / eligibility / packaging prose is never a TOC tab —
+        # check before humanize/enrich so truncation cannot turn a DQ warning
+        # into a fake heading.
+        from app.services.proposal_fulfill_rfp_structure import (
+            _title_is_non_deliverable,
+            recover_deliverable_title_from_instruction,
+        )
+
+        if _title_is_non_deliverable(original_title):
+            recovered = recover_deliverable_title_from_instruction(original_title)
+            if recovered:
+                _set_title(section, recovered)
+                # Continue with the real form name — do not drop the deliverable.
+                original_title = recovered
+            else:
+                dropped.append(
+                    f"{original_title} (RFP instruction / eligibility — not a deliverable)"
+                )
+                continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
         # Strip points-table wording a wrapped PDF row leaks into a heading
         # ("SECTION III Strategic Planning - UP TO 160"). Applied at this shared

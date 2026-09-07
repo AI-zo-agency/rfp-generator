@@ -213,6 +213,64 @@ class PointerPageIntegrityTests(unittest.TestCase):
         self.assertIn("City of Nowhere", body)
         self.assertTrue(any("MANUAL FILL" in line for line in logs))
 
+    def test_where_to_find_it_table_remaps_to_live_marks(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-gilroy",
+            sections=[
+                _sec(
+                    "submit",
+                    "9. Proposal Submission Requirements",
+                    (
+                        "| Required Component | Where to Find It |\n"
+                        "| --- | --- |\n"
+                        "| Schedule / timeline | Section 3 (Schedule tab) |\n"
+                        "| Budget / fee | Section 3 (Budget tab) |\n"
+                        "| Client references | Section 3 (References tab) |\n"
+                        "| Strategic approach | Section 3 (Approach tab) |\n"
+                    ),
+                ),
+                _sec("ow", "3. Our Work", "Case study cards."),
+                _sec("growth", "6. Strategic Growth Plan", "Phases and cadence."),
+                _sec("budget", "7. Budget", "Fee Detail by Phase."),
+                _sec("refs", "8. References", "Three client contacts."),
+            ],
+            updatedAt="2026-09-07T00:00:00Z",
+        )
+        rewritten, n, unresolved = rewrite_cross_ref_addressed_in_table(
+            draft.sections[0].content or "", draft, self_section_id="submit"
+        )
+        self.assertGreaterEqual(n, 3)
+        self.assertNotIn("Section 3 (", rewritten)
+        self.assertNotIn("Schedule tab", rewritten)
+        # Live tabs only — Budget / References / Strategic Growth.
+        self.assertTrue(
+            "§7 (" in rewritten or "§8 (" in rewritten or "§6 (" in rewritten
+        )
+        # Phantom Schedule with no live Schedule tab → MANUAL FILL or remapped away.
+        self.assertNotRegex(rewritten, r"(?i)section\s+3\s*\(schedule")
+
+    def test_phantom_schedule_prose_not_remapped_to_our_work(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-phantom",
+            sections=[
+                _sec(
+                    "submit",
+                    "9. Submission",
+                    "See Section 3 (Schedule tab) for milestones.",
+                ),
+                _sec("ow", "3. Our Work", "Cards."),
+                _sec("growth", "6. Strategic Growth Plan", "Cadence."),
+            ],
+            updatedAt="2026-09-07T00:00:00Z",
+        )
+        rewritten, n, unresolved = rewrite_prose_section_citations(
+            draft.sections[0].content or "", draft, self_section_id="submit"
+        )
+        self.assertGreaterEqual(n, 1)
+        self.assertNotIn("Section 3 (Schedule", rewritten)
+        self.assertNotIn("§3 (Our Work)", rewritten)
+        self.assertIn("MANUAL FILL", rewritten)
+
     def test_apply_integrity_inserts_and_strips_editor_notes(self) -> None:
         draft = self._draft()
         out, logs = apply_pointer_page_integrity(draft, source_section_id="tech")

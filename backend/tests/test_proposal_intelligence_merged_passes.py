@@ -151,6 +151,7 @@ class ExecutionPlanTests(unittest.IsolatedAsyncioTestCase):
         ) as chat:
             updated = await run_execution_plan(plan=_plan())
         chat.assert_awaited_once()
+        self.assertEqual(chat.await_args.kwargs.get("max_tokens"), 16384)
         self.assertEqual(updated.delivery.work_breakdown.packages[0].work_package, "Kickoff")
         self.assertEqual(updated.delivery.timeline.go_live, "Week 12")
         self.assertEqual(updated.delivery.resources.allocations[0].role, "PM")

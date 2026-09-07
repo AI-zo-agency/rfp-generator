@@ -96,6 +96,12 @@ async def run_proposal_checklister(
         original_title = (item.get("title") or "").strip()
         if not original_title:
             continue
+        from app.services.proposal_fulfill_rfp_structure import (
+            title_is_rfp_instruction_not_deliverable,
+        )
+
+        if title_is_rfp_instruction_not_deliverable(original_title):
+            continue
         title = humanize_outline_title(original_title)
         if not title:
             continue

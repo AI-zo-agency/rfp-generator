@@ -200,10 +200,18 @@ class Settings(BaseSettings):
     # Review & Fix reviews this many sections' KB fact-checks concurrently.
     # Only the pure per-section fact-check is parallel; every draft write
     # stays sequential. 1 restores the old fully-sequential behaviour.
-    review_fix_section_concurrency: int = 3
+    # Whole-manuscript contradiction runs once after all sections finish.
+    review_fix_section_concurrency: int = 8
+    # When False (default), Review only Sonnet-rewrites sections that fail
+    # groundedness heuristics — keeps a full manuscript pass in ~10–15 min.
+    # True restores the old always-rewrite behaviour (slow / expensive).
+    review_fix_force_full_check: bool = False
+    # Output budget for Review fact-check rewrites (section JSON, not plans).
+    review_fix_fact_check_max_tokens: int = 4096
     # Hard LLM run budgets (USD). 0 disables guard.
     generate_proposal_max_cost_usd: float = 3.0
-    complete_scan_max_cost_usd: float = 3.0
+    # Lean Review + structure should finish under this; raise only if needed.
+    complete_scan_max_cost_usd: float = 5.0
 
     # Financial workspace chat budgets (USD). Enforced in qb_chat against
     # financial_llm_calls, not against the proposal run budget above — the two

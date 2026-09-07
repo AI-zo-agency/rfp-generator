@@ -81,7 +81,11 @@ class ClientBudgetRenderTests(unittest.TestCase):
         self.assertIn("Direct travel / reimbursables: $7,500", md)
         self.assertNotIn("directExpensesTotal", md)
         self.assertIn("| Travel / Reimbursables |", md)
-        self.assertIn("Travel — two Maine trips", md)
+        # House rule: no em dashes in client-facing budget text. The label/detail
+        # break becomes a colon, so this reads "Travel: two Maine trips."
+        self.assertIn("Travel: two Maine trips", md)
+        self.assertNotIn("\u2014", md)
+        self.assertNotIn("\u2013", md)
         self.assertIn("$7,500", md)
         # No second travel row as Direct expenses when already a Travel line
         self.assertNotIn("| Direct expenses | Travel / reimbursables | $7,500 |", md)
@@ -144,11 +148,13 @@ class ClientBudgetRenderTests(unittest.TestCase):
             ],
         )
         cleaned = prepare_budget_for_client_display(b)
+        # Terms stay Pricing Guide verbatim — fee dollars live in Fee Detail.
         self.assertNotIn("$240,000", cleaned.qualifying_language or "")
-        self.assertIn("57,754.01", cleaned.qualifying_language or "")
+        self.assertNotIn("57,754.01", cleaned.qualifying_language or "")
         md = render_budget_markdown(b)
         self.assertNotIn("$240,000", md)
         self.assertIn("57,754.01", md)
+        self.assertIn("Fee Detail by Phase", md)
 
     def test_syncs_stale_terms_and_strips_garbled_scope(self) -> None:
         b = _budget(
@@ -177,8 +183,12 @@ class ClientBudgetRenderTests(unittest.TestCase):
         cleaned = prepare_budget_for_client_display(b)
         self.assertNotIn("43 ($116", cleaned.scope_summary or "")
         self.assertIn("$100,000 in professional fees plus $7,500", cleaned.scope_summary or "")
-        self.assertIn("$100,000 in professional fees", cleaned.qualifying_language or "")
+        # Stale Terms dollars scrubbed; guide verbatim replaces LLM money prose.
         self.assertNotIn("$73,500", cleaned.qualifying_language or "")
+        self.assertNotIn("$100,000 in professional fees", cleaned.qualifying_language or "")
+        md = render_budget_markdown(b)
+        self.assertIn("$100,000", md)
+        self.assertIn("Fee Detail by Phase", md)
 
     def test_passthrough_not_counted_as_professional_fees_or_agency_revenue(self) -> None:
         b = _budget(
@@ -484,9 +494,10 @@ class QualifyingLanguageFormatTests(unittest.TestCase):
         )
         md = render_budget_markdown(b)
         self.assertIn("## Terms", md)
-        self.assertIn("| Component | Share | Amount |", md)
-        self.assertIn("| Fees | 45% | $33,081 |", md)
-        self.assertIn("| Media | 55% | $40,540 |", md)
+        self.assertIn("## Fee Detail by Phase", md)
+        # Fee Detail is the sole breakdown — no conflicting Component|Share mix.
+        self.assertNotIn("| Component | Share | Amount |", md)
+        self.assertIn("| Phase | Scope | Fee |", md)
 
 
 if __name__ == "__main__":

@@ -197,8 +197,8 @@ def _row_to_rfp_section_spec(
         satisfied_by_static_company_block=satisfied_static,
         mandated_submission_format=mandated_submission_format,
     )
-    if _spec_is_rfp_title_noise(candidate):
-        return None
+    if _spec_is_non_deliverable(candidate):
+        return _coerce_non_deliverable_spec_to_deliverable(candidate)
     return candidate
 
 
@@ -268,9 +268,16 @@ async def extract_rfp_submission_format_specs(
                         "Return the EXACT sequence that section mandates, in order. "
                         "That sequence outranks evaluation-criteria numbering or labels "
                         "from other parts of the RFP when they conflict.\n\n"
-                        "Include EVERY row the format/layout section requires the offeror "
-                        "to submit — narrative sections, signed forms, exhibits, attachments, "
-                        "and compliance statements — using the buyer's verbatim headings.\n"
+                        "Include EVERY row the format/layout / proposal-content section "
+                        "requires the offeror to submit — narrative sections, signed forms, "
+                        "packet exhibits the offeror returns, attachments, and compliance "
+                        "statements — using the buyer's verbatim headings.\n"
+                        "Do NOT emit rows for sample Professional Services Agreement / "
+                        "exemplar contract / Exhibit B|C clause titles (Construction, "
+                        "Captions, Severability, Governing Law, Entire Agreement, etc.). "
+                        "Those are post-award contract text, not proposal tabs. If the "
+                        "buyer wants exceptions or acceptance of the sample agreement, "
+                        "that belongs under Exceptions / compliance — not as each clause.\n"
                         "Every row must be a DELIVERABLE the offeror submits, named in the "
                         "buyer's own wording for that deliverable. An instruction/container "
                         "heading that only describes HOW to respond (e.g. \"Required Elements "
@@ -429,11 +436,13 @@ def format_rfp_structure_specs_for_planner(specs: list[RfpSectionSpec]) -> str:
     ]
     index = 1
     for spec in specs:
-        if _spec_is_rfp_title_noise(spec):
+        if _spec_is_non_deliverable(spec):
             continue
-        if _spec_is_acknowledge_only(spec):
-            continue
-        if spec.satisfied_by_static_company_block:
+        # Only wrap-label stamps skip the planner hard-list — bare Insurance etc.
+        # must remain when the extractor over-marks satisfiedByStaticCompanyBlock.
+        if spec.satisfied_by_static_company_block and _title_is_company_block_wrap_label(
+            spec.rfp_title or ""
+        ):
             continue
         if is_duplicate_static_rfp_section(spec.rfp_title or ""):
             continue
@@ -501,24 +510,39 @@ def outline_sections_from_rfp_specs(
 
     sections: list[Any] = []
     order = 1
+    seen_titles_cf: set[str] = set()
     for spec in specs:
-        if _spec_is_rfp_title_noise(spec):
-            continue
-        if _spec_is_acknowledge_only(spec):
-            continue
-        if spec.satisfied_by_static_company_block:
-            continue
+        if _spec_is_non_deliverable(spec):
+            coerced = _coerce_non_deliverable_spec_to_deliverable(spec)
+            if coerced is None:
+                continue
+            spec = coerced
+        # True static identity / company-block wrap labels stay nested in 1.x —
+        # do NOT skip every row the extract stamped satisfiedByStaticCompanyBlock
+        # (over-eager stamps used to drop bare Insurance / late TOC rows).
         if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+            continue
+        if spec.satisfied_by_static_company_block and _title_is_company_block_wrap_label(
+            spec.rfp_title or ""
+        ):
             continue
         title = _clean_spec_title((spec.rfp_title or "").strip())
         if not title:
             continue
+        title_cf = title.casefold()
+        if title_cf in seen_titles_cf:
+            continue
+        seen_titles_cf.add(title_cf)
 
         # Packet list -> emit its headings as the tabs, not the wrapper.
         if spec_is_submission_wrapper(spec):
             for heading in spec.required_headings or []:
                 child_title = _clean_spec_title(str(heading or "").strip())
-                if not child_title or is_duplicate_static_rfp_section(child_title):
+                if (
+                    not child_title
+                    or is_duplicate_static_rfp_section(child_title)
+                    or _spec_is_non_deliverable(RfpSectionSpec(rfp_title=child_title))
+                ):
                     continue
                 child_raw = {
                     "id": f"rfp-structure-{_slug_section_id(child_title)}",
@@ -883,7 +907,7 @@ async def extract_rfp_scored_section_specs(
                 same_ask_as=same_ask,
                 satisfied_by_static_company_block=satisfied_static,
             )
-            if _spec_is_rfp_title_noise(candidate):
+            if _spec_is_non_deliverable(candidate):
                 continue
             if title.casefold() == "brand marketing plan" and specs:
                 # Merge LLM headings with Exhibit A if richer
@@ -984,6 +1008,214 @@ def _spec_is_acknowledge_only(spec: RfpSectionSpec) -> bool:
     outline tab."""
     title = (spec.rfp_title or "").strip().casefold()
     return title.startswith(_ACKNOWLEDGE_ONLY_TITLE_PREFIXES)
+
+
+# Sample Professional Services Agreement / Exhibit contract articles are
+# RFP-authored post-award prose — not proposal response tabs. Extractors still
+# mint them when closing-package excerpts include the PSA (e.g. "3.7.13
+# Construction; References; Captions. Since the Parties…"). Principle-based:
+# numbered multi-topic legal drafting labels, or clause-body text leaked into
+# the title — never a client-specific deny-list.
+_NUMBERED_CONTRACT_CLAUSE_RE = re.compile(r"^\s*\d+\.\d+(?:\.\d+)*\s+")
+_CLAUSE_BODY_LEAK_IN_TITLE_RE = re.compile(
+    r"\.\s+(?:Since|Whereas|The\s+Parties|If\s+any\s+provision|"
+    r"Nothing\s+in\s+this|Except\s+as\s+expressly)\b"
+)
+_CONTRACT_DRAFTING_TOPIC_RE = re.compile(
+    r"(?i)\b("
+    r"construction|captions?|severabilit(?:y|ies)|governing\s+law|"
+    r"entire\s+agreement|counterparts|force\s+majeure|"
+    r"headings?\s+and\s+captions|interpretation|"
+    r"definitions?\s+and\s+construction|waiver\s+of\s+jury"
+    r")\b"
+)
+_BARE_CONTRACT_ARTICLE_TITLES = frozenset(
+    {
+        "construction",
+        "captions",
+        "severability",
+        "governing law",
+        "entire agreement",
+        "counterparts",
+        "force majeure",
+        "headings and captions",
+        "construction; references; captions",
+        "references; captions",
+    }
+)
+
+
+def _spec_is_sample_agreement_boilerplate(spec: RfpSectionSpec) -> bool:
+    """True when the title is a sample-agreement / PSA exhibit clause, not a
+    deliverable the offeror authors in the proposal packet."""
+    title = (spec.rfp_title or "").strip()
+    if not title:
+        return False
+    if _CLAUSE_BODY_LEAK_IN_TITLE_RE.search(title):
+        return True
+    bare = re.sub(r"^\s*\d+(?:\.\d+)*\s*[.\)—–\-:]*\s*", "", title).strip().casefold()
+    bare = re.sub(r"\s+", " ", bare)
+    if bare in _BARE_CONTRACT_ARTICLE_TITLES:
+        return True
+    if _NUMBERED_CONTRACT_CLAUSE_RE.match(title) and title.count(";") >= 1:
+        topics = _CONTRACT_DRAFTING_TOPIC_RE.findall(title)
+        if len(topics) >= 1:
+            return True
+    return False
+
+
+# Packaging rules, eligibility / DQ warnings, and "how to fill form X" drafting
+# directions are RFP prose the offeror COMPLIES WITH — never TOC tabs. Extractors
+# and checklisters still mint them when a bullet is sentence-shaped but shorter
+# than the >85-char noise gate (e.g. "DO NOT INCLUDE A COPY OF YOUR COST FILE…").
+# Principle-based: imperative packaging prohibitions, conditional exception
+# drafting, and disqualification warnings — not client/city keyword lists.
+_PACKAGING_PROHIBITION_TITLE_RE = re.compile(
+    r"(?i)^\s*(?:"
+    r"do\s+not|must\s+not|shall\s+not|never"
+    r")\s+(?:include|submit|attach|bind|place|put|send|enclose)\b"
+)
+_EXCEPTIONS_DRAFTING_TITLE_RE = re.compile(
+    r"(?i)^\s*if\s+(?:any\s+)?exceptions?\b|"
+    r"\bthis\s+(?:statement|form|affidavit|questionnaire)\s+"
+    r"(?:of\s+compliance\s+)?shall\s+include\b"
+)
+_ELIGIBILITY_WARNING_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"(?:may|shall|will|can)\s+"
+    r"(?:eliminate|disqualify|reject|be\s+deemed\s+non[- ]responsive)"
+    r"|grounds?\s+for\s+(?:rejection|disqualification)"
+    r"|unsatisfactory\s+(?:references|work\s+performance)"
+    r")\b"
+)
+_CONDITIONAL_INSTRUCTION_TITLE_RE = re.compile(
+    r"(?i)^\s*(?:if|when|unless)\b.+\b(?:shall|must|may)\b.+\b"
+    r"(?:include|contain|identify|eliminate|disqualify|submit)\b"
+)
+# Outline / manuscript stamps ("23. DO NOT INCLUDE…", "6. If any exceptions…")
+# must not defeat the start-anchored instruction detectors.
+_LEADING_OUTLINE_NUMBER_RE = re.compile(
+    r"^\s*(?:"
+    r"\d+(?:\.\d+)*\.?\s+"
+    r"|[A-Z]\.\s+"
+    r"|(?:Section|SECTION|Tab|TAB)\s+\d+[.:)\-–—]?\s*"
+    r")"
+)
+
+
+def _strip_leading_outline_number(title: str) -> str:
+    text = (title or "").strip()
+    for _ in range(3):
+        nxt = _LEADING_OUTLINE_NUMBER_RE.sub("", text, count=1).strip()
+        if nxt == text:
+            break
+        text = nxt
+    return text
+
+
+def title_is_rfp_instruction_not_deliverable(title: str) -> bool:
+    """True when the title is procedural RFP prose / eligibility warning, not a tab.
+
+    A TOC tab names a deliverable the offeror authors or returns (form name,
+    scored packet heading, cover letter). Packaging rules, DQ warnings, and
+    drafting directions about another instrument belong on the compliance
+    checklist — never as Generating… tabs.
+    """
+    t = _strip_leading_outline_number(title)
+    if not t:
+        return False
+    if _PACKAGING_PROHIBITION_TITLE_RE.match(t):
+        return True
+    if _EXCEPTIONS_DRAFTING_TITLE_RE.search(t):
+        return True
+    if _ELIGIBILITY_WARNING_TITLE_RE.search(t):
+        return True
+    if _CONDITIONAL_INSTRUCTION_TITLE_RE.match(t):
+        return True
+    return False
+
+
+# When instruction prose names a form ("this Statement of Compliance shall…"),
+# recover that form as the tab — do not drop the deliverable with the instruction.
+_NAMED_FORM_THIS_THE_RE = re.compile(
+    r"(?i)\b(?:this|the)\s+("
+    r"statement\s+of\s+compliance"
+    r"|affidavit\s+of\s+[^.,;:\[\]()]{3,80}"
+    r")\b"
+)
+_NAMED_INSTRUMENT_THIS_THE_RE = re.compile(
+    r"(?i)\b(?:this|the)\s+([A-Za-z][A-Za-z0-9 /&'-]{2,55}?)\s+"
+    r"(form|affidavit|certification|questionnaire|disclosure)\b"
+)
+
+
+def recover_deliverable_title_from_instruction(title: str) -> str | None:
+    """If instruction prose names a form/deliverable, return that short title.
+
+    Packaging prohibitions and eligibility warnings return None (drop the tab).
+    Exception-drafting directions that name Statement of Compliance recover it.
+    """
+    raw = (title or "").strip()
+    t = _strip_leading_outline_number(raw)
+    if not t or not title_is_rfp_instruction_not_deliverable(raw):
+        return None
+    if _PACKAGING_PROHIBITION_TITLE_RE.match(t):
+        return None
+    if _ELIGIBILITY_WARNING_TITLE_RE.search(t):
+        return None
+    m = _NAMED_FORM_THIS_THE_RE.search(t)
+    if m:
+        name = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+        if name.casefold() == "statement of compliance":
+            return "Statement of Compliance"
+        return name
+    m = _NAMED_INSTRUMENT_THIS_THE_RE.search(t)
+    if m:
+        head = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+        kind = m.group(2).strip()
+        if len(head) >= 3:
+            return f"{head} {kind}".strip()
+    return None
+
+
+def _coerce_non_deliverable_spec_to_deliverable(
+    spec: RfpSectionSpec,
+) -> RfpSectionSpec | None:
+    """Rewrite an instruction-shaped spec into its named form, or None to drop."""
+    from dataclasses import replace
+
+    recovered = recover_deliverable_title_from_instruction(spec.rfp_title or "")
+    if not recovered:
+        return None
+    original = (spec.rfp_title or "").strip()
+    prior = (spec.instructions or "").strip()
+    instructions = (
+        f"RFP drafting direction (not a section heading): {original}\n\n{prior}"
+        if prior
+        else f"RFP drafting direction (not a section heading): {original}"
+    )
+    coerced = replace(
+        spec,
+        rfp_title=recovered,
+        instructions=instructions[:2500],
+    )
+    if _spec_is_non_deliverable(coerced):
+        return None
+    return coerced
+
+
+def _spec_is_rfp_instruction_not_deliverable(spec: RfpSectionSpec) -> bool:
+    return title_is_rfp_instruction_not_deliverable(spec.rfp_title or "")
+
+
+def _spec_is_non_deliverable(spec: RfpSectionSpec) -> bool:
+    """Noise, acknowledge-only, instruction, or sample-agreement — never a tab."""
+    return (
+        _spec_is_rfp_title_noise(spec)
+        or _spec_is_acknowledge_only(spec)
+        or _spec_is_sample_agreement_boilerplate(spec)
+        or _spec_is_rfp_instruction_not_deliverable(spec)
+    )
 
 
 # Instruction headings that describe HOW to respond. They are not deliverables,
@@ -1199,6 +1431,25 @@ def _title_is_cover_letter_family(title_cf: str) -> bool:
     return False
 
 
+def _static_1x_blocks_toc_deliverable(
+    section: ProposalSection,
+    spec: RfpSectionSpec,
+) -> bool:
+    """True when a static 1.x tab already owns this ask (wrap / identity only).
+
+    Bare late TOC labels (e.g. Insurance) must NOT be absorbed by
+    ``1.5 — Insurance Information`` via near-duplicate title matching.
+    """
+    if not _is_static_1_3_section(section):
+        return False
+    title = spec.rfp_title or ""
+    from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+    return is_duplicate_static_rfp_section(title) or _title_is_company_block_wrap_label(
+        title
+    )
+
+
 def _match_section_for_spec(
     draft: ProposalDraft,
     spec: RfpSectionSpec,
@@ -1206,6 +1457,10 @@ def _match_section_for_spec(
     """Match by title meaning (outline near-duplicate + LLM sameAskAs), not keyword regex."""
     aliases = list(spec.same_ask_as or [])
     for section in draft.sections:
+        if _is_static_1_3_section(section) and not _static_1x_blocks_toc_deliverable(
+            section, spec
+        ):
+            continue
         if _titles_are_same_ask(spec.rfp_title, section.title or "", aliases):
             return section
     return None
@@ -1258,6 +1513,12 @@ def _spec_title_already_in_draft(
     for section in sections:
         st = (section.title or "").strip()
         if not st:
+            continue
+        # Static 1.x near-dup alone must not suppress a mandated TOC stub
+        # (Insurance vs 1.5 Insurance Information).
+        if _is_static_1_3_section(section) and not _static_1x_blocks_toc_deliverable(
+            section, spec
+        ):
             continue
         if _titles_are_same_ask(title, st, aliases):
             return True
@@ -1315,22 +1576,50 @@ def _title_is_transmittal_deliverable(title: str) -> bool:
     return any(h in _section_title_cf(title) for h in _TRANSMITTAL_TITLE_HINTS)
 
 
-def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> bool:
-    """TOC item already satisfied by Sections 1.1–1.5 / 2 / 3 — header wrap only."""
-    # Guard FIRST, ahead of every other route: a Cover Letter / Cover Page row
-    # was being claimed as the company-block header, so the deliverable became
-    # an empty "[DESIGNER NOTE: Sections 1.1-1.5 follow below]" stub and no
-    # letter was ever written.
-    if _title_is_transmittal_deliverable(spec.rfp_title or ""):
+# Only zö identity TOC labels may wrap Sections 1.1–1.5. Closed allowlist —
+# not an open deny-list of RFP compliance titles (those wording differ by RFP).
+_COMPANY_BLOCK_WRAP_TITLE_RES = (
+    re.compile(r"(?i)\bcompany\s+background\b"),
+    re.compile(r"(?i)\bcompany\s+overview\b"),
+    re.compile(r"(?i)\bfirm\s+(?:overview|profile|background)\b"),
+    re.compile(r"(?i)\bwho\s+we\s+are\b"),
+    re.compile(r"(?i)\babout\s+(?:the\s+)?(?:firm|agency|company)\b"),
+    re.compile(r"(?i)^\s*(?:\d+[.)]?\s*)?company\s+information\s*$"),
+)
+
+
+def _title_is_company_block_wrap_label(title: str) -> bool:
+    """True when this TOC row is a label for the static 1.1–1.5 block."""
+    raw = (title or "").strip()
+    if not raw or _title_is_transmittal_deliverable(raw):
         return False
-    if spec.satisfied_by_static_company_block:
-        return True
+    return any(p.search(raw) for p in _COMPANY_BLOCK_WRAP_TITLE_RES)
+
+
+def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> bool:
+    """TOC item already satisfied by Sections 1.1–1.5 / 2 / 3 — header wrap only.
+
+    Principle (no per-RFP keyword deny-lists):
+    - Transmittal / letter tabs are never wrap-only.
+    - Titles owned by static Sections 1–3 (``is_duplicate_static_rfp_section``)
+      stay nested / skipped as duplicate essays.
+    - Extractor ``satisfiedByStaticCompanyBlock`` alone is not enough — models
+      over-mark late TOC rows (e.g. bare Insurance) as covered by 1.5. Trust the
+      stamp only for true company-block wrap labels.
+    - Never retire a mandated TOC row solely because a static 1.x tab near-matches
+      ("Insurance" → "1.5 Insurance Information"). That tab keeps its own slot
+      and may cross-ref Section 1.x.
+    """
+    title = spec.rfp_title or ""
+    if _title_is_transmittal_deliverable(title):
+        return False
     from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
 
-    if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+    if is_duplicate_static_rfp_section(title):
         return True
-    matched = _match_section_for_spec(draft, spec)
-    return matched is not None and _is_static_1_3_section(matched)
+    if spec.satisfied_by_static_company_block:
+        return _title_is_company_block_wrap_label(title)
+    return False
 
 
 def _dedupe_sections_by_id(sections: list[ProposalSection]) -> list[ProposalSection]:
@@ -1733,43 +2022,60 @@ def split_response_format_container_sections(
 def _title_is_non_deliverable(title: str) -> bool:
     """True for a tab title that is an RFP clause fragment, not a deliverable.
 
-    Same tests the spec filters already use — `_spec_is_rfp_title_noise` (an
-    over-long / many-worded title is linearised clause text, not a heading) and
-    `_spec_is_acknowledge_only` — but applied to a DRAFT section title, so tabs
-    that slipped through before those filters existed can be cleaned up.
+    Same tests the spec filters already use — noise, acknowledge-only,
+    instruction / eligibility prose, and sample-agreement boilerplate —
+    applied to a DRAFT section title.
     """
     probe = RfpSectionSpec(rfp_title=(title or "").strip())
-    return _spec_is_rfp_title_noise(probe) or _spec_is_acknowledge_only(probe)
+    return _spec_is_non_deliverable(probe)
 
 
 def drop_non_deliverable_rfp_sections(
     draft: ProposalDraft,
 ) -> tuple[ProposalDraft, list[str]]:
-    """Remove empty tabs whose title is an RFP clause fragment, never a real one.
+    """Remove tabs whose title is RFP clause / sample-agreement text, not a deliverable.
 
-    A truncated clause ("Consideration of the responses will be governed by the
-    following schedule, which is subject to") is not something the buyer asked
-    the offeror to submit, and shipping it as a tab reads as a drafting error.
+    HARD RULE for ordinary noise / acknowledge-only: only drop when the tab has
+    no real prose (flag if it holds content).
 
-    HARD RULE: only a tab with no real prose is dropped. A junk title over
-    written content is FLAGGED, never deleted — an extra tab is a blemish, and
-    deleting someone's prose is unrecoverable.
+    HARD RULE for sample-agreement boilerplate and instruction / eligibility
+    titles: always drop — even if the LLM wrote acknowledgment prose. That
+    content does not belong as its own proposal packet tab.
     """
     from app.services.proposal_draft_structure_stubs import section_needs_presubmit_fill
 
     logs: list[str] = []
     kept: list[ProposalSection] = []
-    dropped = 0
+    changed = False
     for section in draft.sections:
         title = (section.title or "").strip()
         if _is_static_1_3_section(section) or not _title_is_non_deliverable(title):
             kept.append(section)
             continue
-        if section_needs_presubmit_fill(section):
-            dropped += 1
+        recovered = recover_deliverable_title_from_instruction(title)
+        if recovered:
+            kept.append(section.model_copy(update={"title": recovered}))
+            changed = True
             logs.append(
-                f"Dropped non-deliverable tab '{title[:80]}' — RFP clause text, "
-                "not a section the buyer asked for, and it held no content."
+                f"Retitled instruction tab '{title[:72]}' → '{recovered}' "
+                "(kept deliverable form; drafting direction is not the heading)"
+            )
+            continue
+        probe = RfpSectionSpec(rfp_title=title)
+        force_drop = _spec_is_sample_agreement_boilerplate(
+            probe
+        ) or _spec_is_rfp_instruction_not_deliverable(probe)
+        if force_drop or section_needs_presubmit_fill(section):
+            changed = True
+            if _spec_is_sample_agreement_boilerplate(probe):
+                kind = "sample-agreement boilerplate"
+            elif _spec_is_rfp_instruction_not_deliverable(probe):
+                kind = "RFP instruction / eligibility text"
+            else:
+                kind = "RFP clause text"
+            logs.append(
+                f"Dropped non-deliverable tab '{title[:80]}' — {kind}, "
+                "not a section the buyer asked the offeror to author."
             )
             continue
         kept.append(section)
@@ -1778,10 +2084,95 @@ def drop_non_deliverable_rfp_sections(
             "than a deliverable, but it holds written content, so it was kept. "
             "Delete it by hand if it does not belong."
         )
-    if not dropped:
+    if not changed:
         return draft, logs
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": kept, "updated_at": now}), logs
+
+
+def scrub_non_deliverable_titles_from_research(
+    research: Any,
+) -> tuple[Any, list[str]]:
+    """Drop instruction / eligibility outline rows from cached research — no LLM.
+
+    Existing RFPs already have junk titles in ``rfp_sections`` / the execution
+    plan outline. Scrubbing here means Phase 3 / Review will not re-mint those
+    tabs without re-running intelligence.
+    """
+    if research is None:
+        return research, []
+
+    logs: list[str] = []
+    updates: dict[str, Any] = {}
+
+    maps = list(getattr(research, "rfp_sections", None) or [])
+    if maps:
+        kept_maps = []
+        removed = 0
+        retitled = 0
+        for m in maps:
+            title = getattr(m, "title", "") or ""
+            if not _title_is_non_deliverable(title):
+                kept_maps.append(m)
+                continue
+            recovered = recover_deliverable_title_from_instruction(title)
+            if recovered:
+                kept_maps.append(m.model_copy(update={"title": recovered}))
+                retitled += 1
+            else:
+                removed += 1
+        if removed or retitled:
+            updates["rfp_sections"] = kept_maps
+            if removed:
+                logs.append(
+                    f"Research outline: dropped {removed} RFP instruction / "
+                    "eligibility title(s) (no intelligence re-run)"
+                )
+            if retitled:
+                logs.append(
+                    f"Research outline: retitled {retitled} instruction(s) "
+                    "to named deliverable form(s)"
+                )
+
+    plan = getattr(research, "proposal_execution_plan", None)
+    if plan is not None:
+        writing = getattr(plan, "writing", None)
+        outline = getattr(writing, "proposal_outline", None) if writing else None
+        sections = list(getattr(outline, "sections", None) or []) if outline else []
+        if sections:
+            kept_outline = []
+            removed_o = 0
+            retitled_o = 0
+            for s in sections:
+                title = getattr(s, "title", "") or ""
+                if not _title_is_non_deliverable(title):
+                    kept_outline.append(s)
+                    continue
+                recovered = recover_deliverable_title_from_instruction(title)
+                if recovered:
+                    kept_outline.append(s.model_copy(update={"title": recovered}))
+                    retitled_o += 1
+                else:
+                    removed_o += 1
+            if (removed_o or retitled_o) and outline is not None and writing is not None:
+                new_outline = outline.model_copy(update={"sections": kept_outline})
+                new_writing = writing.model_copy(update={"proposal_outline": new_outline})
+                new_plan = plan.model_copy(update={"writing": new_writing})
+                updates["proposal_execution_plan"] = new_plan
+                if removed_o:
+                    logs.append(
+                        f"Execution-plan outline: dropped {removed_o} instruction / "
+                        "eligibility title(s)"
+                    )
+                if retitled_o:
+                    logs.append(
+                        f"Execution-plan outline: retitled {retitled_o} "
+                        "instruction(s) to named deliverable form(s)"
+                    )
+
+    if not updates:
+        return research, logs
+    return research.model_copy(update=updates), logs
 
 
 def apply_rfp_toc_layout(
@@ -1834,9 +2225,12 @@ def ensure_company_block_wrapper_heading(
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
-        if _spec_is_static_company_ask(draft, spec):
-            wrap_spec = spec
-            break
+        # Only closed-set identity labels wrap 1.1–1.5 — never whatever TOC
+        # row the extractor first stamped as "covered by company block".
+        if not _title_is_company_block_wrap_label(spec.rfp_title or ""):
+            continue
+        wrap_spec = spec
+        break
     if wrap_spec is None:
         if sections != list(draft.sections):
             now = datetime.now(timezone.utc).isoformat()
@@ -1925,7 +2319,7 @@ def order_draft_to_rfp_sequence(
     used: set[str] = set()
     ordered: list[ProposalSection] = []
     for spec in specs:
-        if _spec_is_rfp_title_noise(spec):
+        if _spec_is_non_deliverable(spec):
             continue
         if _spec_is_static_company_ask(draft, spec):
             continue
@@ -1988,7 +2382,7 @@ def ensure_missing_scored_section_stubs(
     changed = False
 
     for spec in specs:
-        if _spec_is_rfp_title_noise(spec):
+        if _spec_is_non_deliverable(spec):
             continue
         # A packet list must never mint a tab of its own. Its headings are
         # already tabs (outline_sections_from_rfp_specs expands them), so
@@ -2314,7 +2708,7 @@ async def run_rfp_structure_alignment_pass(
     for i, spec in enumerate(specs):
         if on_progress:
             await on_progress(i + 1, len(specs), spec.rfp_title or "Missing Section Check")
-        if _spec_is_rfp_title_noise(spec):
+        if _spec_is_non_deliverable(spec):
             continue
         if _spec_is_static_company_ask(draft, spec):
             continue

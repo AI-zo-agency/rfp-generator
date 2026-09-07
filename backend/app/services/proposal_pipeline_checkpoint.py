@@ -295,6 +295,7 @@ async def record_pipeline_activity(
     step_total: int | None = None,
     in_progress_phase: str | None = None,
     scan_profile: str | None = None,
+    active_section_ids: list[str] | None = None,
 ) -> None:
     """Update live sub-step text while a phase runs (polled by the UI)."""
     research = await _ensure_research(rfp_id)
@@ -308,6 +309,11 @@ async def record_pipeline_activity(
         and profile != TARGETED_FIX_PROFILE
     ) else None
     last_done = (step_index - 1) if resume_step and step_index and step_index > 1 else None
+    active_ids = (
+        [str(sid) for sid in active_section_ids if sid]
+        if active_section_ids is not None
+        else None
+    )
     if cp is None:
         cp = ProposalPipelineCheckpoint(
             # Same fabricate-a-phase anti-pattern as the old record_generation_stopped
@@ -320,6 +326,7 @@ async def record_pipeline_activity(
             scanProfile=scan_profile,
             resumeFulfillStep=resume_step,
             lastCompletedFulfillStep=last_done,
+            targetedFixActiveSectionIds=active_ids or [],
             updatedAt=_now_iso(),
         )
     else:
@@ -337,6 +344,8 @@ async def record_pipeline_activity(
             updates["resume_fulfill_step"] = resume_step
             if last_done:
                 updates["last_completed_fulfill_step"] = last_done
+        if active_ids is not None:
+            updates["targeted_fix_active_section_ids"] = active_ids
         cp = cp.model_copy(update=updates)
     await _save_checkpoint(rfp_id, cp)
 
@@ -392,6 +401,7 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
         # Review & Fix finished a full pass — the next click starts from
         # section 1 again instead of skipping everything.
         "targeted_fix_done_section_ids": [],
+        "targeted_fix_active_section_ids": [],
         "targeted_fix_structure_done": False,
         "targeted_fix_contradiction_done": False,
         "targeted_fix_won_fill_done": False,
@@ -465,6 +475,7 @@ async def record_targeted_fix_section_done(
             stepIndex=step_index,
             stepTotal=step_total,
             targetedFixDoneSectionIds=[str(section_id)],
+            targetedFixActiveSectionIds=[],
             updatedAt=_now_iso(),
         )
     else:
@@ -477,6 +488,9 @@ async def record_targeted_fix_section_done(
                 "step_index": step_index if step_index is not None else cp.step_index,
                 "step_total": step_total if step_total is not None else cp.step_total,
                 "targeted_fix_done_section_ids": done,
+                # Batch finished — clear in-flight chips so the UI does not keep
+                # lighting sections that already checkpointed as done.
+                "targeted_fix_active_section_ids": [],
                 "updated_at": _now_iso(),
             }
         )

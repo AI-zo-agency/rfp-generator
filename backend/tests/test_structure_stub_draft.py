@@ -9,6 +9,7 @@ from app.services.proposal_draft_structure_stubs import (
     _stub_draft_brief,
     section_is_rfp_draft_stub,
     section_needs_presubmit_fill,
+    stub_fill_landed,
 )
 from app.services.proposal_fulfill_rfp_structure import _title_is_qual_or_reference
 
@@ -104,6 +105,30 @@ class StructureStubDraftTests(unittest.TestCase):
         brief = _stub_draft_brief(sec)
         self.assertIn("unique ask", brief)
         self.assertNotIn("Short bios for principal team members", brief)
+        # Literal "[MANUAL FILL:" in the brief trips tag-resolve and blocks rewrite.
+        self.assertNotIn("[MANUAL FILL:", brief)
+        from app.services.proposal_manual_flags import is_manual_fill_request
+
+        self.assertFalse(is_manual_fill_request(brief))
+
+    def test_other_information_brief_covers_rfp_bullets(self) -> None:
+        from app.services.proposal_draft_structure_stubs import _stub_draft_brief
+        from app.services.proposal_manual_flags import is_manual_fill_request
+
+        sec = ProposalSection(
+            id="rfp-structure-11-other-information",
+            title="11. Other Information",
+            content=(
+                "[MANUAL FILL: Draft this RFP-required section, 11. Other Information]\n\n"
+                "RFP-required outline:\n- Community involvement\n"
+            ),
+            status="generated",
+        )
+        brief = _stub_draft_brief(sec)
+        self.assertIn("OTHER INFORMATION", brief)
+        self.assertIn("Conflict of interest", brief)
+        self.assertNotIn("[MANUAL FILL:", brief)
+        self.assertFalse(is_manual_fill_request(brief))
 
     def test_finished_prose_is_not_presubmit_fill(self) -> None:
         from app.services.proposal_draft_structure_stubs import (
@@ -549,6 +574,39 @@ class RepairProseDisguisedAsTableRowsTests(unittest.TestCase):
 
         prose = "## Method of Approach\n\nWe will run phased campaigns across paid, owned, and earned channels."
         self.assertEqual(repair_prose_disguised_as_table_rows(prose), prose)
+
+
+class StubFillSignedFormTests(unittest.TestCase):
+    def test_rejects_advisory_chat_as_landed(self) -> None:
+        before = ProposalSection(
+            id="rfp-structure-statement-of-compliance",
+            title="STATEMENT OF COMPLIANCE",
+            content="[MANUAL FILL: Draft this RFP-required section, STATEMENT OF COMPLIANCE]",
+            status="generated",
+        )
+        after = ProposalSection(
+            id=before.id,
+            title=before.title,
+            content=(
+                "Here's what I'd draft for **Statement of Compliance** (Sidebar 24/36) — "
+                "this tab is a fill-in-the-boxes RFP form, not narrative."
+            ),
+            status="generated",
+        )
+        self.assertFalse(stub_fill_landed(before, after))
+
+    def test_compliance_brief_requires_form_body(self) -> None:
+        brief = _stub_draft_brief(
+            ProposalSection(
+                id="x",
+                title="STATEMENT OF COMPLIANCE",
+                content="[MANUAL FILL: Draft this RFP-required section]",
+                status="generated",
+            )
+        )
+        self.assertIn("SIGNED FORM", brief)
+        self.assertIn("No Exceptions", brief)
+        self.assertIn("OUTPUT THE SECTION BODY ONLY", brief)
 
 
 if __name__ == "__main__":

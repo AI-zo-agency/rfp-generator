@@ -41,7 +41,8 @@ Zo Agency is a full-service branding and marketing firm based in Bend, Oregon, s
 - Small: 14px
 
 Proposal writing voice (not UI fonts) is in
-[`ZO_BRAND_AND_WRITING_STANDARDS_REV3.md`](./ZO_BRAND_AND_WRITING_STANDARDS_REV3.md).
+[`ZO_BRAND_AND_WRITING_STANDARDS_REV6.md`](./ZO_BRAND_AND_WRITING_STANDARDS_REV6.md)
+(rev 6 · August 2026 — governing). Older rev files are dead on arrival.
 
 ## Usage Guidelines
 

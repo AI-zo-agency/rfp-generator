@@ -55,6 +55,13 @@ export interface ProposalPipelineCheckpoint {
   stepTotal?: number | null;
   lastCompletedFulfillStep?: number | null;
   resumeFulfillStep?: number | null;
+  /** Section ids Review & Fix already finished (resume + live progress). */
+  targetedFixDoneSectionIds?: string[] | null;
+  /** Section ids currently fact-checked in parallel (light all chips). */
+  targetedFixActiveSectionIds?: string[] | null;
+  targetedFixStructureDone?: boolean | null;
+  targetedFixContradictionDone?: boolean | null;
+  targetedFixWonFillDone?: boolean | null;
   /** Draft-content hash + ISO time of the last completed Complete & clean run. */
   lastCleanFulfillScanHash?: string | null;
   lastCleanFulfillScanAt?: string | null;

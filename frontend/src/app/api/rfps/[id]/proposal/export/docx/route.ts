@@ -49,6 +49,9 @@ export async function POST(
       headers: {
         "Content-Type": contentType,
         "Content-Disposition": disposition,
+        ...(res.headers.get("x-zo-export-mode")
+          ? { "X-Zo-Export-Mode": res.headers.get("x-zo-export-mode")! }
+          : {}),
       },
     });
   } catch (error) {

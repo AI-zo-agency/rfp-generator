@@ -705,10 +705,14 @@ export function chatBusyStatusLabel(
 /** Rotating live lines while a chat turn is in flight. */
 export function chatLiveWorkSteps(primary: string | null | undefined): string[] {
   const head = (primary || "").trim() || "Working on this section…";
+  const budgetish = /budget|cost proposal|pricing|fee detail/i.test(head);
+  const discrepancyLine = budgetish
+    ? "Looking for discrepancies (facts, fee ledger, MANUAL FILL)…"
+    : "Looking for discrepancies (facts, placeholders, MANUAL FILL)…";
   return [
     head,
     "Checking this tab against the RFP and knowledge base…",
-    "Looking for discrepancies (facts, budget, MANUAL FILL)…",
+    discrepancyLine,
     "Preparing the recap of what changed…",
   ];
 }

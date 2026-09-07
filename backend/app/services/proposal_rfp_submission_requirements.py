@@ -939,7 +939,7 @@ def _content_matches_checklist_item(item: SubmissionChecklistItem, content: str)
     "resolved" the instant the draft had any content at all. Attachment
     items therefore never fall back to the fuzzy heuristic; narrative items
     do, since their labels are verbose enough to produce real tokens and a
-    human may reasonably paraphrase RFP wording when drafting prose.
+    human may cover the ask with proposal substance (not by pasting RFP wording).
     """
     if item.pattern and re.search(item.pattern, content, re.I):
         return True

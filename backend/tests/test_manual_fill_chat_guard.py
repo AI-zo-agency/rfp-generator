@@ -128,6 +128,51 @@ class ManualFillHelperTests(unittest.TestCase):
         self.assertTrue(is_manual_fill_request("Fill MANUAL FILL tags from KB"))
         self.assertFalse(is_manual_fill_request("tighten this paragraph"))
 
+    def test_whole_section_draft_stub_skips_manual_fill_resolution(self) -> None:
+        """Phase 4 stub fill must rewrite, not 'could not resolve' the shell tag."""
+        import asyncio
+
+        from app.services.proposal_section_editor import _try_manual_fill_resolution
+
+        content = (
+            "[MANUAL FILL: Draft this RFP-required section, 11. Other Information]\n\n"
+            "RFP-required outline:\n- Community involvement\n"
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-stub",
+            sections=[
+                ProposalSection(
+                    id="rfp-structure-11-other-information",
+                    title="11. Other Information",
+                    content=content,
+                    source="rfp",
+                    mode="write",
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-09-07T00:00:00+00:00",
+        )
+        section = draft.sections[0]
+        brief = (
+            "This tab is an unfilled RFP-required section. "
+            "Do NOT leave [MANUAL FILL: Draft this RFP-required section…] tags."
+        )
+
+        async def _run():
+            return await _try_manual_fill_resolution(
+                rfp_id="rfp-stub",
+                section=section,
+                section_id=section.id,
+                draft=draft,
+                research=None,
+                user_message=brief,
+                rfp_context="",
+                persist=False,
+            )
+
+        result = asyncio.run(_run())
+        self.assertIsNone(result)
+
 
 def _structure_edit(section_id: str):
     from app.services.proposal_chat_structure import StructurePlan

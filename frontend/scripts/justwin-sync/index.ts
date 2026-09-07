@@ -1,5 +1,5 @@
 import "./load-env";
-import { getAuthenticatedContext, getJustWinBaseUrl } from "./browser";
+import { ensureAuthenticatedPage, getAuthenticatedContext, getJustWinBaseUrl } from "./browser";
 import { collectLeads } from "./scrape-leads";
 import { createApiClient } from "./justwin-api";
 import { downloadSolicitationPdf } from "./solicitation-package";
@@ -70,8 +70,9 @@ async function main() {
     `[justwin-sync] starting job ${jobId} (date: ${syncDate || "any"}, tab: ${targetTab})`
   );
 
-  const { browser, context } = await getAuthenticatedContext();
-  const page = await context.newPage();
+  const auth = await getAuthenticatedContext();
+  let { browser, context } = auth;
+  let page = await context.newPage();
 
   try {
     await page.goto(`${getJustWinBaseUrl()}/leads`, {
@@ -80,9 +81,10 @@ async function main() {
     });
     await page.waitForTimeout(3000);
 
-    if (page.url().includes("/login")) {
-      throw new Error("Not authenticated — delete data/justwin-session.json and rerun sync");
-    }
+    const ensured = await ensureAuthenticatedPage({ browser, context }, page);
+    browser = ensured.auth.browser;
+    context = ensured.auth.context;
+    page = ensured.page;
 
     const client = await createApiClient(page);
     const leads = await collectLeads(client, syncDate, targetTab);
