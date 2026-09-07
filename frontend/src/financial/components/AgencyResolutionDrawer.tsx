@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Building2, CircleDollarSign, Link2, MapPinned, X } from "lucide-react";
+import { motion } from "motion/react";
 
 import type { AgencyAction } from "../lib/agency-action-queue";
 import type { AgencyResolutionOption } from "../types/agency";
@@ -186,20 +187,25 @@ export function AgencyResolutionDrawer({
 
   return (
     <>
-      <button
+      <motion.button
         type="button"
         className="agency-drawer-scrim"
         aria-label="Close resolution drawer"
         onClick={close}
         disabled={loading}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
       />
-      <aside
+      <motion.aside
         ref={drawer}
         className="agency-drawer"
         role="dialog"
         aria-modal="true"
         aria-labelledby="agency-drawer-title"
         tabIndex={-1}
+        initial={{ x: "100%", opacity: 0.7 }}
+        animate={{ x: 0, opacity: 1 }}
+        transition={{ type: "spring", stiffness: 320, damping: 34 }}
       >
         <header className="agency-drawer-head">
           <span className="agency-drawer-mark" aria-hidden>
@@ -301,7 +307,7 @@ export function AgencyResolutionDrawer({
             </button>
           ) : null}
         </footer>
-      </aside>
+      </motion.aside>
     </>
   );
 }

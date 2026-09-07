@@ -11,8 +11,10 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { expoOutEase } from "@/lib/motion";
 import type { FinancialTabId } from "../lib/financial-tab";
 
 export type { FinancialTabId };
@@ -174,11 +176,14 @@ export function FinancialNavSidebar({
   return (
     <>
       {mobileOpen ? (
-        <button
+        <motion.button
           type="button"
           className="fixed inset-0 z-40 bg-[#1e3632]/35 md:hidden"
           aria-label="Close financial sections"
           onClick={() => onMobileOpenChange(false)}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
         />
       ) : null}
 
@@ -203,7 +208,12 @@ export function FinancialNavSidebar({
           )}
         >
           <TooltipProvider delayDuration={180}>
-            <div className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-2">
+            <motion.div
+              className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-2"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.45, ease: expoOutEase }}
+            >
               <RailTooltip label={toggleLabel}>{toggleButton}</RailTooltip>
               <div className="fin-rail-copy min-w-0">
                 <p className="font-heading text-[13px] leading-tight font-semibold tracking-tight text-foreground">
@@ -221,35 +231,46 @@ export function FinancialNavSidebar({
               >
                 <X className="h-4 w-4" strokeWidth={1.75} />
               </button>
-            </div>
+            </motion.div>
 
             <nav className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-1 pb-3" aria-label="Auditor sources">
               <p className="sidebar-section-label mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--zo-text-muted)]">
                 Sources
               </p>
               <ul className="flex flex-col gap-1" role="tablist" aria-orientation="vertical">
-                {FINANCIAL_TABS.map((tab) => {
+                {FINANCIAL_TABS.map((tab, index) => {
                   const isActive = tab.id === activeTab;
                   const item = (
-                    <button
+                    <motion.button
                       type="button"
                       role="tab"
                       id={`financial-tab-${tab.id}`}
                       aria-selected={isActive}
                       aria-controls={`financial-panel-${tab.id}`}
                       onClick={() => selectTab(tab.id)}
+                      initial={{ opacity: 0, x: -12 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ duration: 0.4, delay: 0.06 + index * 0.055, ease: expoOutEase }}
+                      whileHover={{ x: railCollapsed ? 0 : 2 }}
+                      whileTap={{ scale: 0.97 }}
                       className={cn(
-                        "fin-rail-item flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left outline-none",
-                        "transition-[color,background-color,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)]",
+                        "fin-rail-item relative flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left outline-none",
+                        "transition-[color,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)]",
                         "focus-visible:ring-2 focus-visible:ring-[#3C5A56] focus-visible:ring-offset-2",
-                        "active:scale-[0.97]",
                         isActive
-                          ? "bg-[#3C5A56] text-white shadow-[0_1px_2px_rgba(15,23,42,0.12),0_8px_16px_-10px_rgba(60,90,86,0.55)]"
+                          ? "text-white"
                           : "text-[var(--zo-text-secondary)] hover:bg-[#3C5A56]/10 hover:text-foreground",
                       )}
                     >
-                      <tab.Icon className="h-[18px] w-[18px] shrink-0" strokeWidth={1.75} aria-hidden />
-                      <span className="fin-rail-copy min-w-0">
+                      {isActive ? (
+                        <motion.span
+                          layoutId="fin-nav-active"
+                          className="absolute inset-0 rounded-lg bg-[#3C5A56] shadow-[0_1px_2px_rgba(15,23,42,0.12),0_8px_16px_-10px_rgba(60,90,86,0.55)]"
+                          transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                        />
+                      ) : null}
+                      <tab.Icon className="relative z-10 h-[18px] w-[18px] shrink-0" strokeWidth={1.75} aria-hidden />
+                      <span className="fin-rail-copy relative z-10 min-w-0">
                         <span className="block text-[13px] leading-snug font-semibold">{tab.label}</span>
                         <span
                           className={cn(
@@ -260,7 +281,7 @@ export function FinancialNavSidebar({
                           {tab.hint}
                         </span>
                       </span>
-                    </button>
+                    </motion.button>
                   );
 
                   if (!railCollapsed) {

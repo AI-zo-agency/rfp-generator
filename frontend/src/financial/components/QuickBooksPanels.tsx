@@ -872,8 +872,8 @@ export function QuickBooksPanels() {
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="qb-ledger" aria-busy={busy || undefined}>
-        <div className="qb-toolbar">
+      <div className="qb-ledger" aria-busy={busy || undefined} data-fin="panel">
+        <div className="qb-toolbar" data-fin="chrome">
           <p className="qb-sync" data-failed={syncFailed ? "true" : undefined}>
             <span className="qb-sync-dot" data-busy={busy ? "true" : undefined} aria-hidden />
             {syncLabel}

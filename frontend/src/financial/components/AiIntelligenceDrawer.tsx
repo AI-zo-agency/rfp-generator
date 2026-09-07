@@ -9,6 +9,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
+import { motion } from "motion/react";
 
 import type { NoteBadge } from "../lib/qb-note-badges";
 import type { QbChat } from "../lib/use-qb-chat";
@@ -120,17 +121,24 @@ export function AiIntelligenceDrawer({
 
   return (
     <>
-      <button
+      <motion.button
         type="button"
         className="qb-ai-scrim"
         aria-label="Close AI Intelligence"
         onClick={onClose}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
       />
-      <aside
+      <motion.aside
         className="qb-ai-drawer"
         role="dialog"
         aria-modal="true"
         aria-label="AI Intelligence"
+        initial={{ x: "100%", opacity: 0.6 }}
+        animate={{ x: 0, opacity: 1 }}
+        exit={{ x: "100%", opacity: 0.6 }}
+        transition={{ type: "spring", stiffness: 320, damping: 34 }}
       >
         <header className="qb-ai-head">
           <span className="qb-ai-mark" aria-hidden>
@@ -363,7 +371,7 @@ export function AiIntelligenceDrawer({
           </p>
         </div>
         ) : null}
-      </aside>
+      </motion.aside>
     </>
   );
 }

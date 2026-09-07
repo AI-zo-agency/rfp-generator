@@ -9,6 +9,7 @@
  */
 
 import { Fragment, useState, type ReactNode } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   flexRender,
   getCoreRowModel,
@@ -49,6 +50,8 @@ import {
 } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { expoOutEase } from "@/lib/motion";
+import { finHoverProps } from "../lib/fin-motion";
 
 /* ── money ─────────────────────────────────────────────────────────────── */
 
@@ -92,9 +95,13 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={cn("qb-panel", className)}>
+    <motion.section
+      className={cn("qb-panel", className)}
+      data-fin="panel"
+      {...finHoverProps()}
+    >
       {title || meta || action ? (
-        <div className="qb-panel-head">
+        <div className="qb-panel-head" data-fin="chrome">
           {title ? (
             <h3>
               {title}
@@ -119,7 +126,7 @@ export function Panel({
         </div>
       ) : null}
       {children}
-    </section>
+    </motion.section>
   );
 }
 
@@ -186,7 +193,13 @@ export function Figure({
 }) {
   const Icon = metric ? METRIC_ICON[metric] : null;
   return (
-    <div className="qb-figure" data-size={size} data-metric={metric}>
+    <motion.div
+      className="qb-figure"
+      data-size={size}
+      data-metric={metric}
+      data-fin="kpi"
+      {...finHoverProps()}
+    >
       <span className="qb-figure-head">
         <span className="qb-figure-label">{label}</span>
         {Icon ? (
@@ -199,7 +212,7 @@ export function Figure({
         {value}
       </span>
       {sub ? <span className="qb-figure-sub">{sub}</span> : null}
-    </div>
+    </motion.div>
   );
 }
 
@@ -274,20 +287,22 @@ export function FilterChips<T extends string>({
   label: string;
 }) {
   return (
-    <div className="qb-chips" role="group" aria-label={label}>
+    <div className="qb-chips" role="group" aria-label={label} data-fin="chrome">
       {options.map((option) => (
-        <button
+        <motion.button
           key={option.id}
           type="button"
           data-state={option.id === value ? "on" : undefined}
           aria-pressed={option.id === value}
           onClick={() => onChange(option.id)}
+          whileHover={{ y: -1 }}
+          whileTap={{ scale: 0.97 }}
         >
           {option.label}
           {option.count === undefined ? null : (
             <span className="qb-chips-count">{option.count}</span>
           )}
-        </button>
+        </motion.button>
       ))}
     </div>
   );
@@ -452,11 +467,15 @@ export function DataTable<T>({
             const toggle = () => setOpenRow((current) => (current === row.id ? null : row.id));
             return (
               <Fragment key={row.id}>
-                <TableRow
+                <motion.tr
+                  data-slot="table-row"
+                  data-fin="row"
+                  className="border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted"
                   data-expandable={renderSubRow ? "true" : undefined}
                   data-open={isOpen ? "true" : undefined}
                   aria-expanded={renderSubRow ? isOpen : undefined}
                   tabIndex={renderSubRow ? 0 : undefined}
+                  whileHover={{ backgroundColor: "rgba(60, 90, 86, 0.06)" }}
                   onClick={
                     renderSubRow
                       ? (event) => {
@@ -484,14 +503,23 @@ export function DataTable<T>({
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}
-                </TableRow>
-                {renderSubRow && isOpen ? (
-                  <TableRow className="qb-drillrow">
-                    <TableCell colSpan={row.getVisibleCells().length}>
-                      {renderSubRow(row.original)}
-                    </TableCell>
-                  </TableRow>
-                ) : null}
+                </motion.tr>
+                <AnimatePresence initial={false}>
+                  {renderSubRow && isOpen ? (
+                    <motion.tr
+                      key={`${row.id}-drill`}
+                      className="qb-drillrow"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.25, ease: expoOutEase }}
+                    >
+                      <TableCell colSpan={row.getVisibleCells().length}>
+                        {renderSubRow(row.original)}
+                      </TableCell>
+                    </motion.tr>
+                  ) : null}
+                </AnimatePresence>
               </Fragment>
             );
           })}

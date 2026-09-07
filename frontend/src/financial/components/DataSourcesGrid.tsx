@@ -1,6 +1,9 @@
 "use client";
 
 import { CheckCircle2, Clock } from "lucide-react";
+import { motion } from "motion/react";
+import { expoOutEase } from "@/lib/motion";
+import { finHoverProps } from "../lib/fin-motion";
 
 export interface DataSource {
   name: string;
@@ -18,21 +21,32 @@ interface DataSourcesGridProps {
 export function DataSourcesGrid({ sources }: DataSourcesGridProps) {
   return (
     <div className="space-y-6">
-      <div>
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease: expoOutEase }}
+        data-fin="chrome"
+      >
         <h3 className="text-xl font-black text-zinc-900">Connected Data Sources & Pipelines</h3>
         <p className="text-xs text-zinc-600 font-medium mt-1">
           Active source inventory for ZÖ Agency reconciliation engine. Only configured accounts present active data.
         </p>
-      </div>
+      </motion.div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {sources.map((source) => {
+        {sources.map((source, index) => {
           const isConnected = source.active_data;
 
           return (
-            <div
+            <motion.div
               key={source.name}
-              className={`rounded-2xl border p-6 transition-all shadow-sm ${
+              data-fin-card
+              data-fin="row"
+              initial={{ opacity: 0, y: 22, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ duration: 0.45, delay: 0.05 + index * 0.06, ease: expoOutEase }}
+              {...finHoverProps()}
+              className={`rounded-2xl border p-6 shadow-sm ${
                 isConnected
                   ? "border-emerald-300 bg-white ring-2 ring-emerald-500/10 shadow-md"
                   : "border-zinc-200 bg-white/80"
@@ -77,7 +91,7 @@ export function DataSourcesGrid({ sources }: DataSourcesGridProps) {
                   No dummy data loaded (Enforced)
                 </div>
               )}
-            </div>
+            </motion.div>
           );
         })}
       </div>
