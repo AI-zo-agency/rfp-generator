@@ -489,10 +489,6 @@ html.fin-lock main .text-\[10px\] {
   min-width: 0;
 }
 
-.qb-tabs-head .qb-years {
-  margin-bottom: 4px;
-}
-
 .qb-tablist {
   display: flex;
   justify-content: flex-start;
@@ -577,8 +573,23 @@ html.fin-lock main .text-\[10px\] {
   }
 }
 
+.qb-chart-swap {
+  animation: qb-chart-swap 220ms var(--qb-ease, cubic-bezier(0.16, 1, 0.3, 1)) both;
+}
+
+@keyframes qb-chart-swap {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .qb-view[data-state="active"] {
+    animation: none;
+  }
+
+  .qb-chart-swap {
     animation: none;
   }
 }
