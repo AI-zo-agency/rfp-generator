@@ -42,10 +42,10 @@ HITS = [
 
 class VerificationFactsBlockTests(unittest.IsolatedAsyncioTestCase):
     async def _block(self, hits=None):
-        async def fake_search(**kwargs):
+        async def fake_search(query, **kwargs):
             return HITS if hits is None else hits
 
-        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+        with patch.object(editor, "_verification_search_hits", side_effect=fake_search):
             return await editor._verification_facts_block(["zö agency legal name"])
 
     async def test_keeps_the_precise_fact(self) -> None:
@@ -65,10 +65,10 @@ class VerificationFactsBlockTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._block(hits=[]), "")
 
     async def test_search_failure_returns_empty_not_raise(self) -> None:
-        async def boom(**kwargs):
+        async def boom(query, **kwargs):
             raise RuntimeError("supermemory down")
 
-        with patch.object(editor.supermemory, "search_hybrid", side_effect=boom):
+        with patch.object(editor, "_verification_search_hits", side_effect=boom):
             self.assertEqual(await editor._verification_facts_block(["q"]), "")
 
     async def test_duplicate_memories_appear_once(self) -> None:
@@ -140,7 +140,7 @@ class VerificationChunkFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_uses_chunk_when_memory_empty(self) -> None:
         """Case-study PDF hits often have empty `memory` but full `chunk`/`content`."""
 
-        async def fake_search(**kwargs):
+        async def fake_search(query, **kwargs):
             return [
                 {
                     "memory": "",
@@ -152,7 +152,7 @@ class VerificationChunkFallbackTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
 
-        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+        with patch.object(editor, "_verification_search_hits", side_effect=fake_search):
             block = await editor._verification_facts_block(
                 ["zö agency City of Umatilla case study"],
                 prefer_needles=["City of Umatilla", "Rock the Lock"],
@@ -161,7 +161,7 @@ class VerificationChunkFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("03_CS_City of Umatilla", block)
 
     async def test_prefers_needle_matching_hits_over_noise(self) -> None:
-        async def fake_search(**kwargs):
+        async def fake_search(query, **kwargs):
             return [
                 {
                     "memory": "City of Lake Oswego accepted proposal from zö agency.",
@@ -176,7 +176,7 @@ class VerificationChunkFallbackTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
 
-        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+        with patch.object(editor, "_verification_search_hits", side_effect=fake_search):
             block = await editor._verification_facts_block(
                 ["zö agency City of Umatilla"],
                 prefer_needles=["Umatilla", "Rock the Locks"],
@@ -382,7 +382,7 @@ class CompanyfactsContactPinTests(unittest.TestCase):
 
 class VerificationFactsRankingTests(unittest.IsolatedAsyncioTestCase):
     async def test_verified_companyfacts_ranked_first(self) -> None:
-        async def fake_search(**kwargs):
+        async def fake_search(query, **kwargs):
             return [
                 {
                     "memory": "Email: hello@zo.agency",
@@ -396,7 +396,7 @@ class VerificationFactsRankingTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
 
-        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+        with patch.object(editor, "_verification_search_hits", side_effect=fake_search):
             block = await editor._verification_facts_block(
                 ["01_companyfacts verified email zö agency"]
             )

@@ -1,8 +1,7 @@
 """General section-improve KB packing — same quality path as kb_qa_loop.
 
-No vertical hardcodes (tourism, SF Travel, etc.). Builds a retrieval question from
-the section title, RFP needs, user ask, and names already in the draft, then packs
-snippets via retrieve_for_question.
+Builds retrieve questions from the live user ask and mapped RFP requirements,
+then packs snippets via retrieve_for_question. No static topic/query packs.
 """
 
 from __future__ import annotations
@@ -41,7 +40,12 @@ ACCURATE_KB_EDITOR_RULES = """ACCURATE KB EVIDENCE RULES (mandatory):
    instruction like "provide reference contacts before submission". Commit to
    every part you DO have (the organization, the person, the scope, the email) and
    tag only the specific hole. A row naming a real client with one tagged field
-   beats a paragraph explaining that you cannot supply references."""
+   beats a paragraph explaining that you cannot supply references.
+10) REFERENCES TABS: Prefer clients/contacts from PACKED KB that match the RFP's
+    mapped reference requirements (count, sector, institution type). Do not keep a
+    wrong prior client just because it was already in the draft. Incomplete contact
+    fields → [VERIFY]/…]/ / [MANUAL FILL: Sonja — …] for that field only — never invent
+    phone or email."""
 
 # User wants content pulled from KB into the open tab (not a chat-only answer).
 _KB_FETCH_FILL_RE = re.compile(
@@ -124,18 +128,77 @@ def build_section_kb_question(
     user_message: str = "",
     requirements: list[str] | None = None,
     section_content: str = "",
+    rfp_client: str = "",
+    rfp_sector: str = "",
 ) -> str:
-    """One retrieval question for retrieve_for_question (kb_qa_loop-style)."""
+    """Retrieval question from live user ask + mapped RFP requirements (no static packs)."""
+    ask = (user_message or "").strip()
+    assets = [r.strip() for r in (requirements or []) if str(r).strip()][:8]
+    # Lead with the ask (kb_qa_loop parity). Append live RFP requirement text so
+    # References/improve searches the buyer's actual demand — not draft client names.
+    if ask and assets:
+        return f"{ask[:240]} RFP needs: {'; '.join(assets)[:280]}"
+    if ask:
+        return ask[:400]
+
     from app.services.kb_rag_retrieve import build_retrieval_question_from_entry
 
-    # Requirements are structured RFP data, so they stay an explicit asset list.
-    assets = [r.strip() for r in (requirements or []) if str(r).strip()][:8]
     return build_retrieval_question_from_entry(
         section_title=section_title,
         required_assets=assets,
-        planner_queries=[user_message.strip()] if user_message.strip() else [],
+        planner_queries=[],
         why_needed=section_prose_excerpt(section_content),
+        rfp_client=rfp_client or rfp_sector,
     )
+
+
+def _pack_questions(
+    *,
+    section_title: str,
+    user_message: str,
+    requirements: list[str] | None,
+    section_content: str,
+    rfp_client: str,
+    rfp_sector: str,
+) -> list[str]:
+    """Build retrieve questions from live RFP requirements + user ask only."""
+    questions: list[str] = []
+    ask = (user_message or "").strip()
+    if ask:
+        questions.append(ask[:400])
+    for req in (requirements or [])[:5]:
+        text = str(req or "").strip()
+        if text:
+            questions.append(text[:400])
+    # Sector/client from this RFP (live fields) — not a hardcoded contact template.
+    context_bits = [
+        (section_title or "").strip(),
+        (rfp_sector or "").strip(),
+        (rfp_client or "").strip(),
+    ]
+    context = " ".join(b for b in context_bits if b)
+    if context and len(questions) < 2:
+        questions.append(context[:400])
+    if not questions:
+        questions.append(
+            build_section_kb_question(
+                section_title=section_title,
+                user_message=user_message,
+                requirements=requirements,
+                section_content=section_content,
+                rfp_client=rfp_client,
+                rfp_sector=rfp_sector,
+            )
+        )
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in questions:
+        key = q.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out[:5]
 
 
 async def fetch_packed_section_kb_evidence(
@@ -144,50 +207,78 @@ async def fetch_packed_section_kb_evidence(
     user_message: str = "",
     requirements: list[str] | None = None,
     section_content: str = "",
+    rfp_client: str = "",
+    rfp_sector: str = "",
     max_chars: int = 12_000,
 ) -> tuple[str, list[str]]:
     """Pack KB context for section improve. Returns (block, sources).
 
-    Always retrieves. Deciding *whether* a section deserves evidence by matching words
-    in its title is what left non-tourism clients ungrounded, and a section with nothing
-    to say is exactly the one that needs facts most. Retrieval failure returns ("", [])
-    rather than raising, so callers degrade to their previous behaviour.
+    Uses the user ask and mapped RFP requirement text as Supermemory questions —
+    no static query packs or filename pins.
     """
     from app.services.kb_rag_retrieve import retrieve_for_question
 
-    question = build_section_kb_question(
+    questions = _pack_questions(
         section_title=section_title,
         user_message=user_message,
         requirements=requirements,
         section_content=section_content,
+        rfp_client=rfp_client,
+        rfp_sector=rfp_sector,
     )
-    try:
-        context, sources, _queries = await retrieve_for_question(
-            question,
-            limit=8,
-            max_chars=max_chars,
-            threshold=0.15,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("packed section KB retrieve failed: %s", exc)
-        return "", []
 
-    text = (context or "").strip()
-    if not text or text.startswith("("):
-        return "", list(sources or [])
+    parts: list[str] = []
+    sources: list[str] = []
+    seen_src: set[str] = set()
+    budget = max(max_chars, 24_000)
+    per_q = max(8_000, budget // max(len(questions), 1))
 
+    for question in questions:
+        q = (question or "").strip()
+        if not q:
+            continue
+        remaining = budget - sum(len(p) for p in parts)
+        if remaining < 800:
+            break
+        try:
+            context, hit_sources, _queries = await retrieve_for_question(
+                q,
+                limit=12,
+                max_chars=min(per_q, remaining),
+                threshold=0.35,
+                fallback_threshold=0.22,
+                expand_queries=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("packed section KB retrieve failed for %r: %s", q[:60], exc)
+            continue
+        text = (context or "").strip()
+        if not text or text.startswith("("):
+            continue
+        parts.append(text)
+        for src in hit_sources or []:
+            if src and src not in seen_src:
+                seen_src.add(src)
+                sources.append(src)
+
+    if not parts:
+        return "", sources
+
+    merged = "\n\n".join(parts)
+    if len(merged) > budget:
+        merged = merged[:budget]
     block = (
         "=== PACKED KB EVIDENCE (cite facts/KPIs from here; do not invent) ===\n"
-        f"{text}\n"
-        f"Sources: {', '.join((sources or [])[:10]) or '(see snippets)'}"
+        f"{merged}\n"
+        f"Sources: {', '.join(sources[:10]) or '(see snippets)'}"
     )
     logger.info(
         "packed section KB evidence title=%r chars=%d sources=%s",
         (section_title or "")[:60],
-        len(text),
-        (sources or [])[:5],
+        len(merged),
+        sources[:5],
     )
-    return block, list(sources or [])
+    return block, sources
 
 
 def inject_packed_evidence_into_instruction(
@@ -205,4 +296,4 @@ def inject_packed_evidence_into_instruction(
 
 # Test helper
 def _extract_state_for_tests() -> dict[str, Any]:
-    return {"heavy": _EVIDENCE_HEAVY_RE.pattern}
+    return {}

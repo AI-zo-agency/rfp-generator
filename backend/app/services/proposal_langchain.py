@@ -285,8 +285,8 @@ def build_proposal_tools(
         """
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             query,
-            limit=5,
-            max_chars=12_000,
+            limit=8,
+            max_chars=32_000,
             rfp_client=client,
             rfp_sector=sector,
             rfp_title=title,
@@ -297,8 +297,8 @@ def build_proposal_tools(
         """Search master template content (02_ prefix) for a proposal section."""
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             f"zö agency master template 02_ {section} company overview team case study",
-            limit=4,
-            max_chars=12_000,
+            limit=6,
+            max_chars=24_000,
             rfp_client=client,
             rfp_sector=sector,
             rfp_title=title,
@@ -309,8 +309,8 @@ def build_proposal_tools(
         """Search verified case studies (03_CS_) by sector and scope similarity."""
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             f"03 case study {sector_hint or sector} {scope} zö agency confirmed outcomes",
-            limit=4,
-            max_chars=12_000,
+            limit=6,
+            max_chars=24_000,
             rfp_client=client,
             rfp_sector=sector,
             rfp_title=title,
@@ -321,8 +321,8 @@ def build_proposal_tools(
         """Search approved team bios (04_Bio_) for required roles."""
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             f"04 bio team {roles} zö agency approved personnel",
-            limit=4,
-            max_chars=12_000,
+            limit=6,
+            max_chars=24_000,
             rfp_client=client,
             rfp_sector=sector,
             rfp_title=title,

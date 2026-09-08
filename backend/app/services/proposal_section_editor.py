@@ -37,6 +37,7 @@ from app.services.proposal_repository import (
     asave_research_cache,
 )
 from app.services.proposal_draft_structure_stubs import (
+    is_cover_letter_section_title,
     repair_prose_disguised_as_table_rows,
 )
 from app.services.proposal_manual_flags import (
@@ -218,15 +219,14 @@ Rules:
       @zo.agency address from memory (e.g. hello@ or info@ when companyfacts says
       connect@). Won/finalist proposals may repeat contact info but companyfacts
       wins for agency-wide Business Information.
-9b. Awards & Recognition: NEVER say the KB has no awards inventory until PACKED KB /
-    Verified KB facts blocks are present in this prompt. Plan Supermemory queries
-    for 05_Awards and companyfacts when the user asks to add or populate an awards
-    table. Populate rows ONLY from retrieved KB snippets (award name, issuer, year).
-    Never invent rows. Never output "TBD — Needs your input" placeholder tables —
-    use [MANUAL FILL: Sonja — confirm from 05_Awards] per missing cell after KB
-    search. For "add awards table" asks on the open tab: set hasFix=true with an
-    applyInstruction to query KB (05_Awards / companyfacts) and insert a populated
-    markdown table after Scored Capability (or where the section structure requires).
+9b. Knowledge-base grounding (any fact the user asks about):
+    NEVER say the KB lacks a fact until Verified KB facts / PACKED KB EVIDENCE were
+    searched for THIS turn. When those blocks contain the answer, quote it with the
+    source filename and — if the open tab is wrong, thin, or missing it — set
+    hasFix=true with an applyInstruction that writes the draft from those snippets
+    only. Do NOT recommend MANUAL FILL / Sonja for a figure the packed KB already
+    returned. Do NOT invent rows or invent "not in KB" when retrieval was skipped.
+    Populate tables from retrieved snippets only — never TBD placeholder rows.
 10. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented
     numbers and reverse-engineered totals; flag out-of-guide scope with
     [PRICING FLAG: … — Sonja review required].
@@ -376,27 +376,25 @@ def _chat_improve_skip_kb(gate: Any, user_message: str) -> bool:
     )
 
 
-def _advisory_needs_kb_lookup(user_message: str, excerpt: str) -> bool:
-    """KB retrieval for advisory: fact-check / fetch / pinned-wrong — not 'what is this?'.
+def _advisory_should_pack_kb(
+    user_message: str,
+    excerpt: str,
+    section: ProposalSection | None = None,
+) -> bool:
+    """Always pack live brain RAG for advisory (same bar as kb_qa_loop).
 
-    Highlighting text used to trigger a query-planner LLM + two KB fetches on every
-    question, including 'what does this mean?'.
+    Principle: any user question or change can need zö facts — retrieve first,
+    then answer. No topic allowlists. Callers may still skip the LLM turn; this
+    gate does not invent facts.
     """
-    from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
+    del user_message, excerpt, section
+    return True
 
-    text = user_message or ""
-    if user_asks_kb_fetch_or_fill(text):
-        return True
-    if _is_verification_only_ask(text) or _VERIFY_ASK_RE.search(text):
-        return True
-    pin = (excerpt or "").strip()
-    if pin and _EXCERPT_CLAIMED_WRONG_RE.search(text):
-        return True
-    # Pinned excerpt + a correctness question (not a meaning/what-is ask).
-    if pin and not _is_informational_only_ask(text):
-        if _ADVISORY_INTENT_RE.search(text) or text.strip().endswith("?"):
-            return True
-    return False
+
+def _advisory_needs_kb_lookup(user_message: str, excerpt: str) -> bool:
+    """Always run verification + packed RAG on advisory — answer from the brain."""
+    del user_message, excerpt
+    return True
 
 
 # Built from the shared vocabulary so the three edit-verb lists in this codebase
@@ -3316,8 +3314,34 @@ async def _plan_edit_scope(
     )
 
 
-VERIFICATION_FACT_MIN_SIMILARITY = 0.55
+VERIFICATION_FACT_MIN_SIMILARITY = 0.35
 VERIFICATION_FACT_LIMIT = 12
+
+
+async def _verification_search_hits(query: str) -> list[dict[str, Any]]:
+    """Chunk-first hits for verification asks (same engine as kb_qa_loop)."""
+    from app.services.kb_rag_retrieve import _search_hits_chunk_first
+
+    try:
+        hits = await _search_hits_chunk_first(
+            query,
+            limit=SEARCH_LIMIT,
+            threshold=0.35,
+        )
+        if not hits:
+            hits = await _search_hits_chunk_first(
+                query,
+                limit=SEARCH_LIMIT,
+                threshold=0.22,
+            )
+        return list(hits or [])
+    except Exception:
+        logger.warning(
+            "Verification KB chunk-first search failed for %r",
+            query[:80],
+            exc_info=True,
+        )
+        return []
 
 
 async def _verification_facts_block(
@@ -3325,17 +3349,11 @@ async def _verification_facts_block(
     *,
     prefer_needles: list[str] | None = None,
 ) -> str:
-    """Crisp KB memories with provenance, for "is this right?" questions.
+    """Crisp KB facts with provenance, for "is this right?" questions.
 
-    _fetch_kb_blob_for_selection expands hits into whole documents, which buries a
-    one-line verified fact under OCR'd logo captions and drops the filename. A
-    verification answer needs the opposite: the exact memory plus the doc it came
-    from, so the reply can cite 01_companyfacts instead of hedging.
-
-    Case-study PDF hits often leave `memory` empty and put text in `chunk` /
-    `content` — those must count. When the ask names a client/project, prefer
-    hits that mention those needles so Maricopa/Lake Oswego noise does not drown
-    a real Umatilla 03_CS_ / 06_WON_ match.
+    Uses chunk-first brain RAG (not hybrid-only memories). Prefers companyfacts
+    and needle-matched case-study / won-proposal hits so the reply can cite a
+    real source instead of hedging.
     """
     needles = [
         n.casefold().strip()
@@ -3349,13 +3367,15 @@ async def _verification_facts_block(
         ).strip()
 
     def _source(hit: dict) -> str:
-        return str((hit.get("metadata") or {}).get("fileName") or "").strip()
+        try:
+            return str(supermemory.hit_file_name(hit) or "").strip()
+        except Exception:
+            return str((hit.get("metadata") or {}).get("fileName") or "").strip()
 
     def _matches_needle(hit: dict) -> bool:
         if not needles:
             return True
         blob = f"{_source(hit)}\n{_fact_text(hit)}"
-        # Filenames use CityofUmatilla; needles use "City of Umatilla".
         compact_blob = re.sub(r"[^a-z0-9]+", "", blob.casefold())
         for n in needles:
             if n in blob.casefold():
@@ -3387,18 +3407,19 @@ async def _verification_facts_block(
 
     for query in queries:
         try:
-            hits = await supermemory.search_hybrid(
-                query=query,
-                limit=SEARCH_LIMIT,
-                include_full_docs=False,
-                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-            )
+            hits = await _verification_search_hits(query)
         except Exception:
-            logger.warning("Verification KB search failed for %r", query[:80], exc_info=True)
+            logger.warning(
+                "Verification KB search failed for %r",
+                (query or "")[:80],
+                exc_info=True,
+            )
             continue
         for hit in hits or []:
             if float(hit.get("similarity") or 0) < VERIFICATION_FACT_MIN_SIMILARITY:
-                continue
+                # Chunk hits sometimes omit similarity — keep them when text is present.
+                if hit.get("similarity") is not None:
+                    continue
             fact = _fact_text(hit)
             if not fact or fact in seen:
                 continue
@@ -3407,6 +3428,14 @@ async def _verification_facts_block(
             fact_line = re.sub(r"\s+", " ", fact)[:400]
             line = f"- {fact_line}" + (f"  [source: {source}]" if source else "")
             _append_line(line, hit)
+            if (
+                len(companyfacts_verified)
+                + len(companyfacts_other)
+                + len(matched)
+                + len(other)
+                >= VERIFICATION_FACT_LIMIT * 2
+            ):
+                break
         total = (
             len(companyfacts_verified)
             + len(companyfacts_other)
@@ -3498,6 +3527,8 @@ async def _section_chat_advisory_reply(
                 research, section.id, section_title=section.title or ""
             ),
             section_content=section.content or "",
+            rfp_client=rfp.client or "",
+            rfp_sector=rfp.sector or "",
         )
         bio_block = await _verification_04_bio_kb_block(
             section, user_message=user_message or "", excerpt=excerpt
@@ -3584,43 +3615,51 @@ async def _section_chat_advisory_reply(
             if supporting.strip():
                 kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
         else:
-            kb_block = (
-                "\n\nKB status: searched the knowledge base with queries "
-                f"{queries!r} and found no matching verified fact for this "
-                "question. Only say the project is missing if these entity-"
-                "focused searches truly returned nothing — do not blame the "
-                "section number.\n"
-            )
+            # Do NOT claim "KB has nothing" here — packed retrieve (same path as
+            # kb_qa_loop) runs next and often finds the fact. A premature miss
+            # status made the model ignore later PACKED KB EVIDENCE.
+            kb_block = bio_block
+            if supporting.strip():
+                kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
 
-    if not _is_informational_only_ask(user_message or ""):
-        if "PACKED KB EVIDENCE" not in kb_block:
-            try:
-                packed, _packed_sources = await fetch_packed_section_kb_evidence(
-                    section_title=section.title or "",
-                    user_message=user_message or "",
-                    requirements=_rfp_section_requirements_list(
-                        research, section.id, section_title=section.title or ""
-                    ),
-                    section_content=section.content or "",
-                )
-            except Exception:
-                logger.warning(
-                    "Advisory packed KB retrieve failed for %s",
-                    section.id,
-                    exc_info=True,
-                )
-                packed = ""
-            if packed:
-                kb_block += (
-                    "\n\n"
-                    + packed
-                    + "\n\nAdvisory rule: PACKED KB EVIDENCE was retrieved live from "
-                    "Supermemory using the user's ask (same retrieval path as KB QA). "
-                    "Never say the KB lacks awards/clients/facts when this block contains "
-                    "them. Populate tables from these snippets only — never TBD placeholder "
-                    "rows. For add-table asks on the open tab: set hasFix=true with an "
-                    "applyInstruction to insert a markdown table from PACKED KB EVIDENCE.\n"
-                )
+    if _advisory_should_pack_kb(user_message or "", excerpt, section) and (
+        "PACKED KB EVIDENCE" not in kb_block
+    ):
+        try:
+            packed, _packed_sources = await fetch_packed_section_kb_evidence(
+                section_title=section.title or "",
+                user_message=user_message or "",
+                requirements=_rfp_section_requirements_list(
+                    research, section.id, section_title=section.title or ""
+                ),
+                section_content=section.content or "",
+                rfp_client=rfp.client or "",
+                rfp_sector=rfp.sector or "",
+            )
+        except Exception:
+            logger.warning(
+                "Advisory packed KB retrieve failed for %s",
+                section.id,
+                exc_info=True,
+            )
+            packed = ""
+        if packed:
+            kb_block += (
+                "\n\n"
+                + packed
+                + "\n\nAdvisory rule: PACKED KB EVIDENCE was retrieved live from "
+                "Supermemory using the user's ask (same retrieval path as KB QA). "
+                "Never say the KB lacks a fact when this block contains it. "
+                "Answer the user's question from these snippets; if the open tab is "
+                "wrong or thin vs this evidence, set hasFix=true to rewrite from KB only. "
+                "Never invent rows or TBD placeholders.\n"
+            )
+        elif not (kb_block or "").strip():
+            kb_block = (
+                "\n\nKB status: searched Supermemory with the user's ask and found "
+                "no matching snippets. Only say the fact is missing after this "
+                "search — do not invent.\n"
+            )
 
     history_block = ""
     if conversation_history:
@@ -3769,8 +3808,12 @@ Rules:
 - outlineAction=edit_open_section only when they want THIS/open/named existing tab rewritten.
 - understoodAsk must reflect the user's actual request (not a generic 'improve section').
 - kbQueries must chase specific facts those needs require (zö agency + field + doc hint like 01 companyfacts / 03_CS_).
-- For examples / case studies / references / campaign results: include at least one query that seeks
+- For examples / case studies / campaign results: include at least one query that seeks
   real KB results/KPIs for clients or projects named in the draft (use those names — never the RFP buyer).
+- For REFERENCES tabs (or "proper references" / "based on RFP" asks): kbQueries MUST chase
+  RFP-mapped reference needs (count, sector, institution type) and sector-comparable
+  ClientList / past-proposal contact rows — do NOT re-query clients that appear only in the
+  prior draft when the user wants RFP-fit replacements. Never use the RFP buyer as a search subject.
 - For awards / recognition / agency honors asks: kbQueries MUST target 05_Awards and
   companyfacts — the query planner decides wording; never skip retrieval.
 - Never invent E-Verify enrollment as a searchable 'confirmed' fact — search companyfacts; leave enrollment VERIFY unless facts prove it.
@@ -4637,6 +4680,8 @@ async def _try_open_section_verify_fill_or_remove(
                 research, section_id, section_title=section.title or ""
             ),
             section_content=content,
+            rfp_client=(rfp.client if rfp else "") or "",
+            rfp_sector=(rfp.sector if rfp else "") or "",
         )
         supplemental = _draft_supplemental_blob(draft)
         blob = "\n\n".join(p for p in (packed, supplemental) if p and p.strip())
@@ -5004,94 +5049,60 @@ async def _fetch_kb_blob_for_selection(
     evidence_blob: str = "",
     supplemental_blob: str = "",
 ) -> tuple[str, str]:
-    """Return (llm_context_blob, contact_fact_blob). All KB reads via v4 search."""
+    """Return (llm_context_blob, contact_fact_blob) via chunk-first brain RAG.
+
+    Same quality bar as ``kb_qa_loop`` / ``retrieve_for_question`` — not the old
+    memory-first hybrid dump that buried COI tables and companyfacts lines.
+    """
+    from app.services.kb_rag_retrieve import retrieve_for_question
+
     llm_parts: list[str] = []
     if evidence_blob.strip():
         llm_parts.append(evidence_blob)
     if supplemental_blob.strip():
         llm_parts.append(supplemental_blob)
 
-    async def _hits_for_query(query: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        async with _search_semaphore:
-            hybrid_res, chunk_res = await asyncio.gather(
-                supermemory.search_hybrid(
-                    query=query,
-                    limit=SEARCH_LIMIT,
-                    include_full_docs=True,
-                    filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-                ),
-                supermemory.search_document_chunks(
-                    query=query,
-                    limit=SEARCH_LIMIT,
-                    filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-                ),
-                return_exceptions=True,
-            )
-            hybrid: list[dict[str, Any]] = []
-            chunks: list[dict[str, Any]] = []
-            if isinstance(hybrid_res, BaseException):
-                logger.warning(
-                    "KB hybrid search failed for chat patch query %r: %s",
-                    query[:80],
-                    hybrid_res,
-                )
-            else:
-                hybrid = list(hybrid_res or [])
-            if isinstance(chunk_res, BaseException):
-                logger.warning(
-                    "KB chunk search failed for chat patch query %r: %s",
-                    query[:80],
-                    chunk_res,
-                )
-            else:
-                chunks = list(chunk_res or [])
-            kb_filter = supermemory.is_knowledge_base_hit
-            return (
-                [h for h in hybrid if kb_filter(h)],
-                [h for h in chunks if kb_filter(h)],
-            )
+    fact_parts: list[str] = []
+    if supplemental_blob.strip():
+        fact_parts.append(supplemental_blob.strip())
 
-    query_results = await asyncio.gather(*[_hits_for_query(q) for q in queries])
-    hybrid_hits = supermemory.merge_search_hits([h for h, _ in query_results])
-    chunk_hits = supermemory.merge_search_hits([c for _, c in query_results])
-
-    chunk_fact_text = ""
-    if chunk_hits:
+    seen_ctx: set[str] = set()
+    for query in queries:
+        q = (query or "").strip()
+        if not q:
+            continue
         try:
-            chunk_fact_text = await supermemory.fetch_hits_fact_text(
-                chunk_hits,
-                max_hits=12,
-                max_chars=32_000,
+            async with _search_semaphore:
+                ctx, sources, _used = await retrieve_for_question(
+                    q,
+                    limit=12,
+                    max_chars=32_000,
+                    threshold=0.35,
+                    fallback_threshold=0.22,
+                    expand_queries=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "KB chunk-first retrieve failed for chat query %r: %s",
+                q[:80],
+                exc,
             )
-        except supermemory.SupermemoryError as exc:
-            logger.warning("KB fetch_hits_fact_text failed: %s", exc)
+            continue
+        text = (ctx or "").strip()
+        if not text or text.startswith("(No matching") or text.startswith("("):
+            continue
+        # Dedupe identical packs when planner emits near-duplicate queries.
+        key = text[:240]
+        if key in seen_ctx:
+            continue
+        seen_ctx.add(key)
+        src_line = ""
+        if sources:
+            src_line = f"\nSources: {', '.join(sources[:10])}"
+        block = f"=== KB (brain RAG) ===\n{text}{src_line}"
+        llm_parts.append(block)
+        fact_parts.append(text[:16_000])
 
-    hybrid_text = ""
-    if hybrid_hits:
-        hybrid_text = supermemory.format_search_hits(hybrid_hits, max_chars=12_000)
-
-    if chunk_fact_text.strip():
-        llm_parts.append(chunk_fact_text)
-    elif hybrid_text.strip():
-        llm_parts.append(hybrid_text)
-
-    if not hybrid_hits and not chunk_hits:
-        for query in queries:
-            try:
-                text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
-                    query,
-                    limit=8,
-                    max_chars=8_000,
-                )
-            except supermemory.SupermemoryError as exc:
-                logger.warning(
-                    "KB fallback search failed for %r: %s", query[:80], exc
-                )
-                continue
-            if text.strip():
-                llm_parts.append(text[:8000])
-
-    fact_parts = [part for part in (supplemental_blob, chunk_fact_text) if part.strip()]
     return "\n\n".join(llm_parts), "\n\n".join(fact_parts)
 
 
@@ -5227,16 +5238,24 @@ def _apply_bio_work_history_kb_fill(
 
 
 async def _search_hits(query: str) -> list[dict[str, Any]]:
+    """Chunk-first KB hits for chat corpus merge (same bar as kb_qa_loop)."""
     if not supermemory.is_configured():
         return []
+    from app.services.kb_rag_retrieve import _search_hits_chunk_first
+
     try:
-        hits = await supermemory.search_hybrid(
-            query=query,
+        hits = await _search_hits_chunk_first(
+            query,
             limit=SEARCH_LIMIT,
-            include_full_docs=True,
-            filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+            threshold=0.35,
         )
-        return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
+        if not hits:
+            hits = await _search_hits_chunk_first(
+                query,
+                limit=SEARCH_LIMIT,
+                threshold=0.22,
+            )
+        return [hit for hit in (hits or []) if supermemory.is_knowledge_base_hit(hit)]
     except supermemory.SupermemoryError:
         return []
 

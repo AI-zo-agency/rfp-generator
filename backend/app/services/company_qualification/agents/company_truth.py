@@ -15,7 +15,7 @@ from app.services.llm import LlmError
 logger = logging.getLogger(__name__)
 
 # Single shot only — sized so Sonnet finishes COMPLETE JSON (no retry loop = no cost spiral).
-_CORPUS_CHARS = 28_000
+_CORPUS_CHARS = 80_000
 _MAX_TOKENS = 8192
 
 
@@ -75,7 +75,9 @@ async def run_company_truth_agent(
                     "NEVER include bio or case study prose.\n"
                     "Return ONE complete JSON object (no markdown fences). "
                     "Finish every string and brace — output must be valid JSON end-to-end.\n"
-                    "Keep lists short: ≤10 capabilities, ≤6 certs, ≤5 departments, ≤5 insurance.\n"
+                    "Keep lists short: ≤10 capabilities, ≤6 certs, ≤6 departments. "
+                    "Insurance: include EVERY coverage type with dollar limits/carriers "
+                    "when the corpus states them (do not drop amounts to stay short).\n"
                     "Missing scalar facts → null. Missing lists (departments, capabilities, "
                     "certifications, insurance, sources) → [] never null.\n"
                     f"Schema:\n{schema}"

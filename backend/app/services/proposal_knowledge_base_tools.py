@@ -20,7 +20,10 @@ PROPOSAL_KB_SEARCH_LIMIT = 50
 # extractions and the resulting [VERIFY] placeholders — see
 # docs/DEBUG_VERIFY_PLACEHOLDERS.md. Capping per document keeps the corpus
 # *diverse* rather than deep on one file.
-PROPOSAL_KB_DOC_CHAR_LIMIT = 8_000
+# Per-document packing floor for QA-quality recall (COI tables, cert numbers).
+# Chunk-first retrieve_for_question uses ≥12k windows; the old 8k relevance
+# window routinely missed limit tables mid-document.
+PROPOSAL_KB_DOC_CHAR_LIMIT = 16_000
 
 # Bucket totals sized to what each section actually needs. These are prompt
 # inputs re-sent on every subsection / case-study call, so the cost of an
@@ -28,7 +31,7 @@ PROPOSAL_KB_DOC_CHAR_LIMIT = 8_000
 # first few thousand relevant characters is negative (lost-in-the-middle).
 PROPOSAL_BUCKET_CHAR_LIMITS = {
     "zo_voice": 20_000,
-    "company": 45_000,
+    "company": 80_000,
     "bios": 60_000,
     "case_studies": 60_000,
 }
@@ -300,6 +303,7 @@ async def search_knowledge_base(
         normalized,
         limit=limit,
         max_chars=max_chars or SEARCH_CHARACTER_LIMIT,
+        category=category,
         filters=filters,
     )
 
@@ -311,15 +315,39 @@ async def search_and_fetch_full(
     max_chars: int = SEARCH_CHARACTER_LIMIT,
     max_chars_per_doc: int | None = PROPOSAL_KB_DOC_CHAR_LIMIT,
     filters: dict[str, Any] | None = None,
+    category: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Run hybrid search, then load each matching document's full indexed text."""
+    """Chunk-first KB retrieve — same quality bar as ``kb_qa_loop`` / brain QA.
+
+    Uses ``retrieve_for_question`` (documents/chunks lead; memories gap-fill;
+    term windows ≥12k) so proposal writers see the same facts QA finds.
+    ``max_chars_per_doc`` is retained for call-site compatibility; packing is
+    owned by kb_rag_retrieve.
+    """
+    del max_chars_per_doc  # packing owned by retrieve_for_question
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
-    hits = await _search_hits_all_modes(query, limit=limit, filters=filters)
-    return await fetch_full_documents_for_hits(
-        hits, max_chars=max_chars, max_chars_per_doc=max_chars_per_doc
+    from app.services.kb_rag_retrieve import retrieve_for_question
+
+    cat = category
+    if cat is None and isinstance(filters, dict):
+        # search_knowledge_base may pass category via AND filter list.
+        for clause in filters.get("AND") or []:
+            if isinstance(clause, dict) and clause.get("key") == "category":
+                cat = str(clause.get("value") or "") or None
+                break
+
+    context, sources, _queries = await retrieve_for_question(
+        query,
+        limit=max(8, min(int(limit or 12), 16)),
+        max_chars=max(4_000, int(max_chars or SEARCH_CHARACTER_LIMIT)),
+        category=cat,
+        threshold=0.35,
+        fallback_threshold=0.22,
+        expand_queries=True,
     )
+    return context, sources
 
 
 def _collapse_ws(text: str) -> str:
@@ -501,6 +529,16 @@ def _rfp_topic_queries(rfp_client: str, rfp_sector: str, rfp_context: str) -> di
     extras["bios"].append(
         f"zö agency team bios {rfp_sector} public sector account creative"
     )
+    # Always pull agency insurance facts into Section 1 company KB — limits/carriers
+    # live in companyfacts + COI tables inside proposals; planner queries often miss them.
+    extras["company"].extend(
+        [
+            "zö agency insurance Commercial General Liability Next Insurance limits "
+            "01_companyfacts certificate of insurance COI.pdf",
+            "zö agency professional liability workers compensation umbrella cyber "
+            "insurance coverage limits ACORD COI.pdf",
+        ]
+    )
     return extras
 
 
@@ -591,7 +629,14 @@ async def _search_hits_all_modes(
 
 
 async def _search_hits(query: str) -> list[dict[str, Any]]:
-    return await _search_hits_all_modes(query, limit=PROPOSAL_KB_SEARCH_LIMIT)
+    """Chunk-first hit list for callers that still merge hits manually."""
+    from app.services.kb_rag_retrieve import _search_hits_chunk_first
+
+    return await _search_hits_chunk_first(
+        query,
+        limit=PROPOSAL_KB_SEARCH_LIMIT,
+        threshold=0.35,
+    )
 
 
 def _merge_hits(hits_by_query: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -694,26 +739,67 @@ async def _gather_bucket(
     bucket: str,
     queries: list[str],
 ) -> tuple[str, list[str]]:
-    """Fetch Supermemory results for all queries in a bucket sequentially (one-by-one),
-    then merge unique hits. The 4 buckets themselves run in parallel via asyncio.gather."""
+    """Fetch KB for each query via chunk-first brain RAG, then merge under budget.
+
+    Same engine as ``kb_qa_loop`` / ``retrieve_for_question`` — not memory-first
+    hybrid. Queries run sequentially (no Supermemory flood); buckets stay parallel.
+    """
     if not queries:
         return "(No queries for this bucket.)", []
-    all_hits: list[list[dict[str, Any]]] = []
+
+    from app.services.kb_rag_retrieve import retrieve_for_question
+
+    budget = PROPOSAL_BUCKET_CHAR_LIMITS[bucket]
+    per_query = max(12_000, budget // max(len(queries), 1))
+    parts: list[str] = []
+    sources: list[str] = []
+    seen_src: set[str] = set()
+    total = 0
+
     for i, query in enumerate(queries, 1):
         from app.services.proposal_generation_cancel import check_cancelled_for_active
 
         await check_cancelled_for_active()
+        if total >= budget:
+            break
         logger.info(
-            "  └─ [Knowledge Base Retriever] [%s] query %d/%d: %s", bucket, i, len(queries), query[:80]
+            "  └─ [Knowledge Base Retriever] [%s] query %d/%d (chunk-first): %s",
+            bucket,
+            i,
+            len(queries),
+            query[:80],
         )
-        hits = await _search_hits(query)  # One at a time — no flooding
-        all_hits.append(hits)
-    hits = _merge_hits(all_hits)
-    logger.info("  [%s] merged %d unique hits", bucket, len(hits))
-    return await fetch_full_documents_for_hits(
-        hits,
-        max_chars=PROPOSAL_BUCKET_CHAR_LIMITS[bucket],
+        remaining = budget - total
+        ctx, srcs, _ = await retrieve_for_question(
+            query,
+            limit=12,
+            max_chars=min(per_query, remaining),
+            threshold=0.35,
+            fallback_threshold=0.22,
+            expand_queries=False,
+        )
+        if not (ctx or "").strip() or ctx.startswith("(No matching"):
+            continue
+        parts.append(ctx.strip())
+        total += len(ctx)
+        for label in srcs:
+            if label and label not in seen_src:
+                seen_src.add(label)
+                sources.append(label)
+
+    logger.info(
+        "  [%s] packed %d chars from %d quer(ies), %d sources",
+        bucket,
+        total,
+        len(queries),
+        len(sources),
     )
+    if not parts:
+        return "(No knowledge base matches.)", []
+    merged = "\n\n---\n\n".join(parts)
+    if len(merged) > budget:
+        merged = merged[:budget]
+    return merged, sources
 
 
 async def gather_proposal_kb_for_sections(

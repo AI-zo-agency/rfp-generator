@@ -101,10 +101,33 @@ def run_justwin_sync(
             )
             if existing is not None:
                 # Already on file for this date / JustWin id — do not duplicate.
-                # Only backfill a missing PDF.
+                # Backfill a missing PDF, or replace a thin invitation packet
+                # when portal Bid Attachments can expand it.
                 existing_pdf = (existing.pdf_path or "").strip()
                 needs_pdf = not existing_pdf or existing_pdf.startswith("pending:")
-                if needs_pdf:
+                needs_enrich = False
+                if not needs_pdf and existing_pdf:
+                    try:
+                        from app.services.justwin_sync.portal_attachments import (
+                            package_looks_thin,
+                        )
+                        from app.services.rfp_content import (
+                            combine_rfp_text,
+                            load_local_rfp_text,
+                        )
+
+                        desc, pdf_text, *_rest = load_local_rfp_text(
+                            existing, max_chars=40_000
+                        )
+                        blob = combine_rfp_text(desc or "", pdf_text or "")
+                        needs_enrich = package_looks_thin(text=blob)
+                    except Exception as thin_err:  # noqa: BLE001
+                        logger.warning(
+                            "[justwin-sync] thin-PDF check skipped for %s: %s",
+                            existing.id,
+                            thin_err,
+                        )
+                if needs_pdf or needs_enrich:
                     try:
                         pdf_bytes = download_solicitation_pdf_bytes(
                             client, lead.external_id
@@ -120,6 +143,12 @@ def run_justwin_sync(
                         saved = save_manual_pdf(existing.id, pdf_bytes)
                         update_rfp_pdf_path(existing.id, saved)
                         pdfs_downloaded += 1
+                        if needs_enrich:
+                            logger.info(
+                                "[justwin-sync] enriched thin PDF for %s (%s)",
+                                lead.external_id,
+                                existing.id,
+                            )
                 rfps_skipped += 1
                 logger.info(
                     "[justwin-sync] skipped duplicate %s (%s)",

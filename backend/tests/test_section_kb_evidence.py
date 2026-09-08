@@ -80,11 +80,39 @@ def test_question_includes_requirements_and_focus():
         requirements=["before/after metrics", "accounts managed"],
         section_content="## Acme Destination Board\nBody",
     )
+    # Ask leads; live RFP requirement text is appended (not a static topic pack).
+    assert q.startswith("fill KPIs from KB")
     assert "before/after metrics" in q
-    assert "fill KPIs" in q
-    # Must not hardcode a tourism win list
     assert "San Francisco Travel" not in q
     assert "Seventh Mountain" not in q
+
+
+def test_question_without_ask_uses_section_scaffold():
+    q = build_section_kb_question(
+        section_title="Client Examples",
+        requirements=["before/after metrics"],
+        section_content="## Acme Destination Board\nBody",
+    )
+    assert "Client Examples" in q
+    assert "before/after metrics" in q
+    assert "Acme Destination Board" in q
+
+
+def test_pack_questions_use_live_rfp_requirements():
+    from app.services.proposal_section_kb_evidence import _pack_questions
+
+    qs = _pack_questions(
+        section_title="References",
+        user_message="Add proper references based on RFP demand.",
+        requirements=["Provide three professional references from municipal clients"],
+        section_content="Umatilla leftover",
+        rfp_client="Dane County",
+        rfp_sector="Airport",
+    )
+    assert qs[0].startswith("Add proper references")
+    assert any("three professional references" in q for q in qs)
+    # Must not inject draft client names as canned queries.
+    assert not any("Umatilla leftover" in q for q in qs)
 
 
 def test_question_does_not_filter_generic_headings():

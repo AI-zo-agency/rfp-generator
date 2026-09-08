@@ -138,6 +138,48 @@ class StructureStubRecoveryTests(unittest.TestCase):
         self.assertNotIn("References & Past Performance", titles)
         self.assertFalse(any("added missing" in x.casefold() for x in logs))
 
+    def test_does_not_stub_digital_ecosystem_when_assessment_already_drafted(self) -> None:
+        """Word-order title variants of the same ask must not mint an empty twin.
+
+        Marion County Health: writer filled ``Assessment of Current Digital
+        Ecosystem`` as rfp-sec-1; structure later added an empty
+        ``Digital Ecosystem Assessment Approach`` stub because jaccard was 0.6.
+        """
+        draft = ProposalDraft(
+            rfpId="rfp-marion",
+            sections=[
+                ProposalSection(
+                    id="rfp-sec-1",
+                    title="Assessment of Current Digital Ecosystem",
+                    content=(
+                        "We map fragmentation the same way every time: name every "
+                        "division's digital footprint before we judge any of it. "
+                        "Discovery runs in five phases with interview protocols, "
+                        "inventory frameworks, and stakeholder mapping across IT, "
+                        "communications, and clinical leads. Assessment findings "
+                        "feed strategy, governance, and the CMS roadmap directly. "
+                        "Prior multi-division digital assessments inform the gaps "
+                        "we surface and the evidence we bring to each workshop."
+                    ),
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        specs = [
+            RfpSectionSpec(
+                rfp_title="Digital Ecosystem Assessment Approach",
+                required_headings=["Discovery methodology"],
+                instructions="Map fragmented multi-division digital ecosystems",
+                evaluation_weight="20 pts",
+            )
+        ]
+        updated, logs = ensure_missing_scored_section_stubs(draft, specs)
+        self.assertEqual(len(updated.sections), 1)
+        self.assertEqual(updated.sections[0].id, "rfp-sec-1")
+        self.assertTrue(any("already covered" in x.casefold() for x in logs))
+        self.assertFalse(any("added missing" in x.casefold() for x in logs))
+
     def test_company_background_does_not_stub_when_static_1_3_covers_it(self) -> None:
         draft = ProposalDraft(
             rfpId="rfp-cov",

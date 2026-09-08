@@ -458,7 +458,7 @@ SECTION_1_STUB_SPECS: tuple[tuple[str, str, int], ...] = (
     ("section-1-org-structure", "1.2 — Organizational Structure", 800),
     ("section-1-business-info", "1.3 — Business Information", 200),
     ("section-1-certifications", "1.4 — Certifications", 150),
-    ("section-1-insurance", "1.5 — Insurance Information", 100),
+    ("section-1-insurance", "1.5 — Insurance Information", 280),
 )
 
 
@@ -1837,7 +1837,7 @@ _SECTION1_PAGE_RATIOS: dict[str, tuple[float, int]] = {
     "section-1-org-structure": (0.08, 800),
     "section-1-business-info": (0.03, 200),
     "section-1-certifications": (0.03, 150),
-    "section-1-insurance": (0.03, 100),
+    "section-1-insurance": (0.05, 280),
 }
 
 
@@ -2678,25 +2678,26 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             "section-1-insurance",
             "1.5 — Insurance Information",
             (
-                "Write the 'Insurance Information' subsection for zö agency. Keep it SHORT and factual.\n\n"
+                "Write the 'Insurance Information' subsection for zö agency. Factual and complete.\n\n"
                 "CRITICAL RULES:\n"
-                "- List coverage TYPES only when they appear in 01_companyfacts (General Liability, Professional Liability, Workers Compensation, Cyber, Auto, etc.).\n"
+                "- When the Knowledge Base below states coverage TYPES, dollar LIMITS, carriers, "
+                "or NAIC numbers (01_companyfacts, COI / ACORD excerpts, MasterTemplate, or other "
+                "verified agency insurance records — including limits tables that describe zö's "
+                "own policies), WRITE those facts exactly. Prefer a markdown table: "
+                "| Coverage | Limit / detail | (carrier if stated).\n"
+                "- Commercial General Liability, Professional Liability / E&O, Workers' Compensation, "
+                "Cyber, Auto, Umbrella — include each TYPE that appears in KB; attach limit lines "
+                "when KB states them (e.g. $1,000,000 each occurrence / $2,000,000 aggregate).\n"
                 "- Do NOT invent dollar limits, carriers, NAIC numbers, policy numbers, or 'Compliant'.\n"
-                "- Do NOT write [VERIFY: amount] placeholders or 'per occurrence / aggregate' without a KB figure.\n"
+                "- If a TYPE is in KB but the dollar figure is not, write the type and "
+                "[VERIFY: limit from current COI] — do not invent a number and do not blank the row.\n"
                 "- NEVER write 'upon request', 'available on request', or 'will be provided separately'.\n"
-                "- If the RFP wants a limits table and KB has no limits, one sentence: "
-                "'Policy limits are those on the current certificate of insurance; the COI is issued to the buyer at award.'\n"
-                "- Max 80 words. No empty markdown tables.\n\n"
-                "Format:\n"
-                "We maintain the following insurance coverage:\n"
-                "- **General Liability**\n"
-                "- **Professional Liability / E&O**\n"
-                "- **Workers' Compensation** (as required by law)\n"
-                "- other types only if named in companyfacts\n"
+                "- End with one designer note to attach the current COI PDF at award — not instead of the table.\n"
+                "- Target ~150–280 words. No empty markdown tables. No generic 'meets industry standards' filler.\n"
             ),
             "pull",
-            0.03,
-            300,
+            0.05,
+            350,
         ),
     ]
 

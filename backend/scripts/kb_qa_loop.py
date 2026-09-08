@@ -41,6 +41,8 @@ Rules:
 - If the answer is not in the context, say exactly: "Not found in knowledge base."
 - Do NOT invent clients, degrees, certifications, insurance limits, or team details.
 - Prefer facts from 03_CS case studies and *Proposal* files over source *RFP* solicitations.
+- For insurance / certificates / policy limits: prefer COI.pdf (and 01_companyfacts) over
+  insurance tables copied into won/finalist proposals. Cite COI.pdf when it is in context.
 - Cite source file names in parentheses when you use them.
 - Keep answers concise and factual.
 

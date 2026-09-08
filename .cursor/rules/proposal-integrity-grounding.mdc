@@ -28,6 +28,8 @@ Principle-based — never client-specific keyword exceptions.
   chat **remove fabricated content**, and content-risk repair all run this scrub.
 - Case-study framing must match the studies shown; utility/gov RFPs must not keep private medical personal-brand studies.
 - Specialist role titles must map to a named Section 2 bio or be MANUAL FILL / subcontractor / generalist.
+- Org chart / Organizational Structure names must match MasterTemplate / 04_Bio — never invent
+  Accounting, Leadership Coach, or other seats to look complete; persist guards scrub org-chart-only names.
 - Bio years/specializations must match 04_Bio exactly — never inflate years or add sector specialization
   the bio PDF does not state (chat + Complete Scan ground bios to KB).
 - Chat/Apply-fix must REPLACE invented bio sentences with 04_Bio wording — never delete the

@@ -10,8 +10,10 @@ from app.services import supermemory
 
 logger = logging.getLogger("app.sections_agents")
 
-# Never retrieve bios or case studies for company truth.
-_EXCLUDED_SOURCE = re.compile(r"04_Bio_|03_CS_|06_WON_", re.I)
+# Never retrieve bios or case-study decks for company truth.
+# Won/finalist proposals MAY contain agency insurance/COI tables — keep them
+# when the filename is proposal-shaped; still drop 03_CS / 04_Bio.
+_EXCLUDED_SOURCE = re.compile(r"04_Bio_|03_CS_", re.I)
 
 # Fixed company queries — NEVER append RFP client/sector (company facts are RFP-agnostic).
 COMPANY_TRUTH_QUERIES: tuple[str, ...] = (
@@ -19,7 +21,8 @@ COMPANY_TRUTH_QUERIES: tuple[str, ...] = (
     "zo agency business registration state IDs DUNS SAM CAGE",
     "company office mailing remittance address phone email website",
     "WBENC WOSB certifications certifying agency certification numbers",
-    "insurance coverage general liability professional liability workers compensation",
+    "zö agency insurance Commercial General Liability Next Insurance limits "
+    "professional liability workers compensation ACORD COI.pdf 01_companyfacts",
     "zo agency capabilities service lines departments expertise",
     "organization structure departments leadership Client Services Creative Digital Development",
     "company founded year history years in operation zo agency",
@@ -42,7 +45,7 @@ async def fetch_company_truth_corpus(
     max_chars: int = 120_000,
     log_label: str = "Company Truth Agent",
 ) -> tuple[str, list[str]]:
-    """Run fixed company queries — snippets only, no RFP client, no bulk full-doc dump.
+    """Run fixed company queries via chunk-first brain RAG (same bar as kb_qa_loop).
 
     rfp_* args are accepted for call-site compatibility but intentionally unused.
     Company facts do not depend on the solicitation.
@@ -52,85 +55,62 @@ async def fetch_company_truth_corpus(
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
-    async def _one(query: str, index: int) -> list[dict[str, Any]]:
+    from app.services.kb_rag_retrieve import retrieve_for_question
+
+    parts: list[str] = []
+    sources: list[str] = []
+    seen_src: set[str] = set()
+    total = 0
+    char_budget = max(2_000, int(max_chars))
+    per_query = max(10_000, char_budget // max(len(COMPANY_TRUTH_QUERIES), 1))
+
+    for i, query in enumerate(COMPANY_TRUTH_QUERIES, start=1):
+        from app.services.proposal_generation_cancel import check_cancelled_for_active
+
+        await check_cancelled_for_active()
+        if total >= char_budget:
+            break
         logger.info(
-            "  └─ [%s] JIT query %d/%d: %s",
+            "  └─ [%s] JIT query %d/%d (chunk-first): %s",
             log_label,
-            index,
+            i,
             len(COMPANY_TRUTH_QUERIES),
             query[:100],
         )
-        try:
-            hits = await supermemory.search_documents(
-                query=query,
-                limit=3,
-                include_full_docs=False,
-                search_mode="hybrid",
-                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-            )
-        except supermemory.SupermemoryError:
-            return []
-        return [h for h in hits if supermemory.is_knowledge_base_hit(h)]
-
-    # One query at a time — never fan out parallel Supermemory/LLM pressure.
-    hit_groups: list[list[dict[str, Any]]] = []
-    for i, q in enumerate(COMPANY_TRUTH_QUERIES):
-        from app.services.proposal_generation_cancel import check_cancelled_for_active
-
-        await check_cancelled_for_active()
-        hit_groups.append(await _one(q, i + 1))
-
-    # Prefer known company docs; keep at most a few unique sources as snippets.
-    seen: set[str] = set()
-    preferred: list[dict[str, Any]] = []
-    other: list[dict[str, Any]] = []
-    for hits in hit_groups:
-        for hit in hits:
-            label = supermemory.hit_file_name(hit)
-            if not label or not is_company_source(label):
-                continue
-            key = label.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            lowered = key
-            if "companyfacts" in lowered or "01_company" in lowered or "mastertemplate" in lowered:
-                preferred.append(hit)
-            else:
-                other.append(hit)
-
-    selected = (preferred + other)[:8]
-    # Fetch full text only for the shortlisted unique company docs (not every search hit).
-    parts: list[str] = []
-    sources: list[str] = []
-    total = 0
-    char_budget = max(2_000, int(max_chars))
-
-    for hit in selected:
-        from app.services.proposal_generation_cancel import check_cancelled_for_active
-
-        await check_cancelled_for_active()
-        label = supermemory.hit_file_name(hit)
-        content = await supermemory.resolve_hit_document_content(hit)
-        if not content.strip():
-            content = supermemory.hit_text(hit)
-        if not content.strip():
-            continue
         remaining = char_budget - total
-        if remaining <= 0:
-            break
-        block = f"### {label}\n{content}"[:remaining]
-        parts.append(block)
-        sources.append(label)
-        total += len(block)
+        ctx, srcs, _ = await retrieve_for_question(
+            query,
+            limit=12,
+            max_chars=min(per_query, remaining),
+            threshold=0.35,
+            fallback_threshold=0.22,
+            expand_queries=False,
+        )
+        if not (ctx or "").strip() or ctx.startswith("(No matching"):
+            continue
+        # Drop bio/case-study only packs that slipped through.
+        kept_labels = [s for s in srcs if is_company_source(s)]
+        if srcs and not kept_labels:
+            continue
+        parts.append(ctx.strip())
+        total += len(ctx)
+        for label in kept_labels or srcs:
+            if label and label not in seen_src:
+                seen_src.add(label)
+                sources.append(label)
 
+    if not parts:
+        return "(No company knowledge-base matches.)", []
+    merged = "\n\n---\n\n".join(parts)
+    if len(merged) > char_budget:
+        merged = merged[:char_budget]
     logger.info(
-        "  └─ [%s] shortlisted %d company docs (%d chars) — no RFP client in queries",
+        "  └─ [%s] packed %d chars from chunk-first company RAG (%d sources)",
         log_label,
+        len(merged),
         len(sources),
-        total,
     )
-    return "\n\n".join(parts), sources
+    return merged, sources
 
 
 def company_truth_extraction_schema() -> dict[str, Any]:

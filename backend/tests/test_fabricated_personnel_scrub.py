@@ -102,13 +102,74 @@ class FabricatedPersonnelScrubTests(unittest.TestCase):
         self.assertIn("retired", " ".join(logs).casefold())
         self.assertIn("assign current staff", (updated.sections[0].content or "").casefold())
 
-    def test_roster_fix_replaces_murilo_with_marcelle(self) -> None:
-        text = "Kelvin Kiruthu Senior Graphic Designer Murilo Mendes Graphic Designer"
-        fixed, logs = apply_deterministic_roster_fixes(text)
+    def test_removes_org_chart_accounting_coach_inventions(self) -> None:
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="section-1-org-structure",
+                    title="1.2 — Organizational Structure",
+                    content=(
+                        "| Name | Role |\n"
+                        "| --- | --- |\n"
+                        "| Sonja Anderson | Agency Director |\n"
+                        "| Kelly Vlach | Accounting (CPA) |\n"
+                        "| Katie Post | Leadership Coach |\n"
+                        "| Dave Luke | Leadership Coach |\n"
+                    ),
+                )
+            ],
+        )
+        updated, logs = scrub_fabricated_personnel_from_draft(draft)
+        body = updated.sections[0].content or ""
+        self.assertNotIn("Kelly Vlach", body)
+        self.assertNotIn("Katie Post", body)
+        self.assertNotIn("Dave Luke", body)
+        self.assertIn("Sonja Anderson", body)
         self.assertTrue(logs)
-        self.assertNotIn("Murilo Mendes", fixed)
-        self.assertIn("Marcelle Benevides", fixed)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class UnverifiedOrgChartRosterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_org_chart_only_names_are_not_self_verifying(self) -> None:
+        """Invented org seats must scrub even when absent from the blocklist."""
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.evidence_trust.personnel_grounding import (
+            scrub_unverified_personnel_from_draft,
+        )
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="section-1-org-structure",
+                    title="Organizational Structure",
+                    content=(
+                        "| Name | Role |\n"
+                        "| --- | --- |\n"
+                        "| Sonja Anderson | Agency Director |\n"
+                        "| Jane Invented | Accounting (CPA) |\n"
+                        "| Ella Lindau | Operations Director |\n"
+                    ),
+                )
+            ],
+        )
+        with (
+            patch(
+                "app.services.proposal_knowledge_base_tools.fetch_master_team_roster",
+                new=AsyncMock(return_value=("", [])),
+            ),
+            patch(
+                "app.services.proposal_sections_graph._find_member_bio_document",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            updated, logs = await scrub_unverified_personnel_from_draft(draft)
+        body = updated.sections[0].content or ""
+        self.assertNotIn("Jane Invented", body)
+        self.assertIn("Sonja Anderson", body)
+        self.assertIn("Ella Lindau", body)
+        self.assertTrue(any("Jane Invented" in line for line in logs))
+

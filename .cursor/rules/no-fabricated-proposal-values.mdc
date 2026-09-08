@@ -20,7 +20,9 @@ in `proposal_zero_fabrication.py` — canonical order:
 4. Fabricated qualifications guard (invented clients / case studies)
 5. Insurance certification gate (no Compliant without Section 1.5 / companyfacts)
 6. Cert claim scrub (MBE/DBE, individual platform certs as agency-wide, etc.)
-7. Fabricated personnel scrub (Brittany Frazier, Drew Stone, … → MANUAL FILL)
+7. Fabricated personnel scrub (blocklist inventions → MANUAL FILL) + unverified
+   roster scrub (org chart + bios must match MasterTemplate / 04_Bio — org-chart-only
+   names are NOT self-verifying)
 8. Forms & Attachments integrity (LLM audit + verbatim replace only) on persist
 
 ## Where it MUST run
@@ -37,7 +39,8 @@ in `proposal_zero_fabrication.py` — canonical order:
 - Hourly labor rates or cost rows when budget is fixed/phased / MANUAL FILL
 - Full reference contacts when KB shows incomplete / withheld
 - Agency certifications not in companyfacts (MBE/DBE, WBE Oregon-only, etc.)
-- Team member names not in 04_Bio / MasterTemplate
+- Team member names not in 04_Bio / MasterTemplate (including org-chart seats —
+  Accounting, coaches, or any filler name invented to complete a table)
 - Past-proven delivery claims without case-study / bio evidence
 - Vendor registration, download, or procurement attestations without proof
 - Budget totals, phase tables, or ceiling figures not from canonical ledger

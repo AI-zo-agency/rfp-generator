@@ -2,7 +2,14 @@
 
 // Proposal Draft Workspace - Key Personas Enabled
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   buildDefaultOutline,
@@ -21,6 +28,7 @@ import {
   stripLeadingTitleEcho,
 } from "@/lib/proposal-section-health";
 import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
+import { usePauseOnNavigate } from "@/lib/use-pause-on-navigate";
 import { repairReferenceSectionsInOutline } from "@/lib/reference-table-repair";
 import { toggleWrapMarkers } from "@/lib/markdown-inline-format";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
@@ -330,6 +338,9 @@ function ProposalDraftWorkspaceInner({
   onOpenGoRfpPicker,
 }: ProposalDraftWorkspaceProps) {
   const confirm = useConfirmDialog();
+  // Pause polls/autosave the moment the user clicks away (e.g. RFPs nav) so
+  // Next's soft navigation can finish instead of stalling on "Rendering…".
+  const navPausedRef = usePauseOnNavigate();
   const [outline, setOutline] = useState<ProposalOutline>(() =>
     buildDefaultOutline(rfp)
   );
@@ -554,9 +565,10 @@ function ProposalDraftWorkspaceInner({
       pipelineInFlight;
 
     const load = async () => {
+      if (navPausedRef.current) return;
       const next = await getLlmCostForRfp(rfp.id);
-      if (cancelled || !next) return;
-      setRfpCost(next);
+      if (cancelled || navPausedRef.current || !next) return;
+      startTransition(() => setRfpCost(next));
     };
 
     void load();
@@ -1040,42 +1052,45 @@ function ProposalDraftWorkspaceInner({
 
     let cancelled = false;
     const retry = async () => {
+      if (navPausedRef.current) return;
       try {
         const result = await fetchProposalDraft(rfp.id, {
           timeoutMs: PROPOSAL_INITIAL_LOAD_TIMEOUT_MS,
         });
-        if (cancelled) return;
+        if (cancelled || navPausedRef.current) return;
         if (!result.draft && !result.research) return;
-        setDraftLoadState("ready");
-        setGenerateError(null);
-        setResearch(result.research);
-        setBudget(result.research?.budget ?? null);
-        setPresubmitReview(result.research?.presubmitReview ?? null);
-        setProvider(result.provider ?? null);
-        if (result.research) {
-          setPipelineStatus(
-            buildPipelineStatus(result.draft, result.research, result.pipelineStatus)
-          );
-          const inFlight = result.research.pipelineCheckpoint?.inProgressPhase;
-          if (inFlight) {
-            setGenerateNotice(pipelineServerStillWorkingMessage(inFlight));
-            setActiveTab("outline");
+        startTransition(() => {
+          setDraftLoadState("ready");
+          setGenerateError(null);
+          setResearch(result.research);
+          setBudget(result.research?.budget ?? null);
+          setPresubmitReview(result.research?.presubmitReview ?? null);
+          setProvider(result.provider ?? null);
+          if (result.research) {
+            setPipelineStatus(
+              buildPipelineStatus(result.draft, result.research, result.pipelineStatus)
+            );
+            const inFlight = result.research.pipelineCheckpoint?.inProgressPhase;
+            if (inFlight) {
+              setGenerateNotice(pipelineServerStillWorkingMessage(inFlight));
+              setActiveTab("outline");
+            }
           }
-        }
-        saveGenerationRef.current += 1;
-        skipNextSaveRef.current = true;
-        if (result.draft) {
-          const prepared = prepareOutline(result.draft);
-          setOutline(prepared);
-          setSelectedSectionId(
-            prepared.sections.find((s) => s.content)?.id ??
-              prepared.sections[0]?.id ??
-              null
-          );
-          if (countSectionsWithContent(prepared) > 0) {
-            setActiveTab("outline");
+          saveGenerationRef.current += 1;
+          skipNextSaveRef.current = true;
+          if (result.draft) {
+            const prepared = prepareOutline(result.draft);
+            setOutline(prepared);
+            setSelectedSectionId(
+              prepared.sections.find((s) => s.content)?.id ??
+                prepared.sections[0]?.id ??
+                null
+            );
+            if (countSectionsWithContent(prepared) > 0) {
+              setActiveTab("outline");
+            }
           }
-        }
+        });
       } catch {
         // Keep banner / error until a later retry succeeds.
       }
@@ -1097,6 +1112,7 @@ function ProposalDraftWorkspaceInner({
     // Never autosave the empty default shell while the initial GET is still in flight —
     // that race was wiping full Supabase manuscripts (snapshots survived, live draft did not).
     if (draftLoadState !== "ready") return;
+    if (navPausedRef.current) return;
     if (
       isFullProposalRunning ||
       isFulfillingRfpGaps ||
@@ -1114,9 +1130,13 @@ function ProposalDraftWorkspaceInner({
     }
     const generation = saveGenerationRef.current;
     const timer = setTimeout(() => {
+      if (navPausedRef.current) return;
       if (generation !== saveGenerationRef.current) return;
       void saveProposalDraft(rfp.id, outline).then(() => {
-        if (generation === saveGenerationRef.current) setLastSavedAt(Date.now());
+        if (navPausedRef.current) return;
+        if (generation === saveGenerationRef.current) {
+          startTransition(() => setLastSavedAt(Date.now()));
+        }
       });
     }, 800);
     return () => clearTimeout(timer);
@@ -1645,11 +1665,13 @@ function ProposalDraftWorkspaceInner({
   }, []);
 
   const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
-    setHydrated(true);
-    applyOutlineFromServer(draft);
-    // Do not force Review tab on each poll — user may be on Sections or Submit while generating.
-    const withContent = draft.sections.filter((s) => s.content?.trim());
-    setLiveGeneratedCount(withContent.length);
+    if (navPausedRef.current) return;
+    startTransition(() => {
+      setHydrated(true);
+      applyOutlineFromServer(draft);
+      // Do not force Review tab on each poll — user may be on Sections or Submit while generating.
+      const withContent = draft.sections.filter((s) => s.content?.trim());
+      setLiveGeneratedCount(withContent.length);
 
     // Section 1 must be readable first. While any 1.x subsection is still empty,
     // keep focus on the newest Section 1 subsection instead of jumping ahead.
@@ -1706,19 +1728,23 @@ function ProposalDraftWorkspaceInner({
     if (focus) {
       setSelectedSectionId(focus.id);
     }
+    });
   }, [applyOutlineFromServer]);
 
   const handleResearchPoll = useCallback((updated: ProposalResearch | null) => {
     if (!updated) return;
-    setResearch(updated);
-    if (updated.pipelineCheckpoint?.inProgressPhase === FULFILL_SCAN_PHASE) {
-      fulfillSawRunningRef.current = true;
-    }
-    // Keep checkpoint + Complete & clean completion stamps live so the green
-    // banner can appear as soon as Celery finishes — no manual refresh.
-    setPipelineStatus((prev) =>
-      buildPipelineStatus(outlineRef.current, updated, prev)
-    );
+    if (navPausedRef.current) return;
+    startTransition(() => {
+      setResearch(updated);
+      if (updated.pipelineCheckpoint?.inProgressPhase === FULFILL_SCAN_PHASE) {
+        fulfillSawRunningRef.current = true;
+      }
+      // Keep checkpoint + Complete & clean completion stamps live so the green
+      // banner can appear as soon as Celery finishes — no manual refresh.
+      setPipelineStatus((prev) =>
+        buildPipelineStatus(outlineRef.current, updated, prev)
+      );
+    });
   }, []);
 
   /**
@@ -2071,25 +2097,29 @@ function ProposalDraftWorkspaceInner({
 
     let cancelled = false;
     const syncRunningJob = async () => {
+      if (navPausedRef.current) return;
       const job = await getProposalJobStatus(rfp.id);
-      if (cancelled || !job || job.status !== "running" || !job.jobType) return;
+      if (cancelled || navPausedRef.current || !job || job.status !== "running" || !job.jobType)
+        return;
 
-      setGenerateError(null);
-      setGenerateNotice(
-        pipelineServerStillWorkingMessage(job.jobType as PipelineInProgressPhase)
-      );
-      if (job.jobType === FULFILL_SCAN_PHASE) {
-        setIsFulfillingRfpGaps(true);
-        return;
-      }
-      if (job.jobType === ALIGN_RFP_OUTLINE_PHASE) {
-        setIsAligningRfpOutline(true);
-        return;
-      }
-      setIsFullProposalRunning(true);
-      setFullProposalProgress(
-        fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase)
-      );
+      startTransition(() => {
+        setGenerateError(null);
+        setGenerateNotice(
+          pipelineServerStillWorkingMessage(job.jobType as PipelineInProgressPhase)
+        );
+        if (job.jobType === FULFILL_SCAN_PHASE) {
+          setIsFulfillingRfpGaps(true);
+          return;
+        }
+        if (job.jobType === ALIGN_RFP_OUTLINE_PHASE) {
+          setIsAligningRfpOutline(true);
+          return;
+        }
+        setIsFullProposalRunning(true);
+        setFullProposalProgress(
+          fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase)
+        );
+      });
     };
 
     void syncRunningJob();

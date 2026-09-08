@@ -1585,6 +1585,29 @@ def _leading_concept_tokens(title: str, n: int = 2) -> list[str]:
     return toks[:n]
 
 
+def _titles_share_leading_concept(a: str, b: str) -> bool:
+    """True when each title's leading concept appears inside the other title.
+
+    Catches word-order / filler variants the jaccard≥0.72 gate misses, e.g.
+    "Digital Ecosystem Assessment Approach" vs "Assessment of Current Digital
+    Ecosystem" (shared digital+ecosystem). Only a coverage signal — never used
+    to retitle a drafted tab.
+    """
+    from app.services.proposal_outline_dedup import outline_title_tokens
+
+    a_tokens = outline_title_tokens(a)
+    b_tokens = outline_title_tokens(b)
+    if not a_tokens or not b_tokens:
+        return False
+    a_head = _leading_concept_tokens(a)
+    b_head = _leading_concept_tokens(b)
+    if len(a_head) >= 2 and set(a_head).issubset(b_tokens):
+        return True
+    if len(b_head) >= 2 and set(b_head).issubset(a_tokens):
+        return True
+    return False
+
+
 def _spec_covered_by_closing_tab(
     sections: list[ProposalSection],
     spec: RfpSectionSpec,
@@ -1638,32 +1661,36 @@ def _spec_covered_by_filled_section(
     sections: list[ProposalSection],
     spec: RfpSectionSpec,
 ) -> bool:
-    """True when an already-DRAFTED section opens with the same concept as this
-    scored spec, so the stub step must not mint a duplicate.
+    """True when an already-DRAFTED section covers the same concept as this spec.
 
     ``_match_section_for_spec`` only catches near-duplicate titles (jaccard ≥
     0.72); long RFP titles like "Stakeholder Coordination and Economic
     Development Through Tourism" fall under that against an existing
     "Stakeholder Coordination and Community Partnership", so a redundant empty
-    stub was being added next to the writer's filled section. This is the
-    coverage backstop: same leading concept ("stakeholder coordination",
-    "strategic approach") + an existing section that is actually drafted. It only
-    ever SUPPRESSES a stub — it never deletes or edits a section.
+    stub was being added next to the writer's filled section. Same failure for
+    "Digital Ecosystem Assessment Approach" vs "Assessment of Current Digital
+    Ecosystem". This is the coverage backstop: shared leading concept + an
+    existing section that is actually drafted. It only ever SUPPRESSES a stub —
+    it never deletes or edits a section.
     """
-    spec_head = _leading_concept_tokens(spec.rfp_title or "")
-    if len(spec_head) < 2:
-        return False
     from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
     from app.services.proposal_section_quality import word_count
+
+    spec_title = spec.rfp_title or ""
+    spec_head = _leading_concept_tokens(spec_title)
+    if len(spec_head) < 2:
+        return False
 
     for section in sections:
         body = section.content or ""
         if word_count(body) < 40 or section_is_rfp_draft_stub(section):
             continue
-        if _leading_concept_tokens(section.title or "") == spec_head:
+        sec_title = section.title or ""
+        if _leading_concept_tokens(sec_title) == spec_head:
+            return True
+        if _titles_share_leading_concept(spec_title, sec_title):
             return True
     return False
-
 
 # A letter addressed to the buyer is authored prose the offeror must write; the
 # static company block is boilerplate ABOUT the firm. Overlapping facts (firm

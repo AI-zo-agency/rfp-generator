@@ -54,10 +54,27 @@ class SearchHeadTests(unittest.TestCase):
         head = search_head_for_supermemory(q)
         self.assertIn("Sonja Anderson", head)
         self.assertNotIn("Find zö agency knowledge-base facts", head)
+        self.assertNotIn("Why needed", head)
         queries = expand_kb_queries(q)
         self.assertTrue(queries)
         self.assertIn("Sonja", queries[0])
         self.assertFalse(any("pricing guide" in item for item in queries))
+
+    def test_user_ask_leads_and_is_search_head(self) -> None:
+        from app.services.kb_rag_retrieve import (
+            build_retrieval_question_from_entry,
+            search_head_for_supermemory,
+        )
+
+        q = build_retrieval_question_from_entry(
+            section_title="1.5 — Insurance Information",
+            planner_queries=["Do we have insurance info?"],
+            why_needed="We maintain coverage that meets industry standards.",
+        )
+        self.assertTrue(q.startswith("Do we have insurance info?"))
+        head = search_head_for_supermemory(q)
+        self.assertTrue(head.startswith("Do we have insurance info?"))
+        self.assertNotIn("industry standards", head)
 
     def test_cost_tab_still_adds_pricing_guide(self) -> None:
         from app.services.kb_rag_retrieve import expand_kb_queries

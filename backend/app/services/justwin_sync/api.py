@@ -229,12 +229,27 @@ def resolve_pdf_url(client: JustWinApiClient, lead_id: str) -> str | None:
     return (view_res.json() or {}).get("url")
 
 
-def download_solicitation_pdf_bytes(
-    client: JustWinApiClient, external_id: str
+def _lead_payload(client: JustWinApiClient, external_id: str) -> dict[str, Any] | None:
+    lead_res = client.page.request.get(
+        f"{_api_root()}/leads/{external_id}", headers=client.headers
+    )
+    if not lead_res.ok:
+        return None
+    payload = lead_res.json()
+    return payload if isinstance(payload, dict) else None
+
+
+def _download_target_pdf(
+    client: JustWinApiClient, target_id: str
 ) -> bytes | None:
-    s3_url = resolve_pdf_url(client, external_id)
+    view_res = client.page.request.get(
+        f"{_api_root()}/targets/{target_id}/view",
+        headers=client.headers,
+    )
+    if not view_res.ok:
+        return None
+    s3_url = (view_res.json() or {}).get("url")
     if not s3_url:
-        logger.info("[justwin-sync] %s: no solicitation document", external_id)
         return None
     pdf_response = client.page.request.get(s3_url)
     if not pdf_response.ok:
@@ -243,6 +258,83 @@ def download_solicitation_pdf_bytes(
     if len(body) < 500 or not body.startswith(b"%PDF"):
         raise RuntimeError("Downloaded file was not a valid PDF")
     return body
+
+
+def download_solicitation_pdf_bytes(
+    client: JustWinApiClient, external_id: str
+) -> bytes | None:
+    """Download JustWin's attached PDF plus public portal Bid Attachments.
+
+    JustWin often indexes only the thin Ebid/Bonfire *invitation* packet. The
+    full RFP (FINAL.pdf, exhibits, SOW) sits on the buyer's public page as Bid
+    Attachments — linked via ``readonly_values.originating_url``. We merge those
+    into one package so intelligence sees the real solicitation.
+    """
+    from app.services.justwin_sync.portal_attachments import (
+        fetch_portal_attachment_pdfs,
+        merge_pdf_bytes,
+        package_looks_thin,
+        sort_portal_pdfs,
+    )
+
+    lead = _lead_payload(client, external_id)
+    if not lead:
+        logger.info("[justwin-sync] %s: lead not found", external_id)
+        return None
+    if lead.get("documentless") or not lead.get("target"):
+        logger.info("[justwin-sync] %s: no solicitation document", external_id)
+        return None
+
+    primary = _download_target_pdf(client, str(lead["target"]))
+    if primary is None:
+        logger.info("[justwin-sync] %s: no solicitation document", external_id)
+        return None
+
+    readonly = lead.get("readonly_values") or {}
+    originating = str(readonly.get("originating_url") or "").strip()
+    portal_pdfs = []
+    if originating:
+        try:
+            portal_pdfs = fetch_portal_attachment_pdfs(client.page, originating)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[justwin-sync] %s: portal attachment scrape failed: %s",
+                external_id,
+                exc,
+            )
+            portal_pdfs = []
+
+    if portal_pdfs:
+        ordered = sort_portal_pdfs(portal_pdfs)
+        parts = [p.data for p in ordered]
+        portal_sizes = {len(p.data) for p in ordered}
+        # Keep the JustWin invitation as a trailing appendix when portal
+        # attachments are present (dates / Ebid instructions) and it isn't
+        # already one of those files.
+        if primary and len(primary) not in portal_sizes:
+            parts.append(primary)
+        logger.info(
+            "[justwin-sync] %s: merged %d portal attachment(s) + JustWin PDF "
+            "(justwin=%d bytes → package parts=%d)",
+            external_id,
+            len(ordered),
+            len(primary),
+            len(parts),
+        )
+    else:
+        parts = [primary]
+        if package_looks_thin(primary):
+            logger.warning(
+                "[justwin-sync] %s: thin solicitation package (%d bytes) and no "
+                "portal attachments from %s — intelligence may miss required "
+                "sections until the full RFP PDF is attached",
+                external_id,
+                len(primary),
+                originating or "(no originating_url)",
+            )
+
+    merged = merge_pdf_bytes(parts)
+    return merged or primary
 
 
 def resolve_tabs(target_tab: str) -> list[LifecycleState]:

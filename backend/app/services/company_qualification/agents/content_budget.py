@@ -51,8 +51,9 @@ DEFAULT_BUDGETS: list[SubsectionBudget] = [
         sectionId="section-1-insurance",
         title="1.5 — Insurance Information",
         format="facts",
-        wordMin=50,
-        wordMax=100,
+        wordMin=120,
+        wordMax=280,
+        notes="Coverage | Limit table from KB (types + amounts when present)",
     ),
 ]
 

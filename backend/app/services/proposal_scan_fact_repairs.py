@@ -867,4 +867,10 @@ async def run_scan_fact_repairs(
         final_sections.append(section)
 
     updated = draft.model_copy(update={"sections": final_sections})
+    from app.services.proposal_client_facing_integrity import (
+        apply_client_facing_integrity_to_draft,
+    )
+
+    updated, echo_logs = apply_client_facing_integrity_to_draft(updated)
+    logs.extend(echo_logs)
     return updated, logs

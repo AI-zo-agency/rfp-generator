@@ -23,6 +23,10 @@ KNOWN_FABRICATED_PERSONNEL: tuple[str, ...] = (
     "Murilo Mendes",
     "Rad S",
     "Priyal Solanki",
+    # Org-chart inventions (Accounting / Leadership Coach seats not on MasterTemplate)
+    "Kelly Vlach",
+    "Katie Post",
+    "Dave Luke",
 )
 
 # Seed only. Live list comes from Key Personas UI (retired_staff.json).
@@ -322,22 +326,6 @@ def scrub_fabricated_personnel_from_draft(
     return draft.model_copy(update=update), logs
 
 
-def _member_in_org_roster(member: str, org_roles: dict[str, str]) -> bool:
-    """True when name matches Section 1.2 org chart (same rule as scan compliance)."""
-    key = (member or "").casefold().strip()
-    if not key:
-        return False
-    if key in org_roles:
-        return True
-    parts = key.split()
-    if len(parts) >= 2:
-        first, last = parts[0], parts[-1]
-        for name in org_roles:
-            if first in name and last in name:
-                return True
-    return False
-
-
 def _person_heading_starts_block(line: str, name: str) -> bool:
     stripped = (line or "").strip()
     if not stripped:
@@ -392,12 +380,15 @@ def _strip_unverified_person_block(
 
 
 async def _build_verified_roster_keys(draft: "ProposalDraft") -> set[str]:
-    """Org chart + documented roster + MasterTemplate team list."""
-    from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
+    """Documented roster + MasterTemplate + 04_Bio — never the org chart alone.
 
+    Section 1.2 is a frequent fabrication surface (invented Accounting / coach
+    seats). Trusting parse_org_chart_roles() as verified made those inventions
+    self-certifying. Org-chart names must also appear on MasterTemplate /
+    DOCUMENTED_TEAM_PERSONNEL / a real bio PDF.
+    """
+    del draft  # roster is KB-grounded, not draft-grounded
     keys: set[str] = set()
-    org_roles = parse_org_chart_roles(draft)
-    keys.update(org_roles.keys())
     for name in DOCUMENTED_TEAM_PERSONNEL:
         keys.add(name.casefold())
     retired = {n.casefold() for n in retired_team_personnel()}
@@ -415,7 +406,51 @@ async def _build_verified_roster_keys(draft: "ProposalDraft") -> set[str]:
                 keys.add(name.casefold())
     except Exception:  # noqa: BLE001
         pass
+    keys -= retired
     return keys
+
+
+def _is_org_structure_section(section: "ProposalSection") -> bool:
+    sid = (section.id or "").casefold()
+    title_cf = (section.title or "").casefold()
+    return (
+        sid in ("section-1-2", "section-1-org-structure")
+        or "org chart" in title_cf
+        or "team roster" in title_cf
+        or "organizational structure" in title_cf
+        or "org structure" in title_cf
+    )
+
+
+def _org_chart_display_names(content: str) -> list[str]:
+    """Person names as written in an org-structure tab (table or **Name** lines)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in (content or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "---" in line:
+            continue
+        candidate = ""
+        if "|" in line:
+            cells = [c.strip().replace("*", "") for c in line.split("|") if c.strip()]
+            if len(cells) >= 2:
+                candidate = cells[0]
+        elif line.startswith("**") and "**" in line[2:]:
+            close = line.index("**", 2)
+            candidate = line[2:close].strip()
+        if not candidate:
+            continue
+        # Drop role-only / header cells
+        if len(candidate.split()) < 2 or len(candidate) > 60:
+            continue
+        if candidate.casefold() in {"name", "team member", "role", "title"}:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(candidate)
+    return names
 
 
 async def _person_has_bio_evidence(name: str) -> bool:
@@ -431,10 +466,10 @@ async def _person_has_bio_evidence(name: str) -> bool:
 async def scrub_unverified_personnel_from_draft(
     draft: "ProposalDraft",
 ) -> tuple["ProposalDraft", list[str]]:
-    """Remove invented staff from Team Bios / personnel tabs — not only blocklist hits.
+    """Remove invented staff from org chart + Team Bios — not only the blocklist.
 
-    Names must appear on the org chart, documented roster, MasterTemplate list,
-    or a retrievable 04_Bio document. Otherwise the person's block is MANUAL FILL.
+    Names must appear on the documented roster, MasterTemplate list, or a
+    retrievable 04_Bio document. Org-chart-only names are NOT enough.
     """
     from datetime import datetime, timezone
 
@@ -443,52 +478,75 @@ async def scrub_unverified_personnel_from_draft(
         is_personnel_bio_section,
         named_people_in_section,
     )
-    from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
 
     if not draft.sections:
         return draft, []
 
     verified_keys = await _build_verified_roster_keys(draft)
-    org_roles = parse_org_chart_roles(draft)
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
 
+    async def _name_is_verified(name: str) -> bool:
+        key = name.casefold().strip()
+        if not key:
+            return True
+        if key in verified_keys:
+            return True
+        if await _person_has_bio_evidence(name):
+            verified_keys.add(key)
+            return True
+        return False
+
     for section in draft.sections:
-        if not is_personnel_bio_section(section):
-            sections.append(section)
-            continue
         body = section.content or ""
         title = section.title or ""
-        people = named_people_in_section(section)
         new_body = body
         section_changed = False
 
-        for name in people:
-            fabricated = find_known_fabricated_names(name)
-            retired_hit = find_retired_team_names(name)
-            if fabricated or retired_hit:
-                continue
-            key = name.casefold()
-            if key in verified_keys or _member_in_org_roster(name, org_roles):
-                continue
-            if await _person_has_bio_evidence(name):
-                verified_keys.add(key)
-                continue
-
-            replacement = (
-                f"### {name}\n\n"
-                f"**Role on this engagement:** [MANUAL FILL: Sonja — assign verified "
-                f"team member from Section 2 / 04_Bio roster]\n\n"
-                f"{_PERSONNEL_MANUAL_FILL}"
-            )
-            new_body, hit = _strip_unverified_person_block(new_body, name, replacement)
-            if hit:
-                section_changed = True
-                logs.append(
-                    f"{title or section.id}: removed unverified personnel '{name}' "
-                    "(not on org chart / MasterTemplate / 04_Bio)"
+        if _is_org_structure_section(section):
+            for name in _org_chart_display_names(body):
+                if find_known_fabricated_names(name) or find_retired_team_names(name):
+                    # Blocklist / retired scrub handles these in the sync pass;
+                    # still strip here if they survived.
+                    pass
+                if await _name_is_verified(name):
+                    continue
+                replaced = replace_listed_names(
+                    new_body, (name,), _PERSONNEL_MANUAL_FILL
                 )
+                if replaced != new_body:
+                    new_body = replaced
+                    section_changed = True
+                    logs.append(
+                        f"{title or section.id}: removed unverified org-chart "
+                        f"personnel '{name}' (not on MasterTemplate / 04_Bio)"
+                    )
+        elif is_personnel_bio_section(section):
+            people = named_people_in_section(section)
+            for name in people:
+                if find_known_fabricated_names(name) or find_retired_team_names(name):
+                    continue
+                if await _name_is_verified(name):
+                    continue
+                replacement = (
+                    f"### {name}\n\n"
+                    f"**Role on this engagement:** [MANUAL FILL: Sonja — assign verified "
+                    f"team member from Section 2 / 04_Bio roster]\n\n"
+                    f"{_PERSONNEL_MANUAL_FILL}"
+                )
+                new_body, hit = _strip_unverified_person_block(
+                    new_body, name, replacement
+                )
+                if hit:
+                    section_changed = True
+                    logs.append(
+                        f"{title or section.id}: removed unverified personnel '{name}' "
+                        "(not on MasterTemplate / 04_Bio)"
+                    )
+        else:
+            sections.append(section)
+            continue
 
         if section_changed:
             changed = True

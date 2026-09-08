@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Callable, TypeVar
@@ -18,6 +19,41 @@ _SUPABASE_READ_RETRIES = 6
 _SUPABASE_WRITE_RETRIES = 6
 _RETRY_BACKOFF_SEC = (0.25, 0.6, 1.2, 2.0, 3.0, 4.5)
 _TRANSIENT_EXC = (httpx.HTTPError, OSError, ConnectionError, TimeoutError)
+
+# The proposal-workspace UI polls GET /{rfp_id}/proposal on a fixed interval,
+# from every open tab independently, and that handler reads both the draft
+# and the research cache on every tick. This short TTL collapses concurrent
+# polls for the same rfp_id (any number of tabs) into a single Supabase read
+# per window — invalidated immediately on write so a save is never served
+# stale. Kept well under the poll interval so it's invisible to users, only
+# absorbing near-simultaneous duplicate reads.
+_DRAFT_READ_CACHE_TTL_SECONDS = 1.5
+_draft_read_cache: dict[str, tuple[float, ProposalDraft | None]] = {}
+_draft_read_cache_lock = threading.Lock()
+_research_read_cache: dict[str, tuple[float, ProposalResearchCache | None]] = {}
+_research_read_cache_lock = threading.Lock()
+
+
+def _cache_get(cache: dict, lock: threading.Lock, key: str):
+    with lock:
+        entry = cache.get(key)
+        if entry is None:
+            return False, None
+        stored_at, value = entry
+        if time.monotonic() - stored_at > _DRAFT_READ_CACHE_TTL_SECONDS:
+            del cache[key]
+            return False, None
+        return True, value.model_copy(deep=True) if value is not None else None
+
+
+def _cache_set(cache: dict, lock: threading.Lock, key: str, value) -> None:
+    with lock:
+        cache[key] = (time.monotonic(), value)
+
+
+def _cache_invalidate(cache: dict, lock: threading.Lock, key: str) -> None:
+    with lock:
+        cache.pop(key, None)
 
 
 def _use_supabase() -> bool:
@@ -107,20 +143,29 @@ def init_proposal_db() -> None:
 
 
 def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
+    hit, cached = _cache_get(_research_read_cache, _research_read_cache_lock, rfp_id)
+    if hit:
+        return cached
+
     if _use_supabase():
-        return _with_supabase_retry(
+        result = _with_supabase_retry(
             "get_research_cache",
             lambda: sb.get_research_cache(rfp_id),
             retries=_SUPABASE_READ_RETRIES,
         )
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT payload FROM proposal_research WHERE rfp_id = ?",
-            (rfp_id,),
-        ).fetchone()
-    if not row:
-        return None
-    return ProposalResearchCache.model_validate(json.loads(row["payload"]))
+    else:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM proposal_research WHERE rfp_id = ?",
+                (rfp_id,),
+            ).fetchone()
+        result = (
+            ProposalResearchCache.model_validate(json.loads(row["payload"]))
+            if row
+            else None
+        )
+    _cache_set(_research_read_cache, _research_read_cache_lock, rfp_id, result)
+    return result
 
 
 def save_research_cache(cache: ProposalResearchCache) -> None:
@@ -135,37 +180,43 @@ def save_research_cache(cache: ProposalResearchCache) -> None:
             lambda: sb.save_research_cache(cache),
             retries=_SUPABASE_WRITE_RETRIES,
         )
-        return
-    now = datetime.now(timezone.utc).isoformat()
-    cache.updated_at = now
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO proposal_research (rfp_id, payload, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(rfp_id) DO UPDATE SET
-                payload = excluded.payload,
-                updated_at = excluded.updated_at
-            """,
-            (cache.rfp_id, cache.model_dump_json(by_alias=True), now),
-        )
+    else:
+        now = datetime.now(timezone.utc).isoformat()
+        cache.updated_at = now
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO proposal_research (rfp_id, payload, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(rfp_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (cache.rfp_id, cache.model_dump_json(by_alias=True), now),
+            )
+    _cache_invalidate(_research_read_cache, _research_read_cache_lock, cache.rfp_id)
 
 
 def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
+    hit, cached = _cache_get(_draft_read_cache, _draft_read_cache_lock, rfp_id)
+    if hit:
+        return cached
+
     if _use_supabase():
-        return _with_supabase_retry(
+        result = _with_supabase_retry(
             "get_proposal_draft",
             lambda: sb.get_proposal_draft(rfp_id),
             retries=_SUPABASE_READ_RETRIES,
         )
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT payload FROM proposal_drafts WHERE rfp_id = ?",
-            (rfp_id,),
-        ).fetchone()
-    if not row:
-        return None
-    return ProposalDraft.model_validate(json.loads(row["payload"]))
+    else:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM proposal_drafts WHERE rfp_id = ?",
+                (rfp_id,),
+            ).fetchone()
+        result = ProposalDraft.model_validate(json.loads(row["payload"])) if row else None
+    _cache_set(_draft_read_cache, _draft_read_cache_lock, rfp_id, result)
+    return result
 
 
 def _preserve_selected_key_personas(draft: ProposalDraft) -> None:
@@ -209,38 +260,41 @@ def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
 def save_proposal_draft(draft: ProposalDraft) -> None:
     _preserve_selected_key_personas(draft)
     _repair_markdown_tables_in_draft(draft)
-    if _use_supabase():
-        _with_supabase_retry(
-            "save_proposal_draft",
-            lambda: sb.save_proposal_draft(draft),
-            retries=_SUPABASE_WRITE_RETRIES,
-        )
-        return
-    now = datetime.now(timezone.utc).isoformat()
-    draft.updated_at = now
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO proposal_drafts (rfp_id, payload, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(rfp_id) DO UPDATE SET
-                payload = excluded.payload,
-                updated_at = excluded.updated_at
-            """,
-            (draft.rfp_id, draft.model_dump_json(by_alias=True), now),
-        )
-        sections = draft.sections or []
-        filled = sum(1 for s in sections if (s.content or "").strip())
-        if filled > 0:
-            note = f"Proposal draft updated — {filled}/{len(sections)} sections filled"
+    try:
+        if _use_supabase():
+            _with_supabase_retry(
+                "save_proposal_draft",
+                lambda: sb.save_proposal_draft(draft),
+                retries=_SUPABASE_WRITE_RETRIES,
+            )
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        draft.updated_at = now
+        with _connect() as conn:
             conn.execute(
                 """
-                UPDATE rfps
-                SET last_activity = ?, last_activity_note = ?
-                WHERE id = ? OR external_id = ?
+                INSERT INTO proposal_drafts (rfp_id, payload, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(rfp_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
                 """,
-                (now, note[:250], draft.rfp_id, draft.rfp_id),
+                (draft.rfp_id, draft.model_dump_json(by_alias=True), now),
             )
+            sections = draft.sections or []
+            filled = sum(1 for s in sections if (s.content or "").strip())
+            if filled > 0:
+                note = f"Proposal draft updated — {filled}/{len(sections)} sections filled"
+                conn.execute(
+                    """
+                    UPDATE rfps
+                    SET last_activity = ?, last_activity_note = ?
+                    WHERE id = ? OR external_id = ?
+                    """,
+                    (now, note[:250], draft.rfp_id, draft.rfp_id),
+                )
+    finally:
+        _cache_invalidate(_draft_read_cache, _draft_read_cache_lock, draft.rfp_id)
 
 
 async def aget_research_cache(rfp_id: str) -> ProposalResearchCache | None:

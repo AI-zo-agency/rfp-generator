@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
 import { JUSTWIN_SYNC_ENABLED } from "@/lib/justwin-config";
 import { listActiveProposalJobs, type ActiveProposalJob } from "@/lib/proposal-api";
@@ -153,21 +153,23 @@ export function GlobalJobStatusWidget() {
       ]);
       if (cancelled) return;
       const combined = justwin ? [...active, justwin] : active;
-      setTracked((prev) => {
-        const activeKeys = new Set(combined.map(jobKey));
-        const next = new Map(prev);
-        // A previously-running job no longer in the active list has finished
-        // — keep its last-known data (title/label) instead of dropping it.
-        for (const [key, job] of prev) {
-          if (job.state === "running" && !activeKeys.has(key)) {
-            next.set(key, { ...job, state: "finished" });
+      startTransition(() => {
+        setTracked((prev) => {
+          const activeKeys = new Set(combined.map(jobKey));
+          const next = new Map(prev);
+          // A previously-running job no longer in the active list has finished
+          // — keep its last-known data (title/label) instead of dropping it.
+          for (const [key, job] of prev) {
+            if (job.state === "running" && !activeKeys.has(key)) {
+              next.set(key, { ...job, state: "finished" });
+            }
           }
-        }
-        // Fresh data always wins for whatever's running right now.
-        for (const job of combined) {
-          next.set(jobKey(job), { ...job, state: "running" });
-        }
-        return next;
+          // Fresh data always wins for whatever's running right now.
+          for (const job of combined) {
+            next.set(jobKey(job), { ...job, state: "running" });
+          }
+          return next;
+        });
       });
     };
     void poll();

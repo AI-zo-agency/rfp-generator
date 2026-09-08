@@ -271,6 +271,33 @@ def get_rfp(rfp_id: str) -> RfpRecord | None:
     return _dict_to_rfp(rows[0]) if rows else None
 
 
+def get_rfps_by_ids(rfp_ids: list[str]) -> dict[str, RfpRecord]:
+    """Batch lookup by id-or-external_id, one round trip instead of one per id.
+
+    Callers building a list view (active jobs, cost dashboards) used to call
+    get_rfp() once per row — an N+1 that re-hits Supabase for each RFP.
+    """
+    ids = sorted({rid for rid in rfp_ids if rid})
+    if not ids:
+        return {}
+    quoted = ",".join(ids)
+    client = _get_client()
+    result = (
+        client.table("rfps")
+        .select("*")
+        .or_(f"id.in.({quoted}),external_id.in.({quoted})")
+        .execute()
+    )
+    rows = _handle_response(result.data, context="get_rfps_by_ids")
+    by_key: dict[str, RfpRecord] = {}
+    for row in rows:
+        rfp = _dict_to_rfp(row)
+        by_key[rfp.id] = rfp
+        if row.get("external_id"):
+            by_key[str(row["external_id"])] = rfp
+    return {rid: by_key[rid] for rid in ids if rid in by_key}
+
+
 def rfp_exists(rfp_id: str) -> bool:
     client = _get_client()
     result = (
@@ -937,10 +964,31 @@ def expire_stale_running_sync_jobs(
     return expired
 
 
+# get_latest_sync_job()/get_running_sync_job() back these poll endpoints
+# (frontend hits them every ~2s, from every open tab). Running both expiry
+# sweeps on every single poll turns one logical "any job running?" check into
+# 3 Supabase reads, repeated per tab per tick. Stale/orphan detection doesn't
+# need sub-minute precision, so throttle the sweeps to once per interval and
+# let the cheap "*" fetch still happen on every call.
+_SYNC_JOB_EXPIRY_SWEEP_INTERVAL_SECONDS = 30
+_sync_job_expiry_last_run = 0.0
+_sync_job_expiry_lock = threading.Lock()
+
+
+def _run_sync_job_expiry_sweeps_throttled() -> None:
+    global _sync_job_expiry_last_run
+    now = time.monotonic()
+    with _sync_job_expiry_lock:
+        if now - _sync_job_expiry_last_run < _SYNC_JOB_EXPIRY_SWEEP_INTERVAL_SECONDS:
+            return
+        _sync_job_expiry_last_run = now
+    expire_stale_running_sync_jobs()
+    expire_orphaned_celery_sync_jobs()
+
+
 def get_latest_sync_job() -> dict[str, Any] | None:
     def _read() -> dict[str, Any] | None:
-        expire_stale_running_sync_jobs()
-        expire_orphaned_celery_sync_jobs()
+        _run_sync_job_expiry_sweeps_throttled()
         client = _get_client()
         result = (
             client.table("sync_jobs")
@@ -957,8 +1005,7 @@ def get_latest_sync_job() -> dict[str, Any] | None:
 
 def get_running_sync_job() -> dict[str, Any] | None:
     def _read() -> dict[str, Any] | None:
-        expire_stale_running_sync_jobs()
-        expire_orphaned_celery_sync_jobs()
+        _run_sync_job_expiry_sweeps_throttled()
         client = _get_client()
         result = (
             client.table("sync_jobs")

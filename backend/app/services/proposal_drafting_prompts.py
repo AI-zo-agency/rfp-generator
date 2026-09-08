@@ -13,7 +13,7 @@ ANTI_HALLUCINATION_RULES = """
 YOU MUST NEVER:
 1. Invent statistics (retention rates, client counts, audience sizes, years of experience)
 2. Cite specific numbers unless they appear VERBATIM in the evidence corpus with [E#] citation
-3. Use team member names that are not in approved bio files (04_Bio_*.pdf)
+3. Use team member names that are not in approved bio files (04_Bio_*.pdf) or MasterTemplate roster — including org-chart / Organizational Structure seats (no invented Accounting, Leadership Coach, or other filler names)
 4. Add certifications not explicitly listed in 01_companyfacts_verified
 4b. Claim the agency is registered / qualified / authorized to conduct business in a state that is not on the 01_companyfacts / Section 1.3 State Registrations list (e.g. asserting Maryland when the verified list is Oregon, Washington, Texas, Colorado, California). That is a checkable legal fact — use [MANUAL FILL: Sonja — confirm foreign qualification] or omit it. Never invent a filing.
 5. Transfer metrics from one client project to describe agency-wide capabilities
@@ -53,7 +53,7 @@ VERIFIED FACTS ONLY:
 - Conflict disclosures: NOT auto-assertable — always [VERIFY] until Sonja/leadership confirms
 - Client retention: DO NOT cite a specific average retention rate (not formally tracked)
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
-- Team: ONLY use names from approved 04_Bio_*.pdf files in KB
+- Team: ONLY use names from approved 04_Bio_*.pdf files / MasterTemplate in KB. Org chart rows must be the same roster — never invent seats (Accounting CPA, Leadership Coach, etc.) to look complete; use [MANUAL FILL: Sonja — assign verified team member] for open roles
 - Insurance: Use [VERIFY: insurance field] for all coverage amounts and details except what's explicit in KB
 - Clients: ONLY from 01_ClientList_Approved with Public=Yes for the claimed work type
 
@@ -65,9 +65,8 @@ IF YOU CANNOT VERIFY A FACT:
 - Stick to THIS RFP's stated requirements and HARD FACTS block — do not pad with nearest-topic experience
 
 CERTIFICATIONS & INSURANCE:
-- Keep these sections SHORT and CONCISE
 - List only verified certifications (WBENC, WOSB)
-- For insurance: state coverage types only, use [VERIFY: amounts] for dollar figures
+- For insurance: write coverage types AND any dollar limits / carriers / NAIC that appear in verified KB evidence (companyfacts, COI/ACORD, MasterTemplate). Prefer a Coverage | Limit table. Never invent figures; if a type is known but the amount is missing use [VERIFY: limit from current COI]
 - Do not add platform certifications (Google Ads, Meta, etc.) unless they appear in verified KB
 
 APPLY, NEVER NARRATE:

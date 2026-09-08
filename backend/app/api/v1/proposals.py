@@ -1783,7 +1783,6 @@ async def save_proposal_key_personas(
     bios_synced = False
     if draft.sections:
         try:
-            from app.services import team_personas_service
             from app.services.proposal_chat_structure import (
                 sync_draft_bios_to_key_personas,
             )
@@ -1791,7 +1790,6 @@ async def save_proposal_key_personas(
                 push_before_structure_change_snapshot,
             )
 
-            all_personas = await team_personas_service.get_all_key_personas()
             by_id = {p["id"]: p for p in all_personas}
             selected_personas = [
                 by_id[pid]
@@ -1866,25 +1864,32 @@ async def list_active_proposal_jobs_endpoint(
     lock — not what occupies a proposal-pipeline worker slot, so it doesn't
     belong in that queue-depth count); pass includeGoNoGo=true for a caller
     that wants a plain "what's running anywhere" view instead."""
+    import asyncio
+
     from app.services.proposal_job_runner import list_active_proposal_jobs
     from app.services.proposal_pipeline_checkpoint import PHASE_LABELS
+    from app.services.rfp_repository import get_rfps_by_ids
 
     records = await list_active_proposal_jobs()
-    jobs = []
-    for record in records:
-        if record.job_type == "go-no-go" and not include_go_no_go:
-            continue
-        rfp = get_rfp(record.rfp_id)
-        jobs.append(
-            {
-                "rfpId": record.rfp_id,
-                "title": rfp.title if rfp else record.rfp_id,
-                "jobType": record.job_type,
-                "jobLabel": PHASE_LABELS.get(record.job_type, record.job_type),
-                "status": record.status,
-                "startedAt": record.started_at,
-            }
-        )
+    records = [
+        record
+        for record in records
+        if include_go_no_go or record.job_type != "go-no-go"
+    ]
+    rfps_by_id = await asyncio.to_thread(
+        get_rfps_by_ids, [record.rfp_id for record in records]
+    )
+    jobs = [
+        {
+            "rfpId": record.rfp_id,
+            "title": (rfps_by_id.get(record.rfp_id).title if record.rfp_id in rfps_by_id else record.rfp_id),
+            "jobType": record.job_type,
+            "jobLabel": PHASE_LABELS.get(record.job_type, record.job_type),
+            "status": record.status,
+            "startedAt": record.started_at,
+        }
+        for record in records
+    ]
     return {"jobs": jobs}
 
 

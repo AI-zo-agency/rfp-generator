@@ -60,7 +60,10 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         "section-1-insurance",
         "1.5 — Insurance Information",
-        "Coverage types from company truth. Use [VERIFY: amount] for unknown dollar figures.",
+        "Coverage types, dollar limits, and carriers from company truth / verified KB "
+        "(companyfacts, COI/ACORD). Prefer Coverage | Limit table. "
+        "Use [VERIFY: limit from current COI] only when type is known but amount is missing. "
+        "Never invent figures or write 'upon request'.",
     ),
 )
 

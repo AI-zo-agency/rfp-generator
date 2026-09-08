@@ -215,6 +215,25 @@ def get_rfp(rfp_id: str) -> RfpRecord | None:
     return rfp
 
 
+def get_rfps_by_ids(rfp_ids: list[str]) -> dict[str, RfpRecord]:
+    """Batch get_rfp() — one round trip for a whole list instead of one per id."""
+    ids = [rid for rid in rfp_ids if rid]
+    if not ids:
+        return {}
+    if _use_supabase():
+        return _with_supabase_retry("get_rfps_by_ids", lambda: sb.get_rfps_by_ids(ids))
+    result: dict[str, RfpRecord] = {}
+    with _connect() as conn:
+        for rid in set(ids):
+            row = conn.execute(
+                "SELECT * FROM rfps WHERE id = ? OR external_id = ?",
+                (rid, rid),
+            ).fetchone()
+            if row:
+                result[rid] = _row_to_rfp(row)
+    return result
+
+
 def rfp_exists(rfp_id: str) -> bool:
     if _use_supabase():
         return bool(_with_supabase_retry("rfp_exists", lambda: sb.rfp_exists(rfp_id)))

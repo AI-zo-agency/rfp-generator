@@ -273,6 +273,17 @@ def apply_zero_fabrication_guards(
         logger.warning("%s edge-case guards skipped: %s", label, exc)
 
     try:
+        from app.services.proposal_client_facing_integrity import (
+            apply_client_facing_integrity_to_draft,
+        )
+
+        draft, echo_logs = apply_client_facing_integrity_to_draft(draft)
+        for line in echo_logs:
+            report.logs.append(f"{label}: client-facing — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s client-facing integrity skipped: %s", label, exc)
+
+    try:
         from app.services.proposal_scan_fact_repairs import (
             apply_leaked_fragment_scrub_to_draft,
         )

@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from app.services.llm_call_log import get_global_cost_summary, get_rfp_cost_breakdown
-from app.services.rfp_repository import get_rfp
+from app.services.rfp_repository import get_rfp, get_rfps_by_ids
 
 router = APIRouter(prefix="/llm-cost", tags=["llm-cost"])
 
@@ -15,17 +15,17 @@ router = APIRouter(prefix="/llm-cost", tags=["llm-cost"])
 def _attach_titles(summary: dict[str, Any]) -> dict[str, Any]:
     """Join RFP titles onto per-proposal rows for the dashboard."""
     by_proposal = summary.get("by_proposal") or []
+    ids = [str(row.get("rfp_id") or "") for row in by_proposal]
+    ids = [rid for rid in ids if rid and rid != "unknown"]
+    try:
+        by_id = get_rfps_by_ids(ids)
+    except Exception:  # noqa: BLE001
+        by_id = {}
     enriched: list[dict[str, Any]] = []
     for row in by_proposal:
         rfp_id = str(row.get("rfp_id") or "")
-        title = ""
-        if rfp_id and rfp_id != "unknown":
-            try:
-                rec = get_rfp(rfp_id)
-                if rec and rec.title:
-                    title = rec.title
-            except Exception:  # noqa: BLE001
-                title = ""
+        rec = by_id.get(rfp_id)
+        title = rec.title if rec and rec.title else ""
         enriched.append({**row, "title": title})
     return {**summary, "by_proposal": enriched}
 

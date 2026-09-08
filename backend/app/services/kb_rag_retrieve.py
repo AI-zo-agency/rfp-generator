@@ -72,10 +72,11 @@ _search_inflight: dict[tuple[Any, ...], asyncio.Future[list[dict[str, Any]]]] = 
 
 
 def search_head_for_supermemory(question: str, *, max_len: int = 220) -> str:
-    """Distinctive head sent to Supermemory (title/ask first).
+    """Distinctive head sent to Supermemory (ask first — same bar as kb_qa_loop).
 
-    A long boilerplate prefix used to lead every question. v4 truncates around
-    ~80 characters, so every section searched the same string and missed.
+    v4 truncates the query. Leading with Section/Why-needed draft filler made every
+    packed search miss docs that the plain user ask would find. Strip scaffolding;
+    keep the ask.
     """
     q = (question or "").strip()
     if not q:
@@ -85,31 +86,29 @@ def search_head_for_supermemory(question: str, *, max_len: int = 220) -> str:
         q = q[len(_BOILERPLATE_PREFIX) :].strip() or q
     elif idx > 0:
         q = q[:idx].strip(" .")
+    why = re.search(r"\bWhy needed:", q, re.I)
+    if why:
+        q = q[: why.start()].strip(" .")
     return q[:max_len].strip(" .")
 
 
 def expand_kb_queries(question: str, *, max_queries: int = 4) -> list[str]:
-    """User question plus targeted supplemental queries (budget guide, Oregon clients)."""
+    """User question plus pricing-guide supplement when the ask is about rates."""
     q = (question or "").strip()
     if not q:
         return []
     search = search_head_for_supermemory(q)
     intent = search.split("Why needed:", 1)[0].casefold()
-    queries = [search]
+    queries = [search] if search else []
 
     budget_kw = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
     if any(kw in intent for kw in budget_kw):
         queries.append("zö agency pricing guide rates fees hourly")
 
-    if "oregon" in intent:
-        queries.append(
-            "Oregon Employment Umatilla Lake Oswego Bend Deschutes proposal budget"
-        )
-
     seen: set[str] = set()
     out: list[str] = []
     for item in queries:
-        if item not in seen:
+        if item and item not in seen:
             seen.add(item)
             out.append(item)
     return out[:max_queries]
@@ -129,22 +128,17 @@ def build_retrieval_question_from_entry(
     Phase 2 retrieval plans often emit keyword fragments; Supermemory works best
     with one clear question like the manual KB QA loop uses.
     """
-    # Distinctive text MUST lead. Supermemory truncates the query; a boilerplate
-    # prefix made every section search identical and return 0 hits.
+    # Ask MUST lead — Supermemory truncates; Section/Why-needed filler first → 0 hits.
     parts: list[str] = []
+    queries = [str(q).strip() for q in (planner_queries or []) if str(q).strip()]
+    if queries:
+        parts.append(queries[0][:400])
     title = (section_title or "").strip()
     if title:
         parts.append(f'Section: "{title}".')
     client = (rfp_client or "").strip()
     if client:
         parts.append(f"RFP client context: {client}.")
-    queries = [str(q).strip() for q in (planner_queries or []) if str(q).strip()]
-    if queries:
-        focus = queries[0]
-        if len(focus) >= 24 and " " in focus:
-            parts.append(f"Search focus: {focus[:400]}.")
-        else:
-            parts.append(f"Topics: {', '.join(queries[:3])}.")
     assets = [str(a).strip() for a in (required_assets or []) if str(a).strip()][:8]
     if assets:
         parts.append("Required proof/assets: " + "; ".join(assets) + ".")
@@ -311,7 +305,10 @@ def rank_hits_for_question(
     """Re-rank by filename preference + term overlap (no topic hardcoding)."""
     from app.services import supermemory
 
-    terms = _question_terms(question)
+    # Overlap against the search head — not boilerplate tokens that diluted ratios
+    # and dropped real hits after retrieve.
+    head = search_head_for_supermemory(question) or question
+    terms = _question_terms(head)
     q_cf = (question or "").casefold()
     ask_about_rfp = bool(re.search(r"\brfp\b|solicitation", q_cf))
     _BUDGET_KW = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
@@ -338,21 +335,6 @@ def rank_hits_for_question(
             rank += 3.0
         elif supermemory.is_memory_hit(hit):
             rank -= 1.5
-        # Oregon client work lives under client-specific proposal/case-study filenames
-        if "oregon" in q_cf:
-            label_cf = label.casefold()
-            if any(
-                tok in label_cf
-                for tok in (
-                    "oregon",
-                    "umatilla",
-                    "lakeoswego",
-                    "bend",
-                    "deschutes",
-                    "mcminnville",
-                )
-            ):
-                rank += 4.0
         # Boost when the filename itself matches question tokens (e.g. TorrentLaboratories)
         if label and _term_overlap(label, terms) > 0:
             rank += 3.0
@@ -500,8 +482,8 @@ async def _search_hits_chunk_first(
     query: str,
     *,
     limit: int,
-    filters: dict[str, Any] | None,
     threshold: float,
+    filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch more raw chunks than memory summaries; chunks lead the merged list."""
     from app.services import supermemory
@@ -587,6 +569,7 @@ async def _search_hits_chunk_first_uncached(
     return merged
 
 
+
 async def retrieve_for_question(
     question: str,
     *,
@@ -595,10 +578,14 @@ async def retrieve_for_question(
     category: str | None = None,
     threshold: float = 0.35,
     fallback_threshold: float = 0.22,
+    expand_queries: bool = True,
 ) -> tuple[str, list[str], list[str]]:
     """Search Supermemory with the user question; pack full docs when possible.
 
     Returns (context, source_labels, queries_used).
+
+    ``expand_queries=False`` when the caller already planned specific queries
+    (proposal Sections 1–3 gather) so we do not multiply each into 3–4 searches.
     """
     import asyncio
 
@@ -613,12 +600,19 @@ async def retrieve_for_question(
             ]
         }
 
-    queries = expand_kb_queries(question)
+    queries = expand_kb_queries(question) if expand_queries else []
+    if not queries:
+        head = search_head_for_supermemory(question)
+        queries = [head] if head else []
+    if not queries:
+        return "(No matching knowledge-base content.)", [], []
+
     logger.info(
-        "KB RAG query %r → %d search(es) head=%r",
+        "KB RAG query %r → %d search(es) head=%r expand=%s",
         question[:80],
         len(queries),
         (queries[0][:80] if queries else ""),
+        expand_queries,
     )
 
     async def _search_one(query: str, thresh: float) -> list[dict[str, Any]]:
@@ -723,7 +717,7 @@ async def retrieve_for_question(
         # noise, and a memory that made it into `ranked` already matched the
         # question — so it skips the overlap filter that chunks still go through.
         if not is_memory:
-            terms = _question_terms(question)
+            terms = _question_terms(search_head_for_supermemory(question) or question)
             if terms and _term_overlap(block, terms) < 0.15:
                 continue
         label = _hit_label(hit) or "document"
