@@ -8,6 +8,7 @@ import {
   groupContainsSection,
   sectionListLabel,
   type OutlineTreeGroup,
+  type OutlineTreeNode,
 } from "@/lib/proposal-outline-tree";
 import {
   classifySectionHealth,
@@ -101,6 +102,7 @@ interface ProposalSectionTreeProps {
   onDeleteSection?: (sectionId: string) => void;
   /** Drag-and-drop reorder of sidebar tabs (flat outline order). */
   onReorderSection?: (fromId: string, toId: string) => void;
+  query?: string;
 }
 
 function SectionRow({
@@ -238,6 +240,11 @@ function SectionRow({
         >
           {listLabel}
         </span>
+        {flagCount > 0 ? (
+          <span className="proposal-section-flag-count" title={`${flagCount} items need input`}>
+            {flagCount}
+          </span>
+        ) : null}
       </button>
       {canDelete && onDeleteSection ? (
         <button
@@ -370,8 +377,28 @@ export function ProposalSectionTree({
   onOpenRevision,
   onDeleteSection,
   onReorderSection,
+  query = "",
 }: ProposalSectionTreeProps) {
   const tree = useMemo(() => buildOutlineSectionTree(sections), [sections]);
+  const visibleTree = useMemo((): OutlineTreeNode[] => {
+    const q = query.trim().toLowerCase();
+    if (!q) return tree;
+    const next: OutlineTreeNode[] = [];
+    for (const node of tree) {
+      if (node.kind === "group") {
+        const groupHit = node.label.toLowerCase().includes(q);
+        const matched = groupHit
+          ? node.sections
+          : node.sections.filter((section) =>
+              section.title.toLowerCase().includes(q),
+            );
+        if (matched.length > 0) next.push({ ...node, sections: matched });
+        continue;
+      }
+      if (node.section.title.toLowerCase().includes(q)) next.push(node);
+    }
+    return next;
+  }, [query, tree]);
   const rfpTabNumberById = useMemo(
     () => buildRfpTabDisplayNumbers(sections),
     [sections],
@@ -427,7 +454,7 @@ export function ProposalSectionTree({
 
   return (
     <ul className="proposal-section-tree">
-      {tree.map((node) =>
+      {visibleTree.map((node) =>
         node.kind === "group" ? (
           <SectionGroup
             key={node.id}
@@ -441,7 +468,7 @@ export function ProposalSectionTree({
             dragOverId={dragOverId}
             rfpTabNumberById={rfpTabNumberById}
             sectionButtonRefs={sectionButtonRefs}
-            collapsed={collapsedGroups.has(node.id)}
+            collapsed={query.trim() ? false : collapsedGroups.has(node.id)}
             onToggle={() =>
               setCollapsedGroups((current) => {
                 const next = new Set(current);

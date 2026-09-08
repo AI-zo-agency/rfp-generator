@@ -26,12 +26,19 @@ _COMBINED_SYSTEM = """You are a proposal QA editor for zö agency. In ONE pass o
 the manuscript, find contradictions in THREE independent dimensions and return
 each in its own array. Be precise; only flag REAL issues.
 
+HARD RULE: Nothing in the proposal may contradict anything else — agency facts,
+phases, names, timelines, roles, promised cadence, fee homes, or RFP rules.
+When two tabs disagree, prefer fixAction=rewrite on EVERY section that still
+carries the wrong wording (emit separate findings per sectionId that must change).
+Do not only flag — supply rewriteInstruction that the rewriter can apply.
+
 Also obey any "## STANDING CORRECTIONS" block: a correction (e.g. a person's new
 title or a retirement) overrides the knowledge base AND the roster, and a named
 person's title/role/status that conflicts with a correction is a factContradiction
 (severity critical, fixAction rewrite to the correction's wording).
 
-1) factContradictions — manuscript vs VERIFIED COMPANY FACTS + internal consistency:
+1) factContradictions — manuscript vs VERIFIED COMPANY FACTS + ANY internal
+   cross-section consistency (judge by meaning, not keyword lists):
    - Contact email / phone / website conflicting with companyfacts.
    - Team size / headcount that conflicts with companyfacts, or DIFFERENT team-size
      numbers in different sections.
@@ -41,9 +48,12 @@ person's title/role/status that conflicts with a correction is a factContradicti
    - Invented past technical capability, state business registration, case-study
      name/URL, or case-study metrics with no evidence in the manuscript/KB.
    - Bio "Role on this engagement" that contradicts the org chart.
+   - Same phase / workstream / deliverable / cadence / form name stated differently
+     across tabs (Implementation vs Approach vs Cover Letter vs Forms, etc.).
    Each: {sectionId, sectionTitle, verifiedFact, manuscriptContradiction, severity,
    fixAction, rewriteInstruction}. verifiedFact = what companyfacts/another section
    authoritatively says. Never invent replacement numbers.
+   Prefer rewrite whenever alignment is already supported in the manuscript.
 
 2) rfpContradictions — manuscript vs the RFP's OWN requirements:
    - Schedule/timeline overrunning the RFP award→launch/contract window.
@@ -54,17 +64,30 @@ person's title/role/status that conflicts with a correction is a factContradicti
    fixAction, rewriteInstruction}. Also collect (top level):
    attachmentNeeds (physically signed PDFs the human must attach) and
    complianceReminders (deadlines / labelling rules) — these are NOT contradictions.
+   Prefer rewrite when the RFP already states the correct requirement.
 
-3) budgetContradictions — cross-section budget/hours/fee consistency:
+3) budgetContradictions — cross-section budget/hours/fee + scope-home consistency:
    - Double-billed coordination (two fee lines with overlapping scope).
    - Hours-vs-fee mismatch, phase table not summing to the stated total, or one
      section stating a total another section contradicts.
+   - Phase label mismatch: Fee Detail cites a phase name/number that another
+     section (Implementation / Approach / Work Plan / etc.) uses for different work.
+     Rewrite citations to match the authoritative phase naming already in the draft.
+   - Orphan workstreams: a named phase or account-management cadence promised
+     elsewhere with no Fee Detail home and no explicit "included in …" statement —
+     rewrite to name the absorbing fee line when safe; verify/human only if Sonja
+     must choose a dedicated Account & Project Management line.
+   - Sidebar/section name drift for the same cost deliverable across tabs.
    Each: {sectionId, sectionTitle, relatedSectionId, canonicalFact,
    manuscriptContradiction, severity, fixAction, rewriteInstruction}.
-   canonicalFact = what the manuscript authoritatively sums to elsewhere.
+   canonicalFact = ledger totals or the authoritative phase/naming elsewhere.
+   Prefer rewrite; put the section that needs the wording fix in sectionId
+   (often the Budget tab for citation fixes).
 
 NEVER invent dollar amounts, dates, signature IDs, notary numbers, or client facts.
 severity ∈ critical|major|minor. fixAction ∈ rewrite|verify|human.
+Default to rewrite for critical/major when the correct wording already exists
+somewhere in the manuscript or companyfacts.
 
 Return ONLY JSON:
 {

@@ -93,12 +93,14 @@ import {
 import { SectionRevisionCompare } from "./SectionRevisionCompare";
 import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
 import { ProposalReviewToolbar } from "./ProposalReviewToolbar";
-import { ProposalWorkflowRail } from "./ProposalWorkflowRail";
+import { ProposalTabMoreMenu } from "./ProposalTabMoreMenu";
+import "./ProposalDraftWorkspace.css";
+import { ProposalCostSummary, ProposalWorkflowRail } from "./ProposalWorkflowRail";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { KeyPersonasBox } from "./KeyPersonasBox";
 import { KeyPersonasModal } from "./KeyPersonasModal";
 import { CaseStudyMatchModal } from "./CaseStudyMatchModal";
-import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
+import { TabPanel } from "./ui/OutlineTabs";
 import {
   ConfirmDialogProvider,
   useConfirmDialog,
@@ -173,12 +175,6 @@ function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): v
   }
 }
 
-const baseWorkspaceTabs = [
-  { id: "outline", label: "Build" },
-  { id: "content", label: "Review" },
-  { id: "export", label: "Download" },
-];
-
 /** Flip to false when Review & fix is ready for users again. */
 const REVIEW_FIX_TEMPORARILY_DISABLED = true;
 
@@ -249,6 +245,68 @@ function IconButton({
     >
       {children}
     </button>
+  );
+}
+
+function StatusStripIcon({
+  name,
+}: {
+  name: "sync" | "warning" | "spinner" | "idle";
+}) {
+  const common = {
+    className: "proposal-status-icon",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    "aria-hidden": true,
+  } as const;
+  if (name === "sync") {
+    return (
+      <svg {...common} stroke="currentColor" strokeWidth="2.1">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M20 12a8 8 0 00-13.5-5.8M4 8.2V4.5H7.7M4 12a8 8 0 0013.5 5.8M20 15.8v3.7h-3.7"
+        />
+      </svg>
+    );
+  }
+  if (name === "warning") {
+    return (
+      <svg {...common} viewBox="0 0 24 24">
+        <path fill="currentColor" d="M12 3.2 1.8 21.2h20.4L12 3.2z" />
+        <rect x="11.1" y="9.1" width="1.8" height="6.3" rx="0.5" fill="#fff" />
+        <rect x="11.1" y="16.6" width="1.8" height="1.8" rx="0.5" fill="#fff" />
+      </svg>
+    );
+  }
+  if (name === "spinner") {
+    return (
+      <svg {...common} className="proposal-status-icon is-spinning" stroke="currentColor" strokeWidth="2.2">
+        <circle cx="12" cy="12" r="8" strokeDasharray="3 5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common} stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="8" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h8M12 8v8" />
+    </svg>
+  );
+}
+
+function WordDocIcon() {
+  return (
+    <svg className="proposal-status-word-icon" viewBox="0 0 24 24" aria-hidden>
+      <rect x="5" y="2.5" width="14" height="19" rx="2" fill="#fff" />
+      <path
+        d="M8.1 8.2 10 16.2l2-5.1 2 5.1 1.9-8"
+        fill="none"
+        stroke="#ef5018"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -337,6 +395,9 @@ function ProposalDraftWorkspaceInner({
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);
   const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [sectionListQuery, setSectionListQuery] = useState("");
+  const [addingSection, setAddingSection] = useState(false);
+  const [editorPreview, setEditorPreview] = useState(true);
 
   useEffect(() => {
     if (!advancedMenuOpen) return;
@@ -484,7 +545,13 @@ function ProposalDraftWorkspaceInner({
     let timer: number | null = null;
     const pipelineInFlight = Boolean(research?.pipelineCheckpoint?.inProgressPhase);
     const running =
-      isFullProposalRunning || isFulfillingRfpGaps || pipelineInFlight;
+      isFullProposalRunning ||
+      isFulfillingRfpGaps ||
+      isPricingRunning ||
+      isRefiningBudget ||
+      isAligningRfpOutline ||
+      isPlacingPacketContent ||
+      pipelineInFlight;
 
     const load = async () => {
       const next = await getLlmCostForRfp(rfp.id);
@@ -494,7 +561,7 @@ function ProposalDraftWorkspaceInner({
 
     void load();
     if (running) {
-      timer = window.setInterval(() => void load(), 4000);
+      timer = window.setInterval(() => void load(), 3000);
     }
 
     return () => {
@@ -507,6 +574,10 @@ function ProposalDraftWorkspaceInner({
     draftLoadState,
     isFullProposalRunning,
     isFulfillingRfpGaps,
+    isPricingRunning,
+    isRefiningBudget,
+    isAligningRfpOutline,
+    isPlacingPacketContent,
     research?.pipelineCheckpoint?.inProgressPhase,
   ]);
 
@@ -534,6 +605,7 @@ function ProposalDraftWorkspaceInner({
   }, [outline.selectedKeyPersonas]);
 
   const openSectionChat = useCallback((request?: SectionChatReference | null) => {
+    setMobileChatOpen(true);
     if (request) {
       setSectionChatReference(request);
       window.setTimeout(() => {
@@ -700,6 +772,12 @@ function ProposalDraftWorkspaceInner({
     setActiveTab("outline");
   }, []);
 
+  const openWholeProposalPreview = useCallback(() => {
+    setReviewFocusMode(true);
+    setSectionChatReference(null);
+    setActiveTab("content");
+  }, []);
+
   const scrollToManuscriptSection = useCallback((requestedId: string) => {
     const targetId = resolveManuscriptJumpTarget(outline.sections, requestedId);
     setActiveSubmissionFlag((current) =>
@@ -739,13 +817,10 @@ function ProposalDraftWorkspaceInner({
       setShowManualFlags(false);
       setHighlightedSectionId(flag.sectionId);
       setActiveSubmissionFlag(flag);
-      setActiveTab("content");
+      selectSection(flag.sectionId);
       window.setTimeout(() => setHighlightedSectionId(null), 4000);
-      window.requestAnimationFrame(() => {
-        scrollToManuscriptSection(flag.sectionId);
-      });
     },
-    [scrollToManuscriptSection]
+    [selectSection]
   );
 
   const activeFlagHighlight = useMemo((): FlagHighlightRange | null => {
@@ -896,7 +971,7 @@ function ProposalDraftWorkspaceInner({
               prepared.sections[0]?.id ??
               null
           );
-          setActiveTab("content");
+          setActiveTab("outline");
           setPipelineStatus(
             buildPipelineStatus(prepared, research, status)
           );
@@ -913,7 +988,7 @@ function ProposalDraftWorkspaceInner({
         const prepared = prepareOutline(draft);
         setOutline(prepared);
         setSelectedSectionId(prepared.sections[0]?.id ?? null);
-        setActiveTab("content");
+        setActiveTab("outline");
         const lastScan =
           prepared.lastFulfillReport ?? draft.lastFulfillReport ?? null;
         if (lastScan && typeof lastScan === "object") {
@@ -938,7 +1013,7 @@ function ProposalDraftWorkspaceInner({
         const prepared = prepareOutline(draft);
         setOutline(prepared);
         setSelectedSectionId(prepared.sections[0]?.id ?? null);
-        setActiveTab(prepared.sections.some((s) => s.content) ? "content" : "outline");
+        setActiveTab("outline");
         if (contentSections === 0 && recoverableSnap) {
           setGenerateNotice(
             `Live draft is empty — use Sections → saved version menu (“${recoverableSnap.label}”) to restore your manuscript.`
@@ -984,7 +1059,7 @@ function ProposalDraftWorkspaceInner({
           const inFlight = result.research.pipelineCheckpoint?.inProgressPhase;
           if (inFlight) {
             setGenerateNotice(pipelineServerStillWorkingMessage(inFlight));
-            setActiveTab("content");
+            setActiveTab("outline");
           }
         }
         saveGenerationRef.current += 1;
@@ -998,7 +1073,7 @@ function ProposalDraftWorkspaceInner({
               null
           );
           if (countSectionsWithContent(prepared) > 0) {
-            setActiveTab("content");
+            setActiveTab("outline");
           }
         }
       } catch {
@@ -1123,20 +1198,24 @@ function ProposalDraftWorkspaceInner({
   const reviewCriticalCount =
     presubmitReview?.issues.filter((i) => i.severity === "critical").length ?? 0;
 
-  const workspaceTabs = useMemo(
-    () =>
-      baseWorkspaceTabs.map((tab) => {
-        if (tab.id === "content" && manualFillCount > 0) {
-          return { ...tab, count: manualFillCount };
-        }
-        return tab;
-      }),
-    [manualFillCount]
-  );
-
   const selectedSection = outline.sections.find(
     (s) => s.id === selectedSectionId
   );
+
+  const selectedSectionFlagCount = useMemo(
+    () =>
+      selectedSection
+        ? actionableFlags.filter((flag) => flag.sectionId === selectedSection.id)
+            .length
+        : 0,
+    [actionableFlags, selectedSection],
+  );
+
+  useEffect(() => {
+    setEditorPreview(Boolean(selectedSection?.content));
+    // Intentionally only when the open section changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSectionId]);
 
   const assistantViewSectionId =
     selectedSectionId ??
@@ -1408,7 +1487,7 @@ function ProposalDraftWorkspaceInner({
             : "KB resolved all submission gaps.";
         setGapResolveNotice(notice);
         if (!options?.stayOnTab) {
-          setActiveTab("content");
+          setActiveTab("outline");
         }
       } catch (error) {
         const message =
@@ -1544,13 +1623,9 @@ function ProposalDraftWorkspaceInner({
 
   const handleCompareJumpToSection = useCallback(
     (sectionId: string) => {
-      setActiveTab("content");
-      setSelectedSectionId(sectionId);
-      window.setTimeout(() => {
-        scrollToManuscriptSection(sectionId);
-      }, 80);
+      selectSection(sectionId);
     },
-    [scrollToManuscriptSection]
+    [selectSection]
   );
 
   const handleOpenLastResults = useCallback(() => {
@@ -1721,7 +1796,7 @@ function ProposalDraftWorkspaceInner({
       );
       setGenerateError(null);
       setIsFulfillingRfpGaps(false);
-      setActiveTab("content");
+      setActiveTab("outline");
       window.requestAnimationFrame(() => {
         document
           .querySelector(".proposal-scan-v2")
@@ -2744,7 +2819,7 @@ function ProposalDraftWorkspaceInner({
       setLiveGeneratedCount(0);
       setLiveLatestSectionTitle(null);
       setSelectedSectionId(defaults.sections[0]?.id ?? null);
-      setActiveTab("content");
+      setActiveTab("outline");
     } else if (startFromCaseStudies) {
       try {
         try {
@@ -2766,7 +2841,7 @@ function ProposalDraftWorkspaceInner({
         setLiveGeneratedCount(countSectionsWithContent(stripped));
         setLiveLatestSectionTitle(null);
         setSelectedSectionId(stripped.sections[0]?.id ?? null);
-        setActiveTab("content");
+        setActiveTab("outline");
         setGenerateNotice(
           "Cleared Our Work + Intelligence. Re-running case-study extraction…"
         );
@@ -2802,7 +2877,7 @@ function ProposalDraftWorkspaceInner({
         setLiveGeneratedCount(countSectionsWithContent(stripped));
         setLiveLatestSectionTitle(null);
         setSelectedSectionId(stripped.sections[0]?.id ?? null);
-        setActiveTab("content");
+        setActiveTab("outline");
         setGenerateNotice(
           "Cleared previous Intelligence / RFP tabs. Rebuilding from Phase 2…"
         );
@@ -2853,7 +2928,7 @@ function ProposalDraftWorkspaceInner({
         }
       }
       await saveProposalDraft(rfp.id, draft);
-      setActiveTab("content");
+      setActiveTab("outline");
       setSelectedSectionId(
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
@@ -2899,7 +2974,7 @@ function ProposalDraftWorkspaceInner({
           if (recovered.research.presubmitReview) {
             setPresubmitReview(recovered.research.presubmitReview);
           }
-          setActiveTab("content");
+          setActiveTab("outline");
           setSelectedSectionId(
             recovered.draft.sections.find((s) => s.content)?.id ??
               recovered.draft.sections[0]?.id ??
@@ -2914,7 +2989,7 @@ function ProposalDraftWorkspaceInner({
           );
           setGenerateError(null);
         } else {
-          setActiveTab("content");
+          setActiveTab("outline");
           setSelectedSectionId(
             recovered.draft.sections.find((s) => s.content)?.id ??
               recovered.draft.sections[0]?.id ??
@@ -3056,7 +3131,7 @@ function ProposalDraftWorkspaceInner({
       setPresubmitReview(reviewedResearch.presubmitReview ?? null);
       await saveProposalDraft(rfp.id, finalDraft);
       setGenerateNotice("Manuscript re-drafted from cached KB research.");
-      setActiveTab("content");
+      setActiveTab("outline");
     } catch (error) {
       setGenerateError(
         error instanceof Error ? error.message : "Manuscript recovery failed"
@@ -3076,7 +3151,7 @@ function ProposalDraftWorkspaceInner({
     applyOutlineFromServer(seeded);
     await saveProposalDraft(rfp.id, seeded);
     // Show Section 1 stubs immediately so the user can follow subsection-by-subsection.
-    setActiveTab("content");
+    setActiveTab("outline");
     setSelectedSectionId(
       seeded.sections.find((s) => s.id.startsWith("section-1-"))?.id ??
         seeded.sections[0]?.id ??
@@ -3098,7 +3173,7 @@ function ProposalDraftWorkspaceInner({
       }
       applyOutlineFromServer(draft);
       await saveProposalDraft(rfp.id, draft);
-      setActiveTab("content");
+      setActiveTab("outline");
       setSelectedSectionId(
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
@@ -3256,6 +3331,7 @@ function ProposalDraftWorkspaceInner({
     }));
     setSelectedSectionId(section.id);
     setNewSectionTitle("");
+    setAddingSection(false);
   };
 
   const fullManuscript = useMemo(() => {
@@ -3379,26 +3455,21 @@ function ProposalDraftWorkspaceInner({
     <section className="proposal-workspace-card">
       <div className="proposal-workspace-chrome shrink-0 border-b border-zo-border/80 bg-white">
         <div className="flex items-center gap-3 px-3 pb-1.5 pt-2.5 md:px-4">
-          <h2 className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight text-foreground md:text-[0.95rem]">
+          <h2 className="proposal-workspace-heading min-w-0 flex-1 truncate">
             {rfp.title}
           </h2>
-          {anyPipelineRunning || isStopping ? (
+          {activeTab !== "content" ? (
             <button
               type="button"
-              onClick={() => void handleStopPipeline()}
-              disabled={isStopping}
-              className="proposal-stop-generation-btn shrink-0"
-              title="Stop the running build or Review & fix job"
+              className="proposal-read-whole-btn"
+              onClick={openWholeProposalPreview}
+              disabled={!outline.sections.some((section) => section.content.trim())}
+              title="Read the proposal as one document, without chat"
             >
-              {isStopping ? (
-                <span
-                  className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
-                  aria-hidden
-                />
-              ) : (
-                <span className="proposal-stop-generation-dot" aria-hidden />
-              )}
-              {isStopping ? "Stopping…" : "Stop Generation"}
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+              </svg>
+              Read whole proposal
             </button>
           ) : null}
           {onOpenGoRfpPicker && goRfpCount ? (
@@ -3414,26 +3485,124 @@ function ProposalDraftWorkspaceInner({
           ) : null}
         </div>
 
-        {manualFillCount === 0 && plainStatus.tone !== "good" ? (
-          <p
-            className={`proposal-header-status px-3 pb-1.5 text-xs leading-snug md:px-4 proposal-header-status--${plainStatus.tone}`}
-          >
-            {plainStatus.headline}
-          </p>
-        ) : null}
-
-        {sectionProgress < 100 ? (
-          <div className="flex items-center gap-2 px-3 pb-2 md:px-4">
-            <div className="proposal-progress-track proposal-progress-track--slim min-w-0 flex-1">
-              <div
-                className="proposal-progress-fill"
-                style={{ width: `${sectionProgress}%` }}
-              />
+        <div className="proposal-status-strip">
+          <div className="proposal-status-cell">
+            <StatusStripIcon name="sync" />
+            <div className="proposal-status-copy">
+              <p className="proposal-status-card-title">
+                {anyPipelineRunning
+                  ? "Proposal generation in progress"
+                  : sectionProgress >= 100
+                    ? "Proposal draft is complete"
+                    : "Proposal draft"}
+              </p>
+              <p className="proposal-status-card-meta">
+                {manuscriptProgress.complete} of {manuscriptProgress.total} sections complete
+              </p>
+              <div className="proposal-status-card-progress">
+                <div className="proposal-progress-track proposal-progress-track--slim min-w-0 flex-1">
+                  <div
+                    className="proposal-progress-fill proposal-progress-fill--ok"
+                    style={{ width: `${sectionProgress}%` }}
+                  />
+                </div>
+                <span>{sectionProgress}%</span>
+              </div>
             </div>
-            <span className="shrink-0 text-[10px] font-medium tabular-nums text-zo-text-muted">
-              {sectionProgress}%
-            </span>
           </div>
+
+          <div className="proposal-status-cell">
+            <StatusStripIcon name="warning" />
+            <div className="proposal-status-copy">
+              <p className="proposal-status-card-title">
+                {manualFillCount > 0
+                  ? `${manualFillCount} item${manualFillCount === 1 ? "" : "s"} need attention`
+                  : "No items need attention"}
+              </p>
+              <p className="proposal-status-card-meta">
+                {manualFillCount > 0
+                  ? "Review flagged content before finalizing your proposal."
+                  : "Nothing is flagged. Open the checklist when you are ready to check the draft."}
+              </p>
+              <button
+                type="button"
+                className="proposal-status-card-link"
+                onClick={() => {
+                  setActiveTab("outline");
+                  setShowManualFlags(true);
+                }}
+              >
+                {manualFillCount > 0 ? "View items" : "Open checklist"}
+                <span aria-hidden>›</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="proposal-status-cell">
+            <StatusStripIcon name={anyPipelineRunning || isStopping ? "spinner" : "idle"} />
+            <div className="proposal-status-copy">
+              {anyPipelineRunning || isStopping ? (
+                <>
+                  <p className="proposal-status-card-title">
+                    {isStopping
+                      ? "Stopping…"
+                      : /^generat/i.test(primaryPipelineLabel)
+                        ? primaryPipelineLabel.replace(/…$/, "")
+                        : `Generating ${primaryPipelineLabel.replace(/…$/, "")}`}
+                  </p>
+                  <p className="proposal-status-card-meta">
+                    Ralph is finalizing this section. This usually takes 1–2 minutes.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleStopPipeline()}
+                    disabled={isStopping}
+                    className="proposal-status-stop"
+                  >
+                    <span className="proposal-status-stop-square" aria-hidden />
+                    {isStopping ? "Stopping…" : "Stop generation"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="proposal-status-card-title">Build this proposal</p>
+                  <p className="proposal-status-card-meta">
+                    Start the draft or continue from the last saved checkpoint.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
+                    disabled={anyPipelineRunning}
+                    className="proposal-status-build"
+                  >
+                    {primaryPipelineLabel}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="proposal-status-cell proposal-status-cell--download">
+            <button
+              type="button"
+              onClick={() => void handleDownloadDocx()}
+              disabled={!fullManuscript || isDownloadingDocx || anyPipelineRunning}
+              className="proposal-status-download"
+            >
+              <WordDocIcon />
+              {isDownloadingDocx
+                ? "Preparing Word…"
+                : docxDownloaded
+                  ? "Download started"
+                  : "Download Word (.docx)"}
+            </button>
+            <p className="proposal-status-download-note">
+              A Word document updates continuously as content is generated.
+            </p>
+          </div>
+        </div>
+        {docxDownloadError ? (
+          <p className="px-3 pb-2 text-xs text-rose-800 md:px-4">{docxDownloadError}</p>
         ) : null}
 
         {/* Server-derived completion banner — shows even after a page refresh
@@ -3541,21 +3710,21 @@ function ProposalDraftWorkspaceInner({
           </div>
         )}
 
-        <div className="px-3 md:px-4">
-          <OutlineTabs
-            variant="underline"
-            fullWidth
-            tabs={workspaceTabs}
-            activeTab={activeTab}
-            onChange={(id) => {
-              const next = id as WorkspaceTab;
-              setActiveTab(next);
-              if (next !== "outline") {
-                setSectionChatReference(null);
-              }
-            }}
-          />
-        </div>
+        {activeTab !== "outline" ? (
+          <div className="proposal-workspace-back">
+            <button
+              type="button"
+              onClick={() => setActiveTab("outline")}
+            >
+              ← Back to editing
+            </button>
+            <span>
+              {activeTab === "content"
+                ? "Reading the whole proposal"
+                : "Download extras"}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       <ProposalManualFlagsPanel
@@ -3582,9 +3751,8 @@ function ProposalDraftWorkspaceInner({
           top strip was a duplicate of it, so it is intentionally not rendered
           here anymore — reclaiming the vertical space above the editor. */}
 
-      {/* Hidden on Build — this telemetry now lives inside Advanced options on
-          that tab (see below) so Build's header stays short; still shown
-          here on Download where there's no toolbar to tuck it into. */}
+      {/* Cost telemetry: toolbar chip + Advanced options on Build; strip below
+          on Download. Intentionally not under Ask Ralph. */}
       {rfpCost && activeTab === "export" ? (
         <div className="border-b border-zo-border/70 bg-[#fafbfc] px-3 py-2 md:px-4">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zo-text-muted">
@@ -3613,7 +3781,19 @@ function ProposalDraftWorkspaceInner({
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab} className="proposal-workspace-tab">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-zo-border/60 px-3 py-1.5">
+          <div className="proposal-tab-actions proposal-tab-actions--build flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-zo-border/60 px-3 py-1.5">
+            <button
+              type="button"
+              className="proposal-read-whole-btn proposal-read-whole-btn--toolbar"
+              onClick={openWholeProposalPreview}
+              disabled={!outline.sections.some((section) => section.content.trim())}
+              title="Read the proposal as one document, without chat"
+            >
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+              </svg>
+              Read whole proposal
+            </button>
             {/* Narrow workspace only (see globals.css .proposal-mobile-panel-toggle) —
                 the section list and Ask Ralph become slide-over panels below
                 1100px, opened from here instead of squeezing beside the editor.
@@ -3631,49 +3811,6 @@ function ProposalDraftWorkspaceInner({
                 </svg>
               </button>
             ) : null}
-            {/* "Built" and "ready to submit" are two different facts — a
-                proposal can be fully built and still have manual-fill items
-                open, so this must show on its own, not only inside the
-                "N things need attention" badge below (which only appears
-                when something's outstanding and would otherwise be the only
-                sign the build ever ran at all). */}
-            {buildPipelineComplete && !isFullProposalRunning && !isFulfillingRfpGaps ? (
-              <span className="flex shrink-0 items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-2.5 py-1 text-[12.5px] font-bold text-emerald-800">
-                <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
-                </svg>
-                Built
-              </span>
-            ) : null}
-            {/* A real badge, not text quietly sharing a line with the word
-                count — small text next to other small text is easy to skip
-                past entirely. Filled color + its own shape + a click straight
-                to the checklist is what actually gets noticed, without going
-                back to a full banner row. */}
-            {buildPipelineComplete && !isFullProposalRunning && !isFulfillingRfpGaps && manualFillCount > 0 ? (
-              <button
-                type="button"
-                onClick={() => setActiveTab("content")}
-                className="flex shrink-0 items-center gap-1.5 rounded-full border border-amber-300 bg-amber-100 px-2.5 py-1 text-[12.5px] font-bold text-amber-900 transition-smooth hover:bg-amber-200"
-              >
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-600" aria-hidden />
-                {manualFillCount} thing{manualFillCount === 1 ? "" : "s"} need
-                {manualFillCount === 1 ? "s" : ""} your attention
-              </button>
-            ) : null}
-            <span className="mr-auto flex items-center gap-1.5 text-[13px] font-semibold tabular-nums text-zo-text-muted">
-              {manuscriptProgress.complete}/{manuscriptProgress.total} drafted
-              {rfpCost ? (
-                <>
-                  <span aria-hidden className="text-zo-text-muted/50">
-                    ·
-                  </span>
-                  <span title="Total LLM cost for this proposal so far">
-                    {fmtUsd(rfpCost.totalCostUsd)}
-                  </span>
-                </>
-              ) : null}
-            </span>
             {/* Hidden once the chat panel is already open — see the Sections
                 toggle above for why. */}
             {!mobileChatOpen ? (
@@ -3689,6 +3826,21 @@ function ProposalDraftWorkspaceInner({
               </button>
             ) : null}
             <div className="proposal-tab-actions-toolbar">
+            {/* Compact LLM spend chip — opens Advanced options where the full
+                Cost summary lives (kept out of Ask Ralph so chat stays clean). */}
+            {rfpCost ? (
+              <button
+                type="button"
+                className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-zo-border/80 bg-white px-2.5 py-1.5 text-xs font-semibold text-zo-text-secondary hover:bg-[#fafbfc]"
+                title="LLM cost for this RFP — open Advanced options for breakdown"
+                onClick={() => setAdvancedMenuOpen(true)}
+              >
+                <span className="tabular-nums text-foreground">
+                  {fmtUsd(rfpCost.totalCostUsd)}
+                </span>
+                <span className="hidden text-zo-text-muted sm:inline">LLM</span>
+              </button>
+            ) : null}
             {/* Advanced options — Restore / Match studies / Designer-compact /
                 Start-from-X / Reset draft, tucked behind one clearly-labeled
                 trigger instead of five competing controls in the main row.
@@ -3784,6 +3936,41 @@ function ProposalDraftWorkspaceInner({
                     </div>
                   </div>
                   <div className="my-1 h-px bg-zo-border/60" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      setShowManualFlags(true);
+                    }}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04]"
+                  >
+                    Open checklist
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      void handleFulfillRfpGaps();
+                    }}
+                    disabled={anyPipelineRunning}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Review &amp; fix
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      openWholeProposalPreview();
+                    }}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04]"
+                  >
+                    Read whole proposal
+                  </button>
+                  <div className="my-1 h-px bg-zo-border/60" />
                   <CapabilityHoverTip id="matchStudies" side="bottom">
                     <button
                       type="button"
@@ -3851,6 +4038,14 @@ function ProposalDraftWorkspaceInner({
                     Start from Intelligence
                   </button>
                   <div className="my-1 h-px bg-zo-border/60" />
+                  <div className="px-1 pb-1 pt-0.5">
+                    <ProposalCostSummary
+                      rfpCost={rfpCost}
+                      costByRunType={costByRunType}
+                      fmtUsd={fmtUsd}
+                    />
+                  </div>
+                  <div className="my-1 h-px bg-zo-border/60" />
                   <button
                     type="button"
                     role="menuitem"
@@ -3887,23 +4082,6 @@ function ProposalDraftWorkspaceInner({
               onSelectionChange={handleKeyPersonasChange}
               onDraftSynced={handlePersonasDraftSynced}
             />
-            <CapabilityHoverTip id="generateProposal" side="bottom">
-              <button
-                type="button"
-                onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
-                disabled={anyPipelineRunning}
-                className="zo-btn proposal-toolbar-btn disabled:opacity-60"
-              >
-                {isFullProposalRunning || isFulfillingRfpGaps ? (
-                  <>
-                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
-                    {primaryPipelineLabel}
-                  </>
-                ) : (
-                  primaryPipelineLabel
-                )}
-              </button>
-            </CapabilityHoverTip>
             </div>
           </div>
 
@@ -3913,20 +4091,44 @@ function ProposalDraftWorkspaceInner({
           <div
             className={`proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80 ${mobileSectionsOpen ? "is-mobile-open" : ""}`}
           >
-            <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
-              <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
-                Sections
-              </p>
-              <button
-                type="button"
-                className="proposal-mobile-panel-toggle items-center justify-center rounded-md p-1 text-zo-text-secondary hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
-                onClick={() => setMobileSectionsOpen(false)}
-                aria-label="Close section list"
-              >
-                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
+            <div className="proposal-sections-head">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+                  Sections
+                </p>
+                <span className="proposal-sections-count">
+                  {manuscriptProgress.complete} / {manuscriptProgress.total}
+                </span>
+                <button
+                  type="button"
+                  className="proposal-mobile-panel-toggle items-center justify-center rounded-md p-1 text-zo-text-secondary hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+                  onClick={() => setMobileSectionsOpen(false)}
+                  aria-label="Close section list"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <label className="proposal-sections-search">
+                <svg
+                  className="h-3.5 w-3.5 shrink-0 text-zo-text-muted"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 100-15 7.5 7.5 0 000 15z" />
                 </svg>
-              </button>
+                <input
+                  type="search"
+                  value={sectionListQuery}
+                  onChange={(e) => setSectionListQuery(e.target.value)}
+                  placeholder="Search sections…"
+                  aria-label="Search sections"
+                />
+              </label>
             </div>
             <ul className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
               <ProposalSectionTree
@@ -3937,6 +4139,7 @@ function ProposalDraftWorkspaceInner({
                 manualFillFlags={actionableFlags}
                 sectionRevisions={sectionRevisions}
                 sectionButtonRefs={sectionButtonRefs}
+                query={sectionListQuery}
                 onSelectSection={(id) => {
                   selectSection(id);
                   setMobileSectionsOpen(false);
@@ -3952,24 +4155,35 @@ function ProposalDraftWorkspaceInner({
               />
             </ul>
 
-            <div className="shrink-0 border-t border-zo-border bg-[var(--zo-input-bg)] p-2">
-              <div className="flex min-w-0 items-stretch gap-1.5">
-                <input
-                  type="text"
-                  value={newSectionTitle}
-                  onChange={(e) => setNewSectionTitle(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addCustomSection()}
-                  placeholder="New section title…"
-                  className="min-w-0 flex-1 zo-input px-2.5 py-2 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
-                />
+            <div className="proposal-sections-add">
+              {addingSection ? (
+                <div className="flex min-w-0 items-stretch gap-1.5">
+                  <input
+                    type="text"
+                    value={newSectionTitle}
+                    onChange={(e) => setNewSectionTitle(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addCustomSection()}
+                    placeholder="New section title…"
+                    className="min-w-0 flex-1 zo-input px-2.5 py-2 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={addCustomSection}
+                    className="zo-btn shrink-0 !px-2.5 !py-2"
+                  >
+                    Add
+                  </button>
+                </div>
+              ) : (
                 <button
                   type="button"
-                  onClick={addCustomSection}
-                  className="zo-btn shrink-0 !px-2.5 !py-2"
+                  className="proposal-sections-add-btn"
+                  onClick={() => setAddingSection(true)}
                 >
-                  Add
+                  + Add new section
                 </button>
-              </div>
+              )}
             </div>
           </div>
 
@@ -3978,34 +4192,107 @@ function ProposalDraftWorkspaceInner({
               <>
                 <div className="proposal-editor-chrome">
                   <div className="proposal-editor-chrome-row">
-                    <span className="shrink-0 text-[10px] font-bold tabular-nums text-zo-text-muted">
+                    <span className="proposal-editor-chrome-index">
                       {manuscriptIndexById.get(selectedSection.id) != null
                         ? `Section ${manuscriptIndexById.get(selectedSection.id)} of ${manuscriptProgress.total}`
                         : "Section"}
                     </span>
-                    <input
-                      type="text"
-                      value={selectedSection.title}
-                      onChange={(e) =>
-                        updateSection(selectedSection.id, {
-                          title: e.target.value,
-                        })
-                      }
-                      className="proposal-editor-chrome-title"
-                      aria-label="Section title"
-                    />
-                    <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
-                      <IconButton
-                        onClick={() => void removeSection(selectedSection.id)}
-                        label="Remove section"
-                        variant="danger"
+                    <span className="proposal-editor-chrome-words">
+                      Word count {countWords(selectedSection.content).toLocaleString()}
+                    </span>
+                    <div className="proposal-editor-chrome-actions">
+                      <button
+                        type="button"
+                        className="proposal-editor-action"
+                        disabled={anyPipelineRunning || !selectedSection.content}
+                        onClick={() => {
+                          setEditorPreview((prev) => !prev);
+                        }}
                       >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487z" />
                         </svg>
-                      </IconButton>
+                        {editorPreview ? "Edit section" : "Preview"}
+                      </button>
+                      <button
+                        type="button"
+                        className="proposal-editor-action proposal-editor-action--primary"
+                        disabled={anyPipelineRunning || sectionChatBusy}
+                        onClick={() =>
+                          openSectionChat(
+                            buildSectionPinReference(
+                              selectedSection,
+                              selectedSection.content || "",
+                            ),
+                          )
+                        }
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L12 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L18.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                        </svg>
+                        Improve
+                      </button>
+                      <ProposalTabMoreMenu
+                        disabled={anyPipelineRunning}
+                        items={[
+                          ...(sectionRevisions[selectedSection.id]
+                            ? [
+                                {
+                                  id: "revision",
+                                  label: "View what changed",
+                                  onClick: () =>
+                                    setRevisionDrawerSectionId(selectedSection.id),
+                                },
+                              ]
+                            : []),
+                          {
+                            id: "remove",
+                            label: "Remove section",
+                            tone: "danger" as const,
+                            onClick: () => void removeSection(selectedSection.id),
+                          },
+                        ]}
+                      />
                     </div>
                   </div>
+                  <input
+                    type="text"
+                    value={selectedSection.title}
+                    onChange={(e) =>
+                      updateSection(selectedSection.id, {
+                        title: e.target.value,
+                      })
+                    }
+                    className="proposal-editor-heading"
+                    aria-label="Section title"
+                  />
+                  {selectedSection.designerNote ? (
+                    <p className="proposal-editor-chrome-desc">
+                      {selectedSection.designerNote}
+                    </p>
+                  ) : null}
+                  {selectedSectionFlagCount > 0 ? (
+                    <div className="proposal-editor-alert">
+                      <span>
+                        {selectedSectionFlagCount} pricing or fill-in value
+                        {selectedSectionFlagCount === 1 ? "" : "s"} need confirmation
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const flag = actionableFlags.find(
+                            (item) => item.sectionId === selectedSection.id,
+                          );
+                          if (flag) {
+                            setActiveSubmissionFlag(flag);
+                            setShowManualFlags(true);
+                          }
+                        }}
+                      >
+                        Review values
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="proposal-editor-split">
@@ -4045,6 +4332,9 @@ function ProposalDraftWorkspaceInner({
                           open ? selectedSection.id : null
                         )
                       }
+                      hideToolbar
+                      previewMode={editorPreview}
+                      onPreviewModeChange={setEditorPreview}
                     />
                   </div>
                 </div>
@@ -4064,14 +4354,21 @@ function ProposalDraftWorkspaceInner({
           >
             <button
               type="button"
-              className="proposal-mobile-panel-toggle absolute right-2 top-2 z-10 items-center justify-center rounded-md bg-white p-1.5 text-zo-text-secondary shadow-sm hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+              className="proposal-mobile-panel-toggle proposal-ralph-mobile-close"
               onClick={() => setMobileChatOpen(false)}
-              aria-label="Close Ask Ralph"
+              aria-label="Close panel"
             >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
               </svg>
             </button>
+            <div
+              className={
+                anyPipelineRunning || isStopping
+                  ? "hidden"
+                  : "flex min-h-0 flex-1 flex-col overflow-hidden"
+              }
+            >
             <ProposalSectionChatPanel
               rfpId={rfp.id}
               sections={outline.sections}
@@ -4099,6 +4396,34 @@ function ProposalDraftWorkspaceInner({
               statusLine={sectionChatStatusLine}
               onStatusLineChange={setSectionChatStatusLine}
             />
+            </div>
+            {anyPipelineRunning || isStopping ? (
+              <div className="proposal-assistant-workflow min-h-0 flex-1 overflow-hidden">
+                <ProposalWorkflowRail
+                  checkpoint={research?.pipelineCheckpoint}
+                  isRunning={anyPipelineRunning}
+                  fullProposalPhase={effectiveFullProposalProgress}
+                  isFulfillScanRunning={isFulfillingRfpGaps}
+                  isAlignRunning={isAligningRfpOutline}
+                  isPlaceRunning={isPlacingPacketContent}
+                  hasCompletedFulfillReport={Boolean(outline.lastFulfillReport)}
+                  buildPipelineComplete={buildPipelineComplete}
+                  manualFillCount={manualFillCount}
+                  rfpCost={rfpCost}
+                  costByRunType={costByRunType}
+                  fmtUsd={fmtUsd}
+                  canCompareToSaved={Boolean((outline.snapshots?.length ?? 0) > 0 && selectedSnapshotForCompare)}
+                  onCompareToSaved={handleOpenCompareToSaved}
+                  canViewLastResults={Boolean(outline.lastFulfillReport)}
+                  onViewLastResults={handleOpenLastResults}
+                  goRfpCount={goRfpCount}
+                  onOpenGoRfpPicker={onOpenGoRfpPicker}
+                  outline={outline}
+                  optimisticScanProfile={isFulfillingRfpGaps ? "targeted_fix" : null}
+                  buildFinalizeEnabled={pipelineStatus?.buildFinalizeEnabled}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
         <div
@@ -4130,11 +4455,12 @@ function ProposalDraftWorkspaceInner({
                 }}
               />
             ) : null}
-            <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-1.5">
+            {reviewFocusMode ? null : (
+            <div className="proposal-tab-actions proposal-review-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-1.5">
               <p className="text-xs text-zo-text-muted">
                 After Build my proposal, use the Checklist. Review & fix is optional after edits.
               </p>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="proposal-review-tab-buttons">
                 <CapabilityHoverTip id="completeClean" side="bottom">
                   <button
                     type="button"
@@ -4143,7 +4469,7 @@ function ProposalDraftWorkspaceInner({
                       anyPipelineRunning ||
                       !outline.sections.some((s) => s.content.trim())
                     }
-                    className="inline-flex min-h-[2.375rem] items-center gap-1.5 rounded-lg border border-zo-border/80 bg-white px-3 py-2 text-[13px] font-semibold text-zo-text-secondary hover:bg-[#fafbfc] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="proposal-review-tab-btn"
                   >
                     {isFulfillingRfpGaps
                       ? "Review & fix…"
@@ -4155,7 +4481,7 @@ function ProposalDraftWorkspaceInner({
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
-                    className={`proposal-checklist-btn ${
+                    className={`proposal-checklist-btn proposal-review-tab-btn ${
                       scanActionCount > 0
                         ? "proposal-checklist-btn--alert"
                         : "proposal-checklist-btn--idle"
@@ -4178,7 +4504,7 @@ function ProposalDraftWorkspaceInner({
                 <button
                   type="button"
                   onClick={() => setShowManualFlags((open) => !open)}
-                  className={`proposal-checklist-btn ${
+                  className={`proposal-checklist-btn proposal-review-tab-btn ${
                     manualFillCount > 0
                       ? "proposal-checklist-btn--alert"
                       : "proposal-checklist-btn--idle"
@@ -4191,6 +4517,7 @@ function ProposalDraftWorkspaceInner({
                 </button>
               </div>
             </div>
+            )}
             <div className="proposal-content-jump-strip custom-scrollbar" aria-label="Jump to section">
               {manuscriptSections.map((section, index) => (
                 <button
@@ -4209,7 +4536,7 @@ function ProposalDraftWorkspaceInner({
                 </button>
               ))}
             </div>
-            {(outline.snapshots?.length ?? 0) > 0 && selectedSnapshotForCompare ? (
+            {!reviewFocusMode && (outline.snapshots?.length ?? 0) > 0 && selectedSnapshotForCompare ? (
               <details
                 ref={compareDetailsRef}
                 className="mx-3 mb-2 shrink-0 rounded-lg border border-zo-border/70 bg-[#fafbfc] px-3 py-2"
@@ -4282,6 +4609,8 @@ function ProposalDraftWorkspaceInner({
               </ul>
             </aside>
             <div className="proposal-review-main flex min-h-0 min-w-0 flex-col overflow-hidden">
+            {reviewFocusMode ? null : (
+            <>
             <ProposalReviewToolbar
               textareaRef={activeSectionTextareaRef}
               content={activeReviewMarkdown}
@@ -4294,7 +4623,7 @@ function ProposalDraftWorkspaceInner({
               showFormattedView={() => setEditingSectionId(null)}
               previewSelection={reviewPreviewSelection}
               onPreviewSelectionConsumed={() => setReviewPreviewSelection(null)}
-              onChange={(next) =>
+              onChange={(next: string) =>
                 activeReviewSection &&
                 updateSection(activeReviewSection.id, {
                   content: next,
@@ -4351,6 +4680,8 @@ function ProposalDraftWorkspaceInner({
                 handleReviewComment(selected);
               }}
             />
+            </>
+            )}
             <div className="proposal-content-layout flex-1 min-h-0">
             <div
               ref={contentScrollRef}

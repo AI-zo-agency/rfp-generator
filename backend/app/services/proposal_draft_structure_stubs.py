@@ -62,29 +62,59 @@ _COVER_LETTER_CHECKLIST_SIGNALS = (
     "addenda acknowledgment",
 )
 
+# Thin salutation+intent stubs are not done — a real letter needs depth.
+_COVER_LETTER_MIN_PROSE_WORDS = 180
+
 
 def is_cover_letter_section_title(title: str) -> bool:
     t = (title or "").casefold()
     return any(tok in t for tok in _COVER_LETTER_TITLE_TOKENS)
 
 
+def _cover_letter_prose_word_count(content: str) -> int:
+    prose_lines: list[str] = []
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cf = stripped.casefold()
+        if cf.startswith("#"):
+            continue
+        if cf.startswith("[designer note") or cf.startswith("[manual fill"):
+            continue
+        if cf.startswith("[verify") or cf.startswith("[flag"):
+            continue
+        prose_lines.append(stripped)
+    return len(" ".join(prose_lines).split())
+
+
 def cover_letter_lacks_letter_body(content: str) -> bool:
-    """True when a cover-letter tab is a requirements checklist, not a letter.
+    """True when a cover-letter tab is not yet a thorough offer letter.
 
     Signed-PDF designer notes are correct and stay — but the RFP still needs
-    the offer letter prose (intent, contact, addenda ack). A green check on a
-    checklist-only body is a false complete.
+    deep letter prose (intent, buyer understanding, fit, contact, addenda ack).
+    A green check on a checklist-only, company-block-header, or thin stub is
+    a false complete.
     """
-    body = (content or "").casefold()
+    raw = content or ""
+    body = raw.casefold()
     if not body.strip():
         return True
-    if any(sig in body for sig in _COVER_LETTER_BODY_SIGNALS):
-        return False
-    checklist_hits = sum(1 for sig in _COVER_LETTER_CHECKLIST_SIGNALS if sig in body)
-    if checklist_hits >= 2:
+    # Mistitled company-block wrapper used as the cover-letter tab.
+    if "follow immediately below" in body and "designer note" in body:
         return True
-    # Designer-note-only / outline chrome without letter salutation.
-    if "[designer note" in body and checklist_hits >= 1:
+    has_letter_shape = any(sig in body for sig in _COVER_LETTER_BODY_SIGNALS)
+    checklist_hits = sum(1 for sig in _COVER_LETTER_CHECKLIST_SIGNALS if sig in body)
+    # Requirements checklist alone (no letter shape) is not a letter.
+    if not has_letter_shape and checklist_hits >= 2:
+        return True
+    if not has_letter_shape and "[designer note" in body and checklist_hits >= 1:
+        return True
+    prose_n = _cover_letter_prose_word_count(raw)
+    # Letter-shaped but thin (e.g. Dear… / one intent sentence / Sincerely) → refill.
+    if prose_n < _COVER_LETTER_MIN_PROSE_WORDS:
+        return True
+    if not has_letter_shape and prose_n < 250:
         return True
     return False
 
@@ -547,8 +577,15 @@ def stub_fill_landed(before: ProposalSection, after: ProposalSection) -> bool:
     # Meta chat ("Here's what I'd draft…") is not a form fill — reject so we retry.
     if _ADVISORY_STUB_CHAT_RE.search(body.lstrip()[:400]):
         return False
+    if is_cover_letter_section_title(after.title or "") and cover_letter_lacks_letter_body(
+        body
+    ):
+        return False
     after_n = word_count(_meaningful_body(body, after.title or ""))
     before_n = word_count(_meaningful_body(before.content or "", before.title or ""))
+    if is_cover_letter_section_title(after.title or ""):
+        # Thorough letter floor — reject thin salutation stubs.
+        return after_n >= _COVER_LETTER_MIN_PROSE_WORDS and after_n > before_n + 40
     return after_n >= 25 and after_n > before_n + 12
 
 
@@ -591,14 +628,29 @@ def _stub_draft_brief(section: ProposalSection) -> str:
     if is_cover_letter_section_title(title):
         return (
             f"{base}\n\n"
-            "COVER LETTER — write a real offer letter, not a requirements checklist:\n"
-            "- Salutation + short statement of intent to bid on THIS RFP\n"
-            "- Firm contact (from companyfacts / Section 1.3 — no invented phones)\n"
-            "- Address each RFP cover-letter element in letter prose\n"
+            "COVER LETTER — write a thorough, deep offer letter in zö agency voice "
+            "for THIS RFP's buyer — never leave this tab blank, thin, or designer-note-only:\n"
+            "- Target ~250–400 words of real letter prose (use most of the tab word budget)\n"
+            "- Open with a real salutation to the buyer / selection committee\n"
+            "- Clear statement of intent to bid on THIS RFP (client + opportunity "
+            "named from the RFP — no invented procurement facts)\n"
+            "- A full paragraph showing understanding of THIS buyer's need / opportunity "
+            "(proposal stance — what we will do and why it fits — not a paraphrase of the RFP)\n"
+            "- Why zö is a fit: warm, proof-led, first person we/our — cite verified "
+            "capabilities / relevant experience from KB without dumping full case studies\n"
+            "- Firm contact from companyfacts / Section 1.3 — no invented phones\n"
+            "- Address each RFP cover-letter element in letter prose (addenda, "
+            "authorized rep, etc. as required)\n"
+            "- AUTHORIZED SIGNER (mandatory): Sonja Anderson, Founder / Agency Director "
+            "(sole owner per companyfacts). Closing signature + any "
+            "'authorized to represent' line must be Sonja — never Ella Lindau or "
+            "another staff member as the offer-letter signatory\n"
             "- Closing + a precise authorized-signature / date handoff tag\n"
             "- Keep [DESIGNER NOTE: Attach physically signed cover letter PDF] "
             "— do not invent signature dates, notary, or claim the PDF is attached\n"
-            "Do NOT output a meta list titled 'Cover Letter Requirements' alone."
+            "Do NOT output a meta list titled 'Cover Letter Requirements' alone.\n"
+            "Do NOT replace the letter with '[DESIGNER NOTE: Sections 1.1–1.5 follow…]'.\n"
+            "Do NOT stop after a one-sentence intent + signature — depth is required."
         )
     if any(
         tok in title_cf

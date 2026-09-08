@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.llm import (
     LlmError,
@@ -149,6 +149,43 @@ class LeanEmptyContentNoReinforceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("skipped reinforcement", str(ctx.exception))
         self.assertEqual(posts.await_count, 1)
+
+
+class EmptyContentStillBilledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_records_usage_when_openrouter_returns_empty_content(self) -> None:
+        billed = {
+            "prompt_tokens": 3500,
+            "completion_tokens": 80,
+            "cost": 0.04,
+        }
+        posts = AsyncMock(
+            side_effect=[LlmError("OpenRouter returned empty content", usage=billed)]
+        )
+        record = MagicMock()
+        with (
+            patch("app.services.llm._provider_routing", return_value=(None, True, False, False)),
+            patch("app.services.llm._openrouter_route", return_value=("sk-test", "anthropic/claude-sonnet-5")),
+            patch("app.services.llm._enforce_run_cost_cap"),
+            patch("app.services.llm.apply_standing_corrections", new=AsyncMock(side_effect=lambda m, **_: m)),
+            patch("app.services.llm._post_chat", new=posts),
+            patch("app.services.llm._record_successful_call", record),
+            patch("app.services.llm._fireworks_key", return_value=""),
+            patch("app.services.llm.settings") as settings,
+        ):
+            settings.openrouter_base_url = "https://openrouter.ai/api/v1"
+            settings.app_url = "http://localhost"
+            settings.app_name = "test"
+            settings.gemini_api_key = ""
+            settings.llm_prefer_fireworks = False
+            with self.assertRaises(LlmError):
+                await chat_json(
+                    [{"role": "user", "content": "x"}],
+                    max_tokens=4096,
+                    node_name="kb_fact_check_section",
+                )
+
+        record.assert_called()
+        self.assertEqual(record.call_args.kwargs["usage"]["cost"], 0.04)
 
 
 class ContradictionRewriteLeanTests(unittest.TestCase):

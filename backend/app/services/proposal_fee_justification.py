@@ -22,13 +22,19 @@ Include:
 3. Risk flags — what could cause scope creep or evaluator pushback
 4. Tier rationale — why Low/Average/High was selected
 
+CRITICAL JSON RULES:
+- Return ONLY one JSON object. No markdown fences. No commentary outside JSON.
+- The "markdown" value MUST be a single JSON string with newlines escaped as \\n
+  (never raw line breaks inside the string — that makes the JSON invalid).
+- Keep markdown under ~2500 characters.
+
 Return ONLY JSON:
 {
-  "markdown": "full memo in Markdown",
+  "markdown": "full memo in Markdown with \\\\n for newlines",
   "pricingPosture": "one sentence",
   "targetVsCap": "e.g. 7% under $500k cap or 'cap unknown'",
   "roleHoursSummary": ["Brand Strategist (guide labor category): 40h @ $X = $Y — message architecture"],
-  "internalNotes": ["bullet for Sonja/Curt/Ella"]
+  "internalNotes": ["bullet for Sonja/Curt"]
 }"""
 
 
@@ -54,38 +60,41 @@ async def generate_fee_justification_memo(
         for item in budget.line_items[:30]
     ]
 
+    user_blob = (
+        f"Client: {rfp.client}\n"
+        f"RFP: {rfp.title}\n"
+        f"Budget cap: {budget.rfp_budget_cap or 'unknown'}\n"
+        f"Pricing tier: {budget.pricing_tier}\n"
+        f"Fee structure: {budget.fee_structure}\n"
+        f"Agency revenue estimate: {budget.agency_revenue_estimate}\n"
+        f"Format: {budget.budget_format}\n\n"
+        f"Line items:\n{line_items}\n\n"
+        f"Verified rates:\n"
+        f"{[r.model_dump(by_alias=True) for r in budget.verified_rates]}\n\n"
+        f"Scope summary:\n{budget.scope_summary[:3000]}\n\n"
+        f"Stage 1 excerpt:\n{stage_one_excerpt[:4000]}"
+    )
+
     try:
         raw, provider = await llm.chat_json(
             [
                 {"role": "system", "content": FEE_MEMO_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Client: {rfp.client}\n"
-                        f"RFP: {rfp.title}\n"
-                        f"Budget cap: {budget.rfp_budget_cap or 'unknown'}\n"
-                        f"Pricing tier: {budget.pricing_tier}\n"
-                        f"Fee structure: {budget.fee_structure}\n"
-                        f"Agency revenue estimate: {budget.agency_revenue_estimate}\n"
-                        f"Format: {budget.budget_format}\n\n"
-                        f"Line items:\n{line_items}\n\n"
-                        f"Verified rates:\n"
-                        f"{[r.model_dump(by_alias=True) for r in budget.verified_rates]}\n\n"
-                        f"Scope summary:\n{budget.scope_summary[:3000]}\n\n"
-                        f"Stage 1 excerpt:\n{stage_one_excerpt[:4000]}"
-                    ),
-                },
+                {"role": "user", "content": user_blob},
             ],
-            max_tokens=16000,
+            max_tokens=8000,
             temperature=0.2,
+            node_name="phase-3-5-budget-fee-memo",
         )
     except LlmError as exc:
-        logger.warning("Fee justification memo failed: %s", exc)
+        logger.warning("Fee justification memo JSON failed (%s) — using deterministic fallback", exc)
         return _fallback_memo(rfp=rfp, budget=budget)
 
     now = datetime.now(timezone.utc).isoformat()
+    md = str(raw.get("markdown") or "").strip()
+    if not md:
+        return _fallback_memo(rfp=rfp, budget=budget)
     return FeeJustificationMemo(
-        markdown=str(raw.get("markdown") or "").strip() or _fallback_memo(rfp, budget).markdown,
+        markdown=md,
         pricingPosture=str(raw.get("pricingPosture") or raw.get("pricing_posture") or ""),
         targetVsCap=str(raw.get("targetVsCap") or raw.get("target_vs_cap") or ""),
         roleHoursSummary=[

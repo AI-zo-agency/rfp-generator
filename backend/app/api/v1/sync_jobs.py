@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.services import supabase_db as sb
 
 router = APIRouter(prefix="/sync-jobs", tags=["sync-jobs"])
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/sync-jobs", tags=["sync-jobs"])
 # RFP loads, etc.), which all share Python's single default thread pool — so
 # a JustWin sync can land on a thread that pool has previously handed to
 # something else. Giving the sync its own dedicated pool means it never
-# shares a thread with that traffic.
+# shares a thread with that traffic. Only used when Celery/Redis is off.
 _justwin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="justwin-sync")
 
 
@@ -90,10 +91,25 @@ def get_running_sync_job() -> dict[str, object]:
 
 VALID_TABS = {"all", "hot", "warm", "review"}
 
-# Guards against a second sync being launched while one is still running.
-# Each run drives a browser, so overlapping runs stack real Chromium processes.
+# In-process guard for the non-Celery fallback path only. Cross-process
+# exclusivity uses get_running_sync_job() in Supabase when Celery is on.
 _sync_lock = asyncio.Lock()
 _sync_running = False
+
+
+def _mark_job_failed(job_id: str, error: str) -> None:
+    if not sb.use_supabase_db():
+        return
+    try:
+        sb.finish_sync_job(
+            job_id,
+            status="failed",
+            rfps_found=0,
+            pdfs_downloaded=0,
+            error=error,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/trigger")
@@ -126,14 +142,6 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
             detail=f"syncDate must be YYYY-MM-DD, got '{target_date}'",
         )
 
-    async with _sync_lock:
-        if _sync_running:
-            raise HTTPException(
-                status_code=409,
-                detail="A JustWin sync is already running. Wait for it to finish before starting another.",
-            )
-        _sync_running = True
-
     if sb.use_supabase_db():
         # Clear zombie "running" rows left behind by uvicorn --reload / crashes
         # before we refuse a new sync with 409.
@@ -144,44 +152,73 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
                 len(expired),
                 expired[:5],
             )
+        already = sb.get_running_sync_job()
+        if already:
+            raise HTTPException(
+                status_code=409,
+                detail="A JustWin sync is already running. Wait for it to finish before starting another.",
+            )
+
+    async with _sync_lock:
+        if _sync_running and not settings.celery_enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="A JustWin sync is already running. Wait for it to finish before starting another.",
+            )
+        if not settings.celery_enabled:
+            _sync_running = True
+
+    if sb.use_supabase_db():
         sb.create_sync_job(job_id)
 
-    async def _run_playwright_sync():
-        global _sync_running
+    # Prefer Celery so Playwright runs in a worker process — same pattern as
+    # proposal pipeline / Go/No-Go — leaving the API free for other work.
+    if settings.celery_enabled:
         try:
-            from app.services.justwin_sync import run_justwin_sync
+            from app.celery_app import run_justwin_sync_task
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                _justwin_executor, run_justwin_sync, job_id, target_date, tab
+            async_result = run_justwin_sync_task.delay(job_id, target_date, tab)
+            sb.remember_justwin_celery_task(job_id, async_result.id)
+            logger.info(
+                "Dispatched JustWin sync to Celery job=%s task=%s date=%r tab=%s",
+                job_id,
+                async_result.id,
+                target_date,
+                tab,
             )
         except Exception as exc:
-            logger.error("Failed to run JustWin Playwright sync: %s", exc)
-            # Runner usually marks the job failed; cover the case where it
-            # never got that far (e.g. import / browser binary missing).
-            if sb.use_supabase_db():
-                try:
-                    running = sb.get_running_sync_job()
-                    if running and running.get("id") == job_id:
-                        sb.finish_sync_job(
-                            job_id,
-                            status="failed",
-                            rfps_found=0,
-                            pdfs_downloaded=0,
-                            error=str(exc),
-                        )
-                except Exception:  # noqa: BLE001
-                    sb.finish_sync_job(
-                        job_id,
-                        status="failed",
-                        rfps_found=0,
-                        pdfs_downloaded=0,
-                        error=str(exc),
-                    )
-        finally:
-            _sync_running = False
+            logger.error("Failed to enqueue JustWin Celery sync: %s", exc)
+            _mark_job_failed(job_id, f"Failed to enqueue sync: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not start JustWin sync on the background worker. Is Celery running?",
+            ) from exc
+    else:
 
-    asyncio.create_task(_run_playwright_sync())
+        async def _run_playwright_sync():
+            global _sync_running
+            try:
+                from app.services.justwin_sync import run_justwin_sync
+
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    _justwin_executor, run_justwin_sync, job_id, target_date, tab
+                )
+            except Exception as exc:
+                logger.error("Failed to run JustWin Playwright sync: %s", exc)
+                # Runner usually marks the job failed; cover the case where it
+                # never got that far (e.g. import / browser binary missing).
+                if sb.use_supabase_db():
+                    try:
+                        running = sb.get_running_sync_job()
+                        if running and running.get("id") == job_id:
+                            _mark_job_failed(job_id, str(exc))
+                    except Exception:  # noqa: BLE001
+                        _mark_job_failed(job_id, str(exc))
+            finally:
+                _sync_running = False
+
+        asyncio.create_task(_run_playwright_sync())
 
     scope = target_date or "all dates"
     return {
@@ -192,6 +229,7 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
         "syncDate": target_date,
         "tab": tab,
         "startedAt": now,
+        "via": "celery" if settings.celery_enabled else "local",
         "message": f"Started JustWin sync for {scope} ({tab} leads)",
     }
 

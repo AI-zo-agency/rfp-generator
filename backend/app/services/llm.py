@@ -221,9 +221,15 @@ _PLACEHOLDER_KEY_MARKERS = (
 
 
 class LlmError(Exception):
-    def __init__(self, message: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.usage = usage
 
 
 # Reasoning models often burn thousands of completion tokens before writing JSON.
@@ -750,9 +756,7 @@ async def _post_chat(
         except (KeyError, IndexError, TypeError) as exc:
             raise LlmError(f"{provider} returned an unexpected response shape") from exc
 
-        if not isinstance(content, str) or not content.strip():
-            raise LlmError(f"{provider} returned empty content")
-
+        content_text = content if isinstance(content, str) else ""
         usage = data.get("usage") or {}
         prompt_tokens, cache_write_tokens, cache_read_tokens = (
             split_cached_input_tokens(usage)
@@ -769,13 +773,43 @@ async def _post_chat(
         ):
             msg_chars = sum(message_char_count(m) for m in cached_messages)
             prompt_tokens = estimate_tokens_from_chars(msg_chars)
-            completion_tokens = estimate_tokens_from_chars(len(content))
+            completion_tokens = estimate_tokens_from_chars(len(content_text))
             estimated = True
+        native_cost: float | None = None
+        raw_cost = usage.get("cost")
+        if raw_cost is not None:
+            try:
+                native_cost = float(raw_cost)
+            except (TypeError, ValueError):
+                native_cost = None
+        usage_out = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cache_creation_input_tokens": cache_write_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
+            "estimated": estimated,
+            "finish_reason": finish_reason,
+            "cost": native_cost,
+        }
+        if not content_text.strip():
+            logger.info(
+                "LLM empty content: provider=%s model=%s finish_reason=%s usage=%s estimated=%s",
+                provider,
+                model,
+                finish_reason or "?",
+                usage if usage else "{}",
+                estimated,
+            )
+            raise LlmError(
+                f"{provider} returned empty content",
+                usage=usage_out,
+            )
+
         logger.info(
             "LLM success: provider=%s model=%s response_chars=%d finish_reason=%s usage=%s estimated=%s",
             provider,
             model,
-            len(content),
+            len(content_text),
             finish_reason or "?",
             usage if usage else "{}",
             estimated,
@@ -786,32 +820,44 @@ async def _post_chat(
                 provider,
                 model,
                 finish_reason,
-                len(content),
+                len(content_text),
             )
 
         # Check if response looks truncated (suspiciously short for a JSON response)
-        if len(content) < 30 and '"content":' in content:
+        if len(content_text) < 30 and '"content":' in content_text:
             logger.warning(
                 "LLM response appears truncated: provider=%s model=%s chars=%d content=%s",
                 provider,
                 model,
-                len(content),
-                content[:200],
+                len(content_text),
+                content_text[:200],
             )
-            raise LlmError(f"{provider} returned truncated response (only {len(content)} chars)")
+            raise LlmError(
+                f"{provider} returned truncated response (only {len(content_text)} chars)",
+                usage=usage_out,
+            )
 
-        return content.strip(), {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "cache_creation_input_tokens": cache_write_tokens,
-            "cache_read_input_tokens": cache_read_tokens,
-            "estimated": estimated,
-            "finish_reason": finish_reason,
-        }
+        return content_text.strip(), usage_out
 
     if last_error:
         raise last_error
     raise LlmError(f"{provider} request failed after retries", status_code=429)
+
+
+def _usage_was_billed(usage: dict[str, Any] | None) -> bool:
+    if not usage:
+        return False
+    try:
+        native = float(usage.get("cost") or 0)
+    except (TypeError, ValueError):
+        native = 0.0
+    return bool(
+        usage.get("prompt_tokens")
+        or usage.get("completion_tokens")
+        or usage.get("cache_creation_input_tokens")
+        or usage.get("cache_read_input_tokens")
+        or native > 0
+    )
 
 
 def _record_successful_call(
@@ -855,14 +901,24 @@ def _record_successful_call(
         cache_write = int(usage.get("cache_creation_input_tokens") or 0)
         cache_read = int(usage.get("cache_read_input_tokens") or 0)
         estimated = bool(usage.get("estimated"))
-        cost = estimate_cost_usd(
-            model=model,
-            input_tokens=inp,
-            output_tokens=out,
-            cache_creation_input_tokens=cache_write,
-            cache_read_input_tokens=cache_read,
-            cache_ttl_1h=settings.llm_cache_ttl_1h,
-        )
+        native = usage.get("cost")
+        cost: float | None = None
+        if native is not None:
+            try:
+                parsed_native = float(native)
+                if parsed_native > 0:
+                    cost = parsed_native
+            except (TypeError, ValueError):
+                cost = None
+        if cost is None:
+            cost = estimate_cost_usd(
+                model=model,
+                input_tokens=inp,
+                output_tokens=out,
+                cache_creation_input_tokens=cache_write,
+                cache_read_input_tokens=cache_read,
+                cache_ttl_1h=settings.llm_cache_ttl_1h,
+            )
         record_llm_call(
             run_id=resolved_run,
             rfp_id=resolved_rfp,
@@ -1072,10 +1128,21 @@ async def chat_json(
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-            # Parse before recording success — HTTP 200 can still be invalid JSON.
-            # Reasoning models often hit finish_reason=length; truncated JSON may
-            # still "parse" via close-brace salvage (empty arrays). Always bump
-            # once when the output cap was hit so we do not ship half a plan.
+            # Bill as soon as OpenRouter returns usage — invalid JSON / empty
+            # replies still consume tokens and must show in the UI cost total.
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
+            # Parse after recording. Reasoning models often hit finish_reason=length;
+            # truncated JSON may still "parse" via close-brace salvage (empty arrays).
+            # Always bump once when the output cap was hit so we do not ship half a plan.
             first_raw, first_usage = raw, usage
             parsed: dict[str, Any] | None = None
             parse_error: LlmError | None = None
@@ -1114,6 +1181,16 @@ async def chat_json(
                     max_tokens=bumped,
                     temperature=temperature,
                 )
+                _record_successful_call(
+                    model=openrouter_model,
+                    tier=tier,
+                    provider="openrouter",
+                    usage=usage,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
                 try:
                     parsed = _parse_json_response(raw)
                     parse_error = None
@@ -1127,18 +1204,20 @@ async def chat_json(
             if parse_error is not None:
                 raise parse_error
             assert parsed is not None
-            _record_successful_call(
-                model=openrouter_model,
-                tier=tier,
-                provider="openrouter",
-                usage=usage,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
-            )
             return parsed, "openrouter"
         except LlmError as exc:
+            billed = getattr(exc, "usage", None)
+            if _usage_was_billed(billed if isinstance(billed, dict) else None):
+                _record_successful_call(
+                    model=openrouter_model,
+                    tier=tier,
+                    provider="openrouter",
+                    usage=billed,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
             errors.append(str(exc))
             logger.info("OpenRouter failed: %s", str(exc)[:200])
             # Invalid/truncated JSON already consumed tokens — do not re-run on Fireworks.
@@ -1316,7 +1395,6 @@ async def chat_json(
                 max_tokens=reinforce_tokens,
                 temperature=0.0,
             )
-            parsed = _parse_json_response(raw)
             _record_successful_call(
                 model=openrouter_model,
                 tier=tier,
@@ -1327,6 +1405,7 @@ async def chat_json(
                 rfp_id=rfp_id,
                 run_id=run_id,
             )
+            parsed = _parse_json_response(raw)
             logger.info(
                 "Recovered a non-JSON/refused LLM response via reinforcement "
                 "retry (node=%s, max_tokens=%s)",
@@ -1335,6 +1414,18 @@ async def chat_json(
             )
             return parsed, "openrouter"
         except Exception as exc:  # noqa: BLE001 — fall through to the raise below
+            billed = getattr(exc, "usage", None)
+            if _usage_was_billed(billed if isinstance(billed, dict) else None):
+                _record_successful_call(
+                    model=openrouter_model,
+                    tier=tier,
+                    provider="openrouter",
+                    usage=billed,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
             errors.append(f"reinforcement retry failed: {str(exc)[:200]}")
 
     raise LlmError(
@@ -2139,12 +2230,13 @@ def _salvage_sections_payload(text: str) -> dict[str, Any] | None:
 
 
 def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
-    """Recover content/replacement from a single-object payload if LLM JSON is invalid.
+    """Recover content/replacement/markdown from a single-object payload if LLM JSON is invalid.
 
     Excerpt edits return {"replacement": "..."} and models often put raw markdown
-    table newlines inside the string, which json.loads rejects.
+    table newlines inside the string, which json.loads rejects. Fee justification
+    memos use {"markdown": "..."} and hit the same failure.
     """
-    for key in ("replacement", "content"):
+    for key in ("replacement", "content", "markdown"):
         match = re.search(rf'"{key}"\s*:\s*"', text)
         if not match:
             continue
@@ -2157,6 +2249,17 @@ def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
         payload: dict[str, Any] = {key: clean_content}
         if key == "replacement":
             payload["content"] = clean_content
+        if key == "markdown":
+            # Optional sibling fields for fee memo — best-effort.
+            for alt_key, dest in (
+                ("pricingPosture", "pricingPosture"),
+                ("pricing_posture", "pricingPosture"),
+                ("targetVsCap", "targetVsCap"),
+                ("target_vs_cap", "targetVsCap"),
+            ):
+                m = re.search(rf'"{alt_key}"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+                if m:
+                    payload[dest] = _unescape_json_string(m.group(1))
         id_m = re.search(r'"id"\s*:\s*"((?:\\.|[^"\\])*)"', text)
         title_m = re.search(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"', text)
         if id_m:

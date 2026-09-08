@@ -529,6 +529,11 @@ def outline_sections_from_rfp_specs(
         title = _clean_spec_title((spec.rfp_title or "").strip())
         if not title:
             continue
+        from app.services.proposal_outline_dedup import humanize_outline_title
+
+        title = humanize_outline_title(title) or title
+        if not title or _title_is_non_deliverable(title):
+            continue
         title_cf = title.casefold()
         if title_cf in seen_titles_cf:
             continue
@@ -536,8 +541,12 @@ def outline_sections_from_rfp_specs(
 
         # Packet list -> emit its headings as the tabs, not the wrapper.
         if spec_is_submission_wrapper(spec):
+            from app.services.proposal_outline_dedup import humanize_outline_title
+
             for heading in spec.required_headings or []:
-                child_title = _clean_spec_title(str(heading or "").strip())
+                child_title = humanize_outline_title(
+                    _clean_spec_title(str(heading or "").strip())
+                ) or _clean_spec_title(str(heading or "").strip())
                 if (
                     not child_title
                     or is_duplicate_static_rfp_section(child_title)
@@ -746,7 +755,10 @@ def apply_rfp_mandated_section_titles(
     specs: list[RfpSectionSpec],
 ) -> tuple[ProposalDraft, list[str]]:
     """Relabel matched tabs to the RFP spec title when labels differ by meaning."""
-    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+    from app.services.proposal_outline_dedup import (
+        humanize_outline_title,
+        outline_titles_near_duplicate,
+    )
 
     logs: list[str] = []
     sections = list(draft.sections)
@@ -757,10 +769,23 @@ def apply_rfp_mandated_section_titles(
         if not section or _is_static_1_3_section(section):
             continue
         current = (section.title or "").strip()
-        target = (spec.rfp_title or "").strip()
-        if not target or current == target:
+        raw_target = (spec.rfp_title or "").strip()
+        if not raw_target or current == raw_target:
+            continue
+        # Never stamp an instruction sentence onto a tab — coerce or skip.
+        if title_is_rfp_instruction_not_deliverable(raw_target):
+            recovered = recover_deliverable_title_from_instruction(raw_target)
+            target = recovered or ""
+        else:
+            target = humanize_outline_title(raw_target) or raw_target
+        if not target or title_is_rfp_instruction_not_deliverable(target):
+            continue
+        if current == target:
             continue
         if outline_titles_near_duplicate(current, target):
+            continue
+        # Prefer a short clean current label over a longer coerced target.
+        if len(current) <= 60 and len(target) > len(current) + 20:
             continue
         aliases = list(spec.same_ask_as or [])
         alias_match = any(
@@ -772,6 +797,88 @@ def apply_rfp_mandated_section_titles(
         sections[idx] = section.model_copy(update={"title": target})
         changed = True
         logs.append(f"RFP structure: retitled “{current}” → “{target}”")
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+async def clean_sidebar_titles_via_llm(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """One LLM pass: turn leftover instruction-sentence tab labels into short names."""
+    logs: list[str] = []
+    if not llm.is_configured() or not draft.sections:
+        return draft, logs
+    candidates: list[dict[str, str]] = []
+    for section in draft.sections:
+        if _is_static_1_3_section(section):
+            continue
+        title = (section.title or "").strip()
+        if not title:
+            continue
+        # Long / clause-like labels only — leave short clean tabs alone.
+        if len(title) < 55 and title.count(" ") < 9:
+            continue
+        candidates.append({"id": section.id, "title": title})
+    if not candidates:
+        return draft, logs
+    try:
+        raw, _provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You clean proposal sidebar tab titles.\n"
+                        "Return JSON: {\"renames\": [{\"id\": \"...\", \"newTitle\": \"...\"}]}\n"
+                        "Rules:\n"
+                        "- newTitle is a short deliverable / form name (typically under 60 chars).\n"
+                        "- Never keep Upload… / Please provide… / DO NOT… instruction sentences.\n"
+                        "- Prefer the form or instrument the buyer wants (e.g. UT Supplemental Terms, "
+                        "Primary Bid Contact, W9 Submission).\n"
+                        "- Only include tabs that need renaming. Skip already-clean labels.\n"
+                        "- Do not invent clients, people, or certifications."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Clean these sidebar titles:\n"
+                        + "\n".join(
+                            f"- id={c['id']}: {c['title']}" for c in candidates[:40]
+                        )
+                    ),
+                },
+            ],
+            max_tokens=900,
+            temperature=0.1,
+            node_name="generate_sidebar_title_clean",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Sidebar title LLM clean skipped: %s", exc)
+        return draft, logs
+
+    renames = raw.get("renames") if isinstance(raw, dict) else None
+    if not isinstance(renames, list) or not renames:
+        return draft, logs
+    by_id = {str(item.get("id") or ""): str(item.get("newTitle") or "").strip()
+             for item in renames if isinstance(item, dict)}
+    sections = list(draft.sections)
+    changed = False
+    for i, section in enumerate(sections):
+        proposed = (by_id.get(section.id) or "").strip().strip("\"'`")
+        while proposed.startswith("#"):
+            proposed = proposed.lstrip("#").strip()
+        if not proposed or proposed.casefold() == (section.title or "").casefold():
+            continue
+        if len(proposed) > 72:
+            proposed = proposed[:69].rstrip() + "…"
+        if title_is_rfp_instruction_not_deliverable(proposed):
+            continue
+        old = section.title or ""
+        sections[i] = section.model_copy(update={"title": proposed})
+        changed = True
+        logs.append(f"LLM title clean: “{old[:64]}” → “{proposed}”")
     if not changed:
         return draft, logs
     now = datetime.now(timezone.utc).isoformat()
@@ -2191,6 +2298,12 @@ def apply_rfp_toc_layout(
     logs.extend(order_logs)
     draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
     logs.extend(wrap_logs)
+    draft, cover_fix_logs = repair_cover_letter_misused_as_company_header(draft)
+    logs.extend(cover_fix_logs)
+    from app.services.proposal_section_dedup import repair_emptied_vendor_questionnaires
+
+    draft, q_logs = repair_emptied_vendor_questionnaires(draft)
+    logs.extend(q_logs)
     draft, pointer_logs = repair_pointer_only_rfp_sections(draft)
     logs.extend(pointer_logs)
     from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
@@ -2261,6 +2374,138 @@ def ensure_company_block_wrapper_heading(
         f"RFP structure: labeled Sections 1.1–1.5 as “{wrap_spec.rfp_title}” "
         "(header only — company tabs unchanged)."
     )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+_COVER_LETTER_DRAFT_STUB = (
+    "## {title}\n\n"
+    "[MANUAL FILL: Draft this RFP-required section — {title}]\n\n"
+    "RFP-required outline (write a thorough, deep multi-paragraph offer letter — "
+    "not a thin stub):\n"
+    "- Salutation to the buyer / selection committee\n"
+    "- Statement of intent to bid on this RFP (name the client + opportunity)\n"
+    "- Understanding of this buyer's need / opportunity (proposal stance)\n"
+    "- Why zö agency is a fit — proof-led specifics from KB (Rev 6 voice)\n"
+    "- Firm contact from companyfacts / Section 1.3\n"
+    "- Every RFP-listed cover-letter element in letter prose\n"
+    "- Closing signed by Sonja Anderson, Founder / Agency Director "
+    "(sole owner — not another staff member)\n"
+    "- Closing + authorized signature handoff\n\n"
+    "[DESIGNER NOTE: Attach the physically signed cover letter PDF after wet-ink signature.]"
+)
+
+
+def repair_cover_letter_misused_as_company_header(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Turn a mistitled company-block header back into a draftable cover letter.
+
+    Regression: some RFPs stamped \"Cover Letter / Cover Page\" onto
+    ``rfp-structure-company-block-header``, so the tab held only the
+    \"Sections 1.1–1.5 follow immediately below\" designer note and never got
+    a letter. Convert that row into a real cover-letter stub and restore a
+    Company Overview wrapper above 1.1–1.5.
+    """
+    logs: list[str] = []
+    sections = list(draft.sections)
+    header_idx = next(
+        (i for i, s in enumerate(sections) if s.id == COMPANY_BLOCK_HEADER_ID),
+        None,
+    )
+    if header_idx is None:
+        # Also catch any non-header tab titled as cover letter that only holds
+        # the company-block chrome note.
+        changed = False
+        fixed: list[ProposalSection] = []
+        for section in sections:
+            title = section.title or ""
+            body = section.content or ""
+            if (
+                _title_is_cover_letter_family((title or "").casefold())
+                and "follow immediately below" in body.casefold()
+            ):
+                stub = _COVER_LETTER_DRAFT_STUB.format(title=title.strip() or "Cover Letter")
+                fixed.append(
+                    section.model_copy(
+                        update={
+                            "content": stub,
+                            "status": "generated",
+                            "mode": "write",
+                            "required": True,
+                            "word_target": max(section.word_target or 0, 400),
+                        }
+                    )
+                )
+                logs.append(
+                    f"RFP structure: replaced company-block chrome on “{title}” "
+                    "with a draftable cover-letter stub."
+                )
+                changed = True
+            else:
+                fixed.append(section)
+        if not changed:
+            return draft, logs
+        now = datetime.now(timezone.utc).isoformat()
+        return draft.model_copy(update={"sections": fixed, "updated_at": now}), logs
+
+    header = sections[header_idx]
+    title = (header.title or "").strip()
+    # Only cover-letter / cover-page family — never rewrite a real Company Overview
+    # header, and never treat Executive Summary as this mislabel.
+    if not _title_is_cover_letter_family(title.casefold()):
+        return draft, logs
+
+    letter_title = title or "Cover Letter"
+    from app.services.proposal_draft_structure_stubs import cover_letter_lacks_letter_body
+
+    next_content = header.content or ""
+    if cover_letter_lacks_letter_body(next_content):
+        next_content = _COVER_LETTER_DRAFT_STUB.format(title=letter_title)
+    letter = header.model_copy(
+        update={
+            "id": "rfp-structure-cover-letter",
+            "title": letter_title,
+            "content": next_content,
+            "status": "generated",
+            "source": "generated",
+            "mode": "write",
+            "required": True,
+            "word_target": max(header.word_target or 0, 400),
+        }
+    )
+    sections[header_idx] = letter
+    logs.append(
+        f"RFP structure: converted mistitled company-block header “{letter_title}” "
+        "into a draftable cover-letter tab."
+    )
+
+    # Restore a real 1.1–1.5 wrapper so company identity stays labeled.
+    if not any(s.id == COMPANY_BLOCK_HEADER_ID for s in sections):
+        first_company = next(
+            (i for i, s in enumerate(sections) if (s.id or "").startswith("section-1-")),
+            None,
+        )
+        if first_company is not None:
+            wrap = ProposalSection(
+                id=COMPANY_BLOCK_HEADER_ID,
+                title="Company Overview",
+                content=(
+                    "## Company Overview\n\n"
+                    "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+                    "this header matches the RFP TOC label only.]"
+                ),
+                status="generated",
+                source="generated",
+                mode="write",
+                required=True,
+                word_target=40,
+            )
+            sections.insert(first_company, wrap)
+            logs.append(
+                "RFP structure: restored Company Overview header above Sections 1.1–1.5."
+            )
+
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 

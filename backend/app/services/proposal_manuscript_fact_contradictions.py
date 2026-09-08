@@ -121,16 +121,31 @@ IS a contradiction (flag these):
   keep whichever number matches companyfacts/KB evidence and remove the
   other; if neither is grounded, state the span once without inventing which
   one is correct.
+- ANY CROSS-SECTION MANUSCRIPT CONFLICT (meaning, not keyword lists): the same
+  fact, phase name/number, workstream, role, timeline, deliverable label, or
+  promised cadence is stated differently in two tabs so a reviewer would see
+  a contradiction (e.g. Implementation Phase 2 vs Budget calling that work
+  Phase 1; Cover Letter promising weekly calls while Approach says monthly;
+  one tab names a form "Cost Proposal" while another still uses a File # /
+  [Required] instruction title for the same packet). Severity=major/critical.
+  Prefer fixAction=rewrite on EVERY section that still carries the wrong
+  wording — emit separate findings per sectionId that must change. Align to
+  the clearest authoritative statement already in the manuscript (or
+  companyfacts). Do NOT invent new dollars, people, or phases.
 
 NOT a contradiction (do NOT flag):
 - RFP-specific project staffing (named roles on THIS engagement — Section 2 bios)
 - [VERIFY] / [MANUAL FILL] tags already flagging uncertainty
-- Budget/fees/dollar amounts (handled elsewhere)
+- Dollar amounts / fee arithmetic alone (budget contradiction pass owns those)
 - Duplication of Who We Are in other tabs (Senior Editor handles dedupe)
 - Case-study metrics whose exact figures appear in the 03_CS source for that study
 
 NEVER invent replacement numbers. When fixing team size, use the companyfacts
 value exactly OR remove the invented claim and state team size per verified facts.
+
+Prefer fixAction=rewrite whenever the fix is a wording/citation/label alignment
+already supported by another manuscript tab or companyfacts. Use verify/human
+only when Sonja must choose (missing fact, pricing strategy).
 
 Return ONLY JSON:
 {
@@ -142,7 +157,7 @@ Return ONLY JSON:
       "manuscriptContradiction": "what this section wrongly claims",
       "severity": "critical|major|minor",
       "fixAction": "rewrite|verify|human",
-      "rewriteInstruction": "if rewrite: fix using companyfacts only; else empty"
+      "rewriteInstruction": "if rewrite: exact prose/table fix; else empty"
     }
   ],
   "summary": "one sentence"
@@ -265,7 +280,12 @@ async def _rewrite_section_for_fact_contradiction(
         return section, False, ""
     system = (
         "You fix ONE proposal section so it no longer contradicts verified zö "
-        "company facts OR invents ungrounded certifications / capabilities.\n"
+        "company facts, invents ungrounded certifications / capabilities, OR "
+        "conflicts with another manuscript tab on the same fact/phase/name/"
+        "timeline/role/cadence.\n"
+        "Apply rewriteInstruction. Prefer aligning wording to the verifiedFact "
+        "(authoritative companyfacts OR the clearest correct statement already "
+        "in the manuscript) — do not invent new facts or dollars.\n"
         "01_companyfacts_verified is the single source of truth for agency profile "
         "(team size, founded year, legal name, agency certifications).\n"
         "Section 1.5 Insurance Information is authoritative for which coverage TYPES "

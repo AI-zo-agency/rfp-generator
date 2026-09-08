@@ -1329,6 +1329,146 @@ def _improve_outcome(
     return section, draft, research, provider, message, changed, suggested_fix
 
 
+async def _maybe_rename_sidebar_title(
+    *,
+    rfp_id: str,
+    draft: ProposalDraft,
+    section_id: str,
+    user_message: str,
+    rfp: RfpRecord,
+    research: ProposalResearchCache | None,
+    persist: bool,
+) -> tuple[
+    ProposalDraft,
+    tuple[
+        ProposalSection,
+        ProposalDraft,
+        ProposalResearchCache,
+        str,
+        str,
+        bool,
+        Any,
+    ]
+    | None,
+]:
+    """Rename sidebar title when asked.
+
+    Returns (draft, early_outcome). early_outcome is set only for title-only asks
+    (caller should return it). For title+body asks, draft is retitled and
+    early_outcome is None so normal improve continues.
+    """
+    low = (user_message or "").casefold()
+    if not any(
+        cue in low
+        for cue in (
+            "title",
+            "section name",
+            "tab name",
+            "rename",
+        )
+    ):
+        return draft, None
+    also_body = any(
+        cue in low
+        for cue in (
+            "budget",
+            "cost",
+            "fee",
+            "pricing",
+            "rewrite",
+            "and also",
+            "content",
+            "wording",
+            "numbers",
+            "dollars",
+            "improve budget",
+        )
+    )
+    section = _find_draft_section(draft, section_id)
+    if section is None:
+        return draft, None
+    body_snip = (section.content or "").strip()[:900]
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "The user may want the proposal sidebar/tab title cleaned up.\n"
+                        "Return JSON: "
+                        '{"shouldRename": true|false, "newTitle": "short label or null", '
+                        '"message": "one sentence"}\n'
+                        "newTitle must be a short clean deliverable name "
+                        "(e.g. Cost Proposal — not File #5 / [Required] / [PDF] / Upload…)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Client: {getattr(rfp, 'client', '') or 'n/a'}\n"
+                        f"Current title: {section.title}\n"
+                        f"Body excerpt:\n{body_snip or '(empty)'}\n\n"
+                        f"User: {user_message}"
+                    ),
+                },
+            ],
+            max_tokens=180,
+            temperature=0.1,
+            node_name="chat_sidebar_title_rename",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Sidebar title rename skipped: %s", exc)
+        return draft, None
+    if not isinstance(raw, dict) or not (
+        raw.get("shouldRename") or raw.get("renameOnly")
+    ):
+        return draft, None
+    new_title = str(raw.get("newTitle") or "").strip().strip("\"'`")
+    while new_title.startswith("#"):
+        new_title = new_title.lstrip("#").strip()
+    cache = research or ProposalResearchCache(
+        rfpId=rfp_id,
+        updatedAt=datetime.now(timezone.utc).isoformat(),
+        provider=provider,
+    )
+    if not new_title or new_title.casefold() == (section.title or "").casefold():
+        if also_body:
+            return draft, None
+        msg = str(raw.get("message") or "").strip() or (
+            "That title already looks fine — I left it unchanged."
+        )
+        return draft, _improve_outcome(section, draft, cache, provider, msg, False, None)
+    if len(new_title) > 72:
+        new_title = new_title[:69].rstrip() + "…"
+    old_title = section.title or ""
+    focus = section.model_copy(update={"title": new_title})
+    sections = [
+        focus if s.id == section_id else s for s in (draft.sections or [])
+    ]
+    updated = draft.model_copy(update={"sections": sections})
+    if also_body:
+        logger.info(
+            "Sidebar title rename with body edit: %r → %r (%s)",
+            old_title[:64],
+            new_title,
+            section_id,
+        )
+        return updated, None
+    if persist:
+        updated = await _persist_section_improve_draft(
+            updated,
+            cache,
+            section_title=new_title,
+            focus_section_id=section_id,
+        )
+        focus = _find_draft_section(updated, section_id) or focus
+    msg = str(raw.get("message") or "").strip() or (
+        f"Renamed the sidebar title from “{old_title}” to “{new_title}”. "
+        "Body content is unchanged."
+    )
+    return updated, _improve_outcome(focus, updated, cache, provider, msg, True, None)
+
+
 async def _finish_chat_structure_plan(
     *,
     rfp_id: str,
@@ -6164,17 +6304,42 @@ async def _redraft_rfp_section(
         )
 
     for attempt in (1, 2):
+        is_cover_letter = is_cover_letter_section_title(section.title or "")
         word_target_line = (
             f"Word target: {section.word_target} MAX — aim for "
             f"{int(section.word_target * 0.6)}-{int(section.word_target * 0.75)} words. "
             "Every sentence must earn its place; cut filler, redundancy, and RFP echo. "
         )
+        if is_cover_letter:
+            floor = max(250, int((section.word_target or 400) * 0.85))
+            ceiling = max(floor, section.word_target or 400)
+            word_target_line = (
+                f"Word target: {ceiling} MAX — cover letter must be thorough and deep; "
+                f"aim for {floor}-{ceiling} words of multi-paragraph letter prose. "
+                "Intent, buyer understanding, proof-led fit, contact, every RFP "
+                "cover-letter element, Sonja Anderson (Founder) close — no thin stub. "
+            )
         if voice_ask:
             word_target_line = (
                 "LENGTH LOCK: keep roughly the same length as the prior draft "
                 f"({word_count(prior_for_agent or original_content)} words). "
                 "Do not shrink to a word target. "
             )
+        length_hint = (
+            "Use most of the word target — depth is required for this letter.\n"
+            if is_cover_letter and not voice_ask
+            else "Go above 75% ONLY if substance demands it.\n"
+        )
+        format_hint = (
+            "FORMAT: Multi-paragraph letter prose (salutation → body → close). "
+            "Keep the signed-PDF designer note. Do not collapse into a checklist.\n"
+            if is_cover_letter
+            else (
+                "FORMAT: Prefer short paragraphs, markdown bullets, and compact markdown tables for "
+                "phases/process/cadence. Add designerNote / [DESIGNER NOTE: …] when a "
+                "table/timeline/swimlane/infographic would help evaluators scan faster.\n"
+            )
+        )
         user_block = (
             f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
             f"Client: {rfp.client}\n"
@@ -6185,10 +6350,8 @@ async def _redraft_rfp_section(
             + "ANTI-RFP-ECHO: answer with proposal substance only — never paraphrase the "
             "requirement checklist. INTERESTING (Rev 6): concrete open + case proof + "
             "true cost when it matters + flat stop. No generic capability lists.\n"
-            "Go above 75% ONLY if substance demands it.\n"
-            "FORMAT: Prefer short paragraphs, markdown bullets, and compact markdown tables for "
-            "phases/process/cadence. Add designerNote / [DESIGNER NOTE: …] when a "
-            "table/timeline/swimlane/infographic would help evaluators scan faster.\n"
+            + length_hint
+            + format_hint
             + coverage_block
             + "\n"
             + gap_block
@@ -8496,6 +8659,19 @@ async def improve_proposal_section(
     # matched the stanza's own edit verbs and turned every question into an edit.
     raw_user_message = user_message.strip()
 
+    research = await aget_research_cache(rfp_id)
+    draft, title_early = await _maybe_rename_sidebar_title(
+        rfp_id=rfp_id,
+        draft=draft,
+        section_id=section_id,
+        user_message=raw_user_message,
+        rfp=rfp,
+        research=research,
+        persist=persist,
+    )
+    if title_early is not None:
+        return title_early
+
     from app.services.proposal_chat_improve_pin import user_asks_thorough_section_repair
 
     if improve_section_pinned:
@@ -8525,8 +8701,6 @@ async def improve_proposal_section(
         and not selection_mode
     ):
         proposal_wide = False
-
-    research = await aget_research_cache(rfp_id)
 
     # Shared Evidence Gate: decide KB vs write (same policy as drafting / repair).
     from app.services.proposal_evidence_gate import (

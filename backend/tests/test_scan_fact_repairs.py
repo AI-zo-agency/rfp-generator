@@ -216,6 +216,25 @@ class ScanFactRepairTests(unittest.TestCase):
         self.assertIn("Account and Operations Manager", fixed)
         self.assertNotIn("Principal & Creative Director, 15", fixed)
 
+    def test_cover_letter_authorized_signer_is_sonja_founder(self) -> None:
+        from app.services.proposal_scan_fact_repairs import (
+            repair_cover_letter_authorized_signer,
+        )
+
+        text = (
+            "Dear Selection Committee,\n\n"
+            "**Ella Lindau** is authorized to represent [Firm Name].\n\n"
+            "Sincerely,\n"
+            "**Ella Lindau**\n"
+            "Operations Director\n"
+        )
+        fixed, logs = repair_cover_letter_authorized_signer(text)
+        self.assertTrue(logs)
+        self.assertIn("Sonja Anderson is authorized to represent", fixed.replace("*", ""))
+        self.assertIn("Sonja Anderson", fixed.split("Sincerely")[-1])
+        self.assertIn("Founder / Agency Director", fixed.split("Sincerely")[-1])
+        self.assertNotIn("Ella Lindau", fixed.split("Sincerely")[-1])
+
 
 class RebuildBioStubTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_resume_becomes_designer_pdf_stub(self) -> None:

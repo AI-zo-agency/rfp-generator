@@ -315,6 +315,12 @@ PHASE 6 — Client-facing copy (MUST be short and clear for the buyer):
   (do not replace it). NEVER a Component|Share mix table when Fee Detail by Phase exists.
 - rfpBudgetNotes: optional one short paragraph OR empty — never a multi-page methodology essay.
 - lineItem descriptions: phase + deliverable tied to RFP items. Put guide citations in rateSource only.
+  When the manuscript / RFP describes numbered Implementation phases, cite those SAME
+  phase names/numbers in each lineItem description (do not call Strategy work "Phase 1"
+  if Implementation already uses Phase 1 for discovery and Phase 2 for strategy build).
+  If Launch / account management is absorbed into another fee line, say so explicitly
+  in that line's description ("includes Phase 3 launch trafficking" / "includes ongoing
+  account management cadence") — never leave a promised workstream with no fee home.
 - Do NOT write long "build-out" prose that re-explains every math step in the section narrative.
 - optionTermNotes: client language only ("proposed fees") — never "agency revenue estimate".
 

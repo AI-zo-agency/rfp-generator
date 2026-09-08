@@ -179,3 +179,81 @@
   color: #047857;
   font-weight: 600;
 }
+
+.proposal-ralph-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0.75rem 0.35rem 1rem;
+}
+
+.proposal-ralph-portrait {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.proposal-ralph-empty-hello {
+  margin: 0.15rem 0 0;
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--zo-text);
+}
+
+.proposal-ralph-empty-copy {
+  margin: 0.35rem 0 0;
+  max-width: 16rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--zo-text-muted);
+}
+
+.proposal-ralph-actions {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+}
+
+.proposal-ralph-action {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.7rem;
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  border-radius: 0.7rem;
+  background: #fff;
+  color: var(--zo-text);
+  padding: 0.7rem 0.8rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.proposal-ralph-action svg:first-child {
+  flex-shrink: 0;
+}
+
+.proposal-ralph-action span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.proposal-ralph-action-chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--zo-text-muted);
+}
+
+.proposal-ralph-action:hover:not(:disabled) {
+  border-color: rgba(239, 80, 24, 0.35);
+  background: #fff7f2;
+  color: #c2410c;
+}
+
+.proposal-ralph-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

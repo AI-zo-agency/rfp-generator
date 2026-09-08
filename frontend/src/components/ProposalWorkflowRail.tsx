@@ -101,6 +101,64 @@ function CategoryIcon({ label }: { label: string }) {
   );
 }
 
+export function ProposalCostSummary({
+  rfpCost,
+  costByRunType,
+  fmtUsd,
+}: {
+  rfpCost: LlmCostRfpBreakdown | null;
+  costByRunType: { generate: number; completeScan: number; chat: number };
+  fmtUsd: (n: number) => string;
+}) {
+  const [costOpen, setCostOpen] = useState(false);
+  return (
+    <div className="proposal-workflow-section">
+      <p className="proposal-workflow-section-label">Cost summary</p>
+      <div className="proposal-workflow-cost">
+        <div className="proposal-workflow-cost-row">
+          <span className="proposal-workflow-cost-value">
+            {fmtUsd(rfpCost?.totalCostUsd ?? 0)}
+          </span>
+          <span className="proposal-workflow-cost-label">LLM cost</span>
+        </div>
+        <div className="proposal-workflow-cost-row">
+          <span className="proposal-workflow-cost-value">
+            {(rfpCost?.callCount ?? 0).toLocaleString()}
+          </span>
+          <span className="proposal-workflow-cost-label">Calls</span>
+        </div>
+        <div className="proposal-workflow-cost-row">
+          <span className="proposal-workflow-cost-value">{rfpCost?.runCount ?? 0}</span>
+          <span className="proposal-workflow-cost-label">Runs</span>
+        </div>
+      </div>
+      <button
+        type="button"
+        className="proposal-workflow-view-btn"
+        onClick={() => setCostOpen((v) => !v)}
+      >
+        {costOpen ? "Hide breakdown" : "Breakdown"}
+      </button>
+      {costOpen ? (
+        <div className="proposal-workflow-cost-breakdown">
+          <div className="proposal-workflow-cost-breakdown-row">
+            <span>Generate</span>
+            <span>{fmtUsd(costByRunType.generate)}</span>
+          </div>
+          <div className="proposal-workflow-cost-breakdown-row">
+            <span>Complete scan</span>
+            <span>{fmtUsd(costByRunType.completeScan)}</span>
+          </div>
+          <div className="proposal-workflow-cost-breakdown-row">
+            <span>Chat edits</span>
+            <span>{fmtUsd(costByRunType.chat)}</span>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ProposalWorkflowRail({
   checkpoint,
   isRunning,
@@ -136,7 +194,6 @@ export function ProposalWorkflowRail({
       else next.add(label);
       return next;
     });
-  const [costOpen, setCostOpen] = useState(false);
 
   // The live generate phase (from polling) is more current than the persisted
   // checkpoint — prefer it so the rail tracks generation as it moves phase to
@@ -621,50 +678,11 @@ export function ProposalWorkflowRail({
         </div>
       )}
 
-      <div className="proposal-workflow-section">
-        <p className="proposal-workflow-section-label">Cost summary</p>
-        <div className="proposal-workflow-cost">
-          <div className="proposal-workflow-cost-row">
-            <span className="proposal-workflow-cost-value">
-              {fmtUsd(rfpCost?.totalCostUsd ?? 0)}
-            </span>
-            <span className="proposal-workflow-cost-label">LLM cost</span>
-          </div>
-          <div className="proposal-workflow-cost-row">
-            <span className="proposal-workflow-cost-value">
-              {(rfpCost?.callCount ?? 0).toLocaleString()}
-            </span>
-            <span className="proposal-workflow-cost-label">Calls</span>
-          </div>
-          <div className="proposal-workflow-cost-row">
-            <span className="proposal-workflow-cost-value">{rfpCost?.runCount ?? 0}</span>
-            <span className="proposal-workflow-cost-label">Runs</span>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="proposal-workflow-view-btn"
-          onClick={() => setCostOpen((v) => !v)}
-        >
-          {costOpen ? "Hide breakdown" : "Breakdown"}
-        </button>
-        {costOpen ? (
-          <div className="proposal-workflow-cost-breakdown">
-            <div className="proposal-workflow-cost-breakdown-row">
-              <span>Generate</span>
-              <span>{fmtUsd(costByRunType.generate)}</span>
-            </div>
-            <div className="proposal-workflow-cost-breakdown-row">
-              <span>Complete scan</span>
-              <span>{fmtUsd(costByRunType.completeScan)}</span>
-            </div>
-            <div className="proposal-workflow-cost-breakdown-row">
-              <span>Chat edits</span>
-              <span>{fmtUsd(costByRunType.chat)}</span>
-            </div>
-          </div>
-        ) : null}
-      </div>
+      <ProposalCostSummary
+        rfpCost={rfpCost}
+        costByRunType={costByRunType}
+        fmtUsd={fmtUsd}
+      />
 
       <div className="proposal-workflow-section">
         <p className="proposal-workflow-section-label">Quick actions</p>

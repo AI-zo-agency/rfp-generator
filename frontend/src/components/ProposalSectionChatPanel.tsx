@@ -441,25 +441,21 @@ export function ProposalSectionChatPanel({
             return prev !== undefined && (s.content || "") !== prev;
           });
 
-          for (const s of changed) {
-            onRevisionRecorded?.(s.id, {
-              before: beforeById.get(s.id) || "",
-              after: s.content || "",
+          // Always stay on the tab the user asked about. Persist-time ZF / Rev6
+          // side-effects on bios must not steal focus into a resume page.
+          const focusId = targetSection.id;
+          const targetChanged = changed.find((s) => s.id === focusId);
+          if (targetChanged) {
+            onRevisionRecorded?.(focusId, {
+              before: beforeById.get(focusId) || "",
+              after: targetChanged.content || "",
               summary: result.assistantMessage,
               instruction: trimmed,
               updatedAt: Date.now(),
             });
-          }
-
-          const focusId =
-            changed.find((s) => s.id === targetSection.id)?.id ||
-            changed[0]?.id ||
-            result.section?.id ||
-            targetSection.id;
-          onFocusSection?.(focusId);
-          if (changed.length > 0) {
             onRevisionDrawerOpenChange?.(focusId, true);
           }
+          onFocusSection?.(focusId);
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";
@@ -571,23 +567,19 @@ export function ProposalSectionChatPanel({
             const prev = beforeById.get(s.id);
             return prev !== undefined && (s.content || "") !== prev;
           });
-          for (const s of changed) {
-            onRevisionRecorded?.(s.id, {
-              before: beforeById.get(s.id) || "",
-              after: s.content || "",
+          const focusId = target.id;
+          const targetChanged = changed.find((s) => s.id === focusId);
+          if (targetChanged) {
+            onRevisionRecorded?.(focusId, {
+              before: beforeById.get(focusId) || "",
+              after: targetChanged.content || "",
               summary: result.assistantMessage,
               instruction,
               updatedAt: Date.now(),
             });
-          }
-          const focusId =
-            changed.find((s) => s.id === target.id)?.id ||
-            changed[0]?.id ||
-            target.id;
-          onFocusSection?.(focusId);
-          if (changed.length > 0) {
             onRevisionDrawerOpenChange?.(focusId, true);
           }
+          onFocusSection?.(focusId);
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Apply fix failed";
@@ -688,13 +680,72 @@ export function ProposalSectionChatPanel({
 
       <div ref={scrollRef} className="proposal-section-chat-messages custom-scrollbar">
         {messages.length === 0 ? (
-          <p className="text-zo-text-muted">
-            Ask by section name, or say what to change (e.g. case studies). Edits stay on
-            that tab unless you say <strong>across the proposal</strong> /{" "}
-            <strong>every section</strong>. If I&apos;m unsure which tab, I&apos;ll ask.
-            You can also pin with <strong>Revise content</strong> or{" "}
-            <strong>Improve full section</strong>.
-          </p>
+          <div className="proposal-ralph-empty">
+            <RalphPortrait />
+            <p className="proposal-ralph-empty-hello">Hi, I&apos;m Ralph.</p>
+            <p className="proposal-ralph-empty-copy">
+              Ask by section name, or say what to change. Edits stay on this tab
+              unless you say across the proposal.
+            </p>
+            <div className="proposal-ralph-actions">
+              {viewingSection ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={pinViewingSection}
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="sparkle" />
+                    <span>Improve this section</span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() =>
+                      void sendMessage(
+                        "Make this section shorter. Keep every RFP ask.",
+                      )
+                    }
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="compress" />
+                    <span>Make this shorter</span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() => void sendMessage("Does this meet the RFP?")}
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="check" />
+                    <span>Check RFP compliance</span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() =>
+                      void sendMessage(
+                        "Fix issues in this section. Remove fabricated content; fill VERIFY tags from KB only.",
+                      )
+                    }
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="wrench" />
+                    <span>Fix issues in this section</span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
+                </>
+              ) : (
+                <p className="proposal-ralph-empty-copy">
+                  Open a section, then pick a task or type below.
+                </p>
+              )}
+            </div>
+          </div>
         ) : (
           messages.map((msg) => (
             <div
@@ -860,7 +911,7 @@ export function ProposalSectionChatPanel({
             onChange={(e) => setInput(e.target.value)}
             disabled={disabled || busy}
             rows={1}
-            placeholder="Ask anything…"
+            placeholder="Ask Ralph anything…"
             className="proposal-section-chat-input"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -880,6 +931,7 @@ export function ProposalSectionChatPanel({
           </button>
         </div>
 
+        {messages.length > 0 ? (
         <div className="proposal-section-chat-quick custom-scrollbar">
           {viewingSection ? (
             <>
@@ -913,8 +965,99 @@ export function ProposalSectionChatPanel({
             </button>
           ))}
         </div>
+        ) : null}
       </div>
     </aside>
+  );
+}
+
+function RalphPortrait() {
+  return (
+    <svg
+      className="proposal-ralph-portrait"
+      width="88"
+      height="88"
+      viewBox="0 0 88 88"
+      fill="none"
+      aria-hidden
+    >
+      <ellipse cx="44" cy="78" rx="22" ry="5" fill="#ef5018" opacity="0.12" />
+      <rect
+        x="18"
+        y="22"
+        width="52"
+        height="48"
+        rx="16"
+        fill="#fff7f2"
+        stroke="#f0c4b0"
+        strokeWidth="1.5"
+      />
+      <rect x="24" y="30" width="40" height="22" rx="11" fill="#1f2933" />
+      <circle cx="36" cy="41" r="5.5" fill="#7dd3c0" />
+      <circle cx="52" cy="41" r="5.5" fill="#7dd3c0" />
+      <circle cx="37.5" cy="39.5" r="1.6" fill="#fff" />
+      <circle cx="53.5" cy="39.5" r="1.6" fill="#fff" />
+      <path
+        d="M34 58c3.2 4 16.8 4 20 0"
+        stroke="#ef5018"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+      <rect x="40" y="10" width="8" height="12" rx="4" fill="#ef5018" />
+      <circle cx="44" cy="10" r="4.5" fill="#ffd652" stroke="#ef5018" strokeWidth="1.5" />
+      <rect x="12" y="40" width="8" height="14" rx="4" fill="#ff8939" />
+      <rect x="68" y="40" width="8" height="14" rx="4" fill="#ff8939" />
+    </svg>
+  );
+}
+
+function RalphActionIcon({
+  kind,
+}: {
+  kind: "sparkle" | "compress" | "check" | "wrench" | "chevron";
+}) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    "aria-hidden": true,
+  } as const;
+  if (kind === "sparkle") {
+    return (
+      <svg {...common}>
+        <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8" />
+      </svg>
+    );
+  }
+  if (kind === "compress") {
+    return (
+      <svg {...common}>
+        <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+      </svg>
+    );
+  }
+  if (kind === "check") {
+    return (
+      <svg {...common}>
+        <path d="M9 11l3 3L22 4" />
+        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+      </svg>
+    );
+  }
+  if (kind === "chevron") {
+    return (
+      <svg {...common} className="proposal-ralph-action-chevron">
+        <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+    </svg>
   );
 }
 

@@ -43,6 +43,10 @@ interface DraftSectionEditorProps {
   revisionDrawerOpen?: boolean;
   onRevisionRecorded?: (revision: SectionRevisionRecord) => void;
   onRevisionDrawerOpenChange?: (open: boolean) => void;
+  /** Parent chrome owns Edit / Improve; keep the manuscript itself here. */
+  hideToolbar?: boolean;
+  previewMode?: boolean;
+  onPreviewModeChange?: (preview: boolean) => void;
 }
 
 export function DraftSectionEditor({
@@ -59,6 +63,9 @@ export function DraftSectionEditor({
   storedRevision = null,
   revisionDrawerOpen = false,
   onRevisionDrawerOpenChange,
+  hideToolbar = false,
+  previewMode: previewModeProp,
+  onPreviewModeChange,
 }: DraftSectionEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -66,7 +73,14 @@ export function DraftSectionEditor({
   const programmaticSelectionRef = useRef(false);
   const appliedHighlightKeyRef = useRef<string | null>(null);
   const [selection, setSelection] = useState<TextSelection | null>(null);
-  const [previewMode, setPreviewMode] = useState(() => Boolean(value));
+  const [uncontrolledPreview, setUncontrolledPreview] = useState(() => Boolean(value));
+  const previewControlled =
+    previewModeProp !== undefined && typeof onPreviewModeChange === "function";
+  const previewMode = previewControlled ? previewModeProp : uncontrolledPreview;
+  const setPreviewMode = (next: boolean) => {
+    if (previewControlled) onPreviewModeChange?.(next);
+    else setUncontrolledPreview(next);
+  };
 
   const busy = disabled || chatBusy;
 
@@ -77,8 +91,10 @@ export function DraftSectionEditor({
   useEffect(() => {
     setSelection(null);
     appliedHighlightKeyRef.current = null;
-    setPreviewMode(Boolean(value));
-  }, [section.id]);
+    if (!previewControlled) setUncontrolledPreview(Boolean(value));
+    // Only when the open section changes — not on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section.id, previewControlled]);
 
   useEffect(() => {
     if (!highlightRange || busy) return;
@@ -232,6 +248,7 @@ export function DraftSectionEditor({
     <>
       <div className="proposal-draft-layout">
         <div className={`proposal-draft-main ${compact ? "is-compact" : ""}`}>
+          {!hideToolbar ? (
           <div className="proposal-draft-toolbar mb-1.5 flex flex-wrap items-center justify-between gap-2">
             <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-zo-text-muted">
               Draft content
@@ -297,6 +314,7 @@ export function DraftSectionEditor({
               </span>
             </div>
           </div>
+          ) : null}
 
           <div className="proposal-draft-textarea-shell">
             {previewMode && value ? (

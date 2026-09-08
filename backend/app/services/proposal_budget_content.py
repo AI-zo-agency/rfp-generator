@@ -907,20 +907,15 @@ def _sync_narrative_total(
 
 
 def _phase_breakdown_from_lines(budget: ProposalBudget) -> str:
-    """Build phase dollars from line items — source of truth for client narrative."""
-    phase_sums: dict[str, float] = {}
-    order: list[str] = []
-    for item in budget.line_items or []:
-        if item.extended is None:
-            continue
-        phase, _desc = _client_line_label(item)
-        if phase not in phase_sums:
-            order.append(phase)
-            phase_sums[phase] = 0.0
-        phase_sums[phase] += float(item.extended)
-    if len(order) < 2:
+    """Build phase dollars from line items — same rollup as Fee Detail by Phase."""
+    rows = _rollup_phase_fee_rows(budget)
+    parts = [
+        f"{label} ({_usd(amount)})"
+        for label, _scope, amount in rows
+        if amount is not None
+    ]
+    if len(parts) < 2:
         return ""
-    parts = [f"{label} ({_usd(phase_sums[label])})" for label in order]
     if len(parts) == 2:
         return f"Fee phases: {parts[0]} and {parts[1]}."
     return "Fee phases: " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
@@ -1820,19 +1815,7 @@ def _append_fee_detail_by_phase_table(
         subtotal += direct
 
     table_total = round(subtotal, 2)
-    if fees > 0 and not travel_already and not include_residual_direct:
-        # Prefer canonical professional fees when the rollup is fee-only.
-        fee_only_rows = [
-            (p, s, a)
-            for p, s, a in rows
-            if "travel" not in p.casefold() and "reimburs" not in p.casefold()
-        ]
-        fee_sum = round(
-            sum(float(a) for _, _, a in fee_only_rows if a is not None), 2
-        )
-        if abs(fee_sum - fees) <= max(1.0, fees * 0.02):
-            table_total = fees
-    elif fees > 0 and table_total <= 0:
+    if fees > 0 and table_total <= 0:
         table_total = round(fees + (direct if include_residual_direct else 0), 2)
     lines.append(f"| **Total** | | **{_usd(table_total)}** |")
     lines.append("")

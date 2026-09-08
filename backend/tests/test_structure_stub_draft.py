@@ -65,21 +65,130 @@ class StructureStubDraftTests(unittest.TestCase):
         self.assertTrue(section_is_rfp_draft_stub(sec))
         self.assertTrue(section_needs_presubmit_fill(sec))
         brief = _stub_draft_brief(sec)
-        self.assertIn("real offer letter", brief.casefold())
+        self.assertIn("thorough", brief.casefold())
+        self.assertIn("deep", brief.casefold())
+        self.assertIn("zö agency voice", brief.casefold())
 
-        real = (
+        thin = (
             "Dear Tseng College Selection Committee,\n\n"
             "We are pleased to submit this proposal for Paid Media Campaigns.\n\n"
             "Sincerely,\nSonja Anderson\n"
             "[MANUAL FILL: authorized signature]\n"
             "[DESIGNER NOTE: Attach signed PDF]\n"
         )
+        self.assertTrue(cover_letter_lacks_letter_body(thin))
+        self.assertTrue(
+            section_is_rfp_draft_stub(
+                ProposalSection(
+                    id="rfp-cover-thin",
+                    title="Section 1 - Cover Letter",
+                    content=thin,
+                    status="generated",
+                )
+            )
+        )
+
+        real = (
+            "Dear Tseng College Selection Committee,\n\n"
+            "We are pleased to submit this proposal for Paid Media Campaigns "
+            "supporting Tseng College continuing education enrollment growth.\n\n"
+            "Your RFP asks for a partner who can plan, buy, and optimize paid media "
+            "across channels while staying accountable to enrollment outcomes. We "
+            "read that as a mandate for transparent media stewardship, clear creative "
+            "that speaks to adult learners, and reporting that ties spend to inquiries "
+            "and starts — not vanity metrics.\n\n"
+            "zö agency brings verified place-branding and public-sector campaign "
+            "experience from our knowledge base, a first-person working style, and a "
+            "compensation model that keeps media pass-through honest. We will staff "
+            "this engagement with the team outlined in this proposal and keep Sonja "
+            "Anderson as your authorized firm contact for decisions that need the "
+            "owner's signature.\n\n"
+            "Firm contact: Z'Onion Creative Group LLC — details in Section 1.3 "
+            "Business Information (phone and email from companyfacts).\n\n"
+            "We acknowledge any addenda issued with this solicitation and confirm "
+            "Sonja Anderson, Founder / Agency Director, is authorized to represent "
+            "the firm on this offer. We look forward to partnering with Tseng College "
+            "on enrollment-driving paid media that stays honest about spend and results.\n\n"
+            "Sincerely,\n"
+            "Sonja Anderson\n"
+            "Founder / Agency Director\n"
+            "[MANUAL FILL: authorized signature / date]\n"
+            "[DESIGNER NOTE: Attach signed PDF]\n"
+        )
         self.assertFalse(cover_letter_lacks_letter_body(real))
         self.assertFalse(
             section_is_rfp_draft_stub(
-                ProposalSection(id="rfp-cover", title="Cover Letter", content=real)
+                ProposalSection(
+                    id="rfp-cover-real",
+                    title="Section 1 - Cover Letter",
+                    content=real,
+                    status="generated",
+                )
             )
         )
+
+    def test_cover_letter_company_block_chrome_needs_fill(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            cover_letter_lacks_letter_body,
+            section_needs_presubmit_fill,
+            stub_fill_landed,
+        )
+
+        chrome = (
+            "## Cover Letter / Cover Page\n\n"
+            "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+            "this header matches the RFP TOC label only.]"
+        )
+        self.assertTrue(cover_letter_lacks_letter_body(chrome))
+        sec = ProposalSection(
+            id="rfp-structure-company-block-header",
+            title="Cover Letter / Cover Page",
+            content=chrome,
+            status="generated",
+        )
+        self.assertTrue(section_is_rfp_draft_stub(sec))
+        self.assertTrue(section_needs_presubmit_fill(sec))
+        still_chrome = ProposalSection(
+            id="rfp-cover",
+            title="Cover Letter / Cover Page",
+            content=chrome + "\n\nExtra chrome words here for length only.",
+            status="generated",
+        )
+        self.assertFalse(stub_fill_landed(sec, still_chrome))
+        letter = ProposalSection(
+            id="rfp-cover",
+            title="Cover Letter / Cover Page",
+            content=(
+                "Dear Dane County Selection Committee,\n\n"
+                "We are pleased to submit this proposal for Marketing Services "
+                "for Dane County Regional Airport.\n\n"
+                "Your solicitation asks for a partner who can strengthen airport "
+                "marketing with clear creative, accountable media, and reporting "
+                "tied to traveler and community outcomes. We read that as a mandate "
+                "for transparent stewardship, place-branding craft, and a working "
+                "relationship with county stakeholders — not generic agency filler.\n\n"
+                "zö agency brings verified public-sector and place-branding campaign "
+                "experience from our knowledge base, a first-person working style, and "
+                "a compensation model that keeps media pass-through honest. We will "
+                "staff this engagement with the team outlined in this proposal and "
+                "keep Sonja Anderson as your authorized firm contact for decisions "
+                "that need the owner's signature.\n\n"
+                "Firm contact: Z'Onion Creative Group LLC — details in Section 1.3 "
+                "Business Information (phone and email from companyfacts).\n\n"
+                "We acknowledge any addenda issued with this solicitation and confirm "
+                "Sonja Anderson, Founder / Agency Director, is authorized to represent "
+                "the firm on this offer. We look forward to supporting Dane County "
+                "Regional Airport with marketing that travelers notice and that "
+                "county stakeholders can trust.\n\n"
+                "Sincerely,\n"
+                "Sonja Anderson\n"
+                "Founder / Agency Director\n"
+                "[MANUAL FILL: authorized signature]\n"
+                "[DESIGNER NOTE: Attach signed PDF]\n"
+            ),
+            status="generated",
+        )
+        self.assertTrue(stub_fill_landed(sec, letter))
 
     def test_performance_stub_needs_presubmit_fill(self) -> None:
         from app.services.proposal_draft_structure_stubs import (

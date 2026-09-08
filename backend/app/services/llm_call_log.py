@@ -13,7 +13,7 @@ from app.services.rfp_repository import _connect, init_db as init_rfp_db
 
 logger = logging.getLogger(__name__)
 
-_RFP_COST_CACHE_TTL_S = 20.0
+_RFP_COST_CACHE_TTL_S = 2.0
 _rfp_cost_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _DDL = """
@@ -112,6 +112,9 @@ def record_llm_call(
             _insert_supabase(row)
         else:
             _insert_sqlite(row)
+        fid = str(row.get("rfp_id") or "").strip()
+        if fid:
+            _rfp_cost_cache.pop(fid, None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("llm_call_log record failed (non-fatal): %s", str(exc)[:240])
 

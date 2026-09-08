@@ -2433,6 +2433,15 @@ async def _run_phase3_drafting_inner(
     draft, layout_logs = apply_rfp_toc_layout(draft, specs)
     toc_logs.extend(layout_logs)
     try:
+        from app.services.proposal_fulfill_rfp_structure import clean_sidebar_titles_via_llm
+
+        draft, title_clean_logs = await clean_sidebar_titles_via_llm(draft)
+        toc_logs.extend(title_clean_logs)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as title_exc:  # noqa: BLE001
+        logger.warning("Phase 3 sidebar title clean skipped: %s", title_exc)
+    try:
         from app.services.proposal_table_of_contents import (
             fill_table_of_contents_in_draft,
         )

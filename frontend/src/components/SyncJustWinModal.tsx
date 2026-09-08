@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconSync } from "./ui/icons";
 import { ZoAmuletLoader } from "./ZoAmuletLoader";
@@ -48,6 +48,11 @@ export function SyncJustWinModal({
     message: string;
     finishedAt?: string;
   } | null>(null);
+  const syncingRef = useRef(false);
+
+  useEffect(() => {
+    syncingRef.current = syncing;
+  }, [syncing]);
 
   // The sync runs in the background on the server, so the POST only tells us it
   // started. Poll the job until it reports a terminal state before claiming
@@ -120,14 +125,36 @@ export function SyncJustWinModal({
     setMounted(true);
   }, []);
 
-  // Only reset form when modal opens
+  // Opening the button must show the date/tab picker — never auto-start a sync.
+  // Background progress lives in the floating job widget; if a real job is
+  // already running we only surface a note so Start Sync isn't a surprise 409.
   useEffect(() => {
-    if (open) {
-      resetForm();
-    }
+    if (!open) return;
+    if (syncingRef.current) return;
+
+    resetForm();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/justwin/status", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const job = (await res.json()) as { status?: string };
+        if (job.status === "running" && !cancelled) {
+          setStatusMessage(
+            "A JustWin sync is already running in the background. You can close this and keep working — progress shows in the job widget."
+          );
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [open, resetForm]);
 
-  // Handle overflow and escape key
+  // Handle overflow and escape key — Escape always closes; sync keeps running.
   useEffect(() => {
     if (!open) return;
 
@@ -135,7 +162,7 @@ export function SyncJustWinModal({
     document.body.style.overflow = "hidden";
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !syncing) onClose();
+      if (event.key === "Escape") onClose();
     };
 
     globalThis.addEventListener("keydown", onKeyDown);
@@ -143,7 +170,7 @@ export function SyncJustWinModal({
       document.body.style.overflow = previousOverflow;
       globalThis.removeEventListener("keydown", onKeyDown);
     };
-  }, [open, onClose, syncing]);
+  }, [open, onClose]);
 
   if (!open || !mounted) return null;
 
@@ -179,7 +206,9 @@ export function SyncJustWinModal({
         throw new Error(result.error || "Failed to start JustWin sync");
       }
 
-      setStatusMessage(`Fetching ${tabFilter} leads ${scope}...`);
+      setStatusMessage(
+        `Fetching ${tabFilter} leads ${scope}… You can close this and keep working.`
+      );
 
       const { rfpsFound, rfpsCreated, rfpsSkipped, pdfsDownloaded } = await waitForJob(
         result.jobId ?? ""
@@ -234,9 +263,7 @@ export function SyncJustWinModal({
         type="button"
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
         aria-label="Close dialog"
-        onClick={() => {
-          if (!syncing) onClose();
-        }}
+        onClick={onClose}
       />
 
       {/* Modal Dialog Body */}
@@ -265,10 +292,9 @@ export function SyncJustWinModal({
           <button
             type="button"
             onClick={onClose}
-            disabled={syncing}
-            className="shrink-0 rounded-lg border border-zo-border px-3 py-1.5 text-sm text-zo-text-muted transition-smooth hover:border-zo-orange hover:text-foreground disabled:opacity-30"
+            className="shrink-0 rounded-lg border border-zo-border px-3 py-1.5 text-sm text-zo-text-muted transition-smooth hover:border-zo-orange hover:text-foreground"
           >
-            Close
+            {syncing ? "Keep working" : "Close"}
           </button>
         </div>
 
@@ -434,6 +460,11 @@ export function SyncJustWinModal({
               </span>
             </div>
           )}
+          {!syncing && statusMessage && (
+            <div className="rounded-xl border border-zo-border bg-[var(--zo-bg-subtle,rgba(0,0,0,0.02))] px-4 py-3 text-sm text-zo-text-secondary">
+              {statusMessage}
+            </div>
+          )}
 
           {/* Success Banner */}
           {successResult && (
@@ -485,10 +516,13 @@ export function SyncJustWinModal({
             <button
               type="button"
               onClick={onClose}
-              disabled={syncing}
               className="zo-btn secondary text-xs"
             >
-              {successResult ? "Close" : "Cancel"}
+              {syncing
+                ? "Keep working"
+                : successResult
+                  ? "Close"
+                  : "Cancel"}
             </button>
             {!successResult && (
               <button

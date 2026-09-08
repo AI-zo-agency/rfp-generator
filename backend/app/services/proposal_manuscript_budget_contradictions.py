@@ -45,25 +45,49 @@ IS a contradiction (flag these):
 - PHASE TABLE vs ROLLUP: phase line items do not sum to stated subtotals/total.
 - CROSS-SECTION DOLLAR CLAIMS: one section states a total/fee that another
   section contradicts (different annual fee, different PM amount).
+- PHASE LABEL MISMATCH: Fee Detail / budget scope prose cites "Implementation
+  Phase N" (or equivalent) but the Implementation / Approach / Work Plan section
+  uses that same Phase N for DIFFERENT work. Example: budget Strategy row says
+  "Phase 1" while Implementation labels that same activity Phase 2, and Phase 1
+  is already covered by a Discovery fee line. Fix by rewriting the citation to
+  match the Implementation section's own phase names — do not invent new dollars.
+- ORPHAN WORKSTREAMS: Implementation / Approach describes a named phase (e.g.
+  Launch) or staffing prose promises recurring account management (weekly /
+  monthly / quarterly status, escalation) with NO Fee Detail home AND no
+  explicit "included in … phase fee" statement. Prefer rewrite to name which
+  fee line absorbs it, or verify/human for Sonja when a dedicated Account &
+  Project Management line may be missing on purpose.
+- SIDEBAR / SECTION NAME DRIFT: the same deliverable is labeled differently in
+  Budget vs Implementation vs TOC (e.g. Cost Proposal vs File #5 Cost Proposal
+  [Required] [PDF]) in a way that would confuse a reviewer — rewrite to the
+  short clean shared name where safe.
 
 NOT a contradiction (do NOT flag):
 - Intentionally aggressive Low-tier pricing when prose says so and math is consistent
-- Client media pass-through separate from agency fee
+- Client media pass-through separate from agency fee (commission line may show "—")
 - [VERIFY] / [PRICING FLAG] tags already marking Sonja review
 - Duplicated Who We Are prose (Senior Editor dedupe handles)
 - Company profile facts (team size, email — fact-contradiction pass handles)
+- Media Planning & Placement left as "—" pending disclosed media budget when the
+  narrative already says commission is 15% of media and dollars are TBD
 
 fixAction rules:
-- rewrite: safe deterministic fix (merge duplicate PM scope into one line,
-  align hours table footnote with fee, fix rollup wording) — provide precise
-  rewriteInstruction naming exact line items / cells / sections
-- verify: add [PRICING FLAG: … — Sonja review required] when strategic pricing
-  choice may be deliberate but a reviewer would notice the gap
+- rewrite (PREFERRED for critical/major): fix the wording now — merge duplicate
+  PM scope into one line, align hours footnotes, fix rollup wording, correct
+  phase citations to match the authoritative Implementation/Approach naming,
+  add one clarifying "included in …" clause, align deliverable names.
+  Provide precise rewriteInstruction naming exact line items / cells / phrases.
+  Put sectionId on the tab that must change (usually Budget for Fee Detail
+  citations). Set relatedSectionId to the authoritative tab (e.g. Implementation).
+- verify: ONLY when Sonja must choose a pricing strategy (e.g. whether to add a
+  dedicated Account & Project Management line vs fold into phases) — add
+  [PRICING FLAG: … — Sonja review required]
 - human: cannot auto-fix without Sonja (major scope/pricing strategy)
 
 NEVER invent dollar amounts not supported by the manuscript or pricing guide excerpt.
-When merging double-billed PM lines, prefer ONE $7,500 coordination line with
-combined scope — do not add new totals.
+When merging double-billed PM lines, prefer ONE coordination line with combined
+scope — do not add new totals. When phases are mislabeled, fix the citation —
+do not change dollar amounts.
 
 Return ONLY JSON:
 {
@@ -222,10 +246,15 @@ async def _rewrite_section_for_budget_contradiction(
         return section, False, ""
     is_budget = _is_budget_section(section, draft)
     system = (
-        "You fix ONE proposal section to resolve a cross-section budget contradiction.\n"
+        "You fix ONE proposal section to resolve a cross-section contradiction.\n"
+        "Apply the rewriteInstruction exactly. Prefer fixing citations, phase "
+        "labels, 'included in …' clauses, and deliverable names over inventing "
+        "new dollars.\n"
         "Preserve markdown tables and designer-ready layout.\n"
-        "For Budget/Pricing: keep phase tables intact; merge duplicate PM/planning "
-        "lines into ONE scoped line OR differentiate scopes clearly — never double-count.\n"
+        "For Budget/Pricing: keep Fee Detail phase tables intact; merge duplicate "
+        "PM/planning lines into ONE scoped line OR differentiate scopes clearly — "
+        "never double-count. Align phase citations to the related section's "
+        "authoritative phase naming when provided.\n"
         "Do NOT invent dollar amounts. Use figures already in the draft or pricing guide.\n"
         + _PATCH_CONTRACT
     )
@@ -380,49 +409,112 @@ async def run_manuscript_budget_contradiction_pass(
     rewrites_attempted = 0
 
     for finding in findings:
-        idx = by_id.get(finding.section_id)
-        if idx is None:
-            continue
-        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
-            result.logs.append(
-                f"{finding.section_id}: skipped budget-contradiction rewrite — "
-                "protected static company-fact section (likely false positive)"
-            )
-            continue
-        section = sections[idx]
-        if finding.fix_action == "rewrite" and finding.severity in {"critical", "major"}:
-            if rewrites_attempted >= rewrite_budget:
+        target_ids = [finding.section_id]
+        if (
+            finding.related_section_id
+            and finding.related_section_id != finding.section_id
+            and finding.related_section_id in by_id
+        ):
+            instr = (finding.rewrite_instruction or "").casefold()
+            if any(
+                tok in instr
+                for tok in (
+                    "both",
+                    "also update",
+                    "also rewrite",
+                    "related section",
+                )
+            ):
+                target_ids.append(finding.related_section_id)
+
+        for target_id in target_ids:
+            idx = by_id.get(target_id)
+            if idx is None:
+                continue
+            if target_id in STATIC_COMPANY_FACT_SECTION_IDS:
+                result.logs.append(
+                    f"{target_id}: skipped budget-contradiction rewrite — "
+                    "protected static company-fact section (likely false positive)"
+                )
+                continue
+            section = sections[idx]
+            if finding.fix_action == "rewrite" and finding.severity in {
+                "critical",
+                "major",
+            }:
+                if rewrites_attempted >= rewrite_budget:
+                    if target_id not in fixed_ids:
+                        sections[idx] = _append_pricing_flag(sections[idx], finding)
+                        result.pricing_flags_added += 1
+                        result.logs.append(
+                            f"{target_id}: lean rewrite cap — PRICING FLAG — "
+                            f"{finding.manuscript_contradiction[:120]}"
+                        )
+                    continue
+                rewrites_attempted += 1
+                updated, changed, notes = await _rewrite_section_for_budget_contradiction(
+                    section,
+                    finding=finding,
+                    draft=draft.model_copy(update={"sections": sections}),
+                    rfp=rfp,
+                    pricing_guide=pricing_guide,
+                    canonical_budget=canonical_budget,
+                )
+                if changed:
+                    sections[idx] = updated
+                    result.rewrites_applied += 1
+                    fixed_ids.add(target_id)
+                    result.logs.append(
+                        f"{target_id}: FIXED budget cross-section by rewrite"
+                        + (f" — {notes}" if notes else "")
+                    )
+                    continue
+                # Rewrite failed — retry once with a stronger instruction before flagging.
+                if rewrites_attempted < rewrite_budget:
+                    rewrites_attempted += 1
+                    stronger = BudgetContradictionFinding(
+                        section_id=finding.section_id,
+                        section_title=finding.section_title,
+                        related_section_id=finding.related_section_id,
+                        canonical_fact=finding.canonical_fact,
+                        manuscript_contradiction=finding.manuscript_contradiction,
+                        severity=finding.severity,
+                        fix_action="rewrite",
+                        rewrite_instruction=(
+                            (finding.rewrite_instruction or "").strip()
+                            or (
+                                "Align this section's phase citations, fee-home "
+                                "statements, and deliverable names with the "
+                                "authoritative wording elsewhere in the manuscript. "
+                                "Do not change dollar amounts."
+                            )
+                        ),
+                    )
+                    updated, changed, notes = await _rewrite_section_for_budget_contradiction(
+                        sections[idx],
+                        finding=stronger,
+                        draft=draft.model_copy(update={"sections": sections}),
+                        rfp=rfp,
+                        pricing_guide=pricing_guide,
+                        canonical_budget=canonical_budget,
+                    )
+                    if changed:
+                        sections[idx] = updated
+                        result.rewrites_applied += 1
+                        fixed_ids.add(target_id)
+                        result.logs.append(
+                            f"{target_id}: FIXED budget cross-section by rewrite retry"
+                            + (f" — {notes}" if notes else "")
+                        )
+                        continue
+            if target_id in fixed_ids:
+                continue
+            if finding.fix_action in {"verify", "human"} or finding.severity != "minor":
                 sections[idx] = _append_pricing_flag(sections[idx], finding)
                 result.pricing_flags_added += 1
                 result.logs.append(
-                    f"{finding.section_id}: lean rewrite cap — PRICING FLAG — "
-                    f"{finding.manuscript_contradiction[:120]}"
+                    f"{target_id}: PRICING FLAG — {finding.manuscript_contradiction[:120]}"
                 )
-                continue
-            rewrites_attempted += 1
-            updated, changed, notes = await _rewrite_section_for_budget_contradiction(
-                section,
-                finding=finding,
-                draft=draft,
-                rfp=rfp,
-                pricing_guide=pricing_guide,
-                canonical_budget=canonical_budget,
-            )
-            if changed:
-                sections[idx] = updated
-                result.rewrites_applied += 1
-                fixed_ids.add(finding.section_id)
-                result.logs.append(
-                    f"{finding.section_id}: FIXED budget cross-section by rewrite"
-                    + (f" — {notes}" if notes else "")
-                )
-                continue
-        if finding.fix_action in {"verify", "human"} or finding.severity != "minor":
-            sections[idx] = _append_pricing_flag(sections[idx], finding)
-            result.pricing_flags_added += 1
-            result.logs.append(
-                f"{finding.section_id}: PRICING FLAG — {finding.manuscript_contradiction[:120]}"
-            )
 
     result.draft = draft.model_copy(update={"sections": sections})
     result.unresolved_findings = [

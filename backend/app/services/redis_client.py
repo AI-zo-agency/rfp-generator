@@ -20,11 +20,28 @@ from __future__ import annotations
 import asyncio
 
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.core.config import settings
 
 _client: Redis | None = None
 _client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def reset_redis_client() -> None:
+    """Drop the cached client so the next call reconnects (or stays down)."""
+    global _client, _client_loop
+    _client = None
+    _client_loop = None
+
+
+def is_redis_unavailable(exc: BaseException) -> bool:
+    """True when Redis is not running / not reachable — not an app bug."""
+    return isinstance(
+        exc,
+        (RedisConnectionError, RedisTimeoutError, ConnectionError, OSError),
+    )
 
 
 def get_redis() -> Redis:

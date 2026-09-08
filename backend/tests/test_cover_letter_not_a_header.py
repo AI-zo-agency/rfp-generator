@@ -61,6 +61,42 @@ def test_wrapper_does_not_consume_the_cover_letter():
         )
 
 
+def test_repair_converts_mistitled_company_header_to_cover_stub():
+    from app.services.proposal_fulfill_rfp_structure import (
+        COMPANY_BLOCK_HEADER_ID,
+        repair_cover_letter_misused_as_company_header,
+    )
+    from app.services.proposal_draft_structure_stubs import (
+        cover_letter_lacks_letter_body,
+        section_needs_presubmit_fill,
+    )
+
+    draft = _draft()
+    draft.sections.insert(
+        0,
+        ProposalSection(
+            id=COMPANY_BLOCK_HEADER_ID,
+            title="Cover Letter / Cover Page",
+            content=(
+                "## Cover Letter / Cover Page\n\n"
+                "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+                "this header matches the RFP TOC label only.]"
+            ),
+            source="generated",
+            mode="write",
+            status="generated",
+        ),
+    )
+    out, logs = repair_cover_letter_misused_as_company_header(draft)
+    letter = next(s for s in out.sections if "cover letter" in (s.title or "").casefold())
+    assert letter.id != COMPANY_BLOCK_HEADER_ID
+    assert COMPANY_BLOCK_NOTE not in (letter.content or "").casefold()
+    assert cover_letter_lacks_letter_body(letter.content or "")
+    assert section_needs_presubmit_fill(letter)
+    assert any(s.id == COMPANY_BLOCK_HEADER_ID for s in out.sections)
+    assert any("converted mistitled" in line.casefold() for line in logs)
+
+
 def test_a_real_company_background_label_still_wraps():
     # The wrapper must keep working for what it is actually for.
     draft = _draft()
@@ -141,8 +177,16 @@ def test_cover_letter_is_not_a_company_identity_form():
 
 
 def test_a_real_company_identity_form_is_still_compressed():
+    # Content shape (identity field table, little else) — not the title string.
     assert is_rfp_company_identity_form_section(
         section_id="rfp-closing-company-info",
         title="Company Information Form",
-        content="x",
+        content=(
+            "| Field | Response |\n| --- | --- |\n"
+            "| Legal Name | Z'Onion Creative Group LLC |\n"
+            "| DBA | zö agency |\n"
+            "| FEIN | 46-1234567 |\n"
+            "| Office Address | Bend, OR |\n"
+            "| Contact Phone | (541) 350-2778 |\n"
+        ),
     )

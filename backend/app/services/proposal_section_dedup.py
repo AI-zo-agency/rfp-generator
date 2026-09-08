@@ -1620,15 +1620,8 @@ def compress_redundant_reference_deliverables(
     return kept, logs
 
 
-_COMPANY_IDENTITY_FORM_TITLE_RE = re.compile(
-    r"(?i)\b(?:"
-    r"offeror\s+identification|vendor\s+identification|"
-    r"proposer\s+identification|contractor\s+identification|"
-    r"company\s+information|firm\s+information|"
-    r"business\s+information\s+form|identification\b.{0,40}\bform"
-    r")\b"
-)
-
+# Structural identity-field labels only (form schema), not RFP topic synonym maps.
+# Used to measure whether a tab is a 1.3 dump vs a multi-ask questionnaire.
 _IDENTITY_FIELD_HINTS = (
     "legal name",
     "dba",
@@ -1666,6 +1659,76 @@ def _extract_markdown_field_table(content: str) -> str:
     return ""
 
 
+def _strip_markdown_tables(content: str) -> str:
+    keep: list[str] = []
+    in_table = False
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            in_table = True
+            continue
+        if in_table:
+            in_table = False
+            if not stripped:
+                continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
+def _non_identity_substance_words(content: str) -> int:
+    """Words outside identity field tables / heading chrome.
+
+    Principle: a multi-ask questionnaire (capabilities, insurance, references…)
+    leaves substantial non-table prose or non-identity table rows. A pure
+    Offeror Identification dump is almost only an identity field table.
+    No title keyword deny-lists — content shape decides.
+    """
+    from app.services.proposal_section_quality import word_count
+
+    body = content or ""
+    # Drop every markdown table; leftover is prose / lists / Q&A outside tables.
+    without_tables = _strip_markdown_tables(body)
+    prose_lines: list[str] = []
+    for raw in without_tables.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        cf = line.casefold()
+        if cf.startswith("#"):
+            continue
+        if cf.startswith("[manual fill") or cf.startswith("[designer note"):
+            continue
+        if cf.startswith("[verify") or cf.startswith("*company identity"):
+            continue
+        if cf.startswith("see **") and "business information" in cf:
+            continue
+        if "complete any form-specific fields below" in cf:
+            continue
+        if "not a second company profile" in cf:
+            continue
+        prose_lines.append(line)
+
+    # Extra table rows whose labels are not identity fields count as other asks.
+    extra_row_words = 0
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        if set(line) <= set("|-: \t"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells:
+            continue
+        label = cells[0].casefold()
+        if label in {"field", "detail", "response", "item", "question"}:
+            continue
+        if any(hint in label for hint in _IDENTITY_FIELD_HINTS):
+            continue
+        extra_row_words += word_count(" ".join(cells))
+
+    return word_count("\n".join(prose_lines)) + extra_row_words
+
+
 def user_asks_remove_company_identity_dump(user_message: str) -> bool:
     """True for 'remove this company info' on Offeror / Company Identification forms."""
     text = (user_message or "").strip()
@@ -1697,38 +1760,39 @@ def is_rfp_company_identity_form_section(
     title: str,
     content: str,
 ) -> bool:
-    """True for RFP Offeror/Company Information forms that restate Section 1.3."""
+    """True when this tab's *content* is only a Section 1.3 identity dump.
+
+    Principle (no per-RFP title keyword lists):
+    - Never touch static Section 1.x or cover-letter / transmittal tabs.
+    - Compress only when the body is an identity field table (legal name / DBA /
+      FEIN / contacts / addresses) with little substance beyond that.
+    - Multi-ask vendor questionnaires keep their body even if they also name
+      the firm — content shape, not the word \"vendor\" / \"questionnaire\".
+    """
     from app.services.proposal_outline_dedup import title_is_transmittal_deliverable
 
     sid = (section_id or "").casefold()
     if sid.startswith("section-1-") or sid == "section-1-business-info":
         return False
-    # A cover letter names the contact person, RFP number and proposer — the
-    # same fields an identity form carries. That overlap made it match here and
-    # get compressed to "See 1.3 — Business Information", so the letter was
-    # never written. A transmittal is authored prose, never an identity form.
     if title_is_transmittal_deliverable(title):
         return False
-    title_cf = (title or "").casefold()
-    if _COMPANY_IDENTITY_FORM_TITLE_RE.search(title or ""):
-        return _looks_like_company_identity_table(content) or "form" in title_cf
-    # Untitled-as-form but body is clearly a company identity FIELD table
-    if _looks_like_company_identity_table(content) and any(
-        token in title_cf
-        for token in ("company", "offeror", "vendor", "proposer", "identification")
-    ):
-        return True
-    return False
+    body = content or ""
+    if not _looks_like_company_identity_table(body):
+        return False
+    # Substantial non-identity ask → not a pure 1.3 dump.
+    if _non_identity_substance_words(body) >= 40:
+        return False
+    return True
 
 
 def compress_rfp_company_identity_forms(
     draft: Any,
 ) -> tuple[Any, list[str]]:
-    """Collapse Offeror/Company Information form tabs that restate Business Info.
+    """Collapse pure Business-Info dumps into cross-ref + synced 1.3 field table.
 
-    Keeps the required form tab (buyer often needs Section 4 Form returned) but
-    replaces a second full company dump with a cross-reference + the same field
-    table owned by Section 1.3 — never a second Who We Are / Business Info essay.
+    Buyer often still needs the form tab returned. Never leave it empty chrome
+    only — keep the Section 1.3 FIELD|RESPONSE table so evaluators see facts.
+    Never wipe multi-ask questionnaires (see ``is_rfp_company_identity_form_section``).
     """
     from app.models.proposal import ProposalDraft, ProposalSection
 
@@ -1751,17 +1815,27 @@ def compress_rfp_company_identity_forms(
         return draft, []
 
     biz_title = business.title or "1.3 — Business Information"
-
+    synced_table = _extract_markdown_field_table(business.content or "")
     pointer = (
         f"*Company identity for this form matches **{biz_title}** "
         "(same legal name, contacts, and addresses — not a second company profile).*\n\n"
     )
-    compact = (
-        pointer
-        + f"See **{biz_title}** for legal name, DBA, FEIN, contacts, and addresses. "
-        "Complete any form-specific fields below only if this RFP requires them here "
-        "and they are not already in that tab."
-    )
+    if synced_table:
+        compact = (
+            pointer
+            + f"Synced from **{biz_title}**:\n\n"
+            + synced_table
+            + "\n\n"
+            + "Complete any additional form-specific fields below only if this RFP "
+            "requires them here and they are not already in that tab."
+        )
+    else:
+        compact = (
+            pointer
+            + f"See **{biz_title}** for legal name, DBA, FEIN, contacts, and addresses. "
+            "Complete any form-specific fields below only if this RFP requires them here "
+            "and they are not already in that tab."
+        )
 
     logs: list[str] = []
     sections: list[ProposalSection] = []
@@ -1775,24 +1849,96 @@ def compress_rfp_company_identity_forms(
         ):
             sections.append(section)
             continue
-        # Already compressed to cross-ref only (no duplicated field table)
+        # Already compacted with synced table (or legacy pointer) — leave alone
+        # unless it is pointer-only chrome with no field table (repair path).
         if (
             "matches **" in body
             and "not a second company profile" in body.casefold()
-            and not _looks_like_company_identity_table(body)
+            and ("|" in body and "---" in body)
         ):
             sections.append(section)
             continue
-        # Skip thin stubs / MANUAL FILL only
         if word_count(body) < 40 and "[manual fill" in body.casefold():
             sections.append(section)
             continue
         sections.append(section.model_copy(update={"content": compact, "status": "generated"}))
         changed = True
         logs.append(
-            f"{section.title or section.id}: compressed company-identity form → "
-            f"cross-ref {biz_title} (no second Business Information dump)"
+            f"{section.title or section.id}: compressed pure identity dump → "
+            f"cross-ref {biz_title} + synced field table"
         )
+
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
+
+
+_POINTER_ONLY_MARKERS = (
+    "not a second company profile",
+    "complete any form-specific fields below",
+)
+
+
+def repair_emptied_vendor_questionnaires(
+    draft: Any,
+) -> tuple[Any, list[str]]:
+    """Restore draftable stubs when compress left pointer chrome with no table.
+
+    Legacy compress wiped multi-ask tabs to See-1.3 text only. Any non-1.3 tab
+    that is still pointer-only (no FIELD table) gets a draft stub — principle
+    based on content shape, not the word \"questionnaire\".
+    """
+    from app.models.proposal import ProposalDraft, ProposalSection
+
+    if not isinstance(draft, ProposalDraft):
+        return draft, []
+
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        sid = (section.id or "").casefold()
+        title = section.title or ""
+        body = section.content or ""
+        body_cf = body.casefold()
+        if sid.startswith("section-1-"):
+            sections.append(section)
+            continue
+        pointer_only = all(m in body_cf for m in _POINTER_ONLY_MARKERS)
+        has_table = "|" in body and "---" in body
+        if pointer_only and not has_table:
+            stub = (
+                f"## {title.strip() or 'Required form'}\n\n"
+                f"[MANUAL FILL: Draft this RFP-required section — {title.strip()}]\n\n"
+                "RFP-required outline:\n"
+                "- Answer every item this tab asks in a FIELD | RESPONSE table "
+                "(or clear Q&A rows)\n"
+                "- Pull legal name / contacts / addresses from Section 1.3 — "
+                "do not invent FEIN, phones, or addresses\n"
+                "- For other asks (capabilities, insurance, references, "
+                "compliance), use KB / companyfacts; [VERIFY: …] or a Sonja "
+                "handoff when KB has no answer — never invent Compliant\n"
+                "- One short cross-ref to 1.3 for shared identity fields is fine; "
+                "this tab must still stand alone for evaluators\n"
+            )
+            sections.append(
+                section.model_copy(
+                    update={
+                        "content": stub,
+                        "status": "generated",
+                        "mode": "write",
+                        "required": True,
+                        "word_target": max(section.word_target or 0, 400),
+                    }
+                )
+            )
+            logs.append(
+                f"{title or section.id}: restored pointer-only form tab "
+                "(was emptied by identity compress)"
+            )
+            changed = True
+            continue
+        sections.append(section)
 
     if not changed:
         return draft, logs

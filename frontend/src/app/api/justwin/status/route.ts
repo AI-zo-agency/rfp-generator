@@ -43,31 +43,36 @@ export async function GET() {
   }
 
   try {
-    const backendRes = await fetch(`${BACKEND_URL}/api/v1/sync-jobs/latest`);
-    if (backendRes.ok) {
-      const data = (await backendRes.json()) as { job?: Record<string, unknown> };
-      if (data.job) {
-        const meta = parseSyncMeta(data.job.error);
-        const rfpsSkipped =
-          typeof data.job.rfps_skipped === "number"
-            ? data.job.rfps_skipped
-            : meta.rfpsSkipped;
-        const rfpsCreated =
-          typeof data.job.rfps_created === "number"
-            ? data.job.rfps_created
-            : meta.rfpsCreated;
-        return NextResponse.json({
-          id: data.job.id,
-          status: data.job.status,
-          startedAt: data.job.started_at,
-          finishedAt: data.job.finished_at,
-          rfpsFound: data.job.rfps_found,
-          rfpsCreated,
-          rfpsSkipped,
-          pdfsDownloaded: data.job.pdfs_downloaded,
-          error: meta.error,
-        });
-      }
+    // Prefer an in-flight job so the global widget / modal stay accurate even
+    // if "latest" briefly lags after enqueue.
+    const [runningRes, latestRes] = await Promise.all([
+      fetch(`${BACKEND_URL}/api/v1/sync-jobs/running`, { cache: "no-store" }),
+      fetch(`${BACKEND_URL}/api/v1/sync-jobs/latest`, { cache: "no-store" }),
+    ]);
+    const runningData = runningRes.ok
+      ? ((await runningRes.json()) as { job?: Record<string, unknown> })
+      : { job: undefined };
+    const latestData = latestRes.ok
+      ? ((await latestRes.json()) as { job?: Record<string, unknown> })
+      : { job: undefined };
+    const job = runningData.job ?? latestData.job;
+    if (job) {
+      const meta = parseSyncMeta(job.error);
+      const rfpsSkipped =
+        typeof job.rfps_skipped === "number" ? job.rfps_skipped : meta.rfpsSkipped;
+      const rfpsCreated =
+        typeof job.rfps_created === "number" ? job.rfps_created : meta.rfpsCreated;
+      return NextResponse.json({
+        id: job.id,
+        status: job.status,
+        startedAt: job.started_at,
+        finishedAt: job.finished_at,
+        rfpsFound: job.rfps_found,
+        rfpsCreated,
+        rfpsSkipped,
+        pdfsDownloaded: job.pdfs_downloaded,
+        error: meta.error,
+      });
     }
   } catch {
     // If backend isn't reached, return idle

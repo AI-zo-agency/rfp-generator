@@ -29,6 +29,29 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_redis_down_logged = False
+
+
+def _swallow_redis_down(exc: BaseException) -> bool:
+    """If Redis is simply not running, log once and let callers use in-memory jobs.
+
+    Draft save/load still goes to Supabase; this only covers job-lock tracking.
+    """
+    global _redis_down_logged
+    from app.services.redis_client import is_redis_unavailable, reset_redis_client
+
+    if not is_redis_unavailable(exc):
+        return False
+    reset_redis_client()
+    if not _redis_down_logged:
+        logger.warning(
+            "Redis is not reachable (%s). Proposal save/load is unchanged; "
+            "job tracking uses the in-process store until Redis is up.",
+            exc,
+        )
+        _redis_down_logged = True
+    return True
+
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 # Both mean "still in flight, holds the lock, blocks a duplicate start" —
@@ -172,11 +195,15 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
 async def get_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> ProposalJobRecord | None:
     key = lock_key or rfp_id
     if settings.celery_enabled:
-        record = await _redis_get_job(rfp_id, key)
-        if record is not None and record.status not in _IN_FLIGHT:
-            # Job finished — drop the lock so the next start isn't blocked.
-            await _redis_clear_job(key)
-        return record
+        try:
+            record = await _redis_get_job(rfp_id, key)
+            if record is not None and record.status not in _IN_FLIGHT:
+                # Job finished — drop the lock so the next start isn't blocked.
+                await _redis_clear_job(key)
+            return record
+        except Exception as exc:  # noqa: BLE001
+            if not _swallow_redis_down(exc):
+                raise
     async with _lock:
         return _jobs.get(key)
 
@@ -184,7 +211,11 @@ async def get_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> Propo
 async def _redis_clear_job(lock_key: str) -> None:
     from app.services.redis_client import get_redis
 
-    await get_redis().delete(_redis_key(lock_key))
+    try:
+        await get_redis().delete(_redis_key(lock_key))
+    except Exception as exc:  # noqa: BLE001
+        if not _swallow_redis_down(exc):
+            raise
 
 
 async def is_proposal_job_running(rfp_id: str, *, lock_key: str | None = None) -> bool:
@@ -217,9 +248,18 @@ async def start_proposal_job(
     """
     key = lock_key or rfp_id
     if settings.celery_enabled and celery_dispatch is not None:
-        return await _start_celery_job(
-            rfp_id, job_type, celery_dispatch, replace=replace, lock_key=key
-        )
+        try:
+            return await _start_celery_job(
+                rfp_id, job_type, celery_dispatch, replace=replace, lock_key=key
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not _swallow_redis_down(exc):
+                raise
+            logger.warning(
+                "Celery dispatch skipped for %s:%s; running the job in this process.",
+                rfp_id,
+                job_type,
+            )
     return await _start_inmemory_job(
         rfp_id, job_type, coro_factory, replace=replace, lock_key=key
     )

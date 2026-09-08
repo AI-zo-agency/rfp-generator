@@ -1,8 +1,8 @@
-"""Celery app for proposal-pipeline and Go/No-Go background jobs.
+"""Celery app for proposal-pipeline, Go/No-Go, and JustWin sync background jobs.
 
 Only used when REDIS_URL is configured (settings.celery_enabled) — local dev
 without Redis stays on the in-process asyncio.create_task path in
-proposal_job_runner.py. See that module for the dispatch branch and
+proposal_job_runner.py / sync_jobs.py. See that module for the dispatch branch and
 docs/plans/twinkling-beaming-whale.md for the full migration design.
 """
 
@@ -223,4 +223,45 @@ def run_go_no_go_task(self, rfp_id: str) -> None:
         from app.api.v1.rfps import _mark_analyze_failed
 
         _mark_analyze_failed(rfp_id, f"Go/No-Go analysis failed: {exc}")
+        raise
+
+
+@celery_app.task(bind=True, name="justwin.run_sync")
+def run_justwin_sync_task(
+    self, job_id: str, target_date: str = "", tab: str = "all"
+) -> dict:
+    """Run Playwright JustWin sync off the API process (same runner as before).
+
+    Keeps uvicorn free so the user can draft proposals / navigate while Chromium
+    scrapes leads. Job status still lives in sync_jobs (Supabase).
+    """
+    from app.services import supabase_db as sb
+    from app.services.justwin_sync import run_justwin_sync
+
+    try:
+        return run_justwin_sync(job_id, target_date, tab)
+    except Exception as exc:
+        logger.exception("Celery JustWin sync failed for job %s", job_id)
+        if job_id != "manual" and sb.use_supabase_db():
+            try:
+                running = sb.get_running_sync_job()
+                if running and running.get("id") == job_id:
+                    sb.finish_sync_job(
+                        job_id,
+                        status="failed",
+                        rfps_found=0,
+                        pdfs_downloaded=0,
+                        error=str(exc),
+                    )
+            except Exception:  # noqa: BLE001
+                try:
+                    sb.finish_sync_job(
+                        job_id,
+                        status="failed",
+                        rfps_found=0,
+                        pdfs_downloaded=0,
+                        error=str(exc),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         raise

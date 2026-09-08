@@ -778,6 +778,117 @@ def finish_sync_job(
 # uvicorn --reload kills in-flight Playwright tasks but leaves sync_jobs.status=
 # "running", so the modal spins forever. Expire zombies on read/trigger.
 _STALE_SYNC_JOB_MINUTES = 8
+_JUSTWIN_CELERY_TASK_KEY = "zo:justwin_sync_task:{job_id}"
+# After enqueue, Celery may sit in PENDING briefly before a worker reserves it.
+_CELERY_ORPHAN_GRACE_SECONDS = 45
+
+
+def remember_justwin_celery_task(job_id: str, celery_task_id: str) -> None:
+    """Map sync job → Celery task id so status polls can tell real vs zombie."""
+    from app.core.config import settings
+
+    if not settings.celery_enabled or not job_id or not celery_task_id:
+        return
+    try:
+        import redis
+
+        client = redis.from_url(settings.redis_url, decode_responses=True)
+        client.set(
+            _JUSTWIN_CELERY_TASK_KEY.format(job_id=job_id),
+            celery_task_id,
+            ex=60 * 60 * 2,
+        )
+    except Exception:  # noqa: BLE001 — never block sync on tracking
+        logger.warning(
+            "Could not store JustWin Celery task id for job %s", job_id, exc_info=True
+        )
+
+
+def _celery_task_still_alive(celery_task_id: str) -> bool | None:
+    """True/False if Celery reported a state; None if inspect/result unavailable."""
+    try:
+        from celery.result import AsyncResult
+
+        from app.celery_app import celery_app
+
+        state = AsyncResult(celery_task_id, app=celery_app).state
+        # PENDING = queued or unknown; STARTED/RETRY = worker has it.
+        return state in {"PENDING", "STARTED", "RECEIVED", "RETRY"}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def expire_orphaned_celery_sync_jobs(
+    *,
+    grace_seconds: int = _CELERY_ORPHAN_GRACE_SECONDS,
+) -> list[str]:
+    """Fail DB 'running' rows whose Celery task is gone / never started.
+
+    Without this, a reload or a worker that wasn't up yet leaves status=running
+    and the UI toast says 'Syncing…' even though Celery is idle.
+    """
+    from app.core.config import settings
+
+    if not settings.celery_enabled:
+        return []
+
+    client = _get_client()
+    result = (
+        client.table("sync_jobs")
+        .select("id,started_at")
+        .eq("status", "running")
+        .execute()
+    )
+    rows = _handle_response(result.data, context="expire_orphaned_celery_sync_jobs")
+    if not rows:
+        return []
+
+    try:
+        import redis
+
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+    except Exception:  # noqa: BLE001
+        return []
+
+    now = datetime.now(timezone.utc)
+    expired: list[str] = []
+    for row in rows:
+        job_id = str(row.get("id") or "")
+        if not job_id:
+            continue
+        started_raw = row.get("started_at") or ""
+        try:
+            started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except ValueError:
+            started = now - timedelta(seconds=grace_seconds + 1)
+        age_sec = (now - started).total_seconds()
+        if age_sec < grace_seconds:
+            continue
+
+        task_id = r.get(_JUSTWIN_CELERY_TASK_KEY.format(job_id=job_id))
+        alive = _celery_task_still_alive(task_id) if task_id else False
+        if alive:
+            continue
+
+        finish_sync_job(
+            job_id,
+            status="failed",
+            rfps_found=0,
+            pdfs_downloaded=0,
+            error=(
+                "JustWin sync was marked running but no Celery worker task is "
+                "active — often the worker was restarted or never picked up the "
+                "job. Retry sync."
+            ),
+        )
+        try:
+            r.delete(_JUSTWIN_CELERY_TASK_KEY.format(job_id=job_id))
+        except Exception:  # noqa: BLE001
+            pass
+        expired.append(job_id)
+    return expired
 
 
 def expire_stale_running_sync_jobs(
@@ -829,6 +940,7 @@ def expire_stale_running_sync_jobs(
 def get_latest_sync_job() -> dict[str, Any] | None:
     def _read() -> dict[str, Any] | None:
         expire_stale_running_sync_jobs()
+        expire_orphaned_celery_sync_jobs()
         client = _get_client()
         result = (
             client.table("sync_jobs")
@@ -846,6 +958,7 @@ def get_latest_sync_job() -> dict[str, Any] | None:
 def get_running_sync_job() -> dict[str, Any] | None:
     def _read() -> dict[str, Any] | None:
         expire_stale_running_sync_jobs()
+        expire_orphaned_celery_sync_jobs()
         client = _get_client()
         result = (
             client.table("sync_jobs")

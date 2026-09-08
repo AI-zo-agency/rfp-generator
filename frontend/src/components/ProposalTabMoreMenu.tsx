@@ -43,23 +43,16 @@ export function ProposalTabMoreMenu({
     <div ref={rootRef} className="relative shrink-0">
       <button
         type="button"
-        className="inline-flex min-h-[2.125rem] items-center gap-1 rounded-lg border border-zo-border/80 bg-white px-2.5 py-1.5 text-xs font-semibold text-zo-text-secondary hover:bg-[#fafbfc] disabled:cursor-not-allowed disabled:opacity-50"
+        className="proposal-editor-action"
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        More
-        <svg
-          className={`h-3.5 w-3.5 ${open ? "rotate-180" : ""}`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2.5}
-          aria-hidden
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
         </svg>
+        More
       </button>
       {open ? (
         <div

@@ -1,4 +1,7 @@
-"""RFP Offeror/Company Information forms must not restate Section 1.3."""
+"""RFP Offeror/Company Information forms must not restate Section 1.3.
+
+Classification is by content shape (identity dump vs multi-ask), not title keywords.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +11,63 @@ from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_section_dedup import (
     compress_rfp_company_identity_forms,
     is_rfp_company_identity_form_section,
+    repair_emptied_vendor_questionnaires,
 )
 
 
 class CompanyIdentityFormCompressTests(unittest.TestCase):
-    def test_offeror_form_compressed_to_business_info_crossref(self) -> None:
+    def test_multi_ask_questionnaire_is_not_compressed(self) -> None:
+        """Extra non-identity asks keep the tab — regardless of the word vendor."""
+        body = (
+            "## Vendor Questionnaire\n\n"
+            "| Field | Response |\n"
+            "| --- | --- |\n"
+            "| Legal Name | Z'Onion Creative Group LLC |\n"
+            "| DBA | zö agency |\n"
+            "| Contact Phone | (541) 350-2778 |\n"
+            "| Years providing airport marketing | 8 |\n"
+            "| Describe your media buying approach | We plan flights from audience data "
+            "and report weekly on CPA and brand lift. |\n"
+            "| List three relevant public-sector campaigns | Hillsboro Library; "
+            "Umatilla; Northglenn. |\n"
+            "| Insurance: can you meet the RFP GL limit? | See Section 1.5; confirm on COI. |\n"
+        )
+        self.assertFalse(
+            is_rfp_company_identity_form_section(
+                section_id="rfp-vq",
+                title="Vendor Questionnaire",
+                content=body,
+            )
+        )
+
+    def test_pointer_only_tab_is_restored_without_title_keywords(self) -> None:
+        body = (
+            "*Company identity for this form matches **1.3 — Business Information** "
+            "(same legal name, contacts, and addresses — not a second company profile).*\n\n"
+            "See **1.3 — Business Information** for legal name, DBA, FEIN, contacts, "
+            "and addresses. Complete any form-specific fields below only if this RFP "
+            "requires them here and they are not already in that tab."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-vq",
+            sections=[
+                ProposalSection(
+                    id="rfp-vq",
+                    title="Supplier Intake Sheet",
+                    content=body,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        out, logs = repair_emptied_vendor_questionnaires(draft)
+        self.assertTrue(logs)
+        fixed = out.sections[0].content or ""
+        self.assertIn("Draft this RFP-required section", fixed)
+        self.assertIn("FIELD | RESPONSE", fixed)
+        self.assertNotIn("not a second company profile", fixed.casefold())
+
+    def test_pure_identity_dump_compressed_with_synced_table(self) -> None:
         draft = ProposalDraft(
             rfpId="rfp-co-dup",
             sections=[
@@ -63,9 +118,9 @@ class CompanyIdentityFormCompressTests(unittest.TestCase):
         body = form.content or ""
         self.assertIn("1.3 — Business Information", body)
         self.assertIn("not a second company profile", body.casefold())
-        self.assertIn("See **1.3 — Business Information**", body)
-        # Must not duplicate the company field table — 1.3 owns that data.
-        self.assertNotIn("| Legal Name |", body)
+        # Synced table stays so the buyer form is not empty chrome.
+        self.assertIn("| Legal Name |", body)
+        self.assertIn("Z'Onion Creative Group LLC", body)
         self.assertEqual(form.title, "20 Offeror Identification (Section 4 Form)")
 
     def test_remove_company_info_ask_detected(self) -> None:
@@ -94,7 +149,6 @@ class CompanyIdentityFormCompressTests(unittest.TestCase):
             content=("We are a women-owned agency. " * 80),
             word_target=420,
         )
-        # Improve-pin + long section must still send remove asks to Claude.
         self.assertFalse(
             should_run_designer_compact_for_chat(
                 user_message="here remove this company info",
