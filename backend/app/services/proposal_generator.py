@@ -2614,6 +2614,19 @@ async def _run_phase3_drafting_inner(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 hollow KB fill skipped for %s: %s", rfp_id, exc)
 
+    # Content-first closing repair: real addenda/tables; flags only for gaps;
+    # scrub TOC-echo titles; fix nested [date] inside MANUAL FILL tags.
+    try:
+        from app.services.proposal_closing_hollow_repair import (
+            repair_hollow_closing_sections,
+        )
+
+        draft, closing_logs = repair_hollow_closing_sections(draft)
+        for line in closing_logs[:12]:
+            logger.info("Phase 3 closing hollow repair: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 closing hollow repair skipped for %s: %s", rfp_id, exc)
+
     await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(

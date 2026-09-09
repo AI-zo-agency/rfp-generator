@@ -655,6 +655,30 @@ def enforce_outline_section_cap(
 
 
 _STRONG_BOUNDARY_MARKERS = (";", " — ", " – ", " (", ":")
+_TOC_LEADER_RE = re.compile(r"[\.·•…]{2,}")
+_TOC_TRAILING_PAGE_RE = re.compile(r"\s+\d{1,3}\s*$")
+
+
+def _strip_toc_leader_noise(title: str) -> str:
+    """Drop RFP TOC leader dots / trailing page numbers from a tab title.
+
+    Example: ``10 Proposal Completion Checklist……………………….. 49``
+    → ``Proposal Completion Checklist``.
+    """
+    text = (title or "").strip()
+    if not text:
+        return ""
+    had_leaders = bool(_TOC_LEADER_RE.search(text))
+    text = _TOC_LEADER_RE.sub(" ", text)
+    text = " ".join(text.split())
+    if had_leaders or _TOC_TRAILING_PAGE_RE.search(text):
+        stripped = _TOC_TRAILING_PAGE_RE.sub("", text).strip()
+        if re.search(r"[A-Za-z]{3,}", stripped):
+            text = stripped
+    if had_leaders:
+        # TOC index prefix only when leaders were present (avoid "Section 10 …").
+        text = re.sub(r"^\d{1,3}[\.\)]?\s+", "", text).strip()
+    return text
 
 
 # A letter or summary the offeror WRITES to the buyer. It may quote the same
@@ -707,6 +731,11 @@ def humanize_outline_title(title: str, *, max_chars: int = 72) -> str:
 
     # Collapse internal whitespace early so length checks are accurate.
     text = " ".join(text.split())
+
+    # RFP TOC echo: "10 Proposal Completion Checklist……………………….. 49"
+    text = _strip_toc_leader_noise(text)
+    if not text:
+        return ""
 
     if len(text) > max_chars:
         cut_at = -1

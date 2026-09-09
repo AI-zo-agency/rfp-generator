@@ -59,6 +59,65 @@ def sanitize_bare_bracket_tag_words(content: str) -> str:
     return _BARE_BRACKET_TAG_WORD_RE.sub(r"\1", content or "")
 
 
+_HANDOFF_TAG_OPEN_RE = re.compile(
+    r"\[((?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY)\s*:)",
+    re.I,
+)
+
+
+def sanitize_nested_brackets_in_handoff_tags(content: str) -> str:
+    """Turn nested ``[date]`` / ``[Name]`` inside handoff tags into ``(date)``.
+
+    Tag scanners match to the first ``]``, so
+    ``[MANUAL FILL: confirm addendum dated [date]]`` splits mid-tag and breaks
+    the UI chip. Convert inner square brackets to parentheses so the outer
+    tag closes on the final ``]``.
+    """
+    text = content or ""
+    if "[" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        match = _HANDOFF_TAG_OPEN_RE.search(text, i)
+        if not match:
+            out.append(text[i:])
+            break
+        out.append(text[i : match.start()])
+        j = match.end()
+        body: list[str] = []
+        closed = False
+        while j < n:
+            ch = text[j]
+            if ch == "[":
+                k = j + 1
+                inner: list[str] = []
+                while k < n and text[k] != "]":
+                    inner.append(text[k])
+                    k += 1
+                if k < n and text[k] == "]":
+                    body.append("(")
+                    body.extend(inner)
+                    body.append(")")
+                    j = k + 1
+                    continue
+                body.append(ch)
+                j += 1
+                continue
+            if ch == "]":
+                out.append("[" + match.group(1) + "".join(body) + "]")
+                i = j + 1
+                closed = True
+                break
+            body.append(ch)
+            j += 1
+        if not closed:
+            out.append(text[match.start() :])
+            break
+    return "".join(out)
+
+
 class _VerifyTagMatch:
     """Duck-types the slice of re.Match every caller here actually uses."""
 

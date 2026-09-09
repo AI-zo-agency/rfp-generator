@@ -133,7 +133,9 @@ Rules:
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
 12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise, designer-ready layout within wordTarget.
 13. LENGTH & FORMAT (designer-compact): Stay at or under wordTarget but cover EVERY RFP ask.
-    Short lead + tables/bullets/rows + [DESIGNER NOTE: …] for layout. Dense tables carry
+    WRITE the markdown table/bullets/rows first. [DESIGNER NOTE: …] only supplements layout —
+    never replaces a required table/matrix/checklist/form. Use [MANUAL FILL]/[VERIFY] only
+    when KB/RFP has nothing for that field — never a tag-only tab. Dense tables carry
     full coverage — never omit requirements to shorten. No essay walls.
 14. LEGAL ATTESTATIONS: NEVER state E-Verify enrollment, good-faith-effort / DVBE / MWBE
     vendor-outreach waivers, mandatory-conference attendance, "no conflicts of interest",

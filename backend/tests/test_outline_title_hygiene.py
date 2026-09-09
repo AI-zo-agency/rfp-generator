@@ -42,6 +42,14 @@ class TestHumanizeOutlineTitle(unittest.TestCase):
         if cut_len < len(_LONG_SENTENCE):
             self.assertIn(_LONG_SENTENCE[cut_len], " ;(:")
 
+    def test_toc_leader_dots_and_page_number_stripped(self):
+        result = humanize_outline_title(
+            "10 Proposal Completion Checklist……………………….. 49"
+        )
+        self.assertEqual(result, "Proposal Completion Checklist")
+        self.assertNotIn("…", result)
+        self.assertNotIn("49", result)
+
     def test_machine_key_addenda(self):
         self.assertEqual(
             humanize_outline_title("addenda_acknowledgment"), "Addenda Acknowledgment"

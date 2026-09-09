@@ -20,6 +20,15 @@ _REFERENCES_BELOW_RE = re.compile(
 _HAS_REFERENCE_CONTACT_RE = re.compile(
     r"(?i)(\bphone\b|\bemail\b|\bcontact\b|@|\(\d{3}\)|\d{3}[-.\s]\d{3})",
 )
+_DESIGNER_NOTE_TAG_RE = re.compile(
+    r"\[DESIGNER\s+NOTE\s*:([^\]]*)\]",
+    re.I,
+)
+_TABLEISH_NOTE_RE = re.compile(
+    r"\b(table|matrix|grid|columns?|rows?|checklist|swimlane|gantt|timeline)\b",
+    re.I,
+)
+_HAS_MD_TABLE_RE = re.compile(r"(?m)^\s*\|.+\|\s*$")
 
 
 def _md_cells(line: str) -> list[str]:
@@ -104,6 +113,73 @@ def normalize_addenda_handoff_tables(content: str) -> tuple[str, bool]:
     return "\n".join(out), changed
 
 
+def normalize_hollow_addenda_content(content: str, *, title: str = "") -> tuple[str, bool]:
+    """Replace tag-only / broken addenda stubs with a clean acknowledgment table.
+
+    Writes real content first; keeps one MANUAL FILL only for portal confirmation
+    when KB/RFP does not state issued addenda.
+    """
+    body = content or ""
+    title_cf = (title or "").casefold()
+    if "addend" not in title_cf and "addend" not in body[:500].casefold():
+        return body, False
+    if "None issued / none received" in body:
+        updated, changed = normalize_addenda_handoff_tables(body)
+        return updated, changed
+
+    updated, changed = normalize_addenda_handoff_tables(body)
+    if changed:
+        return updated, True
+
+    words = len(body.split())
+    mfill = len(re.findall(r"\[MANUAL\s+FILL\b", body, re.I))
+    broken_nested = bool(re.search(r"\[MANUAL\s+FILL:[^\]]*\[", body, re.I))
+    has_real_ack = bool(
+        re.search(
+            r"(?i)(none issued|no addenda|acknowledged\s+all|addendum\s+no\.?\s*\d)",
+            body,
+        )
+    )
+    has_ack_table = bool(re.search(r"(?i)addendum\s+number", body)) and "|" in body
+    if has_ack_table and has_real_ack and not broken_nested:
+        return body, False
+    # Hollow: tiny stub, tag-heavy, or nested-bracket corruption — no real ack.
+    if (
+        broken_nested
+        or words < 70
+        or (mfill >= 1 and words < 140 and not has_real_ack)
+        or (mfill >= 2 and not has_real_ack)
+    ):
+        return _CLEAN_ADDENDA.strip() + "\n", True
+    return body, False
+
+
+def ensure_table_when_designer_note_promises_one(content: str) -> tuple[str, bool]:
+    """If a DESIGNER NOTE promises a table/matrix but body has no ``|`` table, add one.
+
+    Keeps the note as a layout supplement. Does not invent RFP facts — one
+    MANUAL FILL row flags fields KB did not supply.
+    """
+    body = content or ""
+    if not body.strip():
+        return body, False
+    if _HAS_MD_TABLE_RE.search(body):
+        return body, False
+    notes = list(_DESIGNER_NOTE_TAG_RE.finditer(body))
+    promising = [m for m in notes if _TABLEISH_NOTE_RE.search(m.group(1) or "")]
+    if not promising:
+        return body, False
+    first = promising[0]
+    stub = (
+        "| Item | Detail |\n"
+        "| --- | --- |\n"
+        "| [MANUAL FILL: Sonja — row from this tab's RFP ask / work plan] | "
+        "[MANUAL FILL: Sonja — concrete answer; leave flag only if KB has nothing] |\n\n"
+    )
+    new_body = body[: first.start()] + stub + body[first.start() :]
+    return new_body, True
+
+
 def references_section_is_hollow(content: str) -> bool:
     """True when the tab claims references but has no contact details."""
     body = (content or "").strip()
@@ -148,10 +224,15 @@ def repair_hollow_references_section(content: str, *, title: str = "") -> tuple[
 def repair_hollow_closing_sections(
     draft: "ProposalDraft",
 ) -> tuple["ProposalDraft", list[str]]:
-    """Deterministic repair for hollow references + addenda MANUAL FILL spam."""
+    """Deterministic repair for hollow references + addenda + designer-note gaps."""
     from datetime import datetime, timezone
 
     from app.models.proposal import ProposalSection
+    from app.services.proposal_manual_flags import (
+        sanitize_bare_bracket_tag_words,
+        sanitize_nested_brackets_in_handoff_tags,
+    )
+    from app.services.proposal_outline_dedup import humanize_outline_title
 
     if not draft.sections:
         return draft, []
@@ -164,17 +245,41 @@ def repair_hollow_closing_sections(
         title = section.title or ""
         title_cf = title.casefold()
         updated = body
-        if "addend" in title_cf or "addend" in body[:300].casefold():
-            updated, did = normalize_addenda_handoff_tables(updated)
+        new_title = title
+
+        cleaned_title = humanize_outline_title(title) if title else ""
+        if cleaned_title and cleaned_title != title:
+            new_title = cleaned_title
+            logs.append(f"{title or section.id}: scrubbed TOC leader noise from title")
+
+        if updated.strip():
+            nested = sanitize_nested_brackets_in_handoff_tags(updated)
+            nested = sanitize_bare_bracket_tag_words(nested)
+            if nested != updated:
+                logs.append(f"{new_title or section.id}: sanitized nested handoff brackets")
+                updated = nested
+
+        if "addend" in title_cf or "addend" in (new_title or "").casefold() or "addend" in body[:300].casefold():
+            updated, did = normalize_hollow_addenda_content(updated, title=new_title or title)
             if did:
-                logs.append(f"{title or section.id}: cleaned addenda MANUAL FILL table")
-        if "reference" in title_cf:
-            updated, did = repair_hollow_references_section(updated, title=title)
+                logs.append(f"{new_title or section.id}: cleaned hollow/addenda MANUAL FILL stub")
+
+        if "reference" in title_cf or "reference" in (new_title or "").casefold():
+            updated, did = repair_hollow_references_section(updated, title=new_title or title)
             if did:
-                logs.append(f"{title or section.id}: hollow references → Sonja handoff")
-        if updated != body:
+                logs.append(f"{new_title or section.id}: hollow references → Sonja handoff")
+
+        updated, did_table = ensure_table_when_designer_note_promises_one(updated)
+        if did_table:
+            logs.append(
+                f"{new_title or section.id}: designer note promised table — inserted markdown table shell"
+            )
+
+        if updated != body or new_title != title:
             changed = True
-            sections.append(section.model_copy(update={"content": updated}))
+            sections.append(
+                section.model_copy(update={"content": updated, "title": new_title})
+            )
         else:
             sections.append(section)
 

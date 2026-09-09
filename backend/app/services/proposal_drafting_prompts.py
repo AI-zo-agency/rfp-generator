@@ -120,11 +120,12 @@ wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable s
 
 **Every tab:**
 1. **Lead** — 1–3 tight sentences: what this tab proves.
-2. **Body** — markdown tables, short bullets, or labeled rows matched to THIS tab's job (matrix, Q&A, references, phases, checklist). One row per RFP item when there are many asks. Same fact once — not in prose AND bullets.
-3. **Visual handoff** — when layout beats prose (timeline, comparison, grid, icons): one specific [DESIGNER NOTE: …] with columns/data. Do not write paragraphs a graphic would replace.
-4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs. ANTI-RFP-ECHO: never open by telling the client what they asked for; open with the proposal answer.
+2. **Body** — WRITE REAL CONTENT: markdown tables, short bullets, or labeled rows for THIS tab's job (matrix, Q&A, references, phases, checklist, forms, addenda, method). One row per RFP item when there are many asks. Same fact once — not in prose AND bullets.
+3. **Gaps only** — use [MANUAL FILL: Sonja — …] or [VERIFY: …] **only** for a field where KB / RFP / companyfacts has nothing usable. Never ship a tab that is mostly tags or a designer note with no body. Never invent facts to fill a gap.
+4. **Visual handoff** — optional [DESIGNER NOTE: …] that **supplements** the markdown table/bullets already written. NEVER replace a required table, matrix, checklist, form, or Q&A with only a designer note.
+5. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs. ANTI-RFP-ECHO: never open by telling the client what they asked for; open with the proposal answer.
 
-Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density.
+Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables carry density; designer notes never stand in for missing tables.
 
 ## WRITE-TIME MINDFULNESS (cheaper to write right than to repair)
 

@@ -18,7 +18,10 @@ from app.services import llm
 from app.services.proposal_draft_structure_stubs import (
     content_looks_like_instructional_checklist as _looks_like_instructional_checklist,
 )
-from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
+from app.services.proposal_manual_flags import (
+    sanitize_bare_bracket_tag_words,
+    sanitize_nested_brackets_in_handoff_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -506,7 +509,9 @@ async def _llm_fill_section(
     content = str((raw or {}).get("content") or "").strip()
     if not content or len(content) < 40:
         return None
-    content = sanitize_bare_bracket_tag_words(content)
+    content = sanitize_nested_brackets_in_handoff_tags(
+        sanitize_bare_bracket_tag_words(content)
+    )
     if _looks_like_instructional_checklist(content):
         logger.warning(
             "Missing-answers fill for %s wrote a to-do checklist instead of "
