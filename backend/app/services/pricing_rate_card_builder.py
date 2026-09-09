@@ -35,9 +35,37 @@ _SINGLE_RE = re.compile(
 _HOURLY_RE = re.compile(
     r"(?P<label>(?:Senior|Junior|Associate|Lead|Principal)?\s*"
     r"(?:Strategist|Designer|Developer|Copywriter|Account\s+Manager|"
-    r"Project\s+Manager|Media\s+Buyer|Producer)[^\n$]{0,40}?)"
+    r"Agency\s+Director|Art\s+Director|Creative\s+Director|"
+    r"Project\s+Manager|Media\s+Buyer|Producer|Digital\s+Team|"
+    r"Programming|Executive|Finance|Contractor)[^\n$]{0,40}?)"
     r"\$?(?P<amt>[\d,]+(?:\.\d+)?)\s*/\s*h(?:r|our)",
     re.IGNORECASE,
+)
+
+# Role / classification billable column in KB rate tables (any doc):
+# | Account Manager | $275.00 | $85.00 | $50.00 |
+# First money column only — never Internal / Raw floor.
+_ROLE_BILLABLE_ROW_RE = re.compile(
+    r"(?m)^\s*\|\s*\*{0,2}(?P<label>[^|\n]{2,50}?)\*{0,2}\s*\|\s*"
+    r"\$\s*(?P<amt>[\d,]+(?:\.\d+)?)\b"
+)
+
+_ROLE_BILLABLE_SKIP_LABELS = frozenset(
+    {
+        "role",
+        "roles",
+        "labor category",
+        "labor categories",
+        "classification",
+        "billable rate",
+        "billable rate (usd)",
+        "billable rates",
+        "internal rate",
+        "internal rate with benefits, taxes, and costs",
+        "raw floor cost",
+        "raw floor",
+        "usd",
+    }
 )
 
 # Markdown table format from 00_Guide_Pricing.docx OCR/index:
@@ -210,6 +238,83 @@ def _extract_markdown_table_rates(
     return added
 
 
+def _extract_agency_role_billable_rates(
+    text: str,
+    *,
+    source_doc: str,
+    rates: list[PricingRate],
+    seen: set[str],
+) -> int:
+    """Parse KB billable $/hr-by-role table rows (first money column only)."""
+    body = text or ""
+    windows: list[str] = []
+    # Prefer the concrete role table when present — do not stop at the first
+    # incidental "billable rate" mention inside a long 00_Guide_Pricing paste.
+    table_hit = re.search(
+        r"(?is)(?:\|\s*\*?Role\*?\s*\|[^\n]*Billable[^\n]*\n(?:\|[^\n]+\n){3,})"
+        r"|(?:Account\s+Manager\s*\|\s*\$?\s*[\d,]+)",
+        body,
+    )
+    if table_hit:
+        start = max(0, table_hit.start() - 200)
+        end = min(len(body), table_hit.end() + 2500)
+        windows.append(body[start:end])
+    for match in re.finditer(
+        r"(?is)(?:agency\s+role\s+rates|labor\s+cost\s+table|"
+        r"role\s+rates?\s*(?:&|and)?\s*cost).{0,8000}",
+        body,
+    ):
+        windows.append(match.group(0))
+    if not windows:
+        if re.search(r"(?i)\b(account\s+manager|agency\s+director|copywriter)\b", body):
+            windows = [body]
+        else:
+            return 0
+
+    added = 0
+    for window in windows:
+        for match in _ROLE_BILLABLE_ROW_RE.finditer(window):
+            label = re.sub(r"\s+", " ", match.group("label")).strip(" -–—·•*")
+            label_cf = label.casefold()
+            if not label or label_cf in _ROLE_BILLABLE_SKIP_LABELS:
+                continue
+            if "internal" in label_cf or "raw floor" in label_cf:
+                continue
+            if re.fullmatch(r"[\d\s\-–—$.,]+", label):
+                continue
+            # Skip markdown separator / header debris.
+            if set(label) <= set("-: "):
+                continue
+            amt = _parse_money(match.group("amt"))
+            # Role billables are hourly market rates — reject menu-sized fees.
+            if amt is None or amt < 75 or amt > 750:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", label_cf).strip("-")[:40]
+            rate_id = f"role-hourly-{slug}"
+            if rate_id in seen:
+                continue
+            seen.add(rate_id)
+            rates.append(
+                PricingRate(
+                    rateId=rate_id,
+                    service=label,
+                    tier="Average",
+                    unit="hour",
+                    amount=amt,
+                    amountLow=amt,
+                    amountHigh=amt,
+                    menuId="",
+                    sourceDoc=source_doc or "KB labor/role billable rates",
+                    confidence=0.95,
+                    notes="billable rate from KB role/labor table (not internal/floor)",
+                )
+            )
+            added += 1
+    if added:
+        logger.info("pricing_rate_card_role_billable_extract rates=%s", added)
+    return added
+
+
 def build_pricing_rate_card_from_guide_text(
     guide_text: str,
     *,
@@ -238,6 +343,12 @@ def build_pricing_rate_card_from_guide_text(
     )
     if table_count:
         logger.info("pricing_rate_card_table_extract rates=%s", table_count)
+
+    role_count = _extract_agency_role_billable_rates(
+        text, source_doc=source_doc, rates=rates, seen=seen
+    )
+    if role_count:
+        logger.info("pricing_rate_card_role_rates rates=%s", role_count)
 
     for match in _RANGE_RE.finditer(text):
         menu = match.group("menu")

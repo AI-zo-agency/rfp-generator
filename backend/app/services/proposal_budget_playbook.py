@@ -17,11 +17,40 @@ BUDGET_EXPLAIN_ADVISORY_RULES = """=== BUDGET EXPLAIN MODE (mandatory when user 
 - Separate valid reasoning (model, tier, pass-through, qualifying language) from invalid lines — list both honestly.
 - If KB excerpts are missing, say pricing guide was not retrieved — do not invent guide ranges."""
 
+BUDGET_COMPLIANCE_ADVISORY_RULES = """=== BUDGET / COST RFP COMPLIANCE (Check RFP / meet the RFP / gaps) ===
+Hard rules — never conflate separate RFP asks:
+
+1. FEE METHOD ≠ RATE SCHEDULE. Language allowing retainer, hourly, hybrid, phased,
+   or NTE fees answers HOW the buyer may be billed. It does NOT waive a separate
+   ask for a complete hourly rate schedule by classification / labor category /
+   role, option-year rates, or stated assumptions (travel, materials, software
+   licenses, stock media, subconsultant markup). Treat those as independent
+   mandatory deliverables when the RFP states them.
+
+2. CITE EXACT WORDING. Quote the RFP clause. Never invent section titles (e.g. do
+   not rename Term/Budget language as "Compensation" unless that word appears).
+   Prefer the BUDGET / COST instrument excerpt and HARD FLAGS over memory.
+
+3. PHASED / FIXED-FEE ONLY IS NOT ENOUGH when an hourly classification schedule
+   is also required — flag that as a high-priority responsiveness gap, same tier
+   as a missing cost table format.
+
+4. RATES FROM KB ONLY. Do not invent $/hr. If the draft lacks a required rate
+   schedule, search the packed KB pricing + labor/role billable excerpts (cite
+   source filenames) — never fabricate classifications or dollars, and never use
+   Internal Rate / Raw floor columns for the client schedule.
+
+5. When HARD FLAGS list a mandatory hourly schedule / assumptions ask, open with
+   that gap — do not lead with "fee method is flexible so rates are optional."
+"""
+
 BUDGET_PLAYBOOK_CANONICAL = """=== ZÖ PRICING PLAYBOOK (mandatory for budget/fee work) ===
 
 1. Pricing model first — before line items
    - No fee method / innovation invited (e.g. SRIA) → service-menu from Pricing Guide, not default hourly.
-   - RFP asks hourly → work/labor-category rates from 00_Guide_Pricing only. Never invent named ZO person $/hr (not in KB).
+   - RFP asks hourly / rate schedule by classification → billable $/hr from KB
+     labor/role rate excerpts (and 00_Guide_Pricing labor rows when present).
+     Never invent named ZO person $/hr; never use Internal/Raw floor columns.
    - Media placement → pass-through immediately, not agency revenue.
    - Phased RFP → phase subtotals (discovery → strategy → execution), not a flat annual menu only.
 
@@ -63,22 +92,30 @@ OPTION_C_CHAT_POLICY = """=== OPTION C — CHAT / REVISE ENFORCEMENT ===
 - Otherwise apply safe playbook edits and explain tradeoffs in the assistant reply when you push back.
 """
 
-BUDGET_FREEFORM_NARRATIVE_RULES = """=== BUDGET FREEFORM (Cost tab narrative edit) ===
-You MAY improve writing, clarity, Scope cell wording, and layout.
+BUDGET_FREEFORM_NARRATIVE_RULES = """=== BUDGET FREEFORM (Cost tab — surgical edit) ===
+Obey the user's verbatim ask with the SMALLEST change. Prefer editing one table/section.
+
+You MAY:
+- add/rename/reorder columns or rows the user asked for
+- clarify Scope cell wording / layout
+- pull person/role names from KB roster / MasterTemplate / bios when the ask needs names
+  (Name cells: verified person name only, otherwise "—" — NEVER put MANUAL FILL / VERIFY /
+   "Needs your input" / "Confirm before submit" inside a rate-table cell)
+
 You MUST NOT:
+- delete or blank the Hourly Rate Schedule billable $ rows that already exist
+- replace a filled Hourly Rate Schedule with MANUAL FILL / "confirm before submit" prose
+- invent person names (no Jax / fake roster) — unknown → "—"
 - invent new dollar amounts, rates, hourly figures, or line items
 - change any Fee / Amount / Total cell away from the CANONICAL BUDGET OBJECT
+- rewrite Fee Detail by Phase when the user only asked about the Hourly Rate Schedule
 - add Investment Framing Component|Share|Amount mix tables when Fee Detail by Phase exists
 - reverse-engineer fees to hit a target total
 - paraphrase Investment Framing, Scope Protection, Reimbursable Expenses, or Revision Rounds
   — those four blocks are Pricing Guide USE VERBATIM (post-process restores them)
 
 Prefer ONE fee breakdown: **Fee Detail by Phase** from the ledger.
-If Investment Framing has a Component|Share percentage table that disagrees with Fee Detail, DELETE that mix table and keep Fee Detail.
 Preserve Proposed Investment totals exactly as in the canonical object.
-RFP-specific reimbursable notes (e.g. festival tech platforms) may be ADDED under
-Reimbursable Expenses after the verbatim categories — never replace mileage / photo /
-software license language.
 """
 
 _BUDGET_TOPIC_RE = re.compile(
@@ -222,7 +259,7 @@ def user_asks_budget_rebuild(text: str) -> bool:
         re.search(
             r"(?is)\b("
             r"fill|complete|reconcile|rebuild|regenerate|finish|fix|update|"
-            r"re-?run|rerun|redo"
+            r"re-?run|rerun|redo|add|paint|write|seed|generate|create|put"
             r")\b.{0,60}\b("
             r"budget|pricing|cost(?:\s+of)?(?:\s+base)?(?:\s+proposal)?|fee\s+table|"
             r"line\s+items?|cost\s+proposal"
@@ -232,8 +269,14 @@ def user_asks_budget_rebuild(text: str) -> bool:
             r"budget|pricing|cost(?:\s+of)?(?:\s+base)?(?:\s+proposal)?|fee\s+table|"
             r"cost\s+proposal"
             r")\b.{0,60}\b("
-            r"fill|complete|reconcile|rebuild|regenerate|finish|fix|update"
-            r")\b",
+            r"fill|complete|reconcile|rebuild|regenerate|finish|fix|update|"
+            r"add|paint|write|seed|generate|create"
+            r")\b"
+            r"|"
+            # Bare “add budget here” / “budget please” on the Cost tab.
+            r"^\s*(?:please\s+)?(?:add|put|paint|write|seed)\s+"
+            r"(?:the\s+)?(?:budget|cost(?:\s+proposal)?|pricing|fee\s+table)"
+            r"(?:\s+here)?(?:\s+for\s+this\s+rfp)?\s*$",
             raw,
         )
     )
@@ -480,15 +523,42 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
     return False
 
 
+def user_asks_hourly_rate_schedule_edit(text: str) -> bool:
+    """True when the user wants a classification / role hourly rate table added."""
+    raw = (text or "").casefold()
+    if not raw.strip():
+        return False
+    return bool(
+        re.search(
+            r"(?is)\b("
+            r"hourly\s+rate\s+(?:table|schedule|card)|"
+            r"rate\s+schedule|"
+            r"classification.{0,40}(?:rate|hourly)|"
+            r"(?:add|include|insert|put).{0,40}hourly|"
+            r"billable\s+rate|"
+            r"labor\s+(?:categor(?:y|ies)|rate)|"
+            r"role\s+rates?"
+            r")\b",
+            raw,
+        )
+    )
+
+
 def user_asks_budget_fee_structure_mutation(text: str) -> bool:
     """True when the ask would change fees/rates/line items (keep canonical refresh)."""
     raw = (text or "").casefold()
     if not raw.strip():
         return False
+    if user_asks_hourly_rate_schedule_edit(raw):
+        return True
     needles = (
         "hourly",
         "/hr",
         "per hour",
+        "rate schedule",
+        "classification",
+        "labor categor",
+        "billable rate",
         "line item",
         "line-item",
         "new phase fee",
@@ -510,6 +580,10 @@ def user_asks_budget_fee_structure_mutation(text: str) -> bool:
         "burdened rate",
         "add a line",
         "add line item",
+        "revise budget",
+        "revise the budget",
+        "revise pricing",
+        "revise fees",
     )
     return any(n in raw for n in needles)
 
@@ -592,7 +666,12 @@ def user_asks_budget_improve_if_needed(text: str) -> bool:
 
 
 def user_explicitly_asks_to_change_budget(text: str) -> bool:
-    """True only when the user asked to mutate Cost/Budget — not voice / RFP-check asks."""
+    """True when Cost-tab chat should freeform/fee-edit — not coverage-only.
+
+    Soft “improve / align with RFP” and voice-only asks stay on the RFP coverage
+    path (demand extract + safe fixes). Freeform is for substantive Cost edits
+    the user clearly wants rewritten (columns, prose, structure, etc.).
+    """
     raw = (text or "").strip()
     if not raw:
         return False
@@ -602,8 +681,6 @@ def user_explicitly_asks_to_change_budget(text: str) -> bool:
         return True
     if user_asks_budget_summary_reconcile(raw):
         return True
-    if user_asks_budget_narrative_freeform(raw):
-        return True
     from app.services.proposal_manual_flags import (
         is_manual_fill_request,
         user_asks_submit_handoff_fill,
@@ -611,37 +688,79 @@ def user_explicitly_asks_to_change_budget(text: str) -> bool:
 
     if is_manual_fill_request(raw) or user_asks_submit_handoff_fill(raw):
         return True
-    low = raw.casefold()
-    explicit = (
-        "change the budget",
-        "change budget",
-        "update the budget",
-        "update budget",
-        "update the fees",
-        "update fees",
-        "edit the fee",
-        "edit fees",
-        "rewrite the budget",
-        "rewrite budget",
-        "rebuild the budget",
-        "rebuild budget",
-        "replace the fee",
-        "fix the fee table",
-        "fix fee table",
-        "fix the cost",
-        "adjust the total",
-        "adjust pricing",
+    # Coverage / soft improve — not freeform steal.
+    if user_asks_budget_improve_if_needed(raw):
+        return False
+    if _budget_ask_is_soft_improve_only(raw):
+        return False
+    if _budget_ask_is_voice_only(raw):
+        return False
+    return budget_ask_allows_freeform_narrative(raw)
+
+
+def _budget_ask_is_soft_improve_only(text: str) -> bool:
+    raw = (text or "").strip()
+    return bool(
+        re.fullmatch(
+            r"(?is)\s*(?:please\s+)?improve\s+(?:this\s+)?(?:section|budget|cost)"
+            r"(?:\s+please)?\s*",
+            raw,
+        )
     )
-    return any(n in low for n in explicit)
+
+
+def _budget_ask_is_voice_only(text: str) -> bool:
+    """Voice/tone align without a fee or RFP-cost substance ask."""
+    raw = (text or "").casefold()
+    if not raw.strip():
+        return False
+    if user_asks_budget_improve_if_needed(raw):
+        return False
+    if user_asks_budget_fee_structure_mutation(raw):
+        return False
+    if user_asks_budget_rebuild(raw) or user_asks_global_cost_rebuild(raw):
+        return False
+    return bool(
+        re.search(
+            r"(?is)"
+            r"\b("
+            r"zo\s*voice|zö\s*voice|brand\s*voice|"
+            r"in[- ]?voice|style\s*pass|"
+            r"sound\s+like\s+zö|sound\s+like\s+zo"
+            r")\b"
+            r"|"
+            r"\balign\b.{0,160}\bvoice\b"
+            r"|"
+            r"\bvoice\b.{0,60}\balign\b"
+            r"|"
+            r"^\s*(?:align\s+with\s+)?(?:zö|zo)\s+agency'?s?\s+(?:established\s+)?"
+            r"voice\s*$",
+            raw,
+        )
+    )
 
 
 def budget_ask_allows_freeform_narrative(text: str) -> bool:
-    """Cost-tab freeform only for explicit Terms/layout asks — never soft Improve/voice."""
-    if user_asks_budget_fee_structure_mutation(text):
+    """Cost-tab freeform for substantive non-fee asks — clients phrase freely.
+
+    Do NOT grow an allowlist of layout keywords. Freeform + Supermemory is the
+    default for real edits; fee rebuilds stay canonical; soft improve / align-RFP
+    / voice stay on the coverage path.
+    """
+    raw = (text or "").strip()
+    if not raw:
         return False
-    if user_asks_budget_rebuild(text) or user_asks_global_cost_rebuild(text):
+    if user_asks_budget_fee_structure_mutation(raw):
         return False
-    return user_asks_budget_narrative_freeform(text)
+    if user_asks_budget_rebuild(raw) or user_asks_global_cost_rebuild(raw):
+        return False
+    if user_asks_budget_improve_if_needed(raw):
+        return False
+    if _budget_ask_is_soft_improve_only(raw):
+        return False
+    if _budget_ask_is_voice_only(raw):
+        return False
+    return True
 
 
 def dollar_amount_tokens(text: str) -> set[str]:
@@ -688,10 +807,371 @@ def ledger_dollar_tokens(budget: ProposalBudget | None) -> set[str]:
     return tokens
 
 
+def _extract_h2_block(text: str, heading_needle: str) -> str:
+    """Return an ## section whose heading contains needle (casefold), else ""."""
+    needle = (heading_needle or "").casefold()
+    if not needle or not (text or "").strip():
+        return ""
+    lines = (text or "").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and needle in line.casefold():
+            start = i
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def _replace_h2_block(text: str, heading_needle: str, new_block: str) -> str:
+    """Replace matching ## section with new_block, or append if missing."""
+    needle = (heading_needle or "").casefold()
+    block = (new_block or "").strip()
+    if not block:
+        return text or ""
+    lines = (text or "").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and needle in line.casefold():
+            start = i
+            break
+    if start is None:
+        base = (text or "").rstrip()
+        return f"{base}\n\n{block}\n" if base else f"{block}\n"
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+    out = lines[:start] + block.splitlines() + lines[end:]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _block_has_billable_rate_rows(block: str) -> bool:
+    """True when a schedule/fee block still has markdown $ rate/fee cells."""
+    if not (block or "").strip():
+        return False
+    if re.search(r"\|\s*\$\s*\d", block):
+        return True
+    # Role row with a standalone $amount cell.
+    for line in block.splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        if re.search(r"\$\s*\d{2,}", line):
+            return True
+    return False
+
+
+def restore_stripped_budget_tables(
+    content: str,
+    *,
+    prior_text: str,
+    budget: ProposalBudget | None = None,
+) -> tuple[str, list[str]]:
+    """Undo freeform wipes of Fee Detail / Hourly Rate Schedule data rows."""
+    logs: list[str] = []
+    text = content or ""
+    prior = prior_text or ""
+    if not prior.strip():
+        return text, logs
+
+    prior_hourly = _extract_h2_block(prior, "hourly rate schedule")
+    new_hourly = _extract_h2_block(text, "hourly rate schedule")
+    if prior_hourly and _block_has_billable_rate_rows(prior_hourly):
+        if not _block_has_billable_rate_rows(new_hourly):
+            # Prefer re-render from ledger rates when available (keeps columns clean).
+            restored = prior_hourly
+            if budget is not None and any(
+                (vr.hourly_rate or 0) > 0 for vr in (budget.verified_rates or [])
+            ):
+                try:
+                    from app.services.proposal_budget_content import (
+                        render_kb_classification_rate_schedule_markdown,
+                    )
+
+                    painted = render_kb_classification_rate_schedule_markdown(
+                        budget, rfp_text=""
+                    ).strip()
+                    if _block_has_billable_rate_rows(painted):
+                        restored = painted
+                except Exception:
+                    pass
+            text = _replace_h2_block(text, "hourly rate schedule", restored)
+            logs.append(
+                "Restored Hourly Rate Schedule billable rows stripped by freeform edit"
+            )
+
+    prior_fee = _extract_h2_block(prior, "fee detail")
+    new_fee = _extract_h2_block(text, "fee detail")
+    if prior_fee and _block_has_billable_rate_rows(prior_fee):
+        prior_dollars = dollar_amount_tokens(prior_fee)
+        new_dollars = dollar_amount_tokens(new_fee) if new_fee else set()
+        lost = {a for a in prior_dollars if a not in new_dollars}
+        # Only restore when material fee dollars disappeared (not a column add).
+        material_lost = []
+        for a in lost:
+            try:
+                if float(a) >= 100:
+                    material_lost.append(a)
+            except ValueError:
+                continue
+        if material_lost or not _block_has_billable_rate_rows(new_fee):
+            text = _replace_h2_block(text, "fee detail", prior_fee)
+            logs.append("Restored Fee Detail by Phase stripped/altered by freeform edit")
+
+    return text, logs
+
+
+def _md_row_cells(line: str) -> list[str]:
+    raw = (line or "").strip()
+    if not raw.startswith("|"):
+        return []
+    parts = raw.strip("|").split("|")
+    return [p.strip() for p in parts]
+
+
+def _looks_like_person_name(value: str) -> bool:
+    s = (value or "").strip()
+    if not s or len(s) > 48:
+        return False
+    if re.search(r"[\[\]|/]|manual fill|verify:|\$|\d{3,}", s, re.I):
+        return False
+    words = [w for w in re.split(r"\s+", s) if w]
+    if not (1 <= len(words) <= 4):
+        return False
+    return all(re.match(r"^[A-Za-z][A-Za-z.'\-]*$", w) for w in words)
+
+
+def _clean_schedule_name_cell(cell: str) -> str:
+    """Name column: verified person only; junk → em dash (never MANUAL FILL in-cell)."""
+    c = (cell or "").strip()
+    if not c or c in {"—", "-", "–", "n/a", "N/A"}:
+        return "—"
+    low = c.casefold()
+    if any(
+        tok in low
+        for tok in (
+            "manual fill",
+            "verify:",
+            "fabricated",
+            "needs your input",
+            "confirm before",
+            "confirm which",
+            "not in kb",
+            "org chart",
+            "assign verified",
+            "tbd",
+        )
+    ):
+        # ZF already rejected a fabricated name — never keep the leading token.
+        if "fabricated" in low or "manual fill" in low or "assign verified" in low:
+            return "—"
+        # Keep a leading real name if present: "Sonja Anderson [VERIFY: …]"
+        lead = re.split(r"\s*/\s*|\s*\[", c, maxsplit=1)[0].strip(" /-")
+        if _looks_like_person_name(lead):
+            return lead
+        return "—"
+    if _looks_like_person_name(c):
+        return c
+    return "—"
+
+
+def _looks_like_labor_role(value: str) -> bool:
+    s = (value or "").strip()
+    if not s or len(s) > 60:
+        return False
+    low = s.casefold()
+    if any(
+        tok in low
+        for tok in (
+            "team member on this",
+            "confirm",
+            "manual fill",
+            "verify",
+            "engagement",
+            "needs your input",
+        )
+    ):
+        # Allow short roles that happen to include none of the junk phrases above
+        # except "engagement" alone can appear in real titles rarely — block the
+        # known scrub artifact specifically.
+        if "team member on this" in low or "needs your input" in low:
+            return False
+        if "confirm" in low or "manual fill" in low or "verify" in low:
+            return False
+    if "$" in s or s.startswith("|"):
+        return False
+    return True
+
+
+def _rate_from_cell(cell: str) -> float | None:
+    m = re.search(r"\$?\s*([\d,]+(?:\.\d+)?)", cell or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def normalize_hourly_rate_schedule_table(
+    content: str,
+    *,
+    budget: ProposalBudget | None = None,
+) -> tuple[str, list[str]]:
+    """Clean Cost Hourly Rate Schedule tables after freeform / ZF cell pollution."""
+    block = _extract_h2_block(content, "hourly rate schedule")
+    if not block.strip():
+        return content, []
+
+    lines = block.splitlines()
+    table_idxs = [i for i, ln in enumerate(lines) if ln.strip().startswith("|")]
+    if len(table_idxs) < 2:
+        return content, []
+
+    header_i = table_idxs[0]
+    header_cells = _md_row_cells(lines[header_i])
+    if not header_cells:
+        return content, []
+    header_cf = [h.casefold() for h in header_cells]
+
+    def _col(*needles: str) -> int | None:
+        for i, h in enumerate(header_cf):
+            if any(n in h for n in needles):
+                return i
+        return None
+
+    role_i = _col("role", "labor", "categor")
+    name_i = _col("name", "team member", "person", "staff")
+    rate_i = _col("hourly", "rate", "billable")
+    y2_i = _col("year-2", "year 2", "y2")
+    y3_i = _col("year-3", "year 3", "y3")
+    if role_i is None or rate_i is None:
+        return content, []
+
+    # Map rate → roles from ledger for repairing scrubbed role labels.
+    rate_to_roles: dict[float, list[str]] = {}
+    if budget is not None:
+        for vr in budget.verified_rates or []:
+            role = (vr.role or "").strip()
+            rate = float(vr.hourly_rate or 0)
+            if role and rate > 0:
+                rate_to_roles.setdefault(rate, [])
+                if role not in rate_to_roles[rate]:
+                    rate_to_roles[rate].append(role)
+
+    out_rows: list[str] = [lines[header_i]]
+    # Keep separator if present
+    sep_i = header_i + 1
+    if sep_i < len(lines) and re.match(r"^\s*\|[\s:|\-]+\|\s*$", lines[sep_i]):
+        # Normalize separator to column count
+        aligns = []
+        for idx in range(len(header_cells)):
+            if idx in {rate_i, y2_i, y3_i}:
+                aligns.append("---:")
+            else:
+                aligns.append("---")
+        out_rows.append("| " + " | ".join(aligns) + " |")
+        data_start = sep_i + 1
+    else:
+        aligns = []
+        for idx in range(len(header_cells)):
+            if idx in {rate_i, y2_i, y3_i}:
+                aligns.append("---:")
+            else:
+                aligns.append("---")
+        out_rows.append("| " + " | ".join(aligns) + " |")
+        data_start = header_i + 1
+
+    changed = False
+    seen_roles: set[str] = set()
+    for i in range(data_start, len(lines)):
+        line = lines[i]
+        if not line.strip().startswith("|"):
+            break
+        if re.match(r"^\s*\|[\s:|\-]+\|\s*$", line):
+            continue
+        cells = _md_row_cells(line)
+        if len(cells) < len(header_cells):
+            cells = cells + [""] * (len(header_cells) - len(cells))
+        elif len(cells) > len(header_cells):
+            # Extra pipes from junk — keep first N by truncating overflow into last kept
+            cells = cells[: len(header_cells)]
+
+        role = cells[role_i] if role_i < len(cells) else ""
+        rate_cell = cells[rate_i] if rate_i < len(cells) else ""
+        rate_val = _rate_from_cell(rate_cell)
+        if not _looks_like_labor_role(role):
+            repaired = None
+            if rate_val is not None:
+                for candidate in rate_to_roles.get(rate_val, []):
+                    if candidate.casefold() not in seen_roles:
+                        repaired = candidate
+                        break
+            if repaired:
+                role = repaired
+                changed = True
+            else:
+                changed = True
+                continue
+        role_key = role.casefold()
+        if role_key in seen_roles:
+            changed = True
+            continue
+        seen_roles.add(role_key)
+
+        new_cells = list(cells[: len(header_cells)])
+        new_cells[role_i] = role
+        if name_i is not None:
+            cleaned = _clean_schedule_name_cell(new_cells[name_i])
+            if cleaned != new_cells[name_i].strip():
+                changed = True
+            new_cells[name_i] = cleaned
+        if rate_val is not None:
+            pretty = f"${rate_val:,.0f}" if float(rate_val).is_integer() else f"${rate_val:,.2f}"
+            if pretty != rate_cell.strip():
+                # only normalize formatting when we have a parseable rate
+                if re.search(r"\d", rate_cell):
+                    new_cells[rate_i] = pretty
+        for yi in (y2_i, y3_i):
+            if yi is None:
+                continue
+            val = (new_cells[yi] or "").strip()
+            if not val:
+                new_cells[yi] = "—"
+                changed = True
+        # Escape pipes inside cells
+        safe = [c.replace("|", "/") for c in new_cells]
+        out_rows.append("| " + " | ".join(safe) + " |")
+
+    # Rebuild block: prose before table + new table + prose after table
+    first_table = table_idxs[0]
+    last_table = first_table
+    for i in range(first_table, len(lines)):
+        if lines[i].strip().startswith("|"):
+            last_table = i
+        elif i > first_table:
+            break
+    new_block_lines = lines[:first_table] + out_rows + lines[last_table + 1 :]
+    new_block = "\n".join(new_block_lines).strip()
+    if new_block == block.strip() and not changed:
+        return content, []
+    text = _replace_h2_block(content, "hourly rate schedule", new_block)
+    return text, ["Normalized Hourly Rate Schedule table (clean name/role cells)"]
+
+
 def apply_budget_freeform_postprocess(
     content: str,
     *,
     budget: ProposalBudget | None = None,
+    prior_text: str = "",
+    rfp_text: str = "",
+    approach_digest: str = "",
 ) -> tuple[str, list[str]]:
     """Scrub conflicting mix tables + sync summary labels after freeform Cost edits."""
     from app.services.proposal_budget_content import (
@@ -705,15 +1185,32 @@ def apply_budget_freeform_postprocess(
     text = content or ""
     text, mix_logs = scrub_duplicate_budget_breakdown_tables(text)
     logs.extend(mix_logs)
+    text, restore_logs = restore_stripped_budget_tables(
+        text, prior_text=prior_text, budget=budget
+    )
+    logs.extend(restore_logs)
+    text, norm_logs = normalize_hourly_rate_schedule_table(text, budget=budget)
+    logs.extend(norm_logs)
     if budget is not None and (budget.line_items or []):
         text, n = reconcile_budget_summary_prose(text, budget)
         if n:
             logs.append(f"Reconciled {n} budget summary figure(s) to the fee ledger")
     before_terms = text
-    text = ensure_pricing_guide_verbatim_in_budget_markdown(text)
-    if text != before_terms or not qualifying_language_has_pricing_guide_verbatim(text):
+    from app.services.proposal_budget_content import (
+        manuscript_asserts_all_in_no_separate_expenses,
+    )
+
+    include_reimb = not manuscript_asserts_all_in_no_separate_expenses(text)
+    text = ensure_pricing_guide_verbatim_in_budget_markdown(
+        text, include_reimbursable=include_reimb
+    )
+    if text != before_terms or not qualifying_language_has_pricing_guide_verbatim(
+        text, require_reimbursable=include_reimb
+    ):
         if "investment framing" in text.casefold() or "## terms" in text.casefold():
             logs.append("Restored Pricing Guide USE VERBATIM Terms blocks")
+    # RFP Cost demands (LLM) are applied async in chat/Build — not here.
+    _ = (rfp_text, approach_digest)
     return text, logs
 
 
@@ -779,6 +1276,203 @@ New RFP clients have NO fee/hours/rates in the company knowledge base.
 3) Pick ONE tier from RFP pressure + cost scoring weight, then price from the guide only.
 4) Never invent dollars; never put phone numbers in Fee columns; use [VERIFY: …] when unknown.
 """
+
+
+def user_asks_rfp_compliance(text: str) -> bool:
+    """True for Check RFP / meet the RFP / gaps / compliance audits."""
+    raw = text or ""
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"meet(?:s)?\s+(?:the\s+)?rfp|"
+            r"check\s+(?:rfp\s+)?compliance|"
+            r"rfp\s+compliance|"
+            r"complian(?:ce|t)\s+(?:with\s+)?(?:the\s+)?rfp|"
+            r"(?:what(?:'s| is)?|any)\s+(?:still\s+)?missing|"
+            r"gap(?:s)?\s+(?:vs|against|versus)\s+(?:the\s+)?rfp|"
+            r"according\s+to\s+(?:the\s+)?rfp|"
+            r"responsive(?:ness)?|"
+            r"non[\s-]?responsive"
+            r")\b",
+            raw,
+        )
+    )
+
+
+_HOURLY_SCHEDULE_MANDATE_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"hourly\s+rate\s+schedule"
+    r"|rate\s+schedule\s+by\s+classification"
+    r"|complete\s+hourly\s+rate"
+    r"|hourly\s+rates?\s+by\s+(?:classification|labor\s+categor(?:y|ies)|role|position)"
+    r"|provide.{0,60}hourly\s+rate.{0,80}"
+    r"(?:classification|labor\s+categor|option\s+years?|initial\s+term)"
+    r"|fully[\s-]?burdened\s+hourly"
+    r"|personnel[\s-]?loading"
+    r")",
+)
+
+_COST_ASSUMPTIONS_MANDATE_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"assumptions?\s+regarding\s+travel"
+    r"|travel,\s*materials?,\s*software"
+    r"|software\s+licenses?,\s*stock\s+media"
+    r"|subconsultant\s+markup"
+    r"|stock\s+media,\s*and\s*subconsultant"
+    r")",
+)
+
+_FEE_METHOD_FLEX_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"retainer,\s*hourly,\s*or\s*hybrid"
+    r"|hourly,\s*or\s*hybrid"
+    r"|may\s+propose\s+(?:retainer|hourly|hybrid)"
+    r"|retainer\s+or\s+hourly"
+    r")",
+)
+
+
+def rfp_mandates_hourly_rate_schedule(rfp_text: str) -> bool:
+    """True when RFP requires a classification/role hourly rate schedule."""
+    return bool(_HOURLY_SCHEDULE_MANDATE_RE.search(rfp_text or ""))
+
+
+def rfp_mandates_cost_assumptions_disclosure(rfp_text: str) -> bool:
+    """True when RFP requires stated assumptions (travel/materials/licenses/markup)."""
+    return bool(_COST_ASSUMPTIONS_MANDATE_RE.search(rfp_text or ""))
+
+
+def rfp_allows_flexible_fee_method(rfp_text: str) -> bool:
+    """True when RFP allows retainer / hourly / hybrid billing methods."""
+    return bool(_FEE_METHOD_FLEX_RE.search(rfp_text or ""))
+
+
+def _quote_match_window(text: str, match: re.Match[str], *, radius: int = 180) -> str:
+    start = max(0, match.start() - radius)
+    end = min(len(text), match.end() + radius)
+    snippet = " ".join(text[start:end].split())
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet = snippet + "…"
+    return snippet[:420]
+
+
+def budget_compliance_hard_flags(rfp_text: str) -> str:
+    """Deterministic compliance flags for advisory chat — independent RFP asks.
+
+    Prevents the model from using fee-method flexibility to waive a mandatory
+    hourly classification schedule or assumptions disclosure.
+    """
+    body = rfp_text or ""
+    if not body.strip():
+        return ""
+    lines: list[str] = [
+        "=== BUDGET COMPLIANCE HARD FLAGS (mechanical — do not ignore) ==="
+    ]
+    hourly = _HOURLY_SCHEDULE_MANDATE_RE.search(body)
+    assumptions = _COST_ASSUMPTIONS_MANDATE_RE.search(body)
+    flex = _FEE_METHOD_FLEX_RE.search(body)
+    if hourly:
+        lines.append(
+            "- MANDATORY: hourly rate schedule / rates by classification "
+            "(independent deliverable)."
+        )
+        lines.append(f"  RFP quote: \"{_quote_match_window(body, hourly)}\"")
+    if assumptions:
+        lines.append(
+            "- MANDATORY: state assumptions on travel / materials / software "
+            "licenses / stock media / subconsultant markup when asked."
+        )
+        lines.append(f"  RFP quote: \"{_quote_match_window(body, assumptions)}\"")
+    if flex:
+        lines.append(
+            "- FEE METHOD FLEXIBILITY (retainer / hourly / hybrid allowed) does "
+            "NOT waive the mandatory items above — separate section, separate ask."
+        )
+        lines.append(f"  RFP quote: \"{_quote_match_window(body, flex)}\"")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def draft_lacks_hourly_rate_schedule(content: str) -> bool:
+    """Heuristic: open Cost tab has fees but no classification hourly table."""
+    body = (content or "").casefold()
+    if not body.strip():
+        return True
+    has_hourly_table = bool(
+        re.search(
+            r"(?i)(\$\s*/\s*hr|per\s+hour|hourly\s+rate|/hr\b|"
+            r"labor\s+categor|classification.+\$.*hr|"
+            r"\|\s*[^\n]*rate[^\n]*\|[^\n]*\$)",
+            body,
+        )
+    )
+    return not has_hourly_table
+
+
+def augment_cost_section_requirements(
+    requirements: list[str],
+    rfp_text: str,
+) -> list[str]:
+    """Prepend RFP-mandated cost instruments missing from the Phase-2 map.
+
+    Intelligence caps key_messages; chat Improve must still see hourly schedule
+    and assumptions asks when the full RFP states them.
+    """
+    out = [r for r in requirements if str(r).strip()]
+    folded = "\n".join(out).casefold()
+    if rfp_mandates_hourly_rate_schedule(rfp_text) and "hourly rate schedule" not in folded:
+        if "by classification" not in folded and "labor categor" not in folded:
+            out.insert(
+                0,
+                "Provide a complete hourly rate schedule by classification for the "
+                "initial term and any option years (mandatory Cost Proposal ask — "
+                "not waived by retainer/hourly/hybrid fee-method flexibility).",
+            )
+    if rfp_mandates_cost_assumptions_disclosure(rfp_text):
+        if "subconsultant markup" not in folded and "stock media" not in folded:
+            out.insert(
+                1 if out else 0,
+                "State assumptions regarding travel, materials, software licenses, "
+                "stock media, and subconsultant markup.",
+            )
+    return out
+
+
+def pack_budget_compliance_advisory_block(
+    *,
+    rfp_text: str,
+    draft_content: str = "",
+    max_excerpt_chars: int = 12_000,
+) -> str:
+    """Cost-instrument excerpt + hard flags for Ask Ralph compliance answers."""
+    from app.services.proposal_rfp_excerpt import budget_and_cost_excerpt
+
+    parts: list[str] = []
+    excerpt = budget_and_cost_excerpt(rfp_text or "", max_chars=max_excerpt_chars)
+    if excerpt.strip():
+        parts.append(
+            "=== RFP BUDGET / COST EXCERPT (authoritative for Cost / fee asks) ===\n"
+            f"{excerpt.strip()}"
+        )
+    flags = budget_compliance_hard_flags(rfp_text or "")
+    if flags:
+        parts.append(flags)
+    if rfp_mandates_hourly_rate_schedule(rfp_text or "") and draft_lacks_hourly_rate_schedule(
+        draft_content
+    ):
+        parts.append(
+            "=== DRAFT GAP (mechanical) ===\n"
+            "- Open Cost/fee draft appears to LACK a classification hourly rate "
+            "schedule. Flag as high-priority responsiveness gap — phased / fixed-fee "
+            "/ NTE tables alone do not satisfy a mandatory rate schedule."
+        )
+    return "\n\n".join(parts)
 
 
 async def build_budget_repair_context(

@@ -106,10 +106,16 @@ class PostChatOmitsTemperatureTests(unittest.IsolatedAsyncioTestCase):
     async def test_temperature_omitted_for_sonnet_5(self) -> None:
         body = await self._post_chat("anthropic/claude-sonnet-5")
         self.assertNotIn("temperature", body, f"body sent to Sonnet 5: {json.dumps(body)}")
+        self.assertEqual(
+            body.get("reasoning"),
+            {"effort": "medium", "exclude": True},
+            f"Sonnet 5 must cap adaptive thinking: {json.dumps(body)}",
+        )
 
     async def test_temperature_included_for_sonnet_4_6(self) -> None:
         body = await self._post_chat("anthropic/claude-sonnet-4.6")
         self.assertEqual(body.get("temperature"), 0.35)
+        self.assertNotIn("reasoning", body)
 
     async def test_temperature_included_for_non_claude_model(self) -> None:
         body = await self._post_chat("google/gemini-2.5-flash")

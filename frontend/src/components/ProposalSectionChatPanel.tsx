@@ -156,21 +156,27 @@ export function buildSectionPinReference(
   section: OutlineSection,
   content: string
 ): SectionChatReference {
-  if (content.trim()) {
-    // Selection excerpts need the quoted text; full-section pins use title only
-    // so Ralph does not show raw markdown (## headings) in the composer chip.
-    return {
-      mode: "section",
-      sectionId: section.id,
-      sectionTitle: section.title,
-      text: section.title,
-    };
-  }
+  // Full-section pins use title only so Ralph does not show raw markdown
+  // (## headings) in the composer chip.
   return {
     mode: "section",
     sectionId: section.id,
     sectionTitle: section.title,
     text: section.title,
+  };
+}
+
+/** Pin a highlighted manuscript excerpt into Ask Ralph (selection revise). */
+export function buildSelectionPinReference(
+  section: OutlineSection,
+  selectedText: string
+): SectionChatReference {
+  const text = selectedText.replace(/\u00a0/g, " ").trim().slice(0, 8000);
+  return {
+    mode: "selection",
+    sectionId: section.id,
+    sectionTitle: section.title,
+    text: text || section.title,
   };
 }
 

@@ -61,6 +61,88 @@ def test_wrapper_does_not_consume_the_cover_letter():
         )
 
 
+def test_firm_profile_header_seeds_from_who_we_are_not_note_only():
+    """Firm Profile chrome must not look emptied when 1.1 already has prose."""
+    from app.services.proposal_fulfill_rfp_structure import (
+        COMPANY_BLOCK_HEADER_ID,
+        enrich_chrome_only_company_block_header,
+        ensure_company_block_wrapper_heading,
+        repair_empty_manuscript_sections,
+    )
+
+    draft = _draft()
+    draft.sections[0] = draft.sections[0].model_copy(
+        update={
+            "content": (
+                "zo means kindred, the people you gather close when the work matters. "
+                "We built zö agency on that idea 13 years ago.\n\n"
+                "We work with cities and counties because we believe in public service."
+            )
+        }
+    )
+    out, _logs = ensure_company_block_wrapper_heading(
+        draft,
+        [
+            RfpSectionSpec(
+                rfp_title="B. Firm Profile and Qualifications",
+                satisfied_by_static_company_block=True,
+            )
+        ],
+    )
+    header = next(s for s in out.sections if s.id == COMPANY_BLOCK_HEADER_ID)
+    assert "zo means kindred" in (header.content or "")
+    assert "DESIGNER NOTE" not in (header.content or "").upper() or "Who We Are" in (
+        header.content or ""
+    )
+    assert "1.1" in (header.content or "") or "Who We Are" in (header.content or "")
+    # Full static package must appear — not a truncated chrome lead.
+    assert len((header.content or "").split()) >= 40
+
+    # Existing note-only header is repaired in place with full 1.1–1.5.
+    chrome = out.model_copy(
+        update={
+            "sections": [
+                header.model_copy(
+                    update={
+                        "content": (
+                            "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+                            "this header matches the RFP TOC label only.]"
+                        )
+                    }
+                ),
+                *out.sections[1:],
+            ]
+        }
+    )
+    fixed, logs = repair_empty_manuscript_sections(chrome)
+    assert any("restored" in x.casefold() or "filled" in x.casefold() for x in logs)
+    assert "zo means kindred" in (fixed.sections[0].content or "")
+    assert "follow immediately below" not in (fixed.sections[0].content or "").casefold()
+
+
+def test_empty_section_never_persists_blank():
+    from app.services.proposal_fulfill_rfp_structure import repair_empty_manuscript_sections
+
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-09-03T00:00:00Z",
+        sections=[
+            ProposalSection(
+                id="rfp-approach",
+                title="Technical Approach",
+                content="",
+                source="generated",
+                mode="write",
+                status="generated",
+            ),
+        ],
+    )
+    out, logs = repair_empty_manuscript_sections(draft)
+    assert any("filled empty" in x.casefold() for x in logs)
+    assert "[MANUAL FILL" in (out.sections[0].content or "").upper()
+    assert (out.sections[0].content or "").strip()
+
+
 def test_repair_converts_mistitled_company_header_to_cover_stub():
     from app.services.proposal_fulfill_rfp_structure import (
         COMPANY_BLOCK_HEADER_ID,
@@ -106,7 +188,9 @@ def test_a_real_company_background_label_still_wraps():
                         satisfied_by_static_company_block=True)],
     )
     assert any("Company Background" == (s.title or "") for s in out.sections)
-    assert any(COMPANY_BLOCK_NOTE in (s.content or "") for s in out.sections)
+    header = next(s for s in out.sections if (s.title or "") == "Company Background")
+    assert "We are a full-service agency" in (header.content or "")
+    assert COMPANY_BLOCK_NOTE not in (header.content or "").casefold()
 
 
 def test_insurance_toc_row_is_not_company_block_header():

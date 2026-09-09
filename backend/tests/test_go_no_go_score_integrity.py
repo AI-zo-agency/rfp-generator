@@ -78,6 +78,9 @@ class ScrubberScoreIntegrityTests(unittest.TestCase):
 
         for row in raw["decisionMatrix"]:
             self.assertNotIn("62%", row["notes"], msg=row)
+            if row["dimension"] == "Win Probability":
+                self.assertNotIn("not disclosed", row["notes"].casefold())
+                self.assertIn("scope fit", row["notes"].casefold())
 
     def test_published_weights_are_left_alone(self) -> None:
         """When the extractor found a real table, nothing is scrubbed."""

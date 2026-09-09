@@ -91,6 +91,61 @@ class ParseRequirementsTests(unittest.TestCase):
         self.assertIn("01_companyfacts", blob)
         self.assertNotIn("portland state university", blob)
 
+    def test_municipal_experience_misfiled_as_compliance_becomes_service(self) -> None:
+        """Alameda live: experience row as compliance → companyfacts search →
+        permanent GAP while 06_WON City proposals were already retrieved."""
+        out = parse_requirements(
+            {
+                "requirements": [
+                    {
+                        "requirement": (
+                            "Demonstrated experience with municipal government "
+                            "communications and public sector clients"
+                        ),
+                        "category": "compliance",
+                        "isCore": True,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(out[0].category, "service")
+        blob = " ".join(out[0].kb_queries).casefold()
+        self.assertIn("06_won", blob)
+        self.assertNotIn("insurance equal opportunity", blob)
+
+    def test_ada_content_craft_misfiled_as_compliance_becomes_technical(self) -> None:
+        out = parse_requirements(
+            {
+                "requirements": [
+                    {
+                        "requirement": (
+                            "ADA compliance and accessibility in social media "
+                            "content including plain-language drafting"
+                        ),
+                        "category": "compliance",
+                        "isCore": True,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(out[0].category, "technical")
+        blob = " ".join(out[0].kb_queries).casefold()
+        self.assertIn("06_won", blob)
+
+    def test_insurance_stays_compliance(self) -> None:
+        out = parse_requirements(
+            {
+                "requirements": [
+                    {
+                        "requirement": "Certificate of insurance meeting City minimums",
+                        "category": "compliance",
+                        "isCore": True,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(out[0].category, "compliance")
+
     def test_malformed_payload_is_empty(self) -> None:
         self.assertEqual(parse_requirements({}), [])
         self.assertEqual(parse_requirements({"requirements": "nope"}), [])
@@ -309,7 +364,10 @@ class ScoreCoherenceTests(unittest.TestCase):
         })
         by_dim = {r.dimension: r.score for r in out.decision_matrix}
         self.assertEqual(by_dim["Financial Viability"], 3)
-        self.assertEqual(by_dim["Strategic Value"], 4)
+        # Strategic may sit only slightly above Technical (slack 2); with tech=0
+        # from empty craft proof it cannot stay at 4.
+        self.assertLessEqual(by_dim["Strategic Value"], 2)
+        self.assertEqual(by_dim["Financial Viability"], 3)
 
     def test_overall_score_reflects_the_capping(self) -> None:
         from app.services.go_no_go_service import compute_overall_go_score

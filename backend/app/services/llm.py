@@ -233,10 +233,14 @@ class LlmError(Exception):
 
 
 # Reasoning models often burn thousands of completion tokens before writing JSON.
-# When finish_reason=length leaves truncated JSON, bump once up to this cap.
-_LENGTH_RETRY_TOKEN_CAP = 32768
+# When finish_reason=length leaves truncated JSON, bump once — but NEVER above
+# 8192. Live writing_briefs burned ~$0.18 on an 8k→16k retry that spent every
+# token on reasoning_tokens and returned empty content.
+_LENGTH_RETRY_TOKEN_CAP = 8192
 _LEAN_SCAN_LENGTH_RETRY_CAP = 8192
 _OUTPUT_LENGTH_FINISH = frozenset({"length", "max_tokens", "MAX_TOKENS"})
+# Keep a truncated-but-parsed first reply instead of paying for a doubled shot.
+_MIN_CHARS_TO_KEEP_LENGTH_HIT = 400
 
 
 def _is_lean_scan_node(node_name: str | None) -> bool:
@@ -300,26 +304,84 @@ def contradiction_rewrite_chat_kwargs(*, node_name: str) -> dict[str, object]:
 LEAN_CONTRADICTION_REWRITE_CAP = 6
 
 
+def _finish_reason_hit_length(finish_reason: object) -> bool:
+    fr = str(finish_reason or "").strip()
+    return fr in _OUTPUT_LENGTH_FINISH or fr.upper() == "MAX_TOKENS"
+
+
 def bump_max_tokens_after_length_hit(
     requested: int | None,
     *,
     node_name: str | None = None,
 ) -> int:
-    """Double the output budget after a length truncation (floor 8192, cap 32768).
+    """Double the output budget after a length truncation (hard cap 8192).
 
-    Review / fulfill-scan nodes hard-cap at 8192 — a 16k→32k retry was the
-    main driver of ~$1/section Review costs.
+    Never climbs to 16k/32k — reasoning models (claude-sonnet-5) used the extra
+    budget on thinking and returned empty content, doubling spend for nothing.
     """
     base = int(requested) if requested and requested > 0 else 4096
+    cap = (
+        _LEAN_SCAN_LENGTH_RETRY_CAP
+        if _is_lean_scan_node(node_name)
+        else _LENGTH_RETRY_TOKEN_CAP
+    )
     if _is_lean_scan_node(node_name):
-        # One modest bump only; never climb toward the global 32k ceiling.
-        return min(max(base * 2, base + 1024), _LEAN_SCAN_LENGTH_RETRY_CAP)
-    return min(max(base * 2, 8192), _LENGTH_RETRY_TOKEN_CAP)
+        return min(max(base * 2, base + 1024), cap)
+    return min(max(base * 2, 4096), cap)
 
 
-def _finish_reason_hit_length(finish_reason: object) -> bool:
-    fr = str(finish_reason or "").strip()
-    return fr in _OUTPUT_LENGTH_FINISH or fr.upper() == "MAX_TOKENS"
+def _usage_reasoning_exhausted_output(usage: dict[str, Any] | None) -> bool:
+    """True when completion budget went almost entirely to reasoning (empty reply)."""
+    if not isinstance(usage, dict):
+        return False
+    completion = int(usage.get("completion_tokens") or 0)
+    reasoning = int(
+        usage.get("reasoning_tokens")
+        or (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        or 0
+    )
+    if completion <= 0:
+        return False
+    # All or nearly all completion tokens were reasoning — a larger max_tokens
+    # usually just buys more thinking, not JSON.
+    return reasoning >= max(1, int(completion * 0.85))
+
+
+def _empty_content_burned_output_budget(
+    usage: dict[str, Any] | None,
+    *,
+    requested: int | None,
+) -> bool:
+    """True when an empty reply already spent ~all of max_tokens (reinforce won't help)."""
+    if _usage_reasoning_exhausted_output(usage):
+        return True
+    if not isinstance(usage, dict):
+        return False
+    completion = int(usage.get("completion_tokens") or 0)
+    if completion <= 0:
+        return False
+    req = int(requested) if requested and requested > 0 else 0
+    if req <= 0:
+        return False
+    # Live Stage 3 budget: out=16000 with empty content + finish_reason=length —
+    # a second identical reinforce only doubles spend.
+    if completion < int(req * 0.9):
+        return False
+    fr = usage.get("finish_reason")
+    return (not fr) or _finish_reason_hit_length(fr) or completion >= req
+
+
+def _claude_adaptive_reasoning_body(effort: str) -> dict[str, Any]:
+    """OpenRouter reasoning control for Sonnet/Opus 5 adaptive thinking.
+
+    Default Anthropic effort is ``high`` (~80% of max_tokens for thinking). That
+    routinely exhausts JSON budgets with empty ``content``. Medium leaves room
+    for the actual reply; ``exclude`` keeps thinking out of the payload.
+    """
+    level = (effort or "medium").strip().casefold() or "medium"
+    if level not in {"max", "xhigh", "high", "medium", "low", "minimal", "none"}:
+        level = "medium"
+    return {"effort": level, "exclude": True}
 
 
 def _should_retry_after_length_truncation(
@@ -327,10 +389,20 @@ def _should_retry_after_length_truncation(
     finish_reason: object,
     requested: int | None,
     node_name: str | None = None,
+    usage: dict[str, Any] | None = None,
+    parsed: dict[str, Any] | None = None,
+    raw_text: str | None = None,
 ) -> bool:
     if not _finish_reason_hit_length(finish_reason):
         return False
+    # Allow a truncated-but-usable first reply — do not burn a second full shot.
+    if parsed is not None and len(raw_text or "") >= _MIN_CHARS_TO_KEEP_LENGTH_HIT:
+        return False
+    if _usage_reasoning_exhausted_output(usage):
+        return False
     current = int(requested) if requested and requested > 0 else 4096
+    if current >= _LENGTH_RETRY_TOKEN_CAP:
+        return False
     if _is_lean_scan_node(node_name) and current >= _LEAN_SCAN_LENGTH_RETRY_CAP:
         return False
     return bump_max_tokens_after_length_hit(current, node_name=node_name) > current
@@ -626,6 +698,7 @@ async def _post_chat(
     json_mode: bool = True,
     cache_prefix: str | Sequence[str] | None = None,
     ttl_1h: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -657,18 +730,26 @@ async def _post_chat(
             model,
             temperature,
         )
+        # Adaptive thinking defaults to high effort and can consume the entire
+        # max_tokens budget before writing JSON (empty content + length).
+        body["reasoning"] = _claude_adaptive_reasoning_body(
+            reasoning_effort or "medium"
+        )
     else:
         body["temperature"] = temperature
+        if reasoning_effort:
+            body["reasoning"] = _claude_adaptive_reasoning_body(reasoning_effort)
     if effective_json_mode:
         body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
 
     logger.info(
-        "LLM request: provider=%s model=%s messages=%d",
+        "LLM request: provider=%s model=%s messages=%d reasoning=%s",
         provider,
         model,
         len(messages),
+        body.get("reasoning"),
     )
 
     last_error: LlmError | None = None
@@ -782,6 +863,11 @@ async def _post_chat(
                 native_cost = float(raw_cost)
             except (TypeError, ValueError):
                 native_cost = None
+        reasoning_tokens = int(
+            usage.get("reasoning_tokens")
+            or (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or 0
+        )
         usage_out = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -791,6 +877,11 @@ async def _post_chat(
             "finish_reason": finish_reason,
             "cost": native_cost,
         }
+        if reasoning_tokens > 0:
+            usage_out["reasoning_tokens"] = reasoning_tokens
+            usage_out["completion_tokens_details"] = {
+                "reasoning_tokens": reasoning_tokens
+            }
         if not content_text.strip():
             logger.info(
                 "LLM empty content: provider=%s model=%s finish_reason=%s usage=%s estimated=%s",
@@ -1026,12 +1117,14 @@ async def chat_json(
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
     include_corrections: bool = True,
+    reasoning_effort: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     messages = await apply_standing_corrections(
         messages, node_name=node_name, include_corrections=include_corrections
     )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
+    last_empty_usage: dict[str, Any] | None = None
     skip_fireworks_fallback = False
     started = time.perf_counter()
 
@@ -1067,6 +1160,9 @@ async def chat_json(
                 finish_reason=first_usage.get("finish_reason"),
                 requested=max_tokens,
                 node_name=node_name,
+                usage=first_usage if isinstance(first_usage, dict) else None,
+                parsed=parsed,
+                raw_text=first_raw if isinstance(first_raw, str) else None,
             ):
                 bumped = bump_max_tokens_after_length_hit(
                     max_tokens, node_name=node_name
@@ -1127,6 +1223,7 @@ async def chat_json(
                 },
                 max_tokens=max_tokens,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
             # Bill as soon as OpenRouter returns usage — invalid JSON / empty
             # replies still consume tokens and must show in the UI cost total.
@@ -1155,6 +1252,9 @@ async def chat_json(
                 finish_reason=first_usage.get("finish_reason"),
                 requested=max_tokens,
                 node_name=node_name,
+                usage=first_usage if isinstance(first_usage, dict) else None,
+                parsed=parsed,
+                raw_text=first_raw if isinstance(first_raw, str) else None,
             ):
                 bumped = bump_max_tokens_after_length_hit(
                     max_tokens, node_name=node_name
@@ -1180,6 +1280,7 @@ async def chat_json(
                     },
                     max_tokens=bumped,
                     temperature=temperature,
+                    reasoning_effort=reasoning_effort,
                 )
                 _record_successful_call(
                     model=openrouter_model,
@@ -1218,6 +1319,8 @@ async def chat_json(
                     rfp_id=rfp_id,
                     run_id=run_id,
                 )
+            if "empty content" in str(exc).casefold() and isinstance(billed, dict):
+                last_empty_usage = billed
             errors.append(str(exc))
             logger.info("OpenRouter failed: %s", str(exc)[:200])
             # Invalid/truncated JSON already consumed tokens — do not re-run on Fireworks.
@@ -1354,15 +1457,14 @@ async def chat_json(
         and openrouter_key
         and not _is_placeholder_key(openrouter_key)
     ):
-        # Review / fact-check: empty Sonnet replies are almost always
-        # reasoning-budget exhaustion. A second Sonnet reinforce doubles cost
-        # and latency — keep the original section instead.
-        if _is_lean_scan_node(node_name) and any(
-            "empty content" in e.casefold() for e in errors
-        ):
+        empty_failures = any("empty content" in e.casefold() for e in errors)
+        # Empty Sonnet replies are almost always adaptive-thinking exhaustion.
+        # A second identical reinforce doubles cost and rarely recovers content.
+        skip_empty_reinforce = empty_failures
+        if skip_empty_reinforce:
             raise LlmError(
                 "; ".join(errors)
-                + " (lean scan: skipped reinforcement retry after empty content)",
+                + " (skipped reinforcement retry after empty content)",
                 status_code=502,
             )
         try:
@@ -1394,6 +1496,7 @@ async def chat_json(
                 },
                 max_tokens=reinforce_tokens,
                 temperature=0.0,
+                reasoning_effort=reasoning_effort or "low",
             )
             _record_successful_call(
                 model=openrouter_model,

@@ -60,19 +60,36 @@ The knowledge base contains ONLY zö agency materials — company facts
 case studies (03_CS_*), won/finalist proposals (06_WON_*, 07_FIN_*), and the
 pricing guide (00_Guide_Pricing). The RFP's buyer is NOT in the knowledge base.
 
-Read the WHOLE excerpt. Enumerate every distinct capability the vendor must
+Read the WHOLE excerpt. Enumerate the distinct capabilities the vendor must
 supply — services, staff roles/disciplines, technical/platform requirements,
-and compliance obligations. Split bundled scope into separate requirements:
-"website redesign including CMS, hosting and content migration" is FOUR
-requirements, not one. Do not merge, do not summarise, do not skip items you
-suspect the vendor lacks — those matter most.
+and compliance obligations.
+
+Do NOT explode one craft into a checklist of tactics. When the RFP lists many
+tactical bullets under the SAME service family — e.g. press releases, media
+lists, op-eds, media training, and crisis on-call under media relations; or
+editorial calendar, post copy, graphics, community management, and analytics
+under social media; or audit, stakeholder interviews, surveys, message
+architecture, and implementation matrix under strategic communications
+planning — emit ONE (or at most TWO) service requirements for that family,
+not one row per bullet. Case studies prove crafts, not every sub-phrase; one
+row per tactic creates permanent false gaps on every RFP.
+
+DO still split truly different crafts/platforms: website redesign vs CMS vs
+hosting vs content migration; brand identity vs media buying; insurance vs
+EEO. Do not merge those. Do not summarise away real gaps. Do not skip items
+you suspect the vendor lacks — those matter most.
 
 For EACH requirement give 1 short seed kbQuery (fallback only — a dedicated
 evidence agent plans the real searches). Phrase it the way zö materials are
 written (roles, tools, deliverables). Never use the buyer's name as subject.
 
 isCore=true when the RFP makes the requirement mandatory, scores it, or it is
-central to the scope of work. isCore=false for incidental or optional items.
+central to the scope of work. isCore=false for incidental or optional items —
+including anything the RFP marks "optional", "priced separately", "as needed",
+or Task/Option add-ons. Optional gaps must NOT dominate Technical scoring.
+
+"Deliver a draft plan / memorandum / proposal narrative for THIS engagement"
+is category=submission (authored at bid time), not a past-delivery craft gap.
 
 disqualifying=true ONLY for a stated minimum threshold the vendor must ALREADY
 MEET before bidding, which makes a proposal non-responsive when unmet — a
@@ -89,12 +106,18 @@ Never set disqualifying=true on something the vendor SUPPLIES in the proposal.
 either have or do not. Only the second is a qualification.
 
 category MUST be accurate — scoring depends on it:
-- technical = platforms/tools/methods (CMS, WordPress, ADA/WCAG audit, hosting,
-  content migration, SEO, security, integrations, QA)
-- service = delivery work types (website redesign, brand campaign, training)
+- technical = platforms/tools/methods (CMS, WordPress, ADA/WCAG accessibility
+  drafting/audit methods, hosting, content migration, SEO, security,
+  integrations, QA). Accessibility *delivery craft* is technical — not
+  companyfacts insurance.
+- service = delivery work types AND demonstrated past experience / track
+  record with a sector or engagement type (municipal communications,
+  comparable public-sector clients). Experience is proven from 03_CS / 06_WON,
+  never from insurance lines.
 - role = named staff titles to assign (project manager, UX designer, trainer)
 - compliance = certifications, insurance, registrations, EEO/policy affirmations,
-  ability to contract with the buyer (search 01_companyfacts — never the buyer name)
+  ability to contract with the buyer (search 01_companyfacts — never the buyer name).
+  Do NOT put "demonstrated municipal experience" or "ADA social copy" here.
 - logistics = office location, geography, on-site presence
 - submission = what the PROPOSAL DOCUMENT must contain, authored at submission
   time rather than demonstrated from past work: client references, an itemized
@@ -128,6 +151,9 @@ all tracks at once, not to any one of them. When the RFP has NO such split,
 leave "track" empty on every requirement — do NOT invent tracks where the RFP
 describes one unified scope.
 
+Target 6–14 requirements for a typical services RFP. Cap is 24 — do NOT pad
+toward the cap by splitting tactics. Prefer craft-family rows.
+
 Return ONLY JSON:
 {"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics|submission",
   "isCore":true,"disqualifying":false,"rfpQuote":"short verbatim phrase from the RFP",
@@ -137,6 +163,76 @@ Return ONLY JSON:
 _MAX_REQUIREMENTS = 24
 # Seeds only — evidence query planner owns the real search set.
 _MAX_QUERIES_PER_REQUIREMENT = 2
+
+# Structural category remaps — taxonomy only, not platform synonym tables.
+_PAST_EXPERIENCE_MARKERS = (
+    "demonstrated experience",
+    "prior experience",
+    "past experience",
+    "comparable",
+    "past performance",
+    "track record",
+    "similar engagement",
+    "public sector client",
+    "municipal government",
+    "municipal client",
+)
+_TRUE_COMPLIANCE_MARKERS = (
+    "insurance",
+    "certificate of insurance",
+    "coi",
+    "workers' compensation",
+    "workers compensation",
+    "license",
+    "registration",
+    "certification",
+    "wbenc",
+    "wosb",
+    "eeo",
+    "equal opportunity",
+    "bond",
+    "indemnif",
+)
+_ACCESSIBILITY_CRAFT_MARKERS = (
+    "ada",
+    "wcag",
+    "accessibility",
+    "plain-language",
+    "plain language",
+    "language access",
+    "translation",
+)
+
+
+def _normalize_requirement_category(requirement: str, category: str) -> str:
+    """Force scoring-critical category taxonomy the planner often mislabels.
+
+    Live failure: "Demonstrated experience with municipal government
+    communications" arrived as compliance → companyfacts-only search → permanent
+    GAP while 06_WON City proposals sat in the pool for other rows.
+    """
+    low = (requirement or "").casefold()
+    cat = (category or "service").casefold()
+    if cat not in REQUIREMENT_CATEGORIES:
+        cat = "service"
+
+    if any(m in low for m in _TRUE_COMPLIANCE_MARKERS):
+        # Insurance / cert / registration stay compliance even if "experience" appears.
+        return "compliance"
+
+    if cat == "compliance" and any(m in low for m in _PAST_EXPERIENCE_MARKERS):
+        return "service"
+
+    if cat == "compliance" and any(m in low for m in _ACCESSIBILITY_CRAFT_MARKERS):
+        # ADA/plain-language *delivery* is craft — search CS/WON, not insurance facts.
+        return "technical"
+
+    if cat in {"compliance", "logistics"} and any(
+        m in low for m in _PAST_EXPERIENCE_MARKERS
+    ):
+        return "service"
+
+    return cat
 
 
 def _clean(value: Any, *, limit: int) -> str:
@@ -166,6 +262,15 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
         category = _clean(row.get("category"), limit=24).casefold()
         if category not in REQUIREMENT_CATEGORIES:
             category = "service"
+        remapped = _normalize_requirement_category(requirement, category)
+        if remapped != category:
+            logger.info(
+                "go_no_go remapped requirement category %s → %s for %r",
+                category,
+                remapped,
+                requirement[:80],
+            )
+            category = remapped
 
         queries_raw = row.get("kbQueries") or row.get("kb_queries") or []
         queries: list[str] = []

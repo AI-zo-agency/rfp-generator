@@ -313,13 +313,156 @@ def evaluation_is_published_response_form(evaluation: Any) -> bool:
 
 
 def min_outline_sections_for_evaluation(evaluation: Any) -> int:
-    """Cap floor required so every scored parent criterion can hold a tab.
+    """Cap floor so every scored *response-form* parent can hold a tab.
 
-    The page-budget heuristic in ``max_rfp_outline_sections`` assumes narrative
-    tabs of ~400 words. A scored response form breaks that assumption: the
-    buyer decides how many sections exist, not our page math.
+    Scoring-category tables (weights only, no published response form) must NOT
+    raise this floor — that forced duplicate criterion-label tabs beside the
+    buyer's real Proposal Content TOC.
     """
+    if not evaluation_is_published_response_form(evaluation):
+        return 0
     return len(scored_criteria(evaluation))
+
+
+def _criterion_home_match(section_title: str, criterion: Any) -> bool:
+    """TOC package matches a scoring category (containment or shared tokens).
+
+    Long scoreboard labels often share only one content word with short TOC
+    titles ("G. Cost Proposal" ↔ "Cost, rate structure, and overall value").
+    Require ≥2 tokens when possible; accept one ≥4-char shared token otherwise.
+    Used only when deciding whether a *verbatim scoreboard clone* is redundant.
+    """
+    name = criterion_name(criterion)
+    title = (section_title or "").strip()
+    if not title or not name:
+        return False
+    title_cf = title.casefold()
+    name_cf = name.casefold()
+    if name_cf == title_cf or name_cf in title_cf or title_cf in name_cf:
+        return True
+    name_tokens = {t for t in outline_title_tokens(name) if len(t) >= 4}
+    title_tokens = {t for t in outline_title_tokens(title) if len(t) >= 4}
+    overlap = name_tokens & title_tokens
+    if len(overlap) >= 2:
+        return True
+    return len(overlap) >= 1
+
+
+def _title_is_verbatim_scoring_label(title: str, criterion: Any) -> bool:
+    """True when the tab title is the scoreboard label itself (not a TOC package)."""
+    name = criterion_name(criterion)
+    if not title or not name:
+        return False
+    if normalize_outline_title(title) == normalize_outline_title(name):
+        return True
+    # Near-duplicate of the criterion name = copied from the weights table.
+    return outline_titles_near_duplicate(title, name)
+
+
+def drop_scoring_rubric_duplicate_sections(
+    sections: list[Any],
+    evaluation: Any,
+) -> tuple[list[Any], list[str]]:
+    """Remove scoreboard-label tabs when a real submission tab already owns them.
+
+    Principle-based (no client/keyword tables):
+    - Published response forms keep one tab per scored parent.
+    - Otherwise, a tab whose title is the scoring-category label is dropped when
+      another outline tab already matches that criterion (≥2 tokens / containment).
+    """
+    if evaluation_is_published_response_form(evaluation):
+        return list(sections), []
+    criteria = scored_criteria(evaluation)
+    if not criteria or not sections:
+        return list(sections), []
+
+    drop_indexes: set[int] = set()
+    dropped: list[str] = []
+    for index, section in enumerate(sections):
+        title = str(_get(section, "title") or "")
+        for criterion in criteria:
+            if not _title_is_verbatim_scoring_label(title, criterion):
+                continue
+            others = [
+                other
+                for j, other in enumerate(sections)
+                if j != index and j not in drop_indexes
+            ]
+            # A home must match the criterion AND not itself be a scoreboard label.
+            homes = [
+                other
+                for other in others
+                if _criterion_home_match(str(_get(other, "title") or ""), criterion)
+                and not _title_is_verbatim_scoring_label(
+                    str(_get(other, "title") or ""), criterion
+                )
+            ]
+            if not homes:
+                continue
+            drop_indexes.add(index)
+            dropped.append(
+                f"{title} (scoring-category label — covered by submission outline)"
+            )
+            break
+
+    if not drop_indexes:
+        return list(sections), []
+
+    kept = [s for i, s in enumerate(sections) if i not in drop_indexes]
+    for order, section in enumerate(kept, start=1):
+        if hasattr(section, "order"):
+            section.order = order
+        elif isinstance(section, dict):
+            section["order"] = order
+    return kept, dropped
+
+
+def order_outline_sections_by_authority_titles(
+    sections: list[Any],
+    authority_titles: list[str],
+) -> list[Any]:
+    """Reorder outline tabs to follow an RFP-derived title sequence.
+
+    ``authority_titles`` comes from the submission-format extract (buyer order).
+    Matching uses existing near-duplicate / normalization — no static keyword maps.
+    Unmatched tabs keep their relative order after the matched prefix.
+    """
+    if not sections or not authority_titles:
+        return list(sections)
+
+    remaining = list(sections)
+    ordered: list[Any] = []
+    for auth in authority_titles:
+        auth = (auth or "").strip()
+        if not auth:
+            continue
+        match_at: int | None = None
+        for i, section in enumerate(remaining):
+            title = str(_get(section, "title") or "")
+            if not title:
+                continue
+            if outline_titles_near_duplicate(title, auth):
+                match_at = i
+                break
+            if normalize_outline_title(title) == normalize_outline_title(auth):
+                match_at = i
+                break
+            # Containment when the extract used a short label and the tab kept
+            # the buyer's fuller lettered heading (or vice versa).
+            t_cf = title.casefold()
+            a_cf = auth.casefold()
+            if a_cf in t_cf or t_cf in a_cf:
+                match_at = i
+                break
+        if match_at is not None:
+            ordered.append(remaining.pop(match_at))
+    ordered.extend(remaining)
+    for order, section in enumerate(ordered, start=1):
+        if hasattr(section, "order"):
+            section.order = order
+        elif isinstance(section, dict):
+            section["order"] = order
+    return ordered
 
 
 def evaluation_response_char_limit(evaluation: Any) -> int | None:

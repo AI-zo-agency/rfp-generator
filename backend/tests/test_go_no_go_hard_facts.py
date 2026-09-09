@@ -39,6 +39,24 @@ Proposed fee and cost schedule — 25%
 Management quality, reputation, references, and City/NYCEDC history — 25%
 """
 
+ALAMEDA_PERCENT_SNIPPET = """
+7. Evaluation Criteria and Selection Process
+
+An evaluation panel convened by the City Manager’s Office will review all responsive proposals against
+the criteria below. Award will be based on best overall value to the City, not on lowest cost alone.
+
+Criterion Weight
+Relevant experience with California municipalities of comparable size and
+complexity
+25%
+Qualifications, availability, and continuity of assigned personnel 20%
+Quality and practicality of the proposed approach and work plan 20%
+Demonstrated writing and content quality shown in work samples 15%
+Cost, rate structure, and overall value 15%
+References and past performance 5%
+Total 100%
+"""
+
 
 class GoNoGoHardFactsTests(unittest.TestCase):
     def test_extracts_ceiling_and_year_budgets(self) -> None:
@@ -105,6 +123,25 @@ class GoNoGoHardFactsTests(unittest.TestCase):
             evaluation_table_is_reliable(facts),
             facts,
         )
+        self.assertEqual(facts["evaluation_total"], 100)
+
+    def test_extracts_alameda_wrapped_percent_criteria(self) -> None:
+        """Label-on-prior-line + bare '20%' (no em-dash) must still extract.
+
+        Live Alameda RFP PDF layout caused evaluation_points_found=False, so
+        the scrubber replaced Win Probability notes with a vacuous
+        'table not disclosed' line even though Section 7 lists 25/20/20/15/15/5.
+        """
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(ALAMEDA_PERCENT_SNIPPET)
+        blob = " | ".join(facts["evaluation_lines"]).casefold()
+        self.assertIn("california municipalities", blob)
+        self.assertIn("personnel", blob)
+        self.assertIn("references", blob)
+        self.assertTrue(evaluation_table_is_reliable(facts), facts)
         self.assertEqual(facts["evaluation_total"], 100)
 
 

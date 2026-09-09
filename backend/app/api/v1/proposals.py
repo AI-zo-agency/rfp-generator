@@ -935,16 +935,41 @@ async def phase3_6_self_edit_endpoint(rfp_id: str) -> JSONResponse:
     return await _enqueue_pipeline_phase(rfp_id, "phase-3-6-self-edit", work)
 
 
+class Phase35BudgetRequest(BaseModel):
+    """Optional flags for standalone vs full Generate chaining."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    chain_next: bool = Field(
+        default=True,
+        alias="chainNext",
+        description=(
+            "When true (default), Celery continues into Senior editor after budget. "
+            "Set false for Advanced options → Generate budget (stop after Phase 3.5)."
+        ),
+    )
+
+
 @router.post(
     "/{rfp_id}/proposal/phase-3-5-budget",
 )
-async def phase3_5_budget_endpoint(rfp_id: str) -> JSONResponse:
+async def phase3_5_budget_endpoint(
+    rfp_id: str,
+    body: Phase35BudgetRequest | None = None,
+) -> JSONResponse:
     """Start Phase 3.5 budget in the background; poll GET /proposal for completion."""
+
+    chain_next = True if body is None else bool(body.chain_next)
 
     async def work() -> None:
         await run_phase3_5_budget(rfp_id)
 
-    return await _enqueue_pipeline_phase(rfp_id, "phase-3-5-budget", work)
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "phase-3-5-budget",
+        work,
+        job_kwargs={"chain_next": chain_next},
+    )
 
 
 @router.post(

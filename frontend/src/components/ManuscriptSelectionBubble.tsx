@@ -3,10 +3,21 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
+export type SelectionBubbleAnchor = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
 type ManuscriptSelectionBubbleProps = {
   /** True when there is a usable text selection in the manuscript. */
   active: boolean;
+  /** Viewport rect captured at mouseup — required; do not re-read getSelection after React re-render. */
+  anchor: SelectionBubbleAnchor | null;
   disabled?: boolean;
+  /** Bold/Italic need a mapped markdown range; Change… can work with text-only. */
+  formatEnabled?: boolean;
   onBold: () => void;
   onItalic: () => void;
   onAskToChange: () => void;
@@ -17,7 +28,9 @@ type ManuscriptSelectionBubbleProps = {
  */
 export function ManuscriptSelectionBubble({
   active,
+  anchor,
   disabled,
+  formatEnabled = true,
   onBold,
   onItalic,
   onAskToChange,
@@ -25,37 +38,27 @@ export function ManuscriptSelectionBubble({
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
-    if (!active || typeof window === "undefined") {
+    if (!active || !anchor || typeof window === "undefined") {
       setPos(null);
       return;
     }
-    const update = () => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-        setPos(null);
-        return;
-      }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      if (rect.width < 1 && rect.height < 1) {
-        setPos(null);
-        return;
-      }
+    const place = () => {
       setPos({
-        top: Math.max(8, rect.top - 44),
+        top: Math.max(8, anchor.top - 44),
         left: Math.min(
           window.innerWidth - 200,
-          Math.max(8, rect.left + rect.width / 2 - 90)
+          Math.max(8, anchor.left + anchor.width / 2 - 90)
         ),
       });
     };
-    update();
-    document.addEventListener("selectionchange", update);
-    window.addEventListener("scroll", update, true);
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
     return () => {
-      document.removeEventListener("selectionchange", update);
-      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
     };
-  }, [active]);
+  }, [active, anchor]);
 
   if (!active || !pos || typeof document === "undefined") return null;
 
@@ -63,13 +66,13 @@ export function ManuscriptSelectionBubble({
     <div
       role="toolbar"
       aria-label="Selection actions"
-      className="fixed z-[230] flex items-center gap-0.5 rounded-lg border border-[rgba(17,24,39,0.12)] bg-white px-1 py-1 shadow-[0_10px_28px_rgba(15,23,42,0.16)]"
+      className="fixed z-[400] flex items-center gap-0.5 rounded-lg border border-[rgba(17,24,39,0.12)] bg-white px-1 py-1 shadow-[0_10px_28px_rgba(15,23,42,0.16)]"
       style={{ top: pos.top, left: pos.left }}
       onMouseDown={(e) => e.preventDefault()}
     >
       <button
         type="button"
-        disabled={disabled}
+        disabled={disabled || !formatEnabled}
         className="rounded-md px-2 py-1 text-[11px] font-bold text-[var(--zo-text)] hover:bg-[rgba(17,24,39,0.06)] disabled:opacity-40"
         title="Bold"
         onClick={onBold}
@@ -78,7 +81,7 @@ export function ManuscriptSelectionBubble({
       </button>
       <button
         type="button"
-        disabled={disabled}
+        disabled={disabled || !formatEnabled}
         className="rounded-md px-2 py-1 text-[11px] italic text-[var(--zo-text)] hover:bg-[rgba(17,24,39,0.06)] disabled:opacity-40"
         title="Italic"
         onClick={onItalic}

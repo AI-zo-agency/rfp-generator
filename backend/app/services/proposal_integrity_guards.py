@@ -1336,6 +1336,31 @@ def _sentence_has_ungrounded_cs_metric(sent: str, src: str) -> bool:
     return False
 
 
+def _chunk_is_markdown_fee_or_rate_table(chunk: str) -> bool:
+    """True for pipe tables (fee / rate schedules) — not case-study outcome prose."""
+    lines = [ln.strip() for ln in (chunk or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    pipe_lines = [ln for ln in lines if ln.startswith("|")]
+    if len(pipe_lines) < 2 or len(pipe_lines) < len(lines) // 2:
+        return False
+    head = " ".join(pipe_lines[:3]).casefold()
+    return any(
+        needle in head
+        for needle in (
+            "hourly rate",
+            "labor categor",
+            "role / labor",
+            "billable",
+            "year-2",
+            "year-3",
+            "fee",
+            "phase",
+            "extended",
+        )
+    )
+
+
 def scrub_ungrounded_case_study_percent_metrics(
     content: str,
     *,
@@ -1344,6 +1369,8 @@ def scrub_ungrounded_case_study_percent_metrics(
     """Remove invented outcome % / volume claims when they are absent from case-study KB.
 
     Requires ``source_text`` — without a source we do not guess which figures are real.
+    Never strips Cost / fee / classification-rate markdown tables (``Year-2 % Increase``
+    column headers false-positive the outcome-% detector and wipe whole schedules).
     """
     text = content or ""
     src = (source_text or "").strip()
@@ -1357,6 +1384,12 @@ def scrub_ungrounded_case_study_percent_metrics(
     while i < len(chunks):
         chunk = chunks[i]
         sep = chunks[i + 1] if i + 1 < len(chunks) else ""
+        if _chunk_is_markdown_fee_or_rate_table(chunk):
+            rebuilt.append(chunk)
+            if sep:
+                rebuilt.append(sep)
+            i += 2
+            continue
         if _sentence_has_ungrounded_cs_metric(chunk, src):
             logs.append(f"Removed ungrounded case-study metric: {chunk.strip()[:80]}")
             i += 2
@@ -1381,6 +1414,8 @@ def apply_case_study_metric_scrub_to_draft(
     source_text: str,
 ) -> tuple[ProposalDraft, list[str]]:
     """Strip invented impressions/clicks/CTR/% lift when those numbers are not in KB."""
+    from app.services.proposal_budget_playbook import section_is_budget_related
+
     src = (source_text or "").strip()
     if not draft.sections or not src:
         return draft, []
@@ -1389,6 +1424,11 @@ def apply_case_study_metric_scrub_to_draft(
     changed = False
     for section in draft.sections:
         body = section.content or ""
+        # Cost / fee tabs hold classification rate + phase tables — never treat
+        # Year-N % Increase columns as case-study outcome claims.
+        if section_is_budget_related(section):
+            sections.append(section)
+            continue
         if not (
             _CASE_STUDY_VOLUME_METRIC_RE.search(body)
             or _CASE_STUDY_PERCENT_CLAIM_RE.search(body)

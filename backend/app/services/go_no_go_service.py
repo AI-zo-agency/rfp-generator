@@ -35,6 +35,7 @@ from app.services.go_no_go_adjudicator import (
     apply_gap_recover_assessments,
     build_adjudication_payload,
     build_gap_recover_payload,
+    credit_delivery_proof_partials,
     rows_from_assessments,
 )
 from app.services.go_no_go_capability import (
@@ -48,6 +49,7 @@ from app.services.go_no_go_capability import (
     gap_matrix_from_requirements,
     per_track_resource_scores,
     per_track_technical_scores,
+    rebuild_decision_matrix_scores,
     reconcile_narrative,
     tracks_in_rows,
     unmet_disqualifying_requirements,
@@ -258,8 +260,10 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
    for agency-wide platform certification ONLY if KB shows an agency-level credential. Otherwise
    Status = Gap or [VERIFY: individual only — not agency-wide].
 3. Filename provenance: 06_WON = won/usable zö win material; 07_FIN = finalist/loss — NOT a win.
-   Never cite 07_FIN work (e.g. City of San Leandro) as documented won destination-marketing
-   experience. If excerpts credit another agency (e.g. Resonance) or a non-zö case study sitting
+   Never cite 07_FIN work as documented won destination-marketing / municipal experience.
+   Never call a 06_WON_* or 03_CS_* engagement a "pursuit text" or "not a confirmed win."
+   If both appear for the same city story, credit the 06_WON / 03_CS quote.
+   If excerpts credit another agency (e.g. Resonance) or a non-zö case study sitting
    inside a FIN file, flag as contaminated/competitor intelligence — not zö experience.
 4. MCI mismatch: If the RFP excludes meetings/conventions/incentives (MCI) or leisure-only
    destination work, do not count meetings-heavy references (e.g. San Francisco Travel) as
@@ -639,7 +643,10 @@ def _annotate_go_no_go_hit(hit: dict[str, Any]) -> dict[str, Any]:
             "PROVENANCE: 07_FIN = FINALIST/LOSS — do NOT count as won zö experience"
         )
     if "06_won" in label_cf or re.search(r"\b06[_-]?won\b", label_cf):
-        tags.append("PROVENANCE: 06_WON = won material — verify content is zö's")
+        tags.append(
+            "PROVENANCE: 06_WON = CONFIRMED WIN material — never call this a "
+            "pursuit text / unwon proposal"
+        )
     if "03_cs" in label_cf:
         tags.append("PROVENANCE: 03_CS case study")
     if "resonance" in body_cf or "resonance" in label_cf:
@@ -1170,6 +1177,68 @@ async def _plan_rfp_requirements(
     return []
 
 
+def _hit_is_won_or_case_study_delivery(hit: dict[str, Any]) -> bool:
+    """True for 06_WON / 03_CS delivery proof — never buyer source RFPs or 07_FIN."""
+    from app.services.kb_rag_retrieve import is_source_rfp_filename
+
+    name = (
+        supermemory.hit_file_name(hit)
+        or str(hit.get("title") or "")
+        or str(hit.get("customId") or "")
+    )
+    low = name.casefold()
+    if "07_fin" in low:
+        return False
+    if is_source_rfp_filename(name):
+        return False
+    return "06_won" in low or "03_cs" in low
+
+
+def enrich_hits_with_shared_won_case_studies(
+    requirements: list[RfpRequirement],
+    hits_by_requirement: dict[str, list[dict[str, Any]]],
+    all_hits: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Ensure every craft requirement sees won/CS delivery docs already retrieved.
+
+    Live Alameda failure: Santa Clara 06_WON Proposal was in the merged hit
+    pool but not attributed to press/social/plan rows, so the adjudicator only
+    saw thin festival CS and marked 23/24 gaps. Sharing confirmed WON/CS hits
+    across service/technical rows (without inventing new searches) fixes that
+    for every municipal/comms RFP.
+    """
+    won_cs = [h for h in all_hits if _hit_is_won_or_case_study_delivery(h)]
+    if not won_cs:
+        return hits_by_requirement
+
+    out: dict[str, list[dict[str, Any]]] = {
+        key: list(value) for key, value in hits_by_requirement.items()
+    }
+    for req in requirements:
+        category = (req.category or "service").casefold()
+        if category not in {"service", "technical"}:
+            continue
+        name = req.requirement
+        existing = out.get(name) or []
+        seen: set[str] = set()
+        for hit in existing:
+            key = supermemory.document_dedupe_key(hit) or str(
+                hit.get("id") or id(hit)
+            )
+            seen.add(key)
+        merged = list(existing)
+        for hit in won_cs:
+            key = supermemory.document_dedupe_key(hit) or str(
+                hit.get("id") or id(hit)
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(hit)
+        out[name] = merged
+    return out
+
+
 async def _gather_knowledge_context(
     rfp: RfpRecord,
     content: RfpContentInfo,
@@ -1239,6 +1308,10 @@ async def _gather_knowledge_context(
         requirements=requirements,
         search=run_query,
         plan_queries=True,
+    )
+
+    hits_by_requirement = enrich_hits_with_shared_won_case_studies(
+        requirements, hits_by_requirement, merged
     )
 
     # Fair interleave already happened inside the agent; still cap runaway volume.
@@ -1686,13 +1759,24 @@ def _scrub_invented_eval_and_people(
                 if dim == "win probability" and (
                     _INVENTED_EVAL_WEIGHT_RE.search(notes) or "62%" in notes
                 ):
-                    # Scores are NEVER raised here. Restate Win notes only when
-                    # they actually contain invented weights — do not wipe
-                    # Financial rationale just because that score is ≤2.
-                    row["notes"] = (
-                        "Point-weighted evaluation table not disclosed in RFP — "
-                        "score based on scope fit, competition, and logistics only."
-                    )
+                    # Scores are NEVER raised here. Strip invented weight math but
+                    # keep the real win rationale (deadline, competition, fit).
+                    # Never replace with a vacuous "not disclosed" cop-out — that
+                    # hid Alameda-style disclosed % tables when extraction missed.
+                    stripped = _INVENTED_EVAL_WEIGHT_RE.sub("", notes)
+                    stripped = re.sub(r"\s{2,}", " ", stripped).strip(" |.;")
+                    if len(stripped) >= 40:
+                        row["notes"] = stripped
+                    else:
+                        score = row.get("score")
+                        score_bit = (
+                            f"{score}/5" if isinstance(score, int) else "this score"
+                        )
+                        row["notes"] = (
+                            f"{score_bit} from scope fit vs RFP requirements, "
+                            "competitive posture, deadline/logistics, and KB "
+                            "evidence alignment — do not invent point/% weights."
+                        )
                 elif dim == "financial viability" and (
                     _INVENTED_EVAL_WEIGHT_RE.search(notes) or "62%" in notes
                 ):
@@ -2285,6 +2369,12 @@ async def _adjudicate_capabilities(
                     str(exc)[:160],
                 )
 
+    # Mechanical craft-family partials from retrieved 06_WON/03_CS delivery docs
+    # when the LLM left service rows as gap despite delivery proof in the pool.
+    rows = credit_delivery_proof_partials(
+        rows, sources, full_sources=full_sources
+    )
+
     logger.info(
         "capability adjudication for %s via %s: %d rows, %d verified, "
         "%d ungrounded claims rejected",
@@ -2446,91 +2536,13 @@ def _enforce_capability_evidence(
         if gap not in gaps:
             gaps.append(gap)
     derived = calibrate_technical_capability_score(validated)
-    derived_resource = derive_resource_capability_score(validated)
-
     matrix = [row.model_copy() for row in analysis.decision_matrix]
-    if derived is not None:
-        for row in matrix:
-            if row.dimension.casefold() == "technical capability match":
-                if derived != row.score:
-                    direction = "raised" if derived > row.score else "reduced"
-                    row.notes = (
-                        f"{row.notes} | Score {direction} to {derived}/5 from "
-                        f"craft/platform requirement evidence "
-                        f"({len(core_gaps)} core craft gap(s) remaining)."
-                    ).strip(" |")
-                    row.score = derived
-                continue
-
-            if (
-                row.dimension.casefold() == "resource availability"
-                and derived_resource is not None
-                and derived_resource < row.score
-            ):
-                # Never RAISE resource from role-row math. Sonja as liaison
-                # must not override an honest 2/5 for geography / attendance.
-                row.notes = (
-                    f"{row.notes} | Score reduced to {derived_resource}/5 "
-                    "from role/logistics requirement evidence."
-                ).strip(" |")
-                row.score = derived_resource
-                continue
-
-            # Dimensions downstream of capability cannot outrun it.
-            cap = coherent_dimension_cap(row.dimension, derived)
-            if cap is not None and row.score > cap:
-                row.notes = (
-                    f"{row.notes} | Capped at {cap}/5: cannot exceed technical "
-                    f"capability ({derived}/5) — {len(core_gaps)} core craft "
-                    "requirement(s) lack verifiable KB evidence."
-                ).strip(" |")
-                row.score = cap
-
-        # When Technical was understated (bio/platform proof ignored), Win often
-        # sat at 2 from the same mistake. Floor Win to min(3, tech) when enough
-        # core craft rows are evidenced.
-        craft_cores = [
-            r
-            for r in validated
-            if r.is_core
-            and (r.category or "service").casefold()
-            in {"technical", "service", "compliance"}
-        ]
-        evidenced_core = sum(
-            1 for r in craft_cores if r.status in {"verified", "partial"}
-        )
-        # Weighted like the base score: five half-credit "partial" rows are not
-        # the same proof as five verified ones, and a head-count ratio let them
-        # overrule an analyst's defended 2/5. A failed minimum threshold blocks
-        # the floor outright — Win cannot be floored on scope we are not
-        # responsive for.
-        if (
-            derived >= 3
-            and craft_cores
-            and evidenced_core_craft_ratio(validated) >= 0.4
-            and not unmet_disqualifying_requirements(validated)
-        ):
-            win_floor = min(3, derived)
-            for row in matrix:
-                if (
-                    row.dimension.casefold() == "win probability"
-                    and row.score < win_floor
-                ):
-                    row.notes = (
-                        f"{row.notes} | Raised to {win_floor}/5 floor: technical "
-                        f"capability evidenced at {derived}/5 "
-                        f"({evidenced_core}/{len(craft_cores)} core craft rows)."
-                    ).strip(" |")
-                    row.score = win_floor
-        for row in matrix:
-            clamped = clamp_score_to_written_cap(row.score, row.notes)
-            if clamped != row.score:
-                row.notes = (
-                    f"{row.notes} | Display score aligned to written cap "
-                    f"{clamped}/5."
-                ).strip(" |")
-                row.score = clamped
+    if derived is not None or validated:
+        matrix, derived = rebuild_decision_matrix_scores(matrix, validated)
         updates["decision_matrix"] = matrix
+        # Keep fitScore aligned with evidence-driven Technical (dashboard uses it).
+        if derived is not None:
+            updates["fit_score"] = derived
 
     if core_gaps or blocked:
         # Any core gap blocks a clean "go". NO-GO is reserved for capability
@@ -2746,6 +2758,10 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 - Offeror office ≠ automatic subcontractor fix.
 - Google/Meta Ads on one person ≠ agency Verified.
 - 07_FIN ≠ won experience; flag Resonance/competitor text if present.
+- 06_WON_* and 03_CS_* ARE confirmed win / case-study proof when tagged in KB
+  excerpts — never write that Santa Clara / Carbondale / Bend (or any 06_WON
+  client) is only a "pursuit text." If Technical rows are gap, say the
+  adjudicator did not ground a quote — do not invent wrong provenance.
 - MCI-mismatched tourism refs need an explicit discount note.
 - Never invent "budget unknown" when HARD FACTS show a ceiling.
 - Never invent evaluation % / point totals when HARD FACTS say not found.

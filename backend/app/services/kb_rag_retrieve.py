@@ -517,6 +517,15 @@ async def _search_hits_chunk_first(
         _search_inflight.pop(key, None)
 
 
+# Supermemory /v4/search rejects limit > 100 (Go/No-Go used limit*2=200 →
+# every documents-mode call 400'd and chunks=0, leaving only coarse memories).
+_SUPERMEMORY_SEARCH_LIMIT_MAX = 100
+
+
+def _clamp_supermemory_limit(limit: int, *, floor: int = 1) -> int:
+    return max(floor, min(int(limit), _SUPERMEMORY_SEARCH_LIMIT_MAX))
+
+
 async def _search_hits_chunk_first_uncached(
     query: str,
     *,
@@ -524,11 +533,14 @@ async def _search_hits_chunk_first_uncached(
     filters: dict[str, Any] | None,
     threshold: float,
 ) -> list[dict[str, Any]]:
+    """Chunk-first like ``kb_qa_loop``: raw PDF/DOCX passages lead; hybrid fills gaps."""
     from app.services import supermemory
 
     active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
-    chunk_limit = max(limit * 2, 16)
-    memory_limit = max(limit // 2, 4)
+    # Prefer chunks: ask for as many document passages as the API allows, and
+    # fewer memory summaries (gap-fill only) — same priority as kb_qa_loop.
+    chunk_limit = _clamp_supermemory_limit(max(limit * 2, 16))
+    memory_limit = _clamp_supermemory_limit(max(limit // 2, 4))
 
     async def _chunks() -> list[dict[str, Any]]:
         try:
@@ -560,11 +572,14 @@ async def _search_hits_chunk_first_uncached(
     memory_hits = [h for h in memory_hits if supermemory.is_knowledge_base_hit(h)]
     merged = supermemory.merge_chunk_first_hits(memory_hits, chunk_hits)
     logger.info(
-        "KB chunk-first search %r: chunks=%d memories=%d merged=%d",
+        "KB chunk-first search %r: chunks=%d memories=%d merged=%d "
+        "(chunk_limit=%d memory_limit=%d)",
         query[:60],
         len(chunk_hits),
         len(memory_hits),
         len(merged),
+        chunk_limit,
+        memory_limit,
     )
     return merged
 

@@ -10,6 +10,8 @@ from app.services.proposal_edge_case_guards import (
     scrub_bio_marks_used_as_rfp_cites,
     scrub_blank_name_before_will,
     scrub_county_city_manager_mismatch,
+    scrub_empty_list_items,
+    scrub_gap_narration_prose,
 )
 from app.services.proposal_scan_fact_repairs import scrub_leaked_system_fragments
 
@@ -127,6 +129,106 @@ class EdgeCaseGuardTests(unittest.TestCase):
         self.assertTrue(logs)
         self.assertNotIn("Confirm whether", cleaned)
         self.assertIn("Budget workbook", cleaned)
+
+    def test_empty_numbered_list_item_is_removed_and_renumbered(self) -> None:
+        body = (
+            "The undersigned declares that:\n\n"
+            "1. This proposal is submitted in good faith.\n"
+            "2.\n"
+            "3. Zö agency has not sought to fix any proposal price.\n"
+            "4. All statements contained in this proposal are true.\n"
+        )
+        cleaned, logs = scrub_empty_list_items(body)
+        self.assertTrue(logs)
+        self.assertNotRegex(cleaned, r"(?m)^2\.\s*$")
+        self.assertIn("1. This proposal is submitted in good faith.", cleaned)
+        self.assertIn("2. Zö agency has not sought to fix any proposal price.", cleaned)
+        self.assertIn("3. All statements contained in this proposal are true.", cleaned)
+        draft = ProposalDraft(
+            rfpId="rfp-alameda",
+            sections=[
+                _sec("non-collusion", "Completed Non-Collusion Declaration", body),
+            ],
+            updatedAt="2026-09-09T00:00:00Z",
+        )
+        out, out_logs = apply_edge_case_guards_to_draft(draft)
+        self.assertTrue(any("empty list" in log for log in out_logs))
+        self.assertIn(
+            "2. Zö agency has not sought to fix any proposal price.",
+            out.sections[0].content or "",
+        )
+
+    def test_gap_narration_references_prose_becomes_manual_fill_only(self) -> None:
+        body = (
+            "We can't complete a reference table with verified contact names, titles, "
+            "organizations, phone numbers, and emails from our knowledge base for this "
+            "response. [MANUAL FILL: Sonja, pull reference contacts.]\n\n"
+            "What we can stand behind is the operating pattern those references would "
+            "confirm. Section D names the City of Umatilla engagement.\n\n"
+            "That pattern is the actual evidence of past performance here. A reference "
+            "call would tell you we showed up on schedule.\n\n"
+            "We'll supply complete, verifiable reference contacts as part of finalizing "
+            "this submission.\n"
+        )
+        cleaned, logs = scrub_gap_narration_prose(
+            body, title="References and past performance"
+        )
+        self.assertTrue(logs)
+        self.assertNotIn("can't complete", cleaned.casefold())
+        self.assertNotIn("what we can stand behind", cleaned.casefold())
+        self.assertNotIn("reference call would tell you", cleaned.casefold())
+        self.assertNotIn("as part of finalizing", cleaned.casefold())
+        self.assertIn("[MANUAL FILL", cleaned)
+        draft = ProposalDraft(
+            rfpId="rfp-alameda",
+            sections=[
+                _sec("refs", "References and past performance", body),
+            ],
+            updatedAt="2026-09-09T00:00:00Z",
+        )
+        out, out_logs = apply_edge_case_guards_to_draft(draft)
+        self.assertTrue(any("gap-narration" in log for log in out_logs))
+        self.assertNotIn("can't complete", (out.sections[0].content or "").casefold())
+
+    def test_hollow_references_tab_gets_engagement_table(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-alameda",
+            sections=[
+                _sec(
+                    "section-3-umatilla",
+                    "3.1 — City of Umatilla Digital Campaign",
+                    "Case study body.",
+                ),
+                _sec(
+                    "section-3-maricopa",
+                    "3.2 — Maricopa County Brand Video",
+                    "Case study body.",
+                ),
+                _sec(
+                    "d-refs",
+                    "D. Relevant Experience and References",
+                    (
+                        "| Engagement | Scope | Relevance | Reference Contact | Contact Info |\n"
+                        "|---|---|---|---|---|\n"
+                        "| City of Umatilla | Digital campaign | Municipal cadence | "
+                        "[MANUAL FILL: Sonja] | [MANUAL FILL: Sonja] |\n"
+                    ),
+                ),
+                _sec(
+                    "eval-refs",
+                    "References and past performance",
+                    "[MANUAL FILL: Sonja, pull reference contacts before submission.]",
+                ),
+            ],
+            updatedAt="2026-09-09T00:00:00Z",
+        )
+        out, logs = apply_edge_case_guards_to_draft(draft)
+        self.assertTrue(any("rebuilt References contact table" in log for log in logs))
+        body = out.sections[-1].content or ""
+        self.assertIn("| Engagement |", body)
+        self.assertIn("City of Umatilla", body)
+        self.assertIn("[MANUAL FILL", body)
+        self.assertGreater(len(body.split()), 40)
 
 
 if __name__ == "__main__":

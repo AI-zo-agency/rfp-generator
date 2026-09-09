@@ -82,6 +82,26 @@ class ParseOpportunityClassificationTests(unittest.TestCase):
         )
         self.assertEqual(parsed.compensation_signal, "undisclosed")
 
+    def test_quote_match_ignores_pdf_newlines(self) -> None:
+        """Alameda-style: LLM quote is one line; PDF extract has a linebreak mid-sentence."""
+        rfp = (
+            "Proposers may propose retainer, hourly, or hybrid arrangements, "
+            "provided the proposal clearly \nidentifies what is included at each "
+            "price point."
+        )
+        parsed = parse_opportunity_classification(
+            {
+                "opportunityClass": "professional_services",
+                "compensationSignal": "confirmed_fee",
+                "evidenceQuote": (
+                    "Proposers may propose retainer, hourly, or hybrid arrangements, "
+                    "provided the proposal clearly identifies what is included"
+                ),
+            },
+            rfp_text=rfp,
+        )
+        self.assertEqual(parsed.compensation_signal, "confirmed_fee")
+
 
 class OpportunityScoreCapTests(unittest.TestCase):
     def test_open_competition_no_fee_caps_like_claude(self) -> None:

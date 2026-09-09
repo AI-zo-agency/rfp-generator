@@ -435,9 +435,11 @@ async def search_documents(
     threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
     """Query KB via POST /v4/search (always v4 — never v3 for reads)."""
+    # API hard-caps limit at 100; higher values 400 and callers see empty chunks.
+    safe_limit = max(1, min(int(limit), 100))
     body: dict[str, Any] = {
         "q": query,
-        "limit": limit,
+        "limit": safe_limit,
         "containerTag": container_tag(),
         "searchMode": search_mode,
         "rerank": True,

@@ -71,17 +71,65 @@ _EVAL_POINTS_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 # Percent-weighted tables (e.g. NYCEDC V.B: four criteria at 25% each).
+# Separator may be colon/dash/paren OR bare whitespace (Alameda: "… personnel 20%").
 _EVAL_PERCENT_LINE_RE = re.compile(
-    r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-,\.]{3,100}?)"
-    r"\s*(?:[:\-–—]|\()\s*"
+    r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-,\.]{3,120}?)"
+    r"(?:\s*(?:[:\-–—]|\()\s*|[ \t]+)"
     r"(?P<pct>\d{1,3})\s*%\s*\)?",
     re.IGNORECASE,
 )
 _EVAL_PERCENT_SKIP_LABEL = re.compile(
     r"(?i)\b(?:mwbe|mbe|wbe|dbes?|participation|gross\s+receipts|"
     r"workforce|fte|time\s+allocation|of\s+their\s+time|"
-    r"discount|contingency|retainage|overhead)\b"
+    r"discount|contingency|retainage|overhead)\b|"
+    r"^(?:total|criterion|criteria|weight|weights|section|page|item|group)$"
 )
+_LONE_PERCENT_LINE_RE = re.compile(r"^\s*(\d{1,3})\s*%\s*$")
+
+
+def _flatten_wrapped_percent_criteria(window: str) -> str:
+    """Join wrapped criterion titles onto the following ``25%`` line.
+
+    PDF extracts often split Alameda-style tables as::
+
+        Relevant experience with California municipalities …
+        complexity
+        25%
+        Qualifications … personnel 20%
+
+    Without flattening, percent row regexes miss the first criterion.
+    """
+    header_labels = {
+        "criterion weight",
+        "criterion",
+        "weight",
+        "weights",
+        "total",
+        "criteria",
+    }
+    lines = [(ln or "").strip() for ln in (window or "").splitlines()]
+    out: list[str] = []
+    pending: list[str] = []
+    for ln in lines:
+        if not ln:
+            continue
+        lone = _LONE_PERCENT_LINE_RE.match(ln)
+        if lone:
+            usable = [p for p in pending if p.casefold() not in header_labels]
+            # Wrapped titles are almost always the last 1–2 lines — never the
+            # preceding prose paragraph ("…not on lowest cost alone.").
+            label = " ".join(usable[-2:]).strip() if usable else ""
+            pending = []
+            if label:
+                out.append(f"{label} {lone.group(1)}%")
+            continue
+        if _EVAL_PERCENT_LINE_RE.search(ln):
+            if pending:
+                pending = []
+            out.append(ln)
+            continue
+        pending.append(ln)
+    return "\n".join(out)
 
 
 def money_to_number(amount: str, suffix: str | None) -> float | None:
@@ -248,12 +296,23 @@ def extract_rfp_hard_facts(
             if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
                 continue
             collected_points.append((label, pts))
-        for row_m in _EVAL_PERCENT_LINE_RE.finditer(window):
+        flat_window = _flatten_wrapped_percent_criteria(window)
+        for row_m in _EVAL_PERCENT_LINE_RE.finditer(flat_window):
             label = re.sub(r"\s+", " ", row_m.group("label")).strip(" .-:()")
             pct = int(row_m.group("pct"))
             if pct <= 0 or pct > 100:
                 continue
-            if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
+            if len(label) < 4 or label.casefold() in {
+                "section",
+                "page",
+                "item",
+                "group",
+                "total",
+                "criterion",
+                "criteria",
+                "weight",
+                "weights",
+            }:
                 continue
             if _EVAL_PERCENT_SKIP_LABEL.search(label):
                 continue

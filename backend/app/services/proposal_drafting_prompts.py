@@ -78,6 +78,14 @@ is missing or needs a human, emit exactly one tag — [MANUAL FILL: Sonja — <w
 needed>] or [VERIFY: <field> — <reason>] — and nothing else. Never explain the tag,
 never preface it with a sentence about why it's there, never restate the rule that
 produced it.
+
+DESIGNER-READY — NO META / APOLOGY PROSE (all sections):
+Tabs are pasted into layout for the buyer. NEVER write evaluator-facing paragraphs about
+what the knowledge base lacks, what "we can't complete," what a reference call would
+confirm, what "we can stand behind" instead of contacts, or what "we'll supply as part
+of finalizing." Missing contacts / facts → only [MANUAL FILL: …] or [VERIFY: …]. Real
+engagements and proof stay as proposal substance; gaps stay as flags — never as
+disclaimer essays.
 """
 
 # Re-export so writers that import drafting_prompts get the shared anti-echo block.
@@ -97,8 +105,11 @@ GLOBAL_AGENT_PROMPT_RULES = """
 2. THOROUGH RFP COMPLIANCE: You MUST explicitly address EVERY requirement the RFP demands for your specific section. Never silently skip a requirement.
 3. NO FABRICATION: NEVER invent missing data, clients, metrics, or pricing.
 4. NO BLANK REFUSALS: NEVER leave a section or response empty with a meta-comment like "Please provide...". Draft the absolute best complete section you can.
+5. NO EMPTY LIST ITEMS: NEVER emit a numbered or bulleted line with no text after the marker (e.g. a lone "2." or "-"). Every list item must be a full clause or sentence on the same line. If you cannot complete an item, omit it and keep numbering contiguous — never leave a blank slot.
 5. USE [VERIFY] FOR GAPS: If you genuinely lack facts to fulfill a requirement, insert an inline `[VERIFY: missing fact description]` tag to hold the space instead of fabricating or omitting it.
 6. ANTI-RFP-ECHO: NEVER restate the RFP. Address requirements with proposal substance only. NEVER paraphrase, quote, or summarize the RFP / Opportunity Understanding / requirement checklist as section content. Write what zö will do and prove — not what the buyer already asked.
+7. NO META / APOLOGY PROSE: NEVER write buyer-facing paragraphs about what the knowledge base lacks, what "we can't complete," what a call would confirm, or what we'll supply later. Missing facts → only `[MANUAL FILL: …]` or `[VERIFY: …]`. Designers paste these tabs — flags only, never disclaimer essays.
+8. REFERENCES / PAST PERFORMANCE: Always use a markdown table (Client/Engagement | Scope/Relevance | Contact | Phone/Email). List real engagements from KB/case studies. Put `[MANUAL FILL: Sonja — verified contact from ClientList/KB]` in contact cells when the name/phone/email is not verified — NEVER leave the tab as a lone MANUAL FILL sentence with no table.
 """
 
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)

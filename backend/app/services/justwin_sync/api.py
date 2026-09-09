@@ -239,23 +239,54 @@ def _lead_payload(client: JustWinApiClient, external_id: str) -> dict[str, Any] 
     return payload if isinstance(payload, dict) else None
 
 
+# S3 returns headers quickly but large RFP PDFs often exceed Playwright's
+# default 30s while the body is still streaming (logs show 200 OK + timeout).
+_S3_PDF_TIMEOUT_MS = 180_000
+
+
+def _download_bytes_httpx(url: str, *, timeout_s: float = 180.0) -> bytes:
+    """Direct GET for pre-signed S3 URLs — no browser cookies required."""
+    import httpx
+
+    with httpx.Client(timeout=timeout_s, follow_redirects=True) as http:
+        res = http.get(url)
+        res.raise_for_status()
+        return res.content
+
+
 def _download_target_pdf(
     client: JustWinApiClient, target_id: str
 ) -> bytes | None:
     view_res = client.page.request.get(
         f"{_api_root()}/targets/{target_id}/view",
         headers=client.headers,
+        timeout=60_000,
     )
     if not view_res.ok:
         return None
     s3_url = (view_res.json() or {}).get("url")
     if not s3_url:
         return None
-    pdf_response = client.page.request.get(s3_url)
-    if not pdf_response.ok:
-        raise RuntimeError(f"Failed to download PDF from S3 ({pdf_response.status})")
-    body = pdf_response.body()
-    if len(body) < 500 or not body.startswith(b"%PDF"):
+
+    body: bytes | None = None
+    try:
+        pdf_response = client.page.request.get(s3_url, timeout=_S3_PDF_TIMEOUT_MS)
+        if not pdf_response.ok:
+            raise RuntimeError(f"Failed to download PDF from S3 ({pdf_response.status})")
+        body = pdf_response.body()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[justwin-sync] Playwright S3 download failed (%s) — retrying with httpx",
+            exc,
+        )
+        try:
+            body = _download_bytes_httpx(str(s3_url))
+        except Exception as http_exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Failed to download PDF from S3 after Playwright + httpx: {http_exc}"
+            ) from http_exc
+
+    if body is None or len(body) < 500 or not body.startswith(b"%PDF"):
         raise RuntimeError("Downloaded file was not a valid PDF")
     return body
 

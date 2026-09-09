@@ -178,10 +178,13 @@ Rules:
 5b. RFP-GROUNDED ALWAYS: Read the COVERAGE CHECKLIST and RFP GAPS for THIS section. Even on voice/tone asks, keep covered substance and ADD proposal answers for gaps from evidence/KB. Never invent deliverables, metrics, clients, or case studies. Never ignore the mapped RFP section.
 6. Budget/fee edits (critical — ONLY when THIS section is Budget/Cost/Pricing OR the user
    explicitly asks to change fees/rates/line items):
-   - Do NOT query general KB for this client's budget/hours/rates — KB has no new-client pricing.
-   - Use search_rfp_requirements for budget thresholds / cost criteria, then search_pricing_guide for 00_Guide_Pricing tiers.
-   - Choose Low/Average/High from RFP + guide; never invent numbers or reverse-engineer totals.
-   - Refuse invented dollars; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
+   - SURGICAL first: apply ONLY the user ask. Prefer the smallest table/prose change.
+   - NEVER delete existing Hourly Rate Schedule $ rows or replace them with MANUAL FILL.
+   - NEVER rewrite Fee Detail fees when the user only asked for a schedule/table layout change.
+   - For person/name columns: search_team_bios / MasterTemplate org roster — never invent names.
+   - Do NOT invent client-specific fee totals from general KB. Fee dollars stay on the ledger /
+     00_Guide_Pricing path (search_pricing_guide) when the ask actually changes fees.
+   - Refuse invented dollars; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
 6a. NEVER call search_pricing_guide for narrative / strategy / approach / partnership / voice
    restores. Example: restoring a "why regional partnerships move slower" caveat is NOT a
    pricing ask — use search_rfp_requirements if needed, then edit the prose. Do not pull
@@ -217,8 +220,10 @@ Rules:
 - Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
 - When [VERIFY] gaps are listed, dedicate a query to each missing zö field.
 - Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
-- BUDGET / COST / FEES / PRICING sections: do NOT plan queries like "<client> marketing plan budget hours rate".
-  Plan ONLY 00_Guide_Pricing queries (tier Low Average High, menu rates, PM floor) — RFP budget ceilings are read via the RFP tool, not Supermemory client docs.
+- BUDGET / COST / FEES / PRICING sections:
+  - If the user is changing fee dollars / rebuilding rates from the guide → plan 00_Guide_Pricing queries only.
+  - If the user is editing table layout / columns / names / prose on Cost → plan roster/org/bio queries
+    as needed (MasterTemplate, team bios). Do NOT invent fee totals from client KB.
 - Each non-budget query MUST include "zö agency" + the specific fact + a doc-type hint.
 - Avoid vague mash queries like "methodology won_proposals" alone.
 
@@ -853,14 +858,20 @@ async def plan_section_queries_agent(
         for k in ("budget", "pricing", "cost of", "fee", "compensation", "cost proposal")
     )
     if is_budget:
-        # Never plan client-specific budget KB queries — pricing lives in the guide + RFP.
-        guide_queries = [
-            "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
-            "00_Guide_Pricing 9.1 9.2 Project Management 5-8 percent floor Average tier",
-            "00_Guide_Pricing transparent compensation pass-through agency fees qualifying language",
-        ]
-        used = {q.strip().lower() for q in prior_queries}
-        return [q for q in guide_queries if q.lower() not in used][:4]
+        from app.services.proposal_budget_playbook import (
+            user_asks_budget_fee_structure_mutation,
+        )
+
+        # Fee-dollar rebuilds stay on the Pricing Guide. Table/layout/name asks
+        # use the normal planner (roster / bios) — do not force Guide-only queries.
+        if user_asks_budget_fee_structure_mutation(user_message):
+            guide_queries = [
+                "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
+                "00_Guide_Pricing 9.1 9.2 Project Management 5-8 percent floor Average tier",
+                "00_Guide_Pricing transparent compensation pass-through agency fees qualifying language",
+            ]
+            used = {q.strip().lower() for q in prior_queries}
+            return [q for q in guide_queries if q.lower() not in used][:4]
 
     try:
         raw, _ = await run_json_agent(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -111,9 +112,18 @@ PHASE 3 — Map every RFP deliverable to a Pricing Guide line item as a PHASE / 
 - Prefer budgetFormat=phased (or service_menu) UNLESS THIS RFP explicitly requires:
   (a) personnel_loading — hourly rates BY ROLE / labor category (often with Year-2 / Year-3 % increases), OR
   (b) blended_rate_form — a single hourly / monthly / annual block.
-- When THIS RFP asks for a role-by-role hourly table, budgetFormat MUST be personnel_loading.
+- When THIS RFP asks for a role-by-role hourly table OR a complete hourly rate schedule
+  by classification (even alongside phased / NTE fees), you MUST include that schedule.
+  Use billable $/hr rows from the KB labor / role rate excerpts provided (cite the
+  source filename). Never invent classifications or dollars. Never use Internal Rate
+  or Raw floor cost columns — only Billable Rate for the client schedule.
+  If the RFP also wants phased/NTE fees, keep budgetFormat=phased for fee detail AND
+  still emit unit=hour lineItems (or verifiedRates) for every KB billable role so the
+  Cost tab can render the mandatory rate schedule.
+- When THIS RFP's scored instrument is ONLY the hourly table (no fixed-fee ask),
+  budgetFormat MUST be personnel_loading.
   Emit one agency_fee lineItem per RFP-named role with unit=hours (quantity may be 1 for rate display),
-  rate = guide labor-category hourly, roleTitle = exact RFP role label. Put Year-2 / Year-3 % in
+  rate = KB labor-category / role billable hourly, roleTitle = exact RFP role label. Put Year-2 / Year-3 % in
   optionTermNotes (e.g. "Year-2 increase: 3%. Year-3 increase: 3%."). Do NOT substitute a
   fixed-fee / monthly retainer phase table for that instrument — evaluators score the hourly table.
 - budgetFormat is AUTHORITATIVE for the manuscript Cost section. Downstream renderers will not
@@ -499,70 +509,192 @@ async def _fetch_pinned_pricing_guide() -> tuple[str, list[str]] | None:
     return None
 
 
-async def _fetch_guide_context(
+async def _fetch_labor_role_rate_context(
     rfp: RfpRecord,
-    stage_two: str,
     *,
     focus_hint: str = "",
 ) -> tuple[str, list[str]]:
-    """Retrieve 00_Guide_Pricing: pin by filename first, search only as fallback."""
+    """KB-wide retrieve of role / classification billable hourly tables.
+
+    Searches pricing + reference (and unfiltered). When a hit filename looks like
+    a role/labor rate card, upgrade that hit to the **full** indexed document so
+    the billable table is not truncated by chunk merge.
+    """
     if not supermemory.is_configured():
-        return "(Supermemory not configured.)", []
+        return "", []
 
-    pinned = await _fetch_pinned_pricing_guide()
-    if pinned is not None:
-        return pinned
-
-    logger.warning(
-        "pricing_guide_pin_miss — falling back to search rfp_id=%s",
-        rfp.id,
-    )
-    scope_hint = stage_two[:200] if stage_two else (rfp.sector or "")
-    hint = (focus_hint or "")[:300]
-    from app.services.proposal_knowledge_base_tools import sanitize_pricing_guide_query
-
+    hint = (focus_hint or "")[:200]
     queries = [
-        "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management contingency qualifying language",
-        "00_Guide_Pricing 4.4 Email Newsletter Design Setup one-time average tier",
-        "00_Guide_Pricing 9.1 9.2 Project Management short projects campaign-specific 5-8 percent floor",
-        sanitize_pricing_guide_query(
-            f"00_Guide_Pricing {scope_hint[:120]}",
-            rfp_client=rfp.client or "",
-            rfp_title=rfp.title or "",
-        ),
+        "billable rate by role labor classification Account Manager Creative Director hourly USD",
+        "role rates cost table billable per hour copywriter art director agency director",
+        "hourly labor category rates Project Manager Digital Team Programming Finance",
     ]
     if hint:
-        queries.insert(
-            1,
-            sanitize_pricing_guide_query(
-                f"00_Guide_Pricing {hint[:200]}",
-                rfp_client=rfp.client or "",
-                rfp_title=rfp.title or "",
-            ),
-        )
+        queries.insert(0, f"billable hourly role rates {hint}")
+
     chunks: list[str] = []
     sources: list[str] = []
     seen_chunk_keys: set[str] = set()
     for query in queries:
-        # Prefer pricing category; reference only as secondary fallback.
-        for category in ("pricing", "reference"):
+        for category in ("pricing", "reference", None):
             text, srcs = await search_knowledge_base(
                 query,
-                limit=8,
+                limit=6,
                 category=category,
-                max_chars=GUIDE_SEARCH_CHAR_LIMIT // 3,
+                max_chars=10_000,
+                rfp_client=rfp.client or "",
+                rfp_title=rfp.title or "",
             )
             if text and not text.startswith("("):
-                key = text[:200]
+                key = text[:180]
                 if key not in seen_chunk_keys:
                     seen_chunk_keys.add(key)
                     chunks.append(text)
             for src in srcs:
                 if src not in sources:
                     sources.append(src)
+            if len("\n".join(chunks)) >= 18_000:
+                break
+        if len("\n".join(chunks)) >= 18_000:
+            break
 
-    combined = "\n\n---\n\n".join(chunks)[:GUIDE_SEARCH_CHAR_LIMIT]
-    return combined or "(No 00_Guide_Pricing content in KB — ingest pricing guide.)", sources
+    # Upgrade role/labor rate-card hits to full document text (search chunks truncate).
+    full_docs: list[str] = []
+    upgraded: list[str] = []
+    for src in sources[:12]:
+        name = (src or "").strip()
+        if not name:
+            continue
+        if not re.search(
+            r"(?i)role\s+rates?|labor\s+cost|billable\s+rate|rate\s+card|cost\s+table",
+            name,
+        ):
+            continue
+        # Skip the menu guide — already pinned separately.
+        if re.search(r"(?i)00_guide_pricing", name):
+            continue
+        try:
+            document = await supermemory.find_document_by_file_name(name)
+            if not document:
+                continue
+            custom_id = supermemory.document_fetch_key(document)
+            if not custom_id:
+                continue
+            content = await supermemory.get_document_content(custom_id=custom_id)
+            body = (content or "").strip()
+            if len(body) < 200:
+                continue
+            full_docs.append(f"[full doc: {name}]\n{body[:12_000]}")
+            upgraded.append(name)
+            logger.info(
+                "labor_role_rates_full_doc rfp_id=%s file_name=%s chars=%s",
+                rfp.id,
+                name,
+                len(body),
+            )
+        except Exception:
+            logger.warning(
+                "labor_role_rates_full_doc_failed rfp_id=%s file_name=%s",
+                rfp.id,
+                name,
+                exc_info=True,
+            )
+
+    parts = [*full_docs, *chunks]
+    combined = "\n\n---\n\n".join(parts)[:24_000]
+    if combined:
+        logger.info(
+            "labor_role_rates_kb_hits rfp_id=%s sources=%s upgraded=%s chars=%s",
+            rfp.id,
+            sources[:8],
+            upgraded[:6],
+            len(combined),
+        )
+    return combined, sources
+
+
+async def _fetch_guide_context(
+    rfp: RfpRecord,
+    stage_two: str,
+    *,
+    focus_hint: str = "",
+) -> tuple[str, list[str]]:
+    """Retrieve 00_Guide_Pricing (pin first) plus KB labor/role billable rates."""
+    if not supermemory.is_configured():
+        return "(Supermemory not configured.)", []
+
+    guide_text = ""
+    sources: list[str] = []
+    pinned = await _fetch_pinned_pricing_guide()
+    if pinned is not None:
+        guide_text, sources = pinned
+    else:
+        logger.warning(
+            "pricing_guide_pin_miss — falling back to search rfp_id=%s",
+            rfp.id,
+        )
+        scope_hint = stage_two[:200] if stage_two else (rfp.sector or "")
+        hint = (focus_hint or "")[:300]
+        from app.services.proposal_knowledge_base_tools import sanitize_pricing_guide_query
+
+        queries = [
+            "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management contingency qualifying language",
+            "00_Guide_Pricing 4.4 Email Newsletter Design Setup one-time average tier",
+            "00_Guide_Pricing 9.1 9.2 Project Management short projects campaign-specific 5-8 percent floor",
+            sanitize_pricing_guide_query(
+                f"00_Guide_Pricing {scope_hint[:120]}",
+                rfp_client=rfp.client or "",
+                rfp_title=rfp.title or "",
+            ),
+        ]
+        if hint:
+            queries.insert(
+                1,
+                sanitize_pricing_guide_query(
+                    f"00_Guide_Pricing {hint[:200]}",
+                    rfp_client=rfp.client or "",
+                    rfp_title=rfp.title or "",
+                ),
+            )
+        chunks: list[str] = []
+        seen_chunk_keys: set[str] = set()
+        for query in queries:
+            for category in ("pricing", "reference"):
+                text, srcs = await search_knowledge_base(
+                    query,
+                    limit=8,
+                    category=category,
+                    max_chars=GUIDE_SEARCH_CHAR_LIMIT // 3,
+                )
+                if text and not text.startswith("("):
+                    key = text[:200]
+                    if key not in seen_chunk_keys:
+                        seen_chunk_keys.add(key)
+                        chunks.append(text)
+                for src in srcs:
+                    if src not in sources:
+                        sources.append(src)
+
+        guide_text = "\n\n---\n\n".join(chunks)[:GUIDE_SEARCH_CHAR_LIMIT]
+        if not guide_text.strip():
+            guide_text = "(No 00_Guide_Pricing content in KB — ingest pricing guide.)"
+
+    # Always search the whole KB for classification / role billable hours — the
+    # pinned menu guide alone does not satisfy RFP hourly-rate-schedule asks.
+    labor_text, labor_srcs = await _fetch_labor_role_rate_context(
+        rfp, focus_hint=focus_hint or stage_two[:200]
+    )
+    if labor_text.strip():
+        guide_text = (
+            f"{guide_text.rstrip()}\n\n"
+            "=== KB labor / role billable rates (search — cite source filenames) ===\n"
+            f"{labor_text.strip()}"
+        )
+        for src in labor_srcs:
+            if src not in sources:
+                sources.append(src)
+
+    return guide_text, sources
 
 
 _NESTED_LINE_ITEM_KEYS = (
@@ -747,6 +879,23 @@ def coerce_budget_to_phased_from_guide(
 
     logs: list[str] = []
     fmt = (budget.budget_format or "phased").casefold()
+
+    # When the RFP mandates a classification hourly schedule and the KB rate card
+    # already has bindable $/hr rows, never collapse personnel_loading → phased.
+    try:
+        from app.services.proposal_budget_playbook import rfp_mandates_hourly_rate_schedule
+        from app.services.pricing_rate_card_builder import bindable_rates
+
+        if rfp_mandates_hourly_rate_schedule(rfp_text) and fmt == "personnel_loading":
+            hourly_card = [
+                r
+                for r in bindable_rates(rate_card if isinstance(rate_card, PricingRateCard) else None)
+                if getattr(r, "unit", "") == "hour"
+            ]
+            if hourly_card:
+                return budget, logs
+    except Exception:
+        pass
 
     # Priced page/project/year (or other non-hour) fees under a personnel_loading
     # label: flip format only — keep the ledger. Rebuilding from the guide would
@@ -1121,9 +1270,10 @@ async def _run_budget_grounding_audit(
                     ),
                 },
             ],
-            max_tokens=16000,
+            max_tokens=8192,
             temperature=0.0,
             node_name="stage35a_budget_grounding",
+            reasoning_effort="low",
         )
     except LlmError as exc:
         logger.warning("Stage 3.5a grounding audit failed: %s", exc)
@@ -1517,6 +1667,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     )
 
     manuscript_digest = ""
+    draft = None
     try:
         from app.services.proposal_repository import aget_proposal_draft
 
@@ -1524,6 +1675,34 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         manuscript_digest = _manuscript_pricing_digest(draft)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Manuscript pricing digest skipped for %s: %s", rfp_id, exc)
+
+    # LLM Cost demands for THIS RFP (no fixed keyword checklist — scopes differ).
+    cost_demands_prompt = ""
+    try:
+        from app.services.rfp_cost_demands import (
+            approach_digest_from_draft_sections,
+            extract_rfp_cost_demands,
+            format_rfp_cost_demands_for_prompt,
+        )
+
+        approach_for_demands = approach_digest_from_draft_sections(
+            getattr(draft, "sections", None) if draft else None
+        )
+        if not approach_for_demands and manuscript_digest:
+            approach_for_demands = manuscript_digest[:8000]
+        cost_demands = await extract_rfp_cost_demands(
+            rfp_text=rfp_context or "",
+            approach_digest=approach_for_demands,
+        )
+        cost_demands_prompt = format_rfp_cost_demands_for_prompt(cost_demands)
+        if any(d.kind == "disclosure" for d in cost_demands):
+            pricing_contract = pricing_contract.model_copy(
+                update={"must_disclose_media_compensation": True}
+            )
+            contract_prompt = format_pricing_contract_for_prompt(pricing_contract)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RFP cost demands extract skipped for %s: %s", rfp_id, exc)
+        cost_demands_prompt = ""
 
     user_content = "\n".join(
         [
@@ -1534,6 +1713,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             f"\n=== Stage 2 Structural map (deliverables) ===\n{stage_two[:10_000]}",
             f"\n=== 00_Guide_Pricing (KB) ===\n{guide_text}",
             f"\n{contract_prompt}",
+            (f"\n{cost_demands_prompt}" if cost_demands_prompt else ""),
             (
                 f"\n=== Manuscript approach + current budget (PRICE MUST FUND THESE PHASES) ===\n"
                 f"{manuscript_digest[:14_000]}"
@@ -1544,6 +1724,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             "\n=== CRITICAL REMINDERS ===\n"
             "- Do NOT double-count the same guide line across two phases.\n"
             "- Phase fees must fund the depth described in Technical Ability / approach.\n"
+            "- Satisfy every RFP COST DEMAND above (or emit MANUAL FILL) — scopes differ by RFP.\n"
             "- Discounted-below-tier lines must be labeled as scoped/discounted, not 'clean Average'.\n"
             "- Produce a single bottom-line total (lumpSumTotal / agencyRevenueEstimate).\n"
             "- Client-facing copy MUST be short: 2–4 sentence scopeSummary, brief Terms, "
@@ -1564,12 +1745,16 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         {"role": "system", "content": STAGE3_BUDGET_PROMPT},
         {"role": "user", "content": user_content},
     ]
+    raw: dict = {}
+    provider = "skeleton"
     try:
         with pipeline_step("budget_llm_json"):
             raw, provider = await llm.chat_json(
                 messages,
-                max_tokens=16000,
+                max_tokens=8192,
                 temperature=0.2,
+                node_name="phase-3-5-budget",
+                reasoning_effort="low",
             )
     except LlmError as exc:
         logger.warning(
@@ -1597,8 +1782,10 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                         {"role": "system", "content": STAGE3_BUDGET_PROMPT},
                         {"role": "user", "content": compact_user},
                     ],
-                    max_tokens=16000,
+                    max_tokens=4096,
                     temperature=0.2,
+                    node_name="phase-3-5-budget-compact",
+                    reasoning_effort="low",
                 )
             except LlmError as retry_exc:
                 # Model refused or returned prose ("I cannot invent dollar
@@ -1615,7 +1802,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                     error_message=str(retry_exc)[:300],
                 )
                 raw = {}
-                provider = provider or "skeleton"
+                provider = "skeleton"
 
     now = datetime.now(timezone.utc).isoformat()
     flags = [
@@ -1656,8 +1843,10 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                         {"role": "assistant", "content": json.dumps(raw)},
                         {"role": "user", "content": _LINE_ITEMS_RETRY_USER},
                     ],
-                    max_tokens=16000,
+                    max_tokens=4096,
                     temperature=0.2,
+                    node_name="phase-3-5-budget-line-items",
+                    reasoning_effort="low",
                 )
             except LlmError as retry_exc:
                 # Model refused / returned prose instead of JSON. Do NOT crash —
@@ -1808,6 +1997,39 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     # Bind before editor so MANUAL FILL commission placeholders do not trip unbound
     # XOR checks against still-unbound labor lines inside assert_budget_canonical.
     budget = bind_budget_line_items_to_rate_card(budget, rate_card)
+    # Seed classification billable rates from KB labor/role excerpts onto the
+    # budget so phased Cost tabs can still render a mandatory rate schedule.
+    try:
+        from app.services.pricing_rate_card_builder import bindable_rates
+
+        hourly_roles = [
+            r
+            for r in bindable_rates(rate_card)
+            if getattr(r, "unit", "") == "hour" and float(getattr(r, "amount", 0) or 0) > 0
+        ]
+        if hourly_roles:
+            existing = {
+                (vr.role or vr.person_name or "").casefold()
+                for vr in (budget.verified_rates or [])
+            }
+            merged = list(budget.verified_rates or [])
+            for role_rate in hourly_roles:
+                label = (role_rate.service or "").strip()
+                if not label or label.casefold() in existing:
+                    continue
+                existing.add(label.casefold())
+                merged.append(
+                    VerifiedRate(
+                        personName="",
+                        role=label,
+                        hourlyRate=float(role_rate.amount),
+                        source=getattr(role_rate, "source_doc", "") or "",
+                    )
+                )
+            if len(merged) > len(budget.verified_rates or []):
+                budget = budget.model_copy(update={"verified_rates": merged})
+    except Exception:
+        logger.exception("seed verified hourly rates from rate card failed for %s", rfp_id)
     step_trace(
         "pricing_bound_to_rate_card",
         rfp_id=rfp_id,

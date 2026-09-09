@@ -74,13 +74,14 @@ def _word_to_number(word: str) -> int | None:
     return None
 
 
-# A "number phrase" the limit can bind to: plain digits, a spelled-out number
+# A "number phrase" the limit can bind to: plain digits, bracketed template
+# digits ("[20] pages" from fill-in RFP shells), a spelled-out number
 # optionally annotated with a parenthetical digit form ("twenty (20)"), or a
 # spelled-out number on its own ("twenty pages"). Digits win when present —
 # they're the unambiguous, human-proofread form.
 _NUMBER_PHRASE = r"""
     (?:
-        (?P<digits>\d{1,3})
+        \[?\s*(?P<digits>\d{1,3})\s*\]?
       |
         (?P<numword>[A-Za-z]+(?:-[A-Za-z]+)?)
         \s*
@@ -108,6 +109,10 @@ _LIMIT_VERB = r"""
       | no\ more\ than
       | not\ more\ than
       | maximum\ of
+      | maximum\ length\ of
+      | max(?:imum)?\s+(?:page\s+)?(?:length|count)\s+of
+      | page\s+limit\s*(?:of|is|:)?
+      | page\s+count\s*(?:of|is|:|limit)?
     )
 """
 
@@ -256,3 +261,36 @@ def resolve_page_limit(
     if manual_page_limit is not None and manual_page_limit > 0:
         return manual_page_limit
     return parse_page_limit(rfp_text)
+
+
+def remember_resolved_page_limit(
+    rfp_id: str,
+    *,
+    manual_page_limit: int | None,
+    rfp_text: str | None,
+) -> int | None:
+    """Resolve page limit from manual field or RFP body; persist when newly found.
+
+    Every RFP path (intelligence, generate, scan) should call this so a limit
+    stated only in the PDF is stored on the RFP record and reused downstream —
+    not Alameda-only, not form-only.
+    """
+    resolved = resolve_page_limit(manual_page_limit, rfp_text)
+    if not resolved or resolved <= 0:
+        return None
+    if manual_page_limit and manual_page_limit > 0:
+        return resolved
+    try:
+        from app.services.rfp_repository import update_rfp_page_limit
+
+        update_rfp_page_limit(rfp_id, resolved)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "could not persist page_limit=%s for %s: %s",
+            resolved,
+            rfp_id,
+            str(exc)[:160],
+        )
+    return resolved

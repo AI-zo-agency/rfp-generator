@@ -189,6 +189,53 @@ class CaseStudyMetricScrubTests(unittest.TestCase):
         self.assertFalse(logs)
         self.assertIn("392,346 impressions", cleaned)
 
+    def test_keeps_classification_hourly_rate_schedule_table(self) -> None:
+        """Year-2 % Increase columns must not wipe Cost rate tables as CS metrics."""
+        schedule = (
+            "## Hourly Rate Schedule by Classification\n\n"
+            "Billable rates from the agency fee schedule.\n\n"
+            "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |\n"
+            "| --- | ---: | ---: | ---: |\n"
+            "| Account Manager | $275 | — | — |\n"
+            "| Agency Director | $400 | — | — |\n"
+        )
+        source = "Case study: tourism board campaign. Qualitative brand lift only."
+        cleaned, logs = scrub_ungrounded_case_study_percent_metrics(
+            schedule, source_text=source
+        )
+        self.assertFalse(logs)
+        self.assertIn("| Account Manager | $275 |", cleaned)
+        self.assertIn("| Agency Director | $400 |", cleaned)
+
+    def test_budget_section_skipped_by_draft_metric_scrub(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_integrity_guards import (
+            apply_case_study_metric_scrub_to_draft,
+        )
+
+        body = (
+            "## Hourly Rate Schedule by Classification\n\n"
+            "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |\n"
+            "| --- | ---: | ---: | ---: |\n"
+            "| Account Manager | $275 | — | — |\n"
+        )
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="rfp-eval-5",
+                    title="Cost, rate structure, and overall value",
+                    content=body,
+                )
+            ],
+        )
+        out, logs = apply_case_study_metric_scrub_to_draft(
+            draft, source_text="No percentages in case studies."
+        )
+        self.assertEqual(logs, [])
+        self.assertIn("| Account Manager | $275 |", out.sections[0].content or "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,17 +34,15 @@ class BudgetChangeGateTests(unittest.TestCase):
         self.assertFalse(user_explicitly_asks_to_change_budget("Improve this section"))
         self.assertFalse(budget_ask_allows_freeform_narrative("Improve this section"))
 
-    def test_improve_if_needed_per_rfp(self) -> None:
+    def test_improve_budget_align_rfp_is_coverage_not_freeform(self) -> None:
         from app.services.proposal_budget_playbook import (
             user_asks_budget_improve_if_needed,
         )
 
-        ask = (
-            "Make it align with zo agency voice and improve budget if needed "
-            "according to rfp"
-        )
+        ask = "improve budget and align with rfp"
         self.assertTrue(user_asks_budget_improve_if_needed(ask))
         self.assertFalse(user_explicitly_asks_to_change_budget(ask))
+        self.assertFalse(budget_ask_allows_freeform_narrative(ask))
 
     def test_explicit_fee_and_terms_asks_are_changes(self) -> None:
         self.assertTrue(
@@ -57,7 +55,15 @@ class BudgetChangeGateTests(unittest.TestCase):
                 "Remove Investment Framing table and keep Fee Detail only"
             )
         )
+        # Verbatim Terms restore is the coverage / safe-fix path (not freeform).
+        from app.services.proposal_budget_playbook import (
+            user_asks_budget_improve_if_needed,
+        )
+
         self.assertTrue(
+            user_asks_budget_improve_if_needed("Restore verbatim Terms from guide")
+        )
+        self.assertFalse(
             user_explicitly_asks_to_change_budget("Restore verbatim Terms from guide")
         )
         self.assertTrue(
@@ -148,7 +154,8 @@ class BudgetCoverageCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(changed)
         self.assertIn("mileage at current irs rate", (focus.content or "").casefold())
         self.assertIn("we abide by those terms", (focus.content or "").casefold())
-        self.assertIn("safe rfp/compliance", reply.casefold())
+        self.assertIn("rfp", reply.casefold())
+        self.assertIn("compliance", reply.casefold())
         self.assertIn("$10,000", focus.content or "")
 
     async def test_explicit_change_skips_coverage_only_path(self) -> None:

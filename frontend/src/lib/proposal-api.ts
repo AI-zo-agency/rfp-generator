@@ -398,7 +398,8 @@ export async function recoverProposalDraftIfSaved(
 
 export async function runPhase3_5BudgetWithRecovery(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { chainNext?: boolean }
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
@@ -408,7 +409,7 @@ export async function runPhase3_5BudgetWithRecovery(
   throwIfAborted(signal);
   const startedAt = await captureProposalTimestamps(rfpId);
   try {
-    const result = await runPhase3_5Budget(rfpId, signal);
+    const result = await runPhase3_5Budget(rfpId, signal, options);
     return { ...result, recoveredFromDraft: false };
   } catch (error) {
     if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
@@ -870,14 +871,18 @@ async function runProposalPhaseAsync(
   rfpId: string,
   phase: PipelinePhase,
   path: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { body?: string }
 ): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
   budget?: ProposalBudget;
   review?: PreSubmitReview;
 }> {
-  const started = await startProposalPhaseJob(path, signal, { phase });
+  const started = await startProposalPhaseJob(path, signal, {
+    phase,
+    body: options?.body,
+  });
   if (started.mode === "sync") {
     return {
       draft: started.draft ? apiDraftToOutline(started.draft) : null,
@@ -1701,17 +1706,23 @@ export async function runPhase3_6SelfEdit(
 
 export async function runPhase3_5Budget(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { chainNext?: boolean }
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
   draft: ProposalOutline | null;
 }> {
+  const body =
+    options?.chainNext === false
+      ? JSON.stringify({ chainNext: false })
+      : undefined;
   const result = await runProposalPhaseAsync(
     rfpId,
     "phase-3-5-budget",
     `/api/rfps/${rfpId}/proposal/phase-3-5-budget`,
-    signal
+    signal,
+    body ? { body } : undefined
   );
   if (!result.research?.budget) {
     throw new Error("No budget data returned after Phase 3.5");

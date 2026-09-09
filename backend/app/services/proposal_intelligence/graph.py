@@ -84,12 +84,20 @@ def _dump_plan(plan: ProposalExecutionPlan) -> dict[str, Any]:
 
 
 def _meta(state: IntelligenceGraphState) -> dict[str, str]:
-    from app.services.rfp_page_limit import resolve_page_limit
+    from app.services.rfp_page_limit import remember_resolved_page_limit, resolve_page_limit
 
-    page_limit = resolve_page_limit(
-        state.get("page_limit"),
-        state.get("rfp_context") or "",
-    )
+    rfp_id = state.get("rfp_id") or ""
+    if rfp_id:
+        page_limit = remember_resolved_page_limit(
+            rfp_id,
+            manual_page_limit=state.get("page_limit"),
+            rfp_text=state.get("rfp_context") or "",
+        )
+    else:
+        page_limit = resolve_page_limit(
+            state.get("page_limit"),
+            state.get("rfp_context") or "",
+        )
     meta = {
         "title": state.get("rfp_title") or "",
         "client": state.get("rfp_client") or "",

@@ -20,6 +20,11 @@ _PRIORITY_PATTERNS: tuple[str, ...] = (
     r"vendor\s+(?:questionnaire|certification)",
     r"pricing\s+proposal\s+form|cost\s+proposal\s+form|quotation\s*/?\s*pricing",
     r"hourly.{0,120}monthly.{0,120}annual",
+    # Cost Proposal instruments — independent of fee-method flexibility.
+    r"hourly\s+rate\s+schedule|rate\s+schedule\s+by\s+classification",
+    r"hourly\s+rates?\s+by\s+(?:classification|labor\s+categor|role|position)",
+    r"assumptions?\s+regarding\s+travel|subconsultant\s+markup|stock\s+media",
+    r"retainer,\s*hourly,\s*or\s*hybrid|may\s+propose\s+(?:retainer|hourly|hybrid)",
     r"alteration\s+or\s+departure|disqualif(?:y|ication)",
     r"non[- ]?collusion|statement\s+of\s+ownership",
     r"section\s+5\.9|5\.9\s+insurance|commercial general liability|"
@@ -456,6 +461,23 @@ def budget_and_cost_excerpt(rfp_text: str, *, max_chars: int = 28_000) -> str:
         r"evaluation\s+criteria.{0,200}cost|cost.{0,80}evaluation",
         r"year\s*(?:1|2|3|one|two|three).{0,40}\$[\d,]+",
         r"\$[\d,]{3,}",
+        # Mandatory rate-schedule / assumptions instruments (independent of fee method).
+        r"hourly\s+rate\s+schedule|rate\s+schedule\s+by\s+classification",
+        r"hourly\s+rates?\s+by\s+(?:classification|labor\s+categor|role|position)",
+        r"complete\s+hourly\s+rate|fully[\s-]?burdened\s+hourly",
+        r"option\s+years?.{0,80}hourly|initial\s+term.{0,80}hourly",
+        r"assumptions?\s+regarding\s+travel|subconsultant\s+markup|stock\s+media",
+        r"materials?.{0,40}software\s+licenses?|travel.{0,40}materials?",
+        r"retainer.{0,40}hourly.{0,40}hybrid|hourly.{0,40}retainer.{0,40}hybrid",
+        # Proposal-content asks: what Cost/Pricing must include or address.
+        r"(?:cost|pricing|fee)\s+proposal\s+shall|"
+        r"shall\s+(?:include|address|contain|provide|state).{0,160}"
+        r"(?:cost|pricing|fee|budget|commission|markup|reimburs)",
+        r"proposal\s+(?:shall|must|should).{0,220}"
+        r"(?:cost|pricing|fee\s+schedule|rate\s+card|not[\s-]?to[\s-]?exceed)",
+        r"invoic(?:e|ing)|payment\s+terms|milestone\s+billing|"
+        r"media\s+(?:commission|markup|buy|passthrough|pass[\s-]?through)",
+        r"all[\s-]?in(?:clusive)?\s+(?:fee|pricing)|no\s+separate\s+(?:expense|reimburs)",
     )
     windows: list[tuple[int, int]] = []
     span = 4500

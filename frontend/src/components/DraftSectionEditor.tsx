@@ -149,34 +149,56 @@ export function DraftSectionEditor({
 
   const capturePreviewSelection = useCallback(() => {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !previewRef.current) {
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !previewRef.current) {
       return;
     }
     if (!previewRef.current.contains(sel.anchorNode)) return;
     const text = sel.toString().replace(/\u00a0/g, " ");
-    if (text.trim().length < 3) {
+    const trimmed = text.trim();
+    // Table cells / short labels still deserve Ask to change.
+    if (trimmed.length < 1) {
       setSelection(null);
       return;
     }
-    const range = sourceMap.find(text);
-    if (!range) {
-      setSelection(null);
-      return;
-    }
-    try {
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      setSelection({
-        text: value.slice(range.start, range.end),
-        start: range.start,
-        end: range.end,
-        top: rect.top,
-        left: rect.left + rect.width / 2,
-      });
-    } catch {
-      setSelection(null);
-    }
-  }, [sourceMap, value]);
 
+    let rect: DOMRect | null = null;
+    try {
+      const range0 = sel.getRangeAt(0);
+      rect = range0.getBoundingClientRect();
+      // HTML table / multi-node selections often report a 0×0 bounding box.
+      if (rect.width < 1 && rect.height < 1) {
+        const hit = Array.from(range0.getClientRects()).find(
+          (r) => r.width >= 1 || r.height >= 1
+        );
+        if (hit) rect = hit;
+      }
+      if (rect.width < 1 && rect.height < 1) {
+        const el =
+          sel.anchorNode instanceof Element
+            ? sel.anchorNode
+            : sel.anchorNode?.parentElement ?? null;
+        const er = el?.getBoundingClientRect();
+        if (er && (er.width >= 1 || er.height >= 1)) rect = er;
+      }
+    } catch {
+      rect = null;
+    }
+    if (!rect || (rect.width < 1 && rect.height < 1)) {
+      setSelection(null);
+      return;
+    }
+
+    // Table cells render humanized MANUAL FILL chrome ("TBD — …") that will
+    // not map 1:1 onto markdown — still show the tip with the visible excerpt.
+    const range = sourceMap.find(text);
+    setSelection({
+      text: range ? value.slice(range.start, range.end) : trimmed,
+      start: range?.start ?? 0,
+      end: range?.end ?? 0,
+      top: rect.top,
+      left: rect.left + Math.max(rect.width, 8) / 2,
+    });
+  }, [sourceMap, value]);
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
@@ -219,16 +241,22 @@ export function DraftSectionEditor({
 
     if (mode === "selection" && selection) {
       if (!onOpenRevisionChat) return;
+      const mapped = selection.end > selection.start;
       onOpenRevisionChat({
         mode: "selection",
         sectionId: section.id,
         sectionTitle: section.title,
         text: selection.text,
-        selection: {
-          start: selection.start,
-          end: selection.end,
-          text: selection.text,
-        },
+        // Soft table selections may lack markdown offsets — pin by excerpt text.
+        ...(mapped
+          ? {
+              selection: {
+                start: selection.start,
+                end: selection.end,
+                text: selection.text,
+              },
+            }
+          : {}),
       });
       clearSelection();
       window.getSelection()?.removeAllRanges();
@@ -358,6 +386,7 @@ export function DraftSectionEditor({
                     style={{
                       top: Math.max(12, selection.top - 42),
                       left: selection.left,
+                      zIndex: 400,
                       display: "flex",
                       alignItems: "center",
                       gap: "0.25rem",

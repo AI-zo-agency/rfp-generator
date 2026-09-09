@@ -500,5 +500,49 @@ class QualifyingLanguageFormatTests(unittest.TestCase):
         self.assertIn("| Phase | Scope | Fee |", md)
 
 
+class KbClassificationScheduleRenderTests(unittest.TestCase):
+    def test_verified_rates_paint_schedule_without_rfp_mandate_text(self) -> None:
+        """Chat/seeded rates must appear even when RFP excerpt lacks mandate keywords."""
+        from app.models.proposal import VerifiedRate
+
+        b = _budget(
+            agencyRevenueEstimate=121350,
+            agencyFeeSubtotal=121350,
+            totalClientInvoicing=121350,
+            budgetFormat="phased",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    category="Fees",
+                    description="Phase 1 Discovery",
+                    quantity=1,
+                    unit="lump",
+                    rate=50000,
+                    extended=50000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            verifiedRates=[
+                VerifiedRate(
+                    personName="",
+                    role="Account Manager",
+                    hourlyRate=275,
+                    source="Agency Role Rates",
+                ),
+                VerifiedRate(
+                    personName="",
+                    role="Agency Director",
+                    hourlyRate=400,
+                    source="Agency Role Rates",
+                ),
+            ],
+        )
+        md = render_budget_markdown(b, rfp_text="phased fees only — no schedule words")
+        self.assertIn("## Hourly Rate Schedule by Classification", md)
+        self.assertIn("Account Manager", md)
+        self.assertIn("275", md)
+        self.assertIn("Agency Director", md)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,10 +15,48 @@ from app.services.llm import (
 class BumpMaxTokensTests(unittest.TestCase):
     def test_doubles_with_floor_and_cap(self) -> None:
         self.assertEqual(bump_max_tokens_after_length_hit(4096), 8192)
-        self.assertEqual(bump_max_tokens_after_length_hit(2048), 8192)
-        self.assertEqual(bump_max_tokens_after_length_hit(8192), 16384)
-        self.assertEqual(bump_max_tokens_after_length_hit(16384), 32768)
-        self.assertEqual(bump_max_tokens_after_length_hit(32768), 32768)
+        self.assertEqual(bump_max_tokens_after_length_hit(2048), 4096)
+        self.assertEqual(bump_max_tokens_after_length_hit(8192), 8192)
+        self.assertEqual(bump_max_tokens_after_length_hit(16384), 8192)
+
+    def test_never_retries_past_8k_cap(self) -> None:
+        from app.services.llm import _should_retry_after_length_truncation
+
+        self.assertFalse(
+            _should_retry_after_length_truncation(
+                finish_reason="length",
+                requested=8192,
+                node_name="writing_briefs",
+            )
+        )
+
+    def test_keeps_usable_truncated_parse_without_retry(self) -> None:
+        from app.services.llm import _should_retry_after_length_truncation
+
+        self.assertFalse(
+            _should_retry_after_length_truncation(
+                finish_reason="length",
+                requested=4096,
+                node_name="writing_briefs",
+                parsed={"entries": [{"q": "x"}], "confidence": 0.8},
+                raw_text="{" + ("x" * 500),
+            )
+        )
+
+    def test_skips_retry_when_reasoning_ate_the_budget(self) -> None:
+        from app.services.llm import _should_retry_after_length_truncation
+
+        self.assertFalse(
+            _should_retry_after_length_truncation(
+                finish_reason="length",
+                requested=4096,
+                node_name="writing_briefs",
+                usage={
+                    "completion_tokens": 8192,
+                    "completion_tokens_details": {"reasoning_tokens": 8000},
+                },
+            )
+        )
 
     def test_lean_scan_nodes_never_climb_to_32k(self) -> None:
         self.assertEqual(
@@ -145,6 +183,44 @@ class LeanEmptyContentNoReinforceTests(unittest.IsolatedAsyncioTestCase):
                     [{"role": "user", "content": "x"}],
                     max_tokens=4096,
                     node_name="kb_fact_check_section",
+                )
+
+        self.assertIn("skipped reinforcement", str(ctx.exception))
+        self.assertEqual(posts.await_count, 1)
+
+
+class EmptyContentBurnedBudgetNoReinforceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_reinforce_when_reasoning_ate_full_budget(self) -> None:
+        billed = {
+            "prompt_tokens": 28000,
+            "completion_tokens": 16000,
+            "finish_reason": "length",
+            "completion_tokens_details": {"reasoning_tokens": 16000},
+            "cost": 0.22,
+        }
+        posts = AsyncMock(
+            side_effect=[LlmError("OpenRouter returned empty content", usage=billed)]
+        )
+        with (
+            patch("app.services.llm._provider_routing", return_value=(None, True, False, False)),
+            patch("app.services.llm._openrouter_route", return_value=("sk-test", "anthropic/claude-sonnet-5")),
+            patch("app.services.llm._enforce_run_cost_cap"),
+            patch("app.services.llm.apply_standing_corrections", new=AsyncMock(side_effect=lambda m, **_: m)),
+            patch("app.services.llm._post_chat", new=posts),
+            patch("app.services.llm._record_successful_call"),
+            patch("app.services.llm._fireworks_key", return_value=""),
+            patch("app.services.llm.settings") as settings,
+        ):
+            settings.openrouter_base_url = "https://openrouter.ai/api/v1"
+            settings.app_url = "http://localhost"
+            settings.app_name = "test"
+            settings.gemini_api_key = ""
+            settings.llm_prefer_fireworks = False
+            with self.assertRaises(LlmError) as ctx:
+                await chat_json(
+                    [{"role": "user", "content": "budget"}],
+                    max_tokens=16000,
+                    node_name="phase-3-5-budget",
                 )
 
         self.assertIn("skipped reinforcement", str(ctx.exception))

@@ -849,16 +849,20 @@ def derive_legacy_fields(
             focus = list(entry.expected_sources)[:6]
             section_queries[section.id] = list(entry.queries)[:5]
 
+        instrument = getattr(section, "submission_instrument", None)
+        # Cost / form tabs carry more independent sub-asks (rate schedule,
+        # assumptions, fee method) — keep enough so chat Improve can fill them.
+        req_cap = 24 if str(instrument or "").casefold() in {"cost", "form"} else 16
         rfp_sections.append(
             RfpSectionMap(
                 id=section.id,
                 title=section.title,
-                requirements=requirements[:12],
+                requirements=requirements[:req_cap],
                 retrievalFocus=focus or ["company facts"],
                 zoMode=_zo_mode_for_title(section.title),  # type: ignore[arg-type]
                 evaluationWeight=weight,
                 protectFromCap=bool(getattr(section, "protect_from_cap", False)),
-                submissionInstrument=getattr(section, "submission_instrument", None),
+                submissionInstrument=instrument,
             )
         )
 
@@ -953,6 +957,7 @@ def derive_legacy_fields(
     # Re-running an LLM completeness pass here would re-pay for the same
     # answer on the same input — cost with no coverage benefit.
     from app.services.proposal_evaluation_coverage import (
+        drop_scoring_rubric_duplicate_sections,
         ensure_scored_criteria_coverage,
         min_outline_sections_for_evaluation,
         uncovered_scored_criteria,
@@ -983,6 +988,15 @@ def derive_legacy_fields(
             "derive_legacy_fields dropped %d criteria-form wrapper tab(s): %s",
             len(scored_dropped),
             scored_dropped[:12],
+        )
+    rfp_sections, rubric_dropped = drop_scoring_rubric_duplicate_sections(
+        rfp_sections, evaluation
+    )
+    if rubric_dropped:
+        logger.info(
+            "derive_legacy_fields dropped %d scoring-rubric duplicate tab(s): %s",
+            len(rubric_dropped),
+            rubric_dropped[:12],
         )
 
     from app.services.proposal_outline_dedup import section_is_rfp_derived

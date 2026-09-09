@@ -131,6 +131,25 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
     def test_search_limit_is_at_least_100_chunks(self) -> None:
         self.assertGreaterEqual(gng.KB_SEARCH_LIMIT, 100)
 
+    def test_chunk_first_limits_never_exceed_supermemory_max(self) -> None:
+        """Go/No-Go used limit*2=200 → API 400 → chunks=0 for every RFP."""
+        from app.services.kb_rag_retrieve import (
+            _SUPERMEMORY_SEARCH_LIMIT_MAX,
+            _clamp_supermemory_limit,
+        )
+
+        self.assertEqual(_SUPERMEMORY_SEARCH_LIMIT_MAX, 100)
+        self.assertEqual(_clamp_supermemory_limit(200), 100)
+        self.assertEqual(_clamp_supermemory_limit(100), 100)
+        self.assertEqual(_clamp_supermemory_limit(24), 24)
+        # Same math Go/No-Go uses with KB_SEARCH_LIMIT=100
+        chunk_limit = _clamp_supermemory_limit(max(gng.KB_SEARCH_LIMIT * 2, 16))
+        memory_limit = _clamp_supermemory_limit(max(gng.KB_SEARCH_LIMIT // 2, 4))
+        self.assertEqual(chunk_limit, 100)
+        self.assertEqual(memory_limit, 50)
+        self.assertLessEqual(chunk_limit, 100)
+        self.assertLessEqual(memory_limit, 100)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,6 +62,30 @@ class ParsePageLimitMustParseTests(unittest.TestCase):
             parse_page_limit("Proposals shall not exceed 30 pages"), 30
         )
 
+    def test_bracketed_template_digit_still_counts(self) -> None:
+        """Fill-in RFP shells write 'must not exceed [20] pages' — still a real cap."""
+        text = (
+            "Proposal Content and Format\n"
+            "Proposals must not exceed [20] pages, exclusive of the cover letter, "
+            "required forms, resumes, and work samples."
+        )
+        self.assertEqual(parse_page_limit(text), 20)
+        self.assertEqual(resolve_page_limit(None, rfp_text=text), 20)
+
+    def test_page_limit_of_phrasing(self) -> None:
+        self.assertEqual(
+            parse_page_limit(
+                "The proposal page limit is 25 pages excluding attachments."
+            ),
+            25,
+        )
+
+    def test_maximum_length_of_phrasing(self) -> None:
+        self.assertEqual(
+            parse_page_limit("Proposals have a maximum length of 15 pages."),
+            15,
+        )
+
     def test_spelled_out_number_with_parenthetical_digits(self) -> None:
         self.assertEqual(
             parse_page_limit(

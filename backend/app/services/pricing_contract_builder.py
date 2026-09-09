@@ -175,15 +175,24 @@ def format_pricing_contract_for_prompt(contract: PricingContract) -> str:
         else "null (DO NOT INVENT)"
     )
     notes = "; ".join(contract.evidence_notes) or "(none)"
+    disclose = (
+        "YES — Cost MUST state commission %, markup, OR pure pass-through on the "
+        "flat professional fee. Do NOT invent a %. Use MANUAL FILL when unknown."
+        if contract.must_disclose_media_compensation
+        else "see RFP COST DEMANDS checklist in this prompt (LLM-extracted for THIS RFP)"
+    )
     return (
         "=== LOCKED PricingContract (deterministic — do not contradict) ===\n"
         f"feeModel: {contract.fee_model}\n"
         f"mediaSpendAnnual: {spend}\n"
         f"commissionRate: {rate}\n"
+        f"mustDiscloseMediaCompensation: {disclose}\n"
         f"confidence: {contract.confidence}\n"
         f"evidence: {notes}\n"
         "Rules:\n"
-        "- If feeModel is not commission/hybrid: do NOT emit commission line items or commission dollars.\n"
+        "- If feeModel is not commission/hybrid: do NOT emit commission line items or "
+        "commission dollars — but when RFP COST DEMANDS require media compensation "
+        "treatment, still write that prose or MANUAL FILL (never silent omit).\n"
         "- If mediaSpendAnnual is null: do NOT invent media $ or commission $. "
         "Retain commission shape only via MANUAL FILL placeholders when feeModel is commission/hybrid.\n"
         "- If mediaSpendAnnual is set: clientMediaPassthrough MUST equal it; "

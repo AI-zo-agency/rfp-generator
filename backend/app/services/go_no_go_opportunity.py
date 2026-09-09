@@ -62,6 +62,11 @@ def default_opportunity_classification() -> OpportunityClassification:
     )
 
 
+def _normalize_for_quote_match(text: str) -> str:
+    """Collapse whitespace so PDF newlines don't fail verbatim quote checks."""
+    return " ".join((text or "").casefold().split())
+
+
 def parse_opportunity_classification(
     raw: dict[str, Any],
     *,
@@ -89,15 +94,23 @@ def parse_opportunity_classification(
     else:
         comp = "undisclosed"
 
-    if quote and rfp_text and quote.casefold() not in rfp_text.casefold():
-        # Ungrounded quote — do not trust explicitly_unpaid / prize_only caps.
-        logger.warning(
-            "opportunity classifier quote not found in RFP — downgrading to undisclosed "
-            "(quote=%r)",
-            quote[:80],
+    if quote and rfp_text:
+        quote_ok = _normalize_for_quote_match(quote) in _normalize_for_quote_match(
+            rfp_text
         )
-        if comp in {"explicitly_unpaid", "prize_only"}:
-            comp = "undisclosed"
+        if not quote_ok:
+            prior = comp
+            if comp in {"explicitly_unpaid", "prize_only"}:
+                comp = "undisclosed"
+            logger.warning(
+                "opportunity classifier quote not found in RFP%s (quote=%r)",
+                (
+                    " — downgrading unpaid/prize to undisclosed"
+                    if prior != comp
+                    else ""
+                ),
+                quote[:80],
+            )
 
     return OpportunityClassification(
         opportunity_class=opp_class,

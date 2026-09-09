@@ -29,7 +29,10 @@ For EACH requirement: 1–2 sharp queries + a one-line why. Match query meaning
 to the ask (press≠brand strategy; insurance≠audit; EEO≠WBENC badge).
 
 KB tokens when useful: 01_companyfacts, 04_Bio, 03_CS, 06_WON.
-Craft → bio AND case study. Compliance → companyfacts. Never search the buyer.
+Craft → bio AND case study (put 03_CS or 06_WON in at least one craft query).
+Compliance → companyfacts. Never search the buyer.
+Do NOT plan 07_FIN queries for delivery proof — finalist/loss is not a win;
+case-study text lives in 03_CS / 06_WON when available (chunk-first retrieval).
 
 Return ONLY JSON:
 {"plans":[{"requirement":"...","queries":["zö agency ..."],"why":"..."}]}"""

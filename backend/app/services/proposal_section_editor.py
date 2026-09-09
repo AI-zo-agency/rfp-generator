@@ -63,10 +63,13 @@ from app.services.proposal_retrieval_graph import (
     _hit_label,
 )
 from app.services.proposal_budget_playbook import (
+    BUDGET_COMPLIANCE_ADVISORY_RULES,
     BUDGET_EXPLAIN_ADVISORY_RULES,
     apply_budget_freeform_postprocess,
+    augment_cost_section_requirements,
     budget_ask_allows_freeform_narrative,
     budget_playbook_prompt_block,
+    pack_budget_compliance_advisory_block,
     refuse_noncompliant_budget_edit,
     section_has_budget_verify_tags,
     section_is_budget_related,
@@ -78,7 +81,9 @@ from app.services.proposal_budget_playbook import (
     user_asks_budget_rebuild,
     user_asks_budget_summary_reconcile,
     user_asks_global_cost_rebuild,
+    user_asks_hourly_rate_schedule_edit,
     user_asks_insert_budget_table,
+    user_asks_rfp_compliance,
     user_asks_section_budget_fill,
     user_explicitly_asks_to_change_budget,
     user_points_at_open_section,
@@ -164,6 +169,10 @@ Rules:
     provided, answer ONLY about that tab's title + Open-tab draft. Never describe
     a different sidebar section.
 4. If the user asks whether something meets the RFP, cite specific RFP asks and gaps.
+   Quote exact clause wording when provided in BUDGET / COST EXCERPT or HARD FLAGS.
+   Never invent section titles. Independent mandatory asks stay independent — fee-method
+   flexibility (retainer / hourly / hybrid) does NOT waive a required hourly rate
+   schedule by classification or stated cost assumptions when those appear separately.
 5. When the user asks to check / evaluate / list which case studies (or sections) do
    NOT meet the RFP:
    - Review EVERY Our Work / case-study section in the manuscript digest (not only
@@ -2069,7 +2078,7 @@ def _rfp_section_requirements_list(
     *,
     section_title: str = "",
 ) -> list[str]:
-    """Deprecated location — use the title-aware helper near ``_find_rfp_section``.
+    """Mapped requirements + uncovered for KB pack / coverage.
 
     Kept as a thin wrapper so older call sites that only pass ``section_id`` keep
     working; prefer passing ``section_title=`` whenever the draft title is known.
@@ -2077,7 +2086,17 @@ def _rfp_section_requirements_list(
     mapped = _find_rfp_section(research, section_id, section_title=section_title)
     if mapped is None:
         return []
-    return [r for r in (mapped.requirements or []) if str(r).strip()]
+    reqs = [r for r in (mapped.requirements or []) if str(r).strip()]
+    uncovered = [r for r in (mapped.uncovered_requirements or []) if str(r).strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in uncovered + reqs:
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _rfp_section_requirements_block(
@@ -2085,19 +2104,29 @@ def _rfp_section_requirements_block(
     section_id: str,
     *,
     section_title: str = "",
+    rfp_full_text: str = "",
 ) -> str:
     mapped = _find_rfp_section(research, section_id, section_title=section_title)
     if mapped is None:
         return ""
+    requirements = list(mapped.requirements or [])
+    title = section_title or mapped.title or ""
+    instrument = str(getattr(mapped, "submission_instrument", "") or "").casefold()
+    if rfp_full_text and (
+        budget_section_score(title) > 0 or instrument == "cost"
+    ):
+        requirements = augment_cost_section_requirements(requirements, rfp_full_text)
+    # Cost / form tabs need every independent sub-ask visible to chat.
+    req_cap = 36 if instrument in {"cost", "form"} else 28
     parts = [f"Section map — {mapped.title or section_id}"]
-    if mapped.requirements:
+    if requirements:
         parts.append(
-            "Requirements:\n" + "\n".join(f"- {r}" for r in mapped.requirements[:24])
+            "Requirements:\n" + "\n".join(f"- {r}" for r in requirements[:req_cap])
         )
     if mapped.uncovered_requirements:
         parts.append(
             "Uncovered:\n"
-            + "\n".join(f"- {r}" for r in mapped.uncovered_requirements[:12])
+            + "\n".join(f"- {r}" for r in mapped.uncovered_requirements[:18])
         )
     if mapped.evaluation_weight:
         parts.append(f"Evaluation weight hint: {mapped.evaluation_weight}")
@@ -3490,6 +3519,7 @@ async def _section_chat_advisory_reply(
     manuscript_digest: str = "",
     research: ProposalResearchCache | None = None,
     draft: ProposalDraft | None = None,
+    rfp_full_text: str = "",
 ) -> tuple[str, Any]:
     """Return (reply_markdown, suggested_fix_or_none)."""
     from app.services.proposal_suggested_fix import (
@@ -3684,17 +3714,38 @@ async def _section_chat_advisory_reply(
         )
         src_note = ", ".join(guide_sources[:8]) if guide_sources else "(no sources)"
         guide_block = (
-            f"\n\n=== 00_Guide_Pricing (Supermemory — cite menu ids from here) ===\n"
-            f"{guide_text[:20000]}\n\nKB sources: {src_note}\n"
+            f"\n\n=== KB pricing context (00_Guide_Pricing + labor/role billable rates) ===\n"
+            f"{guide_text[:24000]}\n\nKB sources: {src_note}\n"
+            "Advisory rule: for a mandatory hourly rate schedule by classification, "
+            "use Billable Rate rows from the labor/role excerpts above — cite the "
+            "source filename. Never invent $/hr; never use Internal/Raw floor columns.\n"
         )
 
     # Numbered-section asks: put the target draft FIRST and shrink RFP context so
     # an RFP "Section 11" criterion cannot override sidebar section 11.
-    rfp_budget = (
-        1_500
-        if sidebar_number_ask or _is_informational_only_ask(user_message)
-        else 8_000
-    )
+    # Compliance / Cost: block-priority pack + full-text cost excerpt (not a raw
+    # head slice that drops mid-doc §6.G hourly schedule instruments).
+    compliance_ask = user_asks_rfp_compliance(user_message or "")
+    budget_ask = should_apply_budget_playbook(section, user_message)
+    cost_source = (rfp_full_text or rfp_context or "").strip()
+    cost_compliance_block = ""
+    if budget_ask or compliance_ask:
+        cost_compliance_block = pack_budget_compliance_advisory_block(
+            rfp_text=cost_source,
+            draft_content=section.content or "",
+            max_excerpt_chars=14_000,
+        )
+        if cost_compliance_block:
+            cost_compliance_block = f"\n\n{cost_compliance_block}\n"
+
+    if sidebar_number_ask or _is_informational_only_ask(user_message):
+        packed_rfp = _budget_rfp_context(
+            rfp_context, body_chars=1_200, keep=_PLANNER_MARKERS
+        )[:2_500]
+    elif budget_ask or compliance_ask:
+        packed_rfp = _budget_rfp_context(rfp_context, body_chars=3_500)[:10_000]
+    else:
+        packed_rfp = _budget_rfp_context(rfp_context, body_chars=2_500)[:8_000]
     open_tab_block = (
         f"Open-tab draft (THIS is what 'section N' refers to when a target is bound):\n"
         f"{(section.content or '')[:6000]}"
@@ -3708,7 +3759,8 @@ async def _section_chat_advisory_reply(
             f"User message:\n{user_message.strip()}\n\n"
             f"Proposal outline (titles only):\n{manuscript_digest}\n\n"
             f"RFP context (secondary — do not remap section numbers from here):\n"
-            f"{rfp_context[:rfp_budget]}\n\n"
+            f"{packed_rfp}\n"
+            f"{cost_compliance_block}"
             f"{requirements_block}\n"
             f"{guide_block}"
             f"{kb_block}"
@@ -3717,7 +3769,8 @@ async def _section_chat_advisory_reply(
     else:
         prompt = (
             f"RFP: {rfp.title} — {rfp.client}\n\n"
-            f"RFP context (rescan):\n{rfp_context[:rfp_budget]}\n\n"
+            f"RFP context (rescan):\n{packed_rfp}\n"
+            f"{cost_compliance_block}"
             f"{requirements_block}\n\n"
             f"{manuscript_digest}\n\n"
             f"{guide_block}"
@@ -3739,6 +3792,8 @@ async def _section_chat_advisory_reply(
         )
         if full_detail:
             system_prompt = f"{system_prompt}\n\n{BUDGET_EXPLAIN_ADVISORY_RULES}"
+    if budget_ask or compliance_ask:
+        system_prompt = f"{system_prompt}\n\n{BUDGET_COMPLIANCE_ADVISORY_RULES}"
     max_tokens = 16000
     # Advisory replies are long markdown wrapped in {"reply": "..."} and the model
     # intermittently emits JSON this strict parser rejects, which surfaced to the
@@ -6214,6 +6269,7 @@ async def _redraft_rfp_section(
     avoidance_block: str = "",
     research: ProposalResearchCache | None = None,
     compliance_user_message: str | None = None,
+    rfp_full_text: str = "",
 ) -> tuple[ProposalSection, str]:
     requirements = list(rfp_section.requirements if rfp_section else [])
     uncovered = list(rfp_section.uncovered_requirements if rfp_section else [])
@@ -6226,6 +6282,12 @@ async def _redraft_rfp_section(
             rfp_section = mapped
             requirements = list(mapped.requirements or [])
             uncovered = list(mapped.uncovered_requirements or [])
+    if rfp_full_text and (
+        budget_section_score(section.title or "") > 0
+        or str(getattr(rfp_section, "submission_instrument", "") or "").casefold()
+        == "cost"
+    ):
+        requirements = augment_cost_section_requirements(requirements, rfp_full_text)
     coverage_gaps = _requirement_coverage_gaps(
         prior_content or section.content or "",
         requirements,
@@ -6433,7 +6495,7 @@ async def _redraft_rfp_section(
             try:
                 budget_ctx = await build_budget_repair_context(
                     rfp=rfp,
-                    rfp_text=rfp_context,
+                    rfp_text=rfp_full_text or rfp_context,
                     research=research,
                     user_message=user_message,
                 )
@@ -6493,9 +6555,31 @@ async def _redraft_rfp_section(
             content, budget_logs = apply_budget_freeform_postprocess(
                 content,
                 budget=research.budget if research else None,
+                prior_text=original_content,
             )
             for line in budget_logs:
                 logger.info("budget freeform postprocess: %s", line)
+            try:
+                from app.services.rfp_cost_demands import (
+                    approach_digest_from_draft_sections,
+                    ensure_rfp_cost_demands_in_budget_markdown,
+                )
+
+                content, _demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+                    content,
+                    rfp_text=rfp_full_text or rfp_context or "",
+                    approach_digest=approach_digest_from_draft_sections(draft.sections),
+                    budget=research.budget if research else None,
+                    rewrite=True,
+                )
+                for line in demand_logs:
+                    logger.info("budget freeform rfp_cost_demand: %s", line)
+            except Exception:
+                logger.warning(
+                    "budget freeform rfp_cost_demands failed section=%s",
+                    section.id,
+                    exc_info=True,
+                )
             refusal = refuse_noncompliant_budget_edit(
                 (compliance_user_message or user_message),
                 content,
@@ -6728,17 +6812,23 @@ async def _try_budget_section_rfp_coverage_check(
     str,
     bool,
 ] | None:
-    """Budget tab guard: check RFP; apply safe fixes when user asked improve-if-needed.
+    """Budget tab: RFP Cost demand align + safe fixes (no fee invention).
 
-    Never Stage 3.5 rebuild / fee invention. Safe fixes = Pricing Guide USE VERBATIM
-    Terms + light Rev 6 scrub. Fee Detail dollars stay locked.
+    Soft “improve budget / align with RFP” runs LLM demand extract → rewrite →
+    MANUAL FILL stubs. Fee Detail dollars stay locked.
     """
     if selection_mode or not section_is_budget_related(section):
         return None
     ask = (user_message or "").strip()
-    if user_explicitly_asks_to_change_budget(ask):
+    # Soft improve / align-RFP / voice → this path. Hard rebuild/fee mutate → not here.
+    if user_asks_budget_rebuild(ask) or user_asks_global_cost_rebuild(ask):
+        return None
+    if user_asks_budget_fee_structure_mutation(ask):
         return None
     if user_asked_reverse_engineered_total(ask):
+        return None
+    # Substantive freeform Cost asks (columns, layout, etc.) skip this guard.
+    if user_explicitly_asks_to_change_budget(ask):
         return None
 
     provider = _provider_name()
@@ -6758,15 +6848,82 @@ async def _try_budget_section_rfp_coverage_check(
         _user_asks_voice_or_style_only(ask)
         and not qualifying_language_has_pricing_guide_verbatim(section.content or "")
     )
+    # “Improve budget / align with RFP” → full demand rewrite, not stub-only.
+    allow_demand_rewrite = user_asks_budget_improve_if_needed(ask)
 
     before = section.content or ""
     content = before
     fix_logs: list[str] = []
+
+    from app.services.proposal_common import load_rfp_for_proposal
+    from app.services.rfp_cost_demands import (
+        approach_digest_from_draft_sections,
+        ensure_rfp_cost_demands_in_budget_markdown,
+    )
+
+    rfp_blob = ""
+    try:
+        from app.services.go_no_go_service import combine_rfp_text
+
+        _rfp, content_info, rfp_ctx = load_rfp_for_proposal(rfp_id)
+        rfp_blob = combine_rfp_text(
+            getattr(content_info, "description", None) or "",
+            getattr(content_info, "pdf_text", None) or "",
+        ) or (rfp_ctx or "")
+    except Exception:
+        logger.warning(
+            "budget_rfp_coverage: could not load RFP text for %s", rfp_id, exc_info=True
+        )
+    approach_digest = approach_digest_from_draft_sections(draft.sections)
+    include_reimb = True
+    if rfp_blob.strip() or approach_digest.strip():
+        content, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+            content,
+            rfp_text=rfp_blob,
+            approach_digest=approach_digest,
+            budget=research.budget if research else None,
+            rewrite=allow_demand_rewrite,
+        )
+        fix_logs.extend(demand_logs)
+        for d in demands:
+            if d.satisfaction == "manual_fill":
+                fix_logs.append(
+                    f"RFP demand still needs Sonja confirm: {d.id} — {d.requirement[:120]}"
+                )
+
+        from app.services.proposal_budget_content import (
+            manuscript_asserts_all_in_no_separate_expenses,
+        )
+        from app.services.rfp_cost_demands import demands_require_omit_guide_reimbursables
+
+        include_reimb = not (
+            demands_require_omit_guide_reimbursables(demands)
+            or manuscript_asserts_all_in_no_separate_expenses(content)
+        )
+
     if allow_safe_fix:
-        if not qualifying_language_has_pricing_guide_verbatim(content):
-            content = ensure_pricing_guide_verbatim_in_budget_markdown(content)
+        from app.services.proposal_budget_content import (
+            manuscript_asserts_all_in_no_separate_expenses,
+        )
+
+        include_reimb = include_reimb and (
+            not manuscript_asserts_all_in_no_separate_expenses(content)
+        )
+        if not qualifying_language_has_pricing_guide_verbatim(
+            content, require_reimbursable=include_reimb
+        ):
+            content = ensure_pricing_guide_verbatim_in_budget_markdown(
+                content, include_reimbursable=include_reimb
+            )
             if content != before:
-                fix_logs.append("Restored Pricing Guide USE VERBATIM Terms")
+                fix_logs.append(
+                    "Restored Pricing Guide USE VERBATIM Terms"
+                    + (
+                        ""
+                        if include_reimb
+                        else " (all-in — no separate Reimbursable Expenses block)"
+                    )
+                )
         scrubbed = enforce_narrative_voice(
             content,
             section_id=section.id or section_id,
@@ -6779,6 +6936,9 @@ async def _try_budget_section_rfp_coverage_check(
         content, post_logs = apply_budget_freeform_postprocess(
             content,
             budget=research.budget if research else None,
+            prior_text=before,
+            rfp_text=rfp_blob,
+            approach_digest=approach_digest,
         )
         for line in post_logs:
             if line not in fix_logs:
@@ -6824,7 +6984,7 @@ async def _try_budget_section_rfp_coverage_check(
     lines: list[str] = []
     if changed:
         lines.append(
-            f"**{section.title}** — applied safe RFP/compliance fixes only "
+            f"**{section.title}** — applied RFP Cost demand / compliance fixes "
             "(Fee Detail dollars unchanged)."
         )
         if fix_logs:
@@ -6835,7 +6995,7 @@ async def _try_budget_section_rfp_coverage_check(
     else:
         lines.append(
             f"**{section.title}** — left unchanged "
-            "(no fee rebuild; no safe Terms/voice fix required)."
+            "(RFP Cost demands already covered; no fee rebuild)."
         )
 
     lines.append("")
@@ -7371,9 +7531,154 @@ async def _apply_budget_section_canonical_refresh(
 
     budget = reconcile_proposal_budget(canonical, rfp_context=rfp_text)
     budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
+
+    # Always hydrate verifiedRates from whole-KB billable role excerpts on
+    # Cost refresh. Do not gate on ask/RFP keyword detectors — clients phrase
+    # rate requests many ways; the ledger render decides what to show.
+    try:
+        from app.models.proposal import VerifiedRate
+        from app.services.pricing_rate_card_builder import bindable_rates
+        from app.services.pricing_rate_card_store import build_stable_rate_card
+        from app.services.proposal_pricing_service import fetch_pricing_guide_context
+        from app.services.rfp_repository import get_rfp
+
+        rfp_rec = get_rfp(rfp_id)
+        if rfp_rec is not None:
+            logger.info(
+                "cost_refresh_kb_labor_rates rfp_id=%s ask=%r",
+                rfp_id,
+                (user_message or "")[:120],
+            )
+            guide_text, guide_srcs = await fetch_pricing_guide_context(
+                rfp_rec,
+                focus_hint=user_message[:300] or "billable hourly role rates",
+            )
+            logger.info(
+                "cost_refresh_kb_labor_rates_done rfp_id=%s sources=%s chars=%s",
+                rfp_id,
+                (guide_srcs or [])[:8],
+                len(guide_text or ""),
+            )
+            rate_card = build_stable_rate_card(guide_text)
+            hourly_roles = [
+                r
+                for r in bindable_rates(rate_card)
+                if getattr(r, "unit", "") == "hour"
+                and float(getattr(r, "amount", 0) or 0) > 0
+            ]
+            if hourly_roles:
+                # Replace (do not merge-skip) so every Cost refresh rebinds
+                # current KB billable role rates regardless of ask wording.
+                merged = [
+                    VerifiedRate(
+                        personName="",
+                        role=(role_rate.service or "").strip(),
+                        hourlyRate=float(role_rate.amount),
+                        source=getattr(role_rate, "source_doc", "") or "",
+                    )
+                    for role_rate in hourly_roles
+                    if (role_rate.service or "").strip()
+                ]
+                # Dedupe by role label, first occurrence wins.
+                seen: set[str] = set()
+                unique: list[VerifiedRate] = []
+                for vr in merged:
+                    key = (vr.role or "").casefold()
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    unique.append(vr)
+                budget = budget.model_copy(update={"verified_rates": unique})
+                logger.info(
+                    "cost_refresh_kb_labor_rates_bound rfp_id=%s roles=%s",
+                    rfp_id,
+                    len(unique),
+                )
+            else:
+                logger.warning(
+                    "cost_refresh_kb_labor_rates_empty rfp_id=%s — no unit=hour rows parsed",
+                    rfp_id,
+                )
+    except Exception:
+        logger.warning(
+            "Cost refresh could not seed KB hourly rates for %s",
+            rfp_id,
+            exc_info=True,
+        )
+
     now = datetime.now(timezone.utc).isoformat()
     research = research.model_copy(update={"budget": budget, "updatedAt": now})
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    # Paint verified hourly rates into Cost whenever present on the ledger.
+    from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+    approach_digest = approach_digest_from_draft_sections(draft.sections)
+    content = render_budget_markdown(
+        budget, rfp_text=rfp_text, approach_digest=approach_digest
+    )
+    # LLM Cost-demand audit for THIS RFP (async) — close silent gaps without inventing $.
+    try:
+        from app.services.rfp_cost_demands import (
+            ensure_rfp_cost_demands_in_budget_markdown,
+        )
+
+        content, _demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+            content,
+            rfp_text=rfp_text or "",
+            approach_digest=approach_digest,
+            budget=budget,
+            rewrite=True,
+        )
+        for line in demand_logs:
+            logger.info("cost_refresh rfp_cost_demand: %s", line)
+    except Exception:
+        logger.warning(
+            "cost_refresh rfp_cost_demands failed rfp_id=%s", rfp_id, exc_info=True
+        )
+    n_rates = len(
+        [vr for vr in (budget.verified_rates or []) if (vr.hourly_rate or 0) > 0]
+    )
+    # Belt-and-suspenders: never leave rates on the ledger but missing from MD
+    # (e.g. empty rfp_text + older mandate-only render paths).
+    if n_rates and "## Hourly Rate Schedule by Classification" not in content:
+        from app.services.proposal_budget_content import (
+            render_kb_classification_rate_schedule_markdown,
+        )
+
+        schedule = render_kb_classification_rate_schedule_markdown(
+            budget, rfp_text=rfp_text
+        )
+        if schedule.strip():
+            content = content.rstrip() + "\n\n" + schedule.strip() + "\n"
+            logger.info(
+                "cost_refresh_forced_rate_schedule rfp_id=%s roles=%s",
+                rfp_id,
+                n_rates,
+            )
+    # Preserve prior MANUAL FILL handoffs the re-render may have dropped —
+    # except stale "complete hourly rate schedule" tags once KB rates landed.
+    from app.services.proposal_manual_flags import extract_manual_fill_tags
+
+    schedule_present = "## Hourly Rate Schedule by Classification" in content and "|" in content
+    prior_fills = []
+    for tag in extract_manual_fill_tags(section.content or ""):
+        if not tag.text or tag.text in content:
+            continue
+        low = tag.text.casefold()
+        if schedule_present and n_rates and (
+            "hourly rate schedule" in low
+            or "classification" in low and "rate" in low
+            or "kb labor" in low
+        ):
+            continue
+        prior_fills.append(tag.text)
+    if prior_fills:
+        content = (
+            content.rstrip()
+            + "\n\n### Outstanding handoffs\n\n"
+            + "\n".join(prior_fills)
+            + "\n"
+        )
+    before = section.content or ""
     working = section.model_copy(update={"content": content, "status": "generated"})
     merged = [working if s.id == section_id else s for s in draft.sections]
     now = datetime.now(timezone.utc).isoformat()
@@ -7385,34 +7690,92 @@ async def _apply_budget_section_canonical_refresh(
             updated_draft,
             research,
             section_title=section.title,
+            focus_section_id=section_id,
         )
         working = _find_draft_section(updated_draft, section_id) or working
+        # If persist guards wiped the rate table, put it back once.
+        after_body = working.content or ""
+        schedule_ok = (
+            "## Hourly Rate Schedule by Classification" in content
+            and "| Role / Labor Category |" in content
+            and "$" in content
+        )
+        after_ok = (
+            "## Hourly Rate Schedule by Classification" in after_body
+            and "| Role / Labor Category |" in after_body
+            and "$" in after_body
+        )
+        if n_rates and schedule_ok and not after_ok:
+            logger.warning(
+                "cost_refresh_schedule_wiped_on_persist rfp_id=%s — restoring",
+                rfp_id,
+            )
+            working = working.model_copy(update={"content": content})
+            merged = [working if s.id == section_id else s for s in updated_draft.sections]
+            updated_draft = updated_draft.model_copy(update={"sections": merged})
+            updated_draft = await _persist_section_improve_draft(
+                updated_draft,
+                research,
+                section_title=section.title,
+                focus_section_id=section_id,
+            )
+            working = _find_draft_section(updated_draft, section_id) or working
 
+    after = working.content or ""
+    changed = before.strip() != after.strip()
     figs = canonical_budget_summary_figures(budget)
     n_items = len(budget.line_items or [])
-    cap = budget.rfp_budget_cap or budget.rfp_media_or_program_envelope
+
+    def _schedule_table_ok(body: str) -> bool:
+        return (
+            "## Hourly Rate Schedule by Classification" in body
+            and "| Role / Labor Category |" in body
+            and "$" in body
+        )
+
+    # Hard fee NTE only — never treat media/program envelope as the bid cap.
+    hard_cap = budget.rfp_budget_cap
+    envelope = budget.rfp_media_or_program_envelope
     reply = (
         f"**{section.title}** — refreshed from the canonical Stage 3.5 fee ledger "
-        f"(${figs['total']:,.2f} total; {n_items} line item(s)). "
-        "Cost Proposal is rendered from verified phase fees — chat does not invent "
-        "hourly rates or rewrite the fee table. For a full pricing rebuild, ask to "
-        "**rebuild Cost Proposal from the pricing guide**."
+        f"(${figs['total']:,.2f} total; {n_items} line item(s)"
+        + (f"; {n_rates} KB billable role rate(s)" if n_rates else "")
+        + "). "
     )
-    if cap is not None and float(cap) > 0:
+    if n_rates and _schedule_table_ok(after):
+        reply += (
+            "Hourly Rate Schedule by Classification is in the manuscript from KB "
+            "billable role rates (alongside phase fees). "
+        )
+    elif n_rates:
+        reply += (
+            "KB billable role rates are on the fee ledger but the schedule table "
+            "did not land in the manuscript — try the ask again. "
+        )
+    else:
+        reply += (
+            "No KB billable role rates were bound — check Supermemory pricing / "
+            "role-rate docs, then ask again. "
+        )
+    if not changed and n_rates and _schedule_table_ok(after):
+        reply += "Manuscript already contained this schedule (unchanged text). "
+    if hard_cap is not None and float(hard_cap) > 0:
         total = float(figs.get("total") or 0)
-        if total <= float(cap) + 0.01:
+        # Skip absurd false alarms when a tiny "cap" is really a media/program
+        # envelope mislabeled as fee NTE (e.g. $9.5k vs $121k fees).
+        bogus_tiny_cap = (
+            total > float(hard_cap) * 3
+            and envelope is not None
+            and abs(float(envelope) - float(hard_cap)) < 0.02
+        )
+        if total > float(hard_cap) + 0.01 and not bogus_tiny_cap:
             reply += (
-                f" Bid total is at or under the RFP available-funds cap "
-                f"(${float(cap):,.2f})."
-            )
-        else:
-            reply += (
-                f" WARNING: bid total still exceeds the RFP cap "
-                f"(${float(cap):,.2f}) — rebuild Cost Proposal."
+                f" WARNING: bid total exceeds RFP fee NTE "
+                f"(${float(hard_cap):,.2f}) — rebuild Cost Proposal."
             )
     if reply_hint.strip():
         reply = f"{reply}\n\n{reply_hint.strip()}"
-    return working, updated_draft, research, provider, reply, True
+    return working, updated_draft, research, provider, reply, changed
 
 
 def _budget_manual_fill_tags(
@@ -7545,10 +7908,10 @@ async def _try_budget_section_canonical_refresh(
     str,
     bool,
 ] | None:
-    """Re-render Cost / Budget tabs from Stage 3.5 when the ask mutates fees.
+    """Ledger wipe ONLY for fee-dollar rebinds. Everything else → freeform LLM+KB.
 
-    Narrative Improve / framing / Fee Detail cleanup goes through freeform LLM
-    revise with ledger guards — not a full canonical wipe.
+    Do not special-case layout asks (columns, reorder, footnotes). The section
+    improve agent + Supermemory planner handles those.
     """
     if selection_mode or not section_is_budget_related(section):
         return None
@@ -7560,27 +7923,23 @@ async def _try_budget_section_canonical_refresh(
     if user_asked_reverse_engineered_total(ask):
         return None
     from app.services.proposal_manual_flags import (
-        extract_manual_fill_tags,
         is_manual_fill_request,
         user_asks_submit_handoff_fill,
     )
 
     if is_manual_fill_request(ask) or user_asks_submit_handoff_fill(ask):
         return None
-    if extract_manual_fill_tags(section.content or ""):
+    if _user_asks_voice_or_style_only(ask):
         return None
-    # Never wipe Fee Detail on voice / Improve / RFP-check asks.
-    if not user_explicitly_asks_to_change_budget(ask):
+    # Default: freeform agent. Never steal table/layout asks into a ledger wipe.
+    if budget_ask_allows_freeform_narrative(ask):
+        return None
+    if not user_asks_budget_fee_structure_mutation(ask):
         return None
     if not _budget_section_chat_would_freeform_edit(
         chat_intent=chat_intent,
         user_message=ask,
         conversation_history=conversation_history,
-    ):
-        return None
-    # Narrative freeform: let the LLM revise, then post-scrub on persist.
-    if budget_ask_allows_freeform_narrative(ask) and not user_asks_budget_fee_structure_mutation(
-        ask
     ):
         return None
 
@@ -8641,6 +9000,12 @@ async def improve_proposal_section(
         raise ProposalError("Edit message is required.", status_code=400)
 
     rfp, _content, rfp_context = await aload_rfp_for_proposal(rfp_id)
+    from app.services.rfp_content import combine_rfp_text
+
+    rfp_full_text = combine_rfp_text(
+        getattr(_content, "description", "") or "",
+        getattr(_content, "pdf_text", "") or "",
+    )
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft found. Generate a proposal first.", status_code=400)
@@ -9353,7 +9718,10 @@ async def improve_proposal_section(
         if section is None:
             raise ProposalError("Draft has no sections.", status_code=400)
         requirements_block = _rfp_section_requirements_block(
-            research, section.id, section_title=section.title or ""
+            research,
+            section.id,
+            section_title=section.title or "",
+            rfp_full_text=rfp_full_text,
         )
         # Always build a fresh manuscript digest for advisory — do not bury it
         # inside a truncated RFP excerpt (that made the model "only see" Who We Are).
@@ -9371,6 +9739,7 @@ async def improve_proposal_section(
             manuscript_digest=manuscript_digest,
             research=research,
             draft=draft,
+            rfp_full_text=rfp_full_text,
         )
         if intent_degraded:
             # The classifier could not run, so this answer may be advisory only
@@ -9631,7 +10000,10 @@ async def improve_proposal_section(
                 )
 
     requirements_block = _rfp_section_requirements_block(
-        research, section_id, section_title=section.title or ""
+        research,
+        section_id,
+        section_title=section.title or "",
+        rfp_full_text=rfp_full_text,
     )
     if requirements_block:
         rfp_context = f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"
@@ -9714,6 +10086,7 @@ async def improve_proposal_section(
             manuscript_digest=manuscript_digest,
             research=research,
             draft=draft,
+            rfp_full_text=rfp_full_text,
         )
         provider = _provider_name()
         if research is None:
@@ -9826,7 +10199,7 @@ async def improve_proposal_section(
             user_message=latest_user_ask,
             chat_intent=chat_intent,
             conversation_history=conversation_history,
-            rfp_text=rfp_context or "",
+            rfp_text=rfp_full_text or rfp_context or "",
             persist=persist,
             selection_mode=selection_mode,
         )
@@ -11565,6 +11938,7 @@ async def improve_proposal_section(
             avoidance_block=avoidance_block,
             research=research,
             compliance_user_message=raw_user_message,
+            rfp_full_text=rfp_full_text,
         )
 
         new_queries = {

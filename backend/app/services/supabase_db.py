@@ -416,6 +416,15 @@ def update_rfp_pdf_path(rfp_id: str, pdf_path: str) -> None:
     ).execute()
 
 
+def update_rfp_page_limit(rfp_id: str, page_limit: int) -> None:
+    if page_limit <= 0:
+        return
+    client = _get_client()
+    client.table("rfps").update({"page_limit": page_limit}).or_(
+        f"id.eq.{rfp_id},external_id.eq.{rfp_id}"
+    ).execute()
+
+
 def save_go_no_go_analysis(rfp_id: str, analysis: GoNoGoAnalysis) -> RfpRecord | None:
     from app.services.go_no_go_service import analysis_activity_note
 

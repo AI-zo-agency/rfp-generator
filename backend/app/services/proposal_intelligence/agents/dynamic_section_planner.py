@@ -5,11 +5,14 @@ from __future__ import annotations
 import logging
 
 from app.services.proposal_evaluation_coverage import (
+    drop_scoring_rubric_duplicate_sections,
     ensure_missing_submittals_coverage,
     ensure_scored_criteria_coverage,
+    evaluation_is_published_response_form,
     evaluation_priority_brief,
     evaluation_response_char_limit,
     min_outline_sections_for_evaluation,
+    order_outline_sections_by_authority_titles,
 )
 from app.services.proposal_rfp_excerpt import (
     closing_package_excerpt,
@@ -86,6 +89,17 @@ Rules:
   RFP tabs). One tab per Direct Question / TOC heading — NEVER one tab per bullet, sub-bullet,
   evaluation criterion synonym, or form field. If the RFP lists many criteria, fold related
   asks under the buyer's parent TOC heading.
+- ORDER: emit RFP tabs ONLY in the buyer's Proposal Content / "organize as follows" /
+  submission-package sequence. Never invent a default Cover→Technical→Cost stack and never
+  reorder lettered packages (A then B then C…).
+- EVALUATION vs SUBMISSION (critical):
+  * When the RFP publishes a scored RESPONSE FORM (offeror fills each numbered criterion),
+    those criteria ARE the proposal body — emit each scored parent as its own tab.
+  * When the RFP only publishes a scoring RUBRIC / weights table (how the panel scores),
+    those labels are NOT submission sections. Emit only the Proposal Content / TOC packages;
+    put evaluationWeight on the matching TOC tab. Never duplicate a rubric label as a
+    second tab beside Experience / Personnel / Cost / References packages that already
+    answer it.
 - SUBMISSION PACKAGE RFPs (Cover Letter + Direct Questions + Budget, e.g. MTC-style):
   Emit ONLY the buyer-named response packages — typically:
   (1) ONE Cover Letter tab (contact + interest + qualifications — never split),
@@ -112,7 +126,9 @@ Rules:
   Never rename "Sample Work Submission (Portfolio)" to bare "Portfolio".
   Never rename "Qualifications and Experience of the Firm" to bare "Qualifications".
   Keep section numbers from the RFP when present (e.g. 4.2 …).
-- IMPORTANT scored tabs from evaluation criteria + TOC MUST be included when the RFP names them.
+- IMPORTANT: when evaluation is a RESPONSE FORM, scored parent tabs MUST be included.
+  When evaluation is only a RUBRIC, do NOT mint tabs from criterion labels — stamp weights
+  onto the buyer's TOC packages instead.
 -   CLOSING / compliance package items MUST be included when the RFP names them (even if forms):
   References, Acknowledgement of Addenda, Non-Collusion / Ownership Disclosure, Pricing
   Proposal Form, Authorized Signature, Exemplar Agreement acknowledgment, Offeror Commitment
@@ -200,6 +216,20 @@ async def run_dynamic_section_planner(
         min_sections=min_outline_sections_for_evaluation(evaluation),
     )
     scoreboard = evaluation_priority_brief(evaluation)
+    response_form = evaluation_is_published_response_form(evaluation)
+    if response_form:
+        eval_shape_rule = (
+            "EVALUATION SHAPE: published scored RESPONSE FORM — emit each scored "
+            "parent criterion as its own tab in the buyer's order; NEVER drop a "
+            "scored parent to fit the cap (cut unscored narrative instead)."
+        )
+    else:
+        eval_shape_rule = (
+            "EVALUATION SHAPE: scoring RUBRIC / weights only — do NOT emit tabs "
+            "titled as criterion labels. Emit only Proposal Content / TOC / "
+            "required forms packages in the buyer's stated order; stamp "
+            "evaluationWeight onto the matching TOC tab."
+        )
     package_char_limit = evaluation_response_char_limit(evaluation)
     char_limit_line = (
         f"Per-response character limit stated by this RFP: {package_char_limit} characters "
@@ -250,11 +280,13 @@ async def run_dynamic_section_planner(
                     "content": (
                         f"{scoreboard}\n\n"
                         f"{char_limit_line}\n"
+                        f"{eval_shape_rule}\n"
                         f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
-                        f"Emit at most {section_cap} sections in the JSON array — merge aggressively, "
-                        f"but NEVER merge or drop a scored criterion to fit the cap; "
-                        f"cut unscored narrative instead.\n"
-                        f"Page limit from RFP: {page_limit if page_limit else 'not stated'}.\n\n"
+                        f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
+                        f"Page limit from RFP: {page_limit if page_limit else 'not stated'}. "
+                        f"Under a tight page budget, emit ONLY the buyer's required Proposal "
+                        f"Content / submission-package tabs in their stated order — no rubric "
+                        f"duplicates, no optional padding.\n\n"
                         f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
                         f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
                         f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
@@ -276,14 +308,14 @@ async def run_dynamic_section_planner(
             logger.warning("%s validation failed: %s", AGENT, exc)
             outline = ProposalOutline(confidence=0.2)
         if not outline.sections:
-            # Minimal fallback from evaluation emphasis + scope — NEVER force Methodology.
+            # Prefer submission-format titles over inventing a scoreboard outline.
             titles: list[str] = []
-            for crit in plan.opportunity.evaluation.criteria[:6]:
-                name = (crit.name or "").strip()
-                if name and name.casefold() not in {t.casefold() for t in titles}:
-                    titles.append(name)
+            if response_form:
+                for crit in plan.opportunity.evaluation.criteria[:6]:
+                    name = (crit.name or "").strip()
+                    if name and name.casefold() not in {t.casefold() for t in titles}:
+                        titles.append(name)
             if not titles:
-                # Prefer concrete RFP-shaped asks over a generic marketing stack.
                 titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
             outline = ProposalOutline(
                 sections=[
@@ -292,7 +324,11 @@ async def run_dynamic_section_planner(
                         title=title,
                         order=i,
                         required=True,
-                        conditionalReason="Fallback from evaluation criteria — confirm against RFP TOC",
+                        conditionalReason=(
+                            "Fallback from evaluation response form — confirm against RFP TOC"
+                            if response_form
+                            else "Fallback outline — confirm against RFP TOC"
+                        ),
                     )
                     for i, title in enumerate(titles, start=1)
                 ],
@@ -311,6 +347,18 @@ async def run_dynamic_section_planner(
         list(outline.sections),
         list(plan.opportunity.evaluation.criteria),
     )
+    # Drop scoreboard-label clones before lean hygiene (rubric RFPs only).
+    outline.sections, rubric_dropped = drop_scoring_rubric_duplicate_sections(
+        list(outline.sections),
+        evaluation,
+    )
+    if rubric_dropped:
+        logger.info(
+            "%s dropped %d scoring-rubric duplicate tab(s): %s",
+            AGENT,
+            len(rubric_dropped),
+            rubric_dropped[:6],
+        )
 
     kept, dropped = filter_lean_outline_sections(
         list(outline.sections),
@@ -366,6 +414,10 @@ async def run_dynamic_section_planner(
         section_factory=lambda raw: OutlineSection.model_validate(raw),
     )
     dropped = list(dropped) + list(scored_dropped)
+    # Rubric RFPs: ensure_scored is a no-op, but planner/closing may still have
+    # reintroduced scoreboard-label clones — drop again before Align reorder.
+    kept, rubric_dropped_2 = drop_scoring_rubric_duplicate_sections(kept, evaluation)
+    dropped = list(dropped) + list(rubric_dropped_2)
     # Same stub + reorder + mandated titles as the Align to RFP outline button,
     # applied to the plan before Phase 3 drafts — so generate ships the RFP's
     # required tabs instead of leaving empty stubs for a later button click.
@@ -392,6 +444,16 @@ async def run_dynamic_section_planner(
         rfp_context,
         section_factory=lambda raw: OutlineSection.model_validate(raw),
     )
+    kept, rubric_dropped_3 = drop_scoring_rubric_duplicate_sections(kept, evaluation)
+    dropped = list(dropped) + list(rubric_dropped_3)
+    # Buyer submission-format order is authoritative when Align extract exists.
+    authority_titles = [
+        str(getattr(spec, "rfp_title", None) or getattr(spec, "title", None) or "").strip()
+        for spec in (structure_specs or [])
+    ]
+    authority_titles = [t for t in authority_titles if t]
+    if authority_titles:
+        kept = order_outline_sections_by_authority_titles(kept, authority_titles)
     # Recompute the cap floor AFTER the outline exists: min_sections above was
     # derived from the upstream evaluation extraction, which can under-count
     # (e.g. it returns a single criterion with points=None when parsing

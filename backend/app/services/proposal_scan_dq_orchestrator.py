@@ -230,7 +230,13 @@ def collect_rfp_text_dq_risks(
             "attach required affidavit / enrollment proof with the package."
         )
 
-    page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
+    from app.services.rfp_page_limit import remember_resolved_page_limit
+
+    page_limit = remember_resolved_page_limit(
+        getattr(rfp, "id", "") or "",
+        manual_page_limit=getattr(rfp, "page_limit", None),
+        rfp_text=rfp_text,
+    )
     if page_limit and page_limit > 0:
         words = sum(len((s.content or "").split()) for s in draft.sections)
         budget = int(page_limit * 350 * 0.92)

@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 
 ADJUDICATOR_PROMPT = """You decide whether zö agency's knowledge base evidences each RFP requirement.
 
+CRITICAL DEFAULT FOR CRAFT ROWS (every RFP):
+If retrieved 03_CS_* or 06_WON_* *Proposal* text shows the same KIND of delivery
+as the requirement (municipal/gov communications, PR, media relations, social
+media, brand, campaigns, strategic communications planning, surveys, language
+access, etc.), you MUST mark "verified" or "partial" and return a VERBATIM
+quote from that document. Do NOT mark "gap" merely because the case study
+omits the exact tactic phrase (media list, op-ed, editorial calendar, KPI
+matrix, talking points, etc.). Gap only when retrieved text is clearly a
+different craft or no relevant delivery proof appears.
+06_WON_* Proposal files are CONFIRMED WINS — never call them pursuit texts.
+Prefer 06_WON_*Proposal* and 03_CS_* over 07_FIN_* and over 06_WON_*RFP*
+(buyer solicitations are not delivery proof).
+A won municipal / government communications Proposal that discusses press,
+social, surveys, or strategic planning evidences those craft families when
+the quote supports it — that is verified/partial proof, not a weak partial
+from an unrelated festival-only anecdote.
+
 For every requirement you are given the KB documents retrieved for it. Decide:
   "verified" - a document clearly evidences the capability
   "partial"  - a document evidences a related or narrower form of it
@@ -81,6 +98,24 @@ STRATEGIC COMMUNICATIONS / MEDIA / PUBLIC-HEALTH CAMPAIGNS (common RFP shape):
   when campaign delivery is strong but that specific sub-ask is not stated.
 - A bio naming media planning, advertising, or broadcast IS verified for media
   buyer / media specialist role requirements when the quote is verbatim.
+
+GRANULAR SCOPE LISTS (every RFP — never client-specific exceptions):
+- Buyers often split one craft into many tactical bullets (press releases,
+  media lists, op-eds, media training, crisis on-call, social calendars / copy /
+  graphics / community management / analytics, audits, stakeholder interviews,
+  message architecture, language access, staffing recommendations,
+  implementation matrices, plans/memos, etc.).
+- When retrieved 03_CS_* or 06_WON_* documents show the SAME KIND of delivery
+  (municipal / government / higher-ed / healthcare / tourism communications,
+  brand, PR, media, campaigns, web, etc. as the ask requires):
+  * Credit matching bullets as "verified" or "partial" from that proof.
+  * Do NOT mark every sub-bullet "gap" only because the case study omits that
+    exact tactic phrase.
+  * Prefer quotes from 03_CS_* and 06_WON_* over 07_FIN_* for the same story.
+    07_FIN is finalist/loss — craft wording only when no WON/CS quote exists;
+    never label a 06_WON engagement a "pursuit text."
+  * Still mark "gap" for clearly different crafts (e.g. hosting vs brand,
+    bonding, insurance limits) or when no relevant delivery proof was retrieved.
 
 But do NOT stretch across a real difference: content development is not content
 migration; print/brand design is not web development; branding for a city is not
@@ -235,19 +270,26 @@ def _prefer_capability_candidates(
     if not req_terms or len(candidates) < 2:
         return candidates
 
+    def _source_rank(name: str) -> int:
+        low = (name or "").casefold()
+        if "07_fin" in low or "finalist" in low:
+            return 0
+        # Buyer source RFP stored under 06_WON_*_RFP_* is not delivery proof.
+        if "06_won" in low and re.search(r"(?:^|[^a-z0-9])rfp(?:[^a-z0-9]|$)", low):
+            return 1
+        if "06_won" in low and "proposal" in low:
+            return 5  # confirmed won proposal — prefer over FIN copies of CS
+        if "03_cs" in low:
+            return 4
+        if re.search(r"04_bio|01_companyfacts|clientlist|06_won", low):
+            return 3
+        return 1
+
     ranked = sorted(
         candidates.items(),
         key=lambda item: (
             sum(1 for t in req_terms if t in (item[1][1] or "").casefold()),
-            # Prefer case studies / bios / won proposals over templates.
-            (
-                1
-                if re.search(
-                    r"(?i)03_cs|04_bio|06_won|01_companyfacts|clientlist",
-                    item[1][0] or "",
-                )
-                else 0
-            ),
+            _source_rank(item[1][0]),
         ),
         reverse=True,
     )
@@ -286,20 +328,25 @@ _QUOTE_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _distinctive_quote_anchors(quote: str) -> set[str]:
-    """Project / client name tokens that must stay with the salvaged sentence.
+    """Distinctive tokens from the quote that salvage must preserve.
 
-    Stops a Rock the Locks paraphrase from salvaging a Benedictine 'early
-    admissions' sentence out of a combined case-study dump.
+    Principle-based — no client/city allowlist. Uses capitalized multi-word
+    spans and longer content tokens from THIS quote so new 06_WON / 03_CS
+    engagements work without adding another regex name. Stops a paraphrase
+    about one project from salvaging a sentence about a different one in a
+    combined case-study dump.
     """
     anchors: set[str] = set()
-    for match in re.finditer(
-        r"\b(?:Rock\s+the\s+Locks|Benedictine|Umatilla|Maricopa|"
-        r"Deschutes|Carbondale|University\s+of\s+\w+)\b",
-        quote or "",
-        re.I,
-    ):
+    text = quote or ""
+    # Proper-noun phrases as written in the quote (any client, any RFP).
+    for match in re.finditer(r"\b(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){0,4})\b", text):
         for tok in _QUOTE_TOKEN_RE.findall(_normalize(match.group(0))):
             if tok not in _QUOTE_STOPWORDS and len(tok) > 2:
+                anchors.add(tok)
+    # Fall back to longer content tokens when the quote has no capitals.
+    if not anchors:
+        for tok in _QUOTE_TOKEN_RE.findall(_normalize(text)):
+            if tok not in _QUOTE_STOPWORDS and len(tok) >= 6:
                 anchors.add(tok)
     return anchors
 
@@ -1089,6 +1136,140 @@ def apply_gap_recover_assessments(
     if upgraded:
         logger.info(
             "go_no_go LLM gap recover upgraded %d row(s) from grounded evidence",
+            upgraded,
+        )
+    return out
+
+
+def _delivery_proof_docs(docs: dict[str, str]) -> list[tuple[str, str]]:
+    """06_WON Proposal + 03_CS only — never FIN or buyer source RFPs."""
+    from app.services.kb_rag_retrieve import is_source_rfp_filename
+
+    out: list[tuple[str, str]] = []
+    for name, text in (docs or {}).items():
+        low = (name or "").casefold()
+        if "07_fin" in low:
+            continue
+        if is_source_rfp_filename(name):
+            continue
+        if "06_won" in low and "proposal" in low:
+            out.append((name, text or ""))
+        elif "03_cs" in low:
+            out.append((name, text or ""))
+        elif "06_won" in low and "rfp" not in low:
+            out.append((name, text or ""))
+    # Prefer Proposal over other WON, then CS.
+    out.sort(
+        key=lambda item: (
+            0 if "proposal" in item[0].casefold() else 1,
+            0 if "03_cs" in item[0].casefold() else 1,
+            item[0],
+        )
+    )
+    return out
+
+
+def _best_overlapping_sentence(requirement: str, text: str) -> str | None:
+    """Pick a verbatim sentence from ``text`` that overlaps requirement tokens.
+
+    Requires real token overlap — never the document head / first sentence.
+    Head-fallback credited Seventh Mountain rafting contact blocks as "crisis
+    communications" proof on Alameda.
+    """
+    req_tokens = {
+        t
+        for t in _tokens(requirement)
+        if t not in _QUOTE_STOPWORDS and len(t) > 3
+    }
+    if not req_tokens or not (text or "").strip():
+        return None
+    best = ""
+    best_score = 0
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        cleaned = " ".join((sentence or "").split()).strip()
+        if len(cleaned) < _MIN_QUOTE_CHARS:
+            continue
+        if len(cleaned) > 400:
+            cleaned = cleaned[:400].rsplit(" ", 1)[0]
+        sent_tokens = set(_tokens(cleaned))
+        score = len(req_tokens & sent_tokens)
+        if score > best_score:
+            best_score = score
+            best = cleaned
+    if best_score < 2 or not best:
+        return None
+    return best
+
+
+def credit_delivery_proof_partials(
+    rows: list[GoNoGoCapabilityRow],
+    sources: dict[str, dict[str, str]],
+    *,
+    full_sources: dict[str, dict[str, str]] | None = None,
+) -> list[GoNoGoCapabilityRow]:
+    """Upgrade craft gaps to partial when WON/CS delivery docs were retrieved.
+
+    Principle-based filename provenance only (06_WON Proposal / 03_CS) — no
+    client-name tables. Quote must overlap the requirement (≥2 content tokens).
+    """
+    out: list[GoNoGoCapabilityRow] = []
+    upgraded = 0
+    for row in rows:
+        if row.status in {"verified", "partial"}:
+            out.append(row)
+            continue
+        category = (row.category or "service").casefold()
+        if category not in {"service", "technical"}:
+            out.append(row)
+            continue
+        docs = dict(sources.get(row.requirement) or {})
+        if full_sources:
+            for name, text in (full_sources.get(row.requirement) or {}).items():
+                docs.setdefault(name, text)
+        delivery = _delivery_proof_docs(docs)
+        if not delivery:
+            out.append(row)
+            continue
+        # Prefer the delivery doc with the strongest requirement-token overlap.
+        best_src = ""
+        best_quote = ""
+        best_score = 0
+        req_tokens = {
+            t
+            for t in _tokens(row.requirement)
+            if t not in _QUOTE_STOPWORDS and len(t) > 3
+        }
+        for kb_source, body in delivery:
+            quote = _best_overlapping_sentence(row.requirement, body)
+            if not quote or not quote_is_grounded(quote, body):
+                continue
+            score = len(req_tokens & set(_tokens(quote)))
+            if score > best_score:
+                best_score = score
+                best_src = kb_source
+                best_quote = quote
+        if best_score < 2 or not best_quote or not best_src:
+            out.append(row)
+            continue
+        upgraded += 1
+        out.append(
+            row.model_copy(
+                update={
+                    "status": "partial",
+                    "kb_source": best_src,
+                    "evidence": best_quote,
+                    "evidence_state": "adjacent",
+                    "downgrade_reason": (
+                        "Craft-family partial from retrieved 06_WON/03_CS delivery "
+                        "proof — same kind of work; tactic phrasing may differ"
+                    ),
+                }
+            )
+        )
+    if upgraded:
+        logger.info(
+            "go_no_go delivery-proof credit upgraded %d gap row(s) to partial "
+            "from 06_WON/03_CS docs",
             upgraded,
         )
     return out

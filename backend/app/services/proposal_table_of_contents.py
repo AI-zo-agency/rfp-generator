@@ -34,7 +34,11 @@ def _should_list_in_toc(section: ProposalSection) -> bool:
         return False
     sid = (section.id or "").casefold()
     # Company-block wrapper is a designer header, not a deliverable tab.
-    if sid in {"company-block-header", "section-company-block-header"}:
+    if sid in {
+        "company-block-header",
+        "section-company-block-header",
+        "rfp-structure-company-block-header",
+    }:
         return False
     title = _entry_title(section)
     if not title:

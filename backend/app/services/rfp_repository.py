@@ -619,6 +619,21 @@ def update_rfp_pdf_path(rfp_id: str, pdf_path: str) -> None:
         )
 
 
+def update_rfp_page_limit(rfp_id: str, page_limit: int) -> None:
+    """Persist a page cap found in RFP text (or confirmed manually)."""
+    if page_limit <= 0:
+        return
+    if _use_supabase():
+        sb.update_rfp_page_limit(rfp_id, page_limit)
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE rfps SET page_limit = ? WHERE id = ? OR external_id = ?",
+            (page_limit, rfp_id, rfp_id),
+        )
+
+
 def delete_rfp(rfp_id: str) -> RfpRecord | None:
     rfp = get_rfp(rfp_id)
     if not rfp:

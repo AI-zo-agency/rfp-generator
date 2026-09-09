@@ -427,6 +427,40 @@ class NonCapabilitySourceTests(unittest.TestCase):
                      "06_WON_CityOfBend.pdf", "01_companyfacts.docx"):
             self.assertTrue(source_can_evidence_capability(name), name)
 
+    def test_prefer_won_case_study_over_finalist_for_same_craft(self) -> None:
+        from app.services.go_no_go_adjudicator import _prefer_capability_candidates
+
+        candidates = {
+            "fin": (
+                "07_FIN_CityofSanLeandro_Proposal_2026.pdf",
+                "Draft press releases and media advisories for city communications",
+            ),
+            "won": (
+                "06_WON_CityofSantaClara_Proposal_2025.pdf",
+                "Draft press releases and media advisories for city communications",
+            ),
+            "cs": (
+                "03_CS_MunicapilitySummaries.pdf",
+                "Draft press releases and media advisories for city communications",
+            ),
+        }
+        ordered = list(
+            _prefer_capability_candidates(
+                candidates,
+                requirement="Draft press releases and media advisories",
+            ).keys()
+        )
+        self.assertEqual(ordered[-1], "fin", "07_FIN must rank last vs 03_CS/06_WON")
+        self.assertIn(ordered[0], {"won", "cs"})
+
+    def test_adjudicator_prompt_credits_granular_scope_from_same_craft(self) -> None:
+        from app.services.go_no_go_adjudicator import ADJUDICATOR_PROMPT
+
+        low = ADJUDICATOR_PROMPT.casefold()
+        self.assertIn("granular scope lists", low)
+        self.assertIn("do not mark every sub-bullet", low)
+        self.assertIn("pursuit text", low)
+
     def test_pricing_variants_are_all_blocked(self) -> None:
         from app.services.go_no_go_adjudicator import source_can_evidence_capability
 

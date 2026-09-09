@@ -564,13 +564,18 @@ def unverified_core_requirements(rows: list[GoNoGoCapabilityRow]) -> list[str]:
 
 
 # Dimensions that cannot outrun demonstrated capability.
+# slack = how many points above Technical the dimension may sit.
 _CAPABILITY_DEPENDENT_DIMENSIONS = {
     "win probability": 1,
     "resource availability": 1,
+    "strategic value": 2,  # strategic upside can outpace weak craft only slightly
 }
 
 # Craft / platform / delivery asks drive Technical Capability.
-_TECHNICAL_SCORE_CATEGORIES = frozenset({"technical", "service", "compliance"})
+# Pure compliance (insurance, EEO, registrations) is flagged for humans — it must
+# not sit in the Technical denominator (mis-filed "municipal experience" as
+# compliance previously zeroed Technical while WON City proposals were in-pool).
+_TECHNICAL_SCORE_CATEGORIES = frozenset({"technical", "service"})
 # Staffing titles and presence asks drive Resource Availability.
 _RESOURCE_SCORE_CATEGORIES = frozenset({"role", "logistics"})
 
@@ -588,12 +593,167 @@ def coherent_dimension_cap(dimension: str, technical_score: int | None) -> int |
     return max(0, min(5, technical_score + slack))
 
 
+def resolve_headline_technical_score(rows: list[GoNoGoCapabilityRow]) -> tuple[int | None, str]:
+    """Technical score for the decision matrix — per-track max when lots exist.
+
+    Multi-track RFPs must not blend Track 1 GO with Track 2 gaps into a single
+    collapsed Technical score. Headline = best calibrated track (what we can
+    honestly bid); notes name every track score.
+    """
+    from app.models.go_no_go import GoNoGoDecisionMatrixRow  # noqa: F401 — typing only
+
+    track_scores = per_track_technical_scores(rows)
+    if track_scores:
+        best_track = max(track_scores.items(), key=lambda item: item[1])
+        detail = ", ".join(f"{name}={score}/5" for name, score in track_scores.items())
+        note = (
+            f"Technical from best bid track {best_track[0]}={best_track[1]}/5 "
+            f"(per-track: {detail})."
+        )
+        return best_track[1], note
+
+    score = calibrate_technical_capability_score(rows)
+    if score is None:
+        return None, ""
+    cores = core_craft_rows(rows)
+    verified = sum(1 for r in cores if r.status == "verified")
+    partial = sum(1 for r in cores if r.status == "partial")
+    gaps = sum(1 for r in cores if r.status not in {"verified", "partial"})
+    note = (
+        f"Technical from KB capability evidence: {verified} verified, "
+        f"{partial} partial, {gaps} core craft gap(s) → {score}/5 "
+        f"(weighted verified=full, partial=½; floors apply when proof is strong)."
+    )
+    return score, note
+
+
+def rebuild_decision_matrix_scores(
+    matrix: list[Any],
+    capability_rows: list[GoNoGoCapabilityRow],
+) -> tuple[list[Any], int | None]:
+    """Thoroughly recalculate all five matrix cells for every RFP.
+
+    Order (deterministic, same for every solicitation):
+      1. Technical ← capability rows (calibrated; best track when multi-lot)
+      2. Resource  ← role/logistics evidence when present, else analyst seed;
+                     never above Technical+1; role math may only lower
+      3. Financial ← analyst seed (opportunity caps applied earlier) — independent
+      4. Strategic ← analyst seed, capped at Technical+2
+      5. Win       ← analyst seed, capped at Technical+1; floor min(3, tech)
+                     when core craft ratio ≥ 0.4 and no unmet disqualifier
+
+    Overall Go Score = arithmetic mean of the five scores (caller averages).
+    """
+    from app.models.go_no_go import GoNoGoDecisionMatrixRow
+
+    derived, tech_note = resolve_headline_technical_score(capability_rows)
+    derived_resource = derive_resource_capability_score(capability_rows)
+    core_gaps = unverified_core_requirements(capability_rows)
+    blocked = unmet_disqualifying_requirements(capability_rows)
+
+    out: list[GoNoGoDecisionMatrixRow] = []
+    for row in matrix:
+        if not isinstance(row, GoNoGoDecisionMatrixRow):
+            row = GoNoGoDecisionMatrixRow.model_validate(row)
+        dim = row.dimension.casefold()
+        score = int(row.score)
+        notes = (row.notes or "").strip()
+
+        if dim == "technical capability match" and derived is not None:
+            if score != derived:
+                direction = "raised" if derived > score else "set"
+                notes = (
+                    f"{notes} | Score {direction} to {derived}/5 from capability "
+                    f"matrix ({len(core_gaps)} core craft gap(s)). {tech_note}"
+                ).strip(" |")
+            else:
+                notes = f"{notes} | {tech_note}".strip(" |")
+            score = derived
+
+        elif dim == "resource availability" and derived is not None:
+            if derived_resource is not None and derived_resource < score:
+                notes = (
+                    f"{notes} | Score reduced to {derived_resource}/5 from "
+                    "role/logistics requirement evidence."
+                ).strip(" |")
+                score = derived_resource
+            cap = coherent_dimension_cap(row.dimension, derived)
+            if cap is not None and score > cap:
+                notes = (
+                    f"{notes} | Capped at {cap}/5: cannot exceed technical "
+                    f"capability ({derived}/5)."
+                ).strip(" |")
+                score = cap
+
+        elif dim == "strategic value" and derived is not None:
+            cap = coherent_dimension_cap(row.dimension, derived)
+            if cap is not None and score > cap:
+                notes = (
+                    f"{notes} | Capped at {cap}/5: strategic upside limited by "
+                    f"technical capability ({derived}/5)."
+                ).strip(" |")
+                score = cap
+
+        elif dim == "win probability" and derived is not None:
+            cap = coherent_dimension_cap(row.dimension, derived)
+            if cap is not None and score > cap:
+                notes = (
+                    f"{notes} | Capped at {cap}/5: cannot exceed technical "
+                    f"capability ({derived}/5) — {len(core_gaps)} core craft "
+                    "gap(s)."
+                ).strip(" |")
+                score = cap
+
+        clamped = clamp_score_to_written_cap(score, notes)
+        if clamped != score:
+            notes = (
+                f"{notes} | Display score aligned to written cap {clamped}/5."
+            ).strip(" |")
+            score = clamped
+
+        out.append(row.model_copy(update={"score": score, "notes": notes}))
+
+    # Win floor after all caps — only when craft proof is real and responsive.
+    if (
+        derived is not None
+        and derived >= 3
+        and evidenced_core_craft_ratio(capability_rows) >= 0.4
+        and not blocked
+    ):
+        win_floor = min(3, derived)
+        raised: list[GoNoGoDecisionMatrixRow] = []
+        for row in out:
+            if (
+                row.dimension.casefold() == "win probability"
+                and row.score < win_floor
+            ):
+                raised.append(
+                    row.model_copy(
+                        update={
+                            "score": win_floor,
+                            "notes": (
+                                f"{row.notes} | Raised to {win_floor}/5 floor: "
+                                f"technical capability evidenced at {derived}/5."
+                            ).strip(" |"),
+                        }
+                    )
+                )
+            else:
+                raised.append(row)
+        out = raised
+
+    return out, derived
+
+
 def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
     """Score 0-5 from craft/platform requirement evidence, not staffing titles.
 
     Role and logistics rows (assign a PM, open a CA office) are real gaps but they
     belong in Resource Availability — counting them here produced live 1/5
     Technical scores while a WordPress specialist bio was already in the KB.
+
+    When any CORE craft rows exist, only those enter the denominator. Optional
+    Task/add-on gaps (priced separately) must not zero Technical on every RFP.
     """
     if not rows:
         return None
@@ -604,7 +764,9 @@ def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | 
         if (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
     ]
     # Older rows without category still participate.
-    scored = craft_rows or list(rows)
+    pool = craft_rows or list(rows)
+    core_only = [row for row in pool if row.is_core]
+    scored = core_only if core_only else pool
 
     earned = 0.0
     possible = 0.0
@@ -700,23 +862,29 @@ def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int
         return base
 
     verified = sum(1 for row in craft_cores if row.status == "verified")
+    partial = sum(1 for row in craft_cores if row.status == "partial")
+    evidenced_n = verified + partial
     ratio = evidenced_core_craft_ratio(rows)
 
-    service_verified = sum(
+    service_evidenced = sum(
         1
         for row in craft_cores
-        if row.status == "verified"
+        if row.status in {"verified", "partial"}
         and (row.category or "service").casefold() in {"service", "technical"}
     )
 
     floor = base
+    # Partials count: won/CS craft family proof often lands partial when the
+    # RFP lists tactics the case study does not name verbatim.
+    if ratio >= 0.25 and evidenced_n >= 2:
+        floor = max(floor, 3)
     if ratio >= 0.4 and verified >= 2:
         floor = max(floor, 3)
-    if service_verified >= 2 and ratio >= 0.35:
+    if service_evidenced >= 2 and ratio >= 0.3:
         floor = max(floor, 3)
     if ratio >= 0.55 and verified >= 3:
         floor = max(floor, 4)
-    if service_verified >= 3 and ratio >= 0.45:
+    if service_evidenced >= 3 and ratio >= 0.45:
         floor = max(floor, 4)
 
     # Multiple missing core crafts cannot be a 4. A live run scored Technical

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
 from app.models.proposal import BudgetLineItem, ProposalBudget, ProposalDraft, ProposalSection
 from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
 from app.services.proposal_rfp_excerpt import rfp_forbids_quotation_form_changes
+
+logger = logging.getLogger(__name__)
 
 _BUDGET_TITLE_PATTERN = re.compile(
     r"\b(budget|pricing|price\s*proposal|fee\s*schedule|cost\s*proposal|compensation)\b",
@@ -309,6 +312,124 @@ def render_personnel_loading_form_markdown(
         lines.append(f"| {role} | {rate_cell} | {y2_cell} | {y3_cell} |")
 
     lines.append("")
+    return "\n".join(lines)
+
+
+def _md_table_cell(text: str) -> str:
+    """Strip characters that break GitHub/markdown pipe tables."""
+    cleaned = " ".join((text or "").replace("|", " ").split()).strip()
+    return cleaned or "—"
+
+
+def _client_rate_source_label(source: str) -> str:
+    """Human label for schedule footnote — drop path junk / pipes."""
+    cleaned = _md_table_cell(source)
+    if cleaned in {"—", "KB", "kb"}:
+        return ""
+    # Prefer short agency wording over raw Drive filenames in client prose.
+    low = cleaned.casefold()
+    if "role rates" in low or "fee schedule" in low or "labor" in low:
+        return "agency role billable rate card"
+    if "00_guide_pricing" in low or "guide_pricing" in low:
+        return "00_Guide_Pricing"
+    if len(cleaned) > 60:
+        return cleaned[:57] + "…"
+    return cleaned
+
+
+def render_kb_classification_rate_schedule_markdown(
+    budget: ProposalBudget,
+    *,
+    rfp_text: str = "",
+) -> str:
+    """Client hourly schedule from verifiedRates / unit=hour lines (KB-grounded).
+
+    Used when the RFP mandates a classification rate schedule alongside phased fees.
+    """
+    rows: list[tuple[str, float, str]] = []
+    seen: set[str] = set()
+    for vr in budget.verified_rates or []:
+        role = (vr.role or vr.person_name or "").strip()
+        rate = vr.hourly_rate
+        if not role or rate is None or float(rate) <= 0:
+            continue
+        key = role.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((role, float(rate), (vr.source or "").strip()))
+    for item in budget.line_items or []:
+        unit = (item.unit or "").casefold()
+        if unit not in {"hour", "hours", "hr", "hrs"}:
+            continue
+        rate_val = _hourly_rate_from_line(item)
+        if rate_val is None and item.rate is not None:
+            rate_val = float(item.rate)
+        if rate_val is None or rate_val <= 0:
+            continue
+        role = (item.role_title or item.description or "").strip()
+        if not role:
+            continue
+        key = role.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((role, float(rate_val), (item.rate_source or "").strip()))
+    if not rows:
+        return ""
+
+    yoy = (budget.option_term_notes or "").strip()
+    y2 = y3 = None
+    m2 = re.search(r"year[\s-]*2[^%]{0,40}?(\d+(?:\.\d+)?)\s*%", yoy, re.I)
+    m3 = re.search(r"year[\s-]*3[^%]{0,40}?(\d+(?:\.\d+)?)\s*%", yoy, re.I)
+    if m2:
+        y2 = m2.group(1)
+    if m3:
+        y3 = m3.group(1)
+
+    labels = []
+    for _, _, src in rows:
+        label = _client_rate_source_label(src)
+        if label and label not in labels:
+            labels.append(label)
+    source_note = ", ".join(labels[:3]) if labels else "agency rate card"
+
+    lines = [
+        "## Hourly Rate Schedule by Classification",
+        "",
+        f"Billable classification rates from the {source_note}. "
+        "This schedule answers the RFP’s classification-rate disclosure. "
+        "Proposed investment remains the phase / project fees above "
+        "(hours × rate is used only when the RFP scores a staff-loading form).",
+        "",
+        "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for role, rate_val, _source in rows:
+        y2_cell = f"{y2}%" if y2 else "—"
+        y3_cell = f"{y3}%" if y3 else "—"
+        lines.append(
+            f"| {_md_table_cell(role)} | {_usd(rate_val)} | "
+            f"{_md_table_cell(y2_cell)} | {_md_table_cell(y3_cell)} |"
+        )
+    lines.append("")
+
+    from app.services.proposal_budget_playbook import (
+        rfp_mandates_cost_assumptions_disclosure,
+    )
+
+    if rfp_mandates_cost_assumptions_disclosure(rfp_text):
+        lines.extend(
+            [
+                "### Cost assumptions",
+                "",
+                "Travel, materials, software licenses, stock media, and subconsultant "
+                "markup are billed as reimbursable / pass-through unless included in "
+                "a phase fee above — confirm final assumptions with Sonja before "
+                "submission when not stated in the Fee Detail.",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -912,7 +1033,7 @@ def _phase_breakdown_from_lines(budget: ProposalBudget) -> str:
     parts = [
         f"{label} ({_usd(amount)})"
         for label, _scope, amount in rows
-        if amount is not None
+        if amount is not None and float(amount) > 0
     ]
     if len(parts) < 2:
         return ""
@@ -1757,6 +1878,11 @@ def _rollup_phase_fee_rows(
 
     rows: list[tuple[str, str, float | None]] = []
     for phase, data in buckets.items():
+        phase_cf = phase.casefold()
+        # Drop explicit reference-only placeholders only — never drop a positive
+        # fee line (that caused Proposed Investment $69k vs Fee Detail $67.5k).
+        if "reference only" in phase_cf or "(reference)" in phase_cf:
+            continue
         descs = list(data["descs"])  # type: ignore[arg-type]
         if len(descs) > 4:
             scope = _scope_sentence(phase, descs[:4]) + f" Plus {len(descs) - 4} more."
@@ -1767,8 +1893,169 @@ def _rollup_phase_fee_rows(
             amount = round(float(data["amount"]), 2)
         else:
             amount = None
+        # $0 rows pollute Fee Detail and "Fee phases:" prose — omit them.
+        if amount is not None and amount <= 0:
+            continue
         rows.append((phase, scope, amount))
     return rows
+
+
+def fee_detail_professional_total(budget: ProposalBudget) -> float:
+    """Sum of Fee Detail by Phase amounts — client-facing professional-fee truth."""
+    return round(
+        sum(
+            float(amount)
+            for _phase, _scope, amount in _rollup_phase_fee_rows(budget)
+            if amount is not None
+        ),
+        2,
+    )
+
+
+def render_fee_detail_by_phase_markdown(budget: ProposalBudget) -> str:
+    """Standalone Fee Detail by Phase markdown from the canonical ledger."""
+    lines: list[str] = []
+    _append_fee_detail_by_phase_table(
+        lines, budget, heading="## Fee Detail by Phase"
+    )
+    return "\n".join(lines).strip()
+
+
+def ensure_fee_detail_table_in_budget_markdown(
+    content: str,
+    budget: ProposalBudget | None,
+) -> str:
+    """Re-inject Fee Detail by Phase when an LLM rewrite dropped the table.
+
+    Keeps Cost client-ready: narrative alone is not a budget table.
+    """
+    text = content or ""
+    if budget is None or not (budget.line_items or []):
+        return text
+    table = render_fee_detail_by_phase_markdown(budget)
+    if not table.strip() or "| Phase |" not in table:
+        return text
+    has_table = bool(
+        re.search(r"(?im)^##\s+Fee Detail by Phase\s*$", text)
+        and re.search(r"(?i)\|\s*Phase\s*\|\s*Scope\s*\|\s*Fee\s*\|", text)
+    )
+    if has_table:
+        # Replace existing Fee Detail block with canonical ledger table.
+        match = re.search(r"(?im)^##\s+Fee Detail by Phase\s*$", text)
+        if match:
+            start = match.start()
+            rest = text[match.end() :]
+            next_h = re.search(r"(?im)^##\s+\S", rest)
+            end = match.end() + (next_h.start() if next_h else len(rest))
+            out = (text[:start] + table + "\n\n" + text[end:].lstrip()).strip() + "\n"
+            return sync_proposed_investment_to_fee_detail_total(out, budget)
+        return sync_proposed_investment_to_fee_detail_total(text, budget)
+    # Insert before Hourly Rate Schedule / Additional Work / end.
+    insert_at = None
+    for pat in (
+        r"(?im)^##\s+Hourly Rate Schedule",
+        r"(?im)^##\s+Additional Work",
+        r"(?im)^##\s+RFP Cost demand",
+    ):
+        m = re.search(pat, text)
+        if m:
+            insert_at = m.start()
+            break
+    if insert_at is None:
+        out = text.rstrip() + "\n\n" + table + "\n"
+    else:
+        out = (
+            text[:insert_at].rstrip()
+            + "\n\n"
+            + table
+            + "\n\n"
+            + text[insert_at:].lstrip()
+        )
+    return sync_proposed_investment_to_fee_detail_total(out, budget)
+
+
+def _parse_fee_detail_table_total(content: str) -> float | None:
+    """Read the Fee Detail **Total** cell — authoritative when present."""
+    m = re.search(
+        r"(?im)^\|\s*\*\*Total\*\*\s*\|\s*\|?\s*\*\*(\$[\d,]+(?:\.\d{2})?)\*\*\s*\|",
+        content or "",
+    )
+    if not m:
+        m = re.search(
+            r"(?im)^\|\s*\*\*Total\*\*\s*\|\s*[^|]*\|\s*\*\*?(\$[\d,]+(?:\.\d{2})?)\*\*?\s*\|",
+            content or "",
+        )
+    if not m:
+        return None
+    try:
+        return round(float(m.group(1).replace("$", "").replace(",", "")), 2)
+    except ValueError:
+        return None
+
+
+def sync_proposed_investment_to_fee_detail_total(
+    content: str,
+    budget: ProposalBudget | None = None,
+) -> str:
+    """Force Proposed Investment / fee prose to match Fee Detail Total.
+
+    Fixes the recurring $69,000 header vs $67,500 table drift after rewrite.
+    Does not change individual Fee Detail phase row amounts.
+    """
+    text = content or ""
+    table_total = _parse_fee_detail_table_total(text)
+    if table_total is None or table_total <= 0:
+        if budget is not None:
+            table_total = fee_detail_professional_total(budget)
+        if table_total is None or table_total <= 0:
+            return text
+
+    fees_amt = table_total
+    direct = 0.0
+    passthrough = 0.0
+    if budget is not None:
+        _fees, direct = _professional_fees_and_direct(budget)
+        passthrough = round(float(budget.client_media_passthrough or 0), 2)
+    investment_total = round(fees_amt + direct + passthrough, 2)
+    money = _usd(fees_amt)
+    inv = _usd(investment_total)
+
+    # Labeled bold headers (may appear more than once after rewrite stacking).
+    text = re.sub(
+        r"(?i)(\*{0,2}Professional fees:\s*\*{0,2})\s*\$[\d,]+(?:\.\d{2})?(\*{0,2})",
+        rf"\1{money}\2",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\*{0,2}Total proposed investment:\s*\*{0,2})\s*\$[\d,]+(?:\.\d{2})?(\*{0,2})",
+        rf"\1{inv}\2",
+        text,
+    )
+    # "Total proposed investment: $X ($Y in professional fees)" — both → table.
+    text = re.sub(
+        r"(?i)(Total proposed investment:\s*)\$[\d,]+(?:\.\d{2})?"
+        r"(\s*\(\s*)\$[\d,]+(?:\.\d{2})?(\s+in\s+professional\s+fees\s*\))",
+        rf"\g<1>{inv}\2{money}\3",
+        text,
+    )
+    # Trailing "($Y in professional fees)" alone.
+    text = re.sub(
+        r"(?i)(\(\s*)\$[\d,]+(?:\.\d{2})?(\s+in\s+professional\s+fees\s*\))",
+        rf"\1{money}\2",
+        text,
+    )
+    # NTE / all-in confirmations that repeat the stale professional-fee figure.
+    text = re.sub(
+        r"(?i)(not-to-exceed total contract amount of\s*\*?\*?)\$[\d,]+(?:\.\d{2})?",
+        rf"\g<1>{money}",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(confirms the\s*)\$[\d,]+(?:\.\d{2})?(\s+professional fee)",
+        rf"\1{money}\2",
+        text,
+    )
+    return text
 
 
 def _append_fee_detail_by_phase_table(
@@ -1855,31 +2142,90 @@ PRICING_GUIDE_VERBATIM_REVISION_ROUNDS = (
     "deliverables. Additional rounds available at scope addendum."
 )
 
-_VERBATIM_ANCHORS = (
+_VERBATIM_ANCHORS_CORE = (
     "we abide by those terms as does our client",
     "as discovery progresses and priorities sharpen",
+)
+_VERBATIM_ANCHORS_REIMBURSABLE = (
     "mileage at current irs rate",
     "photography/videography location fees and permits",
 )
+_VERBATIM_ANCHORS = _VERBATIM_ANCHORS_CORE + _VERBATIM_ANCHORS_REIMBURSABLE
 
 
-def _professional_zo_budget_terms() -> str:
+def _professional_zo_budget_terms(*, include_reimbursable: bool = True) -> str:
     """Pricing Guide USE VERBATIM Terms blocks (Investment / Scope / Reimbursables / Revisions)."""
-    return (
+    parts = [
         "### Investment Framing\n\n"
         f"{PRICING_GUIDE_VERBATIM_INVESTMENT_FRAMING}\n\n"
         "### Scope Protection\n\n"
         f"{PRICING_GUIDE_VERBATIM_SCOPE_PROTECTION}\n\n"
-        "### Reimbursable Expenses\n\n"
-        f"{PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES}\n\n"
+    ]
+    if include_reimbursable:
+        parts.append(
+            "### Reimbursable Expenses\n\n"
+            f"{PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES}\n\n"
+        )
+    else:
+        parts.append(
+            "### Expenses\n\n"
+            "Professional fees are all-in for this engagement as scoped — no separate "
+            "expense reimbursement line is billed beyond the fees stated above "
+            "(RFP cost requirement). Travel or third-party costs, if any arise outside "
+            "scope, require a written scope addendum before incurring.\n\n"
+        )
+    parts.append(
         "### Revision Rounds\n\n"
         f"{PRICING_GUIDE_VERBATIM_REVISION_ROUNDS}"
     )
+    return "".join(parts)
 
 
-def qualifying_language_has_pricing_guide_verbatim(text: str) -> bool:
+def qualifying_language_has_pricing_guide_verbatim(
+    text: str,
+    *,
+    require_reimbursable: bool = True,
+) -> bool:
     blob = (text or "").casefold()
-    return all(anchor in blob for anchor in _VERBATIM_ANCHORS)
+    anchors = _VERBATIM_ANCHORS if require_reimbursable else _VERBATIM_ANCHORS_CORE
+    return all(anchor in blob for anchor in anchors)
+
+
+def manuscript_asserts_all_in_no_separate_expenses(text: str) -> bool:
+    """True when Cost already asserts expenses are not billed separately (RFP all-in)."""
+    blob = (text or "").casefold()
+    if not blob.strip():
+        return False
+    return bool(
+        re.search(
+            r"(?is)"
+            r"("
+            r"no\s+expense\s+(?:will\s+)?(?:appear|be\s+billed|reimbursement)"
+            r"|no\s+expense\s+line\s+is\s+billed\s+separately"
+            r"|expenses?\s+not\s+paid\s+separately"
+            r"|not\s+billed\s+separately\s+from\s+the\s+fees"
+            r"|all[\s-]?in\s+(?:professional\s+)?fees?"
+            r"|no\s+separate\s+expense\s+reimbursement"
+            r")",
+            blob,
+        )
+    )
+
+
+def strip_guide_reimbursable_expenses_heading_block(content: str) -> str:
+    """Remove ### Reimbursable Expenses … through the next ###/## heading."""
+    text = content or ""
+    match = re.search(
+        r"(?im)^###\s+Reimbursable\s+Expenses\s*$",
+        text,
+    )
+    if not match:
+        return text
+    start = match.start()
+    rest = text[match.end() :]
+    next_h = re.search(r"(?im)^#{2,3}\s+\S", rest)
+    end = match.end() + (next_h.start() if next_h else len(rest))
+    return (text[:start] + text[end:]).strip() + ("\n" if text.endswith("\n") else "")
 
 
 def _additive_reimbursable_extras(qualifying_language: str) -> str:
@@ -1887,7 +2233,6 @@ def _additive_reimbursable_extras(qualifying_language: str) -> str:
     raw = (qualifying_language or "").strip()
     if not raw:
         return ""
-    # Take the Reimbursable block body if headed; else whole string.
     blocks = _split_qualifying_blocks(raw)
     body = raw
     for title, block_body in blocks:
@@ -1907,7 +2252,6 @@ def _additive_reimbursable_extras(qualifying_language: str) -> str:
             continue
         if chunk.casefold() == PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES.casefold():
             continue
-        # Skip paraphrases of the standard categories sentence.
         if (
             "billed at cost" in low
             and "travel" in low
@@ -1921,9 +2265,23 @@ def _additive_reimbursable_extras(qualifying_language: str) -> str:
     return "\n\n".join(extras)
 
 
-def force_pricing_guide_verbatim_qualifying_language(qualifying_language: str = "") -> str:
-    """Always ship Pricing Guide USE VERBATIM; append additive reimbursable notes only."""
+def force_pricing_guide_verbatim_qualifying_language(
+    qualifying_language: str = "",
+    *,
+    include_reimbursable: bool = True,
+) -> str:
+    """Ship Pricing Guide USE VERBATIM; optionally omit separate reimbursable block."""
     extras = _additive_reimbursable_extras(qualifying_language)
+    if not include_reimbursable:
+        # Keep additive RFP notes only (e.g. platform/ad-tech) under Expenses.
+        base = _professional_zo_budget_terms(include_reimbursable=False)
+        if extras:
+            base = base.replace(
+                "### Revision Rounds",
+                f"{extras}\n\n### Revision Rounds",
+                1,
+            )
+        return base
     reimbursable = PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES
     if extras:
         reimbursable = f"{reimbursable}\n\n{extras}"
@@ -1939,33 +2297,150 @@ def force_pricing_guide_verbatim_qualifying_language(qualifying_language: str = 
     )
 
 
-def ensure_pricing_guide_verbatim_in_budget_markdown(content: str) -> str:
+_PRICING_GUIDE_BLOCK_START_RE = re.compile(
+    r"(?im)^(?:#{1,4}\s+|\*\*)?"
+    r"(Investment Framing|Scope Protection|Reimbursable Expenses|"
+    r"Expenses|Revision Rounds)"
+    r"(?:\*\*)?\s*:?\s*$"
+)
+
+
+def collapse_duplicate_pricing_guide_blocks(content: str) -> str:
+    """Keep one Investment Framing→Revision Rounds cycle; drop stacked copies.
+
+    Chat rewrite + ensure_verbatim can leave Investment Framing / Scope /
+    Expenses / Revision Rounds repeated 2–3× under ## Terms. Early-return
+    paths that see any verbatim anchor used to leave those stacks intact.
+    """
+    text = content or ""
+    if text.count("Investment Framing") < 2 and text.count("Revision Rounds") < 2:
+        return text
+
+    matches = list(_PRICING_GUIDE_BLOCK_START_RE.finditer(text))
+    if len(matches) < 2:
+        return text
+
+    # Walk cycles: each cycle starts at Investment Framing (or first guide
+    # heading) and ends after Revision Rounds (or next ## Fee / ## heading).
+    cycle_starts: list[int] = []
+    for m in matches:
+        label = (m.group(1) or "").casefold()
+        if label == "investment framing" or (
+            not cycle_starts and label in {"scope protection", "revision rounds"}
+        ):
+            # New cycle when we see Investment Framing again after a prior start.
+            if label == "investment framing" and cycle_starts:
+                cycle_starts.append(m.start())
+            elif not cycle_starts:
+                cycle_starts.append(m.start())
+
+    if len(cycle_starts) < 2:
+        # Fallback: second+ Investment Framing heading → strip through its
+        # following Revision Rounds block repeatedly.
+        out = text
+        while True:
+            first = re.search(r"(?im)^#{1,4}\s+Investment Framing\s*$", out)
+            if not first:
+                break
+            second = re.search(
+                r"(?im)^#{1,4}\s+Investment Framing\s*$",
+                out[first.end() :],
+            )
+            if not second:
+                break
+            abs_second = first.end() + second.start()
+            after = out[abs_second:]
+            rev = re.search(r"(?im)^#{1,4}\s+Revision Rounds\s*$", after)
+            if rev:
+                rest = after[rev.end() :]
+                next_h = re.search(r"(?im)^#{1,3}\s+\S", rest)
+                end_rel = rev.end() + (next_h.start() if next_h else len(rest))
+                # Drop from second Investment Framing through end of that
+                # Revision Rounds section.
+                out = (out[:abs_second] + after[end_rel:]).strip() + (
+                    "\n" if out.endswith("\n") else ""
+                )
+            else:
+                # No Revision Rounds — drop through next ## heading or EOF.
+                next_h = re.search(r"(?im)^##\s+\S", after)
+                end_rel = next_h.start() if next_h else len(after)
+                out = (out[:abs_second] + after[end_rel:]).strip() + (
+                    "\n" if out.endswith("\n") else ""
+                )
+        return out
+
+    # Keep first cycle; remove subsequent cycles (Investment Framing … end of
+    # its Revision Rounds).
+    out = text
+    # Process from the end so indices stay valid.
+    for start in reversed(cycle_starts[1:]):
+        chunk = out[start:]
+        rev = re.search(r"(?im)^#{1,4}\s+Revision Rounds\s*$", chunk)
+        if rev:
+            rest = chunk[rev.end() :]
+            next_h = re.search(r"(?im)^#{1,3}\s+\S", rest)
+            end_rel = rev.end() + (next_h.start() if next_h else len(rest))
+            out = out[:start] + chunk[end_rel:]
+        else:
+            next_h = re.search(r"(?im)^##\s+\S", chunk)
+            end_rel = next_h.start() if next_h else len(chunk)
+            out = out[:start] + chunk[end_rel:]
+    # Normalize excess blank lines.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
+def ensure_pricing_guide_verbatim_in_budget_markdown(
+    content: str,
+    *,
+    include_reimbursable: bool | None = None,
+) -> str:
     """Rewrite ## Terms (or bare qualifying blocks) to Pricing Guide USE VERBATIM."""
     text = content or ""
     if not text.strip():
         return text
+    if include_reimbursable is None:
+        include_reimbursable = not manuscript_asserts_all_in_no_separate_expenses(text)
+    if not include_reimbursable:
+        text = strip_guide_reimbursable_expenses_heading_block(text)
+    # Collapse stacks before early-return / rewrite so verbatim anchors in a
+    # duplicated Terms block cannot freeze a 3× Investment Framing mess.
+    text = collapse_duplicate_pricing_guide_blocks(text)
     match = re.search(r"(?im)^##\s+Terms\s*$", text)
     if match:
         start = match.end()
         next_h = re.search(r"(?im)^##\s+\S", text[start:])
         end = start + next_h.start() if next_h else len(text)
         body = text[start:end].strip()
-        forced = force_pricing_guide_verbatim_qualifying_language(body)
+        forced = force_pricing_guide_verbatim_qualifying_language(
+            body, include_reimbursable=include_reimbursable
+        )
         formatted = format_qualifying_language_for_client(
             forced,
             suppress_mix_tables=_text_has_fee_detail_heading(text),
         )
         suffix = text[end:]
         joiner = "\n\n" if suffix.strip() else "\n"
-        return text[:start] + "\n\n" + formatted + joiner + suffix
+        return collapse_duplicate_pricing_guide_blocks(
+            text[:start] + "\n\n" + formatted + joiner + suffix
+        )
     if any(
         h in text.casefold()
         for h in ("investment framing", "scope protection", "reimbursable")
     ):
-        if qualifying_language_has_pricing_guide_verbatim(text):
-            return text
-        # Whole-section qualifying language without a ## Terms wrapper.
-        return force_pricing_guide_verbatim_qualifying_language(text)
+        if qualifying_language_has_pricing_guide_verbatim(
+            text, require_reimbursable=include_reimbursable
+        ):
+            if not include_reimbursable:
+                return collapse_duplicate_pricing_guide_blocks(
+                    strip_guide_reimbursable_expenses_heading_block(text)
+                )
+            return collapse_duplicate_pricing_guide_blocks(text)
+        return collapse_duplicate_pricing_guide_blocks(
+            force_pricing_guide_verbatim_qualifying_language(
+                text, include_reimbursable=include_reimbursable
+            )
+        )
     return text
 
 
@@ -2008,9 +2483,15 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
 
     cleaned = dedupe_travel_vs_direct_expenses(budget)
     fees, reimbursables = _professional_fees_and_direct(cleaned)
+    table_fees = fee_detail_professional_total(cleaned)
+    if table_fees > 0 and abs(table_fees - fees) > 0.01:
+        # Align ledger display totals to Fee Detail (never leave $69k vs $67.5k).
+        fees = table_fees
     direct_bucket = round(float(cleaned.direct_expenses_total or 0), 2)
     line_sum, agency_fee, passthrough = split_line_item_totals(cleaned.line_items or [])
-    if agency_fee <= 0:
+    if table_fees > 0:
+        agency_fee = table_fees
+    elif agency_fee <= 0:
         agency_fee = fees
     if passthrough <= 0 and cleaned.client_media_passthrough:
         passthrough = round(float(cleaned.client_media_passthrough), 2)
@@ -2214,6 +2695,7 @@ def render_budget_markdown(
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
+    approach_digest: str = "",
 ) -> str:
     """Client-facing budget: one total, phase/deliverable fee table, short terms."""
     budget = prepare_budget_for_client_display(budget)
@@ -2243,7 +2725,14 @@ def render_budget_markdown(
 
     total = _canonical_client_total(budget)
     fees, direct = _professional_fees_and_direct(budget)
+    # Fee Detail is client truth for professional fees — never show a higher
+    # Proposed Investment than the table rows sum to.
+    table_fees = fee_detail_professional_total(budget)
+    if table_fees > 0:
+        fees = table_fees
     passthrough = round(float(budget.client_media_passthrough or 0), 2)
+    if table_fees > 0:
+        total = round(fees + direct + passthrough, 2)
     if total is not None:
         lines.append("## Proposed Investment")
         lines.append("")
@@ -2298,6 +2787,35 @@ def render_budget_markdown(
             "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
         )
         _append_fee_detail_by_phase_table(lines, budget, heading=heading)
+
+    # Classification schedule: render whenever we have KB billable role rates on
+    # the ledger (chat seed or Stage 3.5) — do not wait on RFP-mandate regex.
+    # Mandate-only path keeps the MANUAL FILL gap when rates are still missing.
+    from app.services.proposal_budget_playbook import rfp_mandates_hourly_rate_schedule
+
+    has_verified_hourly = any(
+        (vr.hourly_rate or 0) > 0 for vr in (budget.verified_rates or [])
+    )
+    if not wants_personnel and (
+        has_verified_hourly or rfp_mandates_hourly_rate_schedule(rfp_text)
+    ):
+        schedule = render_kb_classification_rate_schedule_markdown(
+            budget, rfp_text=rfp_text
+        )
+        if schedule.strip():
+            lines.append(schedule.rstrip())
+            lines.append("")
+        elif rfp_mandates_hourly_rate_schedule(rfp_text) and not _budget_line_has_hourly_rate(
+            budget
+        ):
+            lines.append("## Hourly Rate Schedule by Classification")
+            lines.append("")
+            lines.append(
+                "[MANUAL FILL: Sonja — complete hourly rate schedule by classification "
+                "from KB labor/role billable rates; phased fees alone do not satisfy "
+                "this RFP ask.]"
+            )
+            lines.append("")
 
     # Honest gap when narrative mentions Additional Work hourly but we have no rates.
     scope_cf = (budget.scope_summary or "").casefold()
@@ -2721,7 +3239,13 @@ def ensure_budget_section_present(
     except Exception:  # noqa: BLE001
         # If the check cannot run, still restore when a budget object exists.
         pass
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+    content = render_budget_markdown(
+        budget,
+        rfp_text=rfp_text,
+        approach_digest=approach_digest_from_draft_sections(sections),
+    )
     if not (content or "").strip():
         return sections, False
     restored = list(sections) + [
@@ -2769,7 +3293,13 @@ def reshape_budget_for_rfp_form(
         target.content or ""
     ):
         return None
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+    content = render_budget_markdown(
+        budget,
+        rfp_text=rfp_text,
+        approach_digest=approach_digest_from_draft_sections(draft.sections),
+    )
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
@@ -2827,7 +3357,42 @@ async def incorporate_budget_into_draft(
         return None
 
     budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+    approach_digest = approach_digest_from_draft_sections(draft.sections)
+    content = render_budget_markdown(
+        budget, rfp_text=rfp_text, approach_digest=approach_digest
+    )
+    try:
+        from app.services.rfp_cost_demands import (
+            ensure_rfp_cost_demands_in_budget_markdown,
+            pricing_flags_for_rfp_cost_demands,
+        )
+
+        content, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+            content,
+            rfp_text=rfp_text or "",
+            approach_digest=approach_digest,
+            budget=budget,
+            rewrite=True,
+        )
+        for line in demand_logs[:12]:
+            logger.info("incorporate_budget rfp_cost_demand: %s", line)
+        demand_flags = pricing_flags_for_rfp_cost_demands(demands)
+        if demand_flags:
+            # Drop prior RFP Cost demand flags, then append current set.
+            prior = [
+                f
+                for f in (budget.pricing_flags or [])
+                if not str(f).startswith("RFP Cost demand [")
+            ]
+            budget = budget.model_copy(
+                update={"pricing_flags": prior + demand_flags}
+            )
+    except Exception:
+        logger.warning(
+            "incorporate_budget rfp_cost_demands failed rfp_id=%s", rfp_id, exc_info=True
+        )
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)

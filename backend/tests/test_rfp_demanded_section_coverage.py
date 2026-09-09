@@ -317,7 +317,8 @@ class IntelligenceTabOrderTests(unittest.TestCase):
         self.assertEqual(wrapped.sections[0].title, "Company Background")
         self.assertEqual(wrapped.sections[1].id, "section-1-who-we-are")
         self.assertEqual(wrapped.sections[1].content, "Who we are body.")
-        self.assertIn("DESIGNER NOTE", wrapped.sections[0].content or "")
+        self.assertIn("Who we are body.", wrapped.sections[0].content or "")
+        self.assertNotIn("DESIGNER NOTE", (wrapped.sections[0].content or "").upper())
         self.assertTrue(any("1.1–1.5" in x or "1.1-1.5" in x for x in wrap_logs))
 
     def test_repair_pointer_only_section_gets_draft_stub(self) -> None:

@@ -36,11 +36,13 @@ from app.services.proposal_evaluation_coverage import (
     clean_criterion_name,
     criterion_char_limit,
     criterion_writer_directive,
+    drop_scoring_rubric_duplicate_sections,
     ensure_scored_criteria_coverage,
     evaluation_extraction_looks_degenerate,
     evaluation_is_published_response_form,
     find_response_char_limit,
     min_outline_sections_for_evaluation,
+    order_outline_sections_by_authority_titles,
     rfp_publishes_a_points_table,
     uncovered_scored_criteria,
 )
@@ -260,11 +262,13 @@ class SectionCapNeverSqueezesOutScoredWorkTests(unittest.TestCase):
         self.assertEqual(min_outline_sections_for_evaluation(cnm_evaluation()), 7)
 
         # The real squeeze: an RFP scoring more sections than the 18-tab ceiling.
+        # Must be a published response form — bare weight tables do not raise the floor.
         wide = EvaluationAnalysis(
+            scoredResponseForm=True,
             criteria=[
-                EvaluationCriterion(name=f"Scored Area {n}", weight=25)
+                EvaluationCriterion(name=f"Scored Area {n}", weight=25, itemCode=f"S{n}")
                 for n in range(1, 23)
-            ]
+            ],
         )
         floor = min_outline_sections_for_evaluation(wide)
         self.assertEqual(floor, 22)
@@ -274,6 +278,18 @@ class SectionCapNeverSqueezesOutScoredWorkTests(unittest.TestCase):
             "sanity: the page-budget ceiling would drop four scored sections",
         )
         self.assertGreaterEqual(max_rfp_outline_sections(40, min_sections=floor), floor)
+
+    def test_scoring_rubric_alone_does_not_raise_cap_floor(self) -> None:
+        rubric_only = EvaluationAnalysis(
+            scoredResponseForm=False,
+            criteria=[
+                EvaluationCriterion(name="Experience with similar clients", weight=25),
+                EvaluationCriterion(name="Personnel qualifications", weight=20),
+                EvaluationCriterion(name="Approach and work plan", weight=20),
+                EvaluationCriterion(name="Cost and value", weight=15),
+            ],
+        )
+        self.assertEqual(min_outline_sections_for_evaluation(rubric_only), 0)
 
     def test_the_floor_never_shrinks_the_existing_cap(self) -> None:
         """A scoreboard smaller than the cap must not tighten it."""
@@ -868,6 +884,100 @@ class NullWeightOfferorResponseCoverageTests(unittest.TestCase):
         self.assertEqual(added, [])
         self.assertEqual(kept, [])
         self.assertEqual(dropped, [])
+
+
+class ScoringRubricDuplicateDropTests(unittest.TestCase):
+    """Submission TOC + separate scoring weights must not mint duplicate tabs."""
+
+    def test_drops_scoreboard_labels_when_toc_packages_already_cover_them(self) -> None:
+        evaluation = EvaluationAnalysis(
+            scoredResponseForm=False,
+            criteria=[
+                EvaluationCriterion(
+                    name="Relevant experience with comparable municipalities",
+                    weight=25,
+                ),
+                EvaluationCriterion(
+                    name="Qualifications and continuity of assigned personnel",
+                    weight=20,
+                ),
+                EvaluationCriterion(
+                    name="Quality and practicality of the proposed approach",
+                    weight=20,
+                ),
+                EvaluationCriterion(name="Cost, rate structure, and overall value", weight=15),
+                EvaluationCriterion(name="References and past performance", weight=5),
+            ],
+        )
+        sections = [
+            OutlineSection(id="1", title="A. Cover Letter", order=1),
+            OutlineSection(id="2", title="B. Firm Profile and Qualifications", order=2),
+            OutlineSection(id="3", title="C. Key Personnel", order=3),
+            OutlineSection(id="4", title="D. Relevant Experience and References", order=4),
+            OutlineSection(id="5", title="E. Approach and Work Plan", order=5),
+            OutlineSection(id="6", title="F. Work Samples", order=6),
+            OutlineSection(id="7", title="G. Cost Proposal", order=7),
+            # Scoreboard clones the planner wrongly emitted:
+            OutlineSection(
+                id="dup-exp",
+                title="Relevant experience with comparable municipalities",
+                order=8,
+                evaluationWeight=25,
+            ),
+            OutlineSection(
+                id="dup-pers",
+                title="Qualifications and continuity of assigned personnel",
+                order=9,
+                evaluationWeight=20,
+            ),
+            OutlineSection(
+                id="dup-cost",
+                title="Cost, rate structure, and overall value",
+                order=10,
+                evaluationWeight=15,
+            ),
+            OutlineSection(
+                id="dup-refs",
+                title="References and past performance",
+                order=11,
+                evaluationWeight=5,
+            ),
+        ]
+        kept, dropped = drop_scoring_rubric_duplicate_sections(sections, evaluation)
+        titles = [s.title for s in kept]
+        self.assertIn("D. Relevant Experience and References", titles)
+        self.assertIn("C. Key Personnel", titles)
+        self.assertIn("G. Cost Proposal", titles)
+        self.assertNotIn("Relevant experience with comparable municipalities", titles)
+        self.assertNotIn("Qualifications and continuity of assigned personnel", titles)
+        self.assertNotIn("Cost, rate structure, and overall value", titles)
+        self.assertNotIn("References and past performance", titles)
+        self.assertGreaterEqual(len(dropped), 3)
+
+    def test_response_form_criteria_are_not_dropped(self) -> None:
+        evaluation = cnm_evaluation()
+        sections = [
+            OutlineSection(id="a", title="SECTION III Strategic Planning", order=1, evaluationWeight=160),
+            OutlineSection(id="b", title="SECTION IV Media", order=2, evaluationWeight=120),
+        ]
+        kept, dropped = drop_scoring_rubric_duplicate_sections(sections, evaluation)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(dropped, [])
+
+    def test_authority_title_order_is_respected(self) -> None:
+        sections = [
+            OutlineSection(id="g", title="G. Cost Proposal", order=1),
+            OutlineSection(id="a", title="A. Cover Letter", order=2),
+            OutlineSection(id="c", title="C. Key Personnel", order=3),
+        ]
+        ordered = order_outline_sections_by_authority_titles(
+            sections,
+            ["A. Cover Letter", "C. Key Personnel", "G. Cost Proposal"],
+        )
+        self.assertEqual(
+            [s.title for s in ordered],
+            ["A. Cover Letter", "C. Key Personnel", "G. Cost Proposal"],
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -95,6 +95,7 @@ import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEd
 import {
   ProposalSectionChatPanel,
   buildSectionPinReference,
+  buildSelectionPinReference,
   type SectionChatMessage,
   type SectionChatReference,
 } from "./ProposalSectionChatPanel";
@@ -383,6 +384,7 @@ function ProposalDraftWorkspaceInner({
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [isResettingDraft, setIsResettingDraft] = useState(false);
   const [isDesignerCompacting, setIsDesignerCompacting] = useState(false);
+  const [isGeneratingBudget, setIsGeneratingBudget] = useState(false);
   const [isMatchingCaseStudies, setIsMatchingCaseStudies] = useState(false);
   const [caseStudyMatchOpen, setCaseStudyMatchOpen] = useState(false);
   const [caseStudyMatchResult, setCaseStudyMatchResult] =
@@ -1254,6 +1256,9 @@ function ProposalDraftWorkspaceInner({
   const [reviewPreviewSelection, setReviewPreviewSelection] = useState<{
     start: number;
     end: number;
+    /** DOM selection text — kept even when offsets cannot be mapped to markdown. */
+    text?: string;
+    anchor?: { top: number; left: number; width: number; height: number };
   } | null>(null);
   const sectionTextareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
@@ -1280,16 +1285,60 @@ function ProposalDraftWorkspaceInner({
   const captureReviewPreviewSelection = useCallback(() => {
     if (!activeReviewSection) return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) return;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
     const text = sel.toString().replace(/\u00a0/g, " ");
     if (text.trim().length < 1) return;
+
+    const anchorNode = sel.anchorNode;
+    const article = document.getElementById(activeReviewSection.id);
+    const proseRoot =
+      article?.querySelector(".proposal-prose--manuscript") ?? article;
+    // Table cells / gap-tag spans must still count as in-manuscript.
+    if (proseRoot && anchorNode && !proseRoot.contains(anchorNode)) {
+      // Fallback: any manuscript article currently showing.
+      const anyProse = document.querySelector(
+        ".proposal-content-article--read .proposal-prose--manuscript"
+      );
+      if (!anyProse || !anyProse.contains(anchorNode)) return;
+    }
+
+    const range0 = sel.getRangeAt(0);
+    let rect = range0.getBoundingClientRect();
+    // Table / multi-node selections often report a 0×0 bounding rect — use
+    // the first non-empty client rect instead.
+    if (rect.width < 1 && rect.height < 1) {
+      const rects = Array.from(range0.getClientRects());
+      const hit = rects.find((r) => r.width >= 1 || r.height >= 1);
+      if (hit) rect = hit;
+    }
+    if (rect.width < 1 && rect.height < 1) {
+      // Last resort: anchor element box (td / span).
+      const el =
+        anchorNode instanceof Element
+          ? anchorNode
+          : anchorNode?.parentElement ?? null;
+      const er = el?.getBoundingClientRect();
+      if (er && (er.width >= 1 || er.height >= 1)) rect = er;
+    }
+    if (rect.width < 1 && rect.height < 1) return;
+
+    const anchor = {
+      top: rect.top,
+      left: rect.left,
+      width: Math.max(rect.width, 8),
+      height: Math.max(rect.height, 8),
+    };
+
     const source = stripLeadingTitleEcho(
       activeReviewSection.content,
       activeReviewSection.title
     );
     const range = createMarkdownSourceMap(source).find(text);
-    if (!range) return;
-    setReviewPreviewSelection(range);
+    if (range) {
+      setReviewPreviewSelection({ ...range, text: text.trim(), anchor });
+      return;
+    }
+    setReviewPreviewSelection({ start: 0, end: 0, text: text.trim(), anchor });
   }, [activeReviewSection]);
 
   const resizeManuscriptTextarea = useCallback((el: HTMLTextAreaElement | null) => {
@@ -1330,8 +1379,14 @@ function ProposalDraftWorkspaceInner({
     (selectedText: string | null) => {
       if (!activeReviewSection) return;
       selectSection(activeReviewSection.id);
+      const excerpt = (selectedText || "").trim();
       openSectionChat(
-        buildSectionPinReference(activeReviewSection, selectedText ?? activeReviewSection.content)
+        excerpt
+          ? buildSelectionPinReference(activeReviewSection, excerpt)
+          : buildSectionPinReference(
+              activeReviewSection,
+              activeReviewSection.content || ""
+            )
       );
     },
     [activeReviewSection, selectSection, openSectionChat]
@@ -1479,6 +1534,7 @@ function ProposalDraftWorkspaceInner({
     isFullProposalRunning ||
     isPricingRunning ||
     isRefiningBudget ||
+    isGeneratingBudget ||
     isFinalizingGaps ||
     isFulfillingRfpGaps ||
     isAligningRfpOutline ||
@@ -2263,6 +2319,52 @@ function ProposalDraftWorkspaceInner({
       setIsMatchingCaseStudies(false);
     }
   }, [rfp.id, isMatchingCaseStudies, anyPipelineRunning]);
+
+  /** Same Stage 3.5 path as Build my proposal — rebuild Cost from scratch. */
+  const handleGenerateBudget = useCallback(async () => {
+    if (isGeneratingBudget || anyPipelineRunning) return;
+    setIsGeneratingBudget(true);
+    setIsFullProposalRunning(true);
+    setFullProposalProgress("phase-3-5-budget");
+    setGenerateError(null);
+    setGenerateNotice(null);
+    try {
+      const { draft, research: afterBudget, budget: nextBudget } =
+        await runPhase3_5BudgetWithRecovery(rfp.id, undefined, {
+          // Standalone Advanced action — do not Celery-chain into Senior editor.
+          chainNext: false,
+        });
+      if (draft) {
+        applyOutlineFromServer(draft);
+        await saveProposalDraft(rfp.id, draft);
+      }
+      setResearch(afterBudget);
+      if (nextBudget) setBudget(nextBudget);
+      setPipelineStatus(buildPipelineStatus(draft, afterBudget));
+      const total =
+        nextBudget?.totalClientInvoicing ??
+        nextBudget?.agencyRevenueEstimate ??
+        nextBudget?.lumpSumTotal;
+      setGenerateNotice(
+        total != null && Number(total) > 0
+          ? `Budget generated from scratch — $${Number(total).toLocaleString("en-US", { maximumFractionDigits: 0 })}. Stopped after Budget (Senior editor not started).`
+          : "Budget generated from scratch. Stopped after Budget (Senior editor not started)."
+      );
+    } catch (error) {
+      setGenerateError(
+        error instanceof Error ? error.message : "Budget generation failed"
+      );
+    } finally {
+      setIsGeneratingBudget(false);
+      setIsFullProposalRunning(false);
+      setFullProposalProgress(null);
+    }
+  }, [
+    rfp.id,
+    isGeneratingBudget,
+    anyPipelineRunning,
+    applyOutlineFromServer,
+  ]);
 
   // "Already cleaned" for this draft — true from this session's just-finished run
   // (fulfillJustCompleted) OR from the server (survives refresh, same for every
@@ -4018,6 +4120,22 @@ function ProposalDraftWorkspaceInner({
                     </button>
                   </CapabilityHoverTip>
                   <div className="my-1 h-px bg-zo-border/60" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Rebuild Cost / fee table from scratch — same Phase 3.5 path as Build my proposal"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      void handleGenerateBudget();
+                    }}
+                    disabled={anyPipelineRunning || isGeneratingBudget}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isGeneratingBudget
+                      ? "Generating budget…"
+                      : "Generate budget"}
+                  </button>
+                  <div className="my-1 h-px bg-zo-border/60" />
                   <CapabilityHoverTip id="moreMenu" side="bottom">
                     <button
                       type="button"
@@ -4640,7 +4758,6 @@ function ProposalDraftWorkspaceInner({
             </aside>
             <div className="proposal-review-main flex min-h-0 min-w-0 flex-col overflow-hidden">
             {reviewFocusMode ? null : (
-            <>
             <ProposalReviewToolbar
               textareaRef={activeSectionTextareaRef}
               content={activeReviewMarkdown}
@@ -4661,15 +4778,26 @@ function ProposalDraftWorkspaceInner({
                 })
               }
             />
+            )}
             <ManuscriptSelectionBubble
               active={Boolean(
-                reviewPreviewSelection &&
-                  reviewPreviewSelection.end > reviewPreviewSelection.start &&
+                reviewPreviewSelection?.anchor &&
+                  (reviewPreviewSelection.text || "").trim() &&
                   activeReviewSection
               )}
+              anchor={reviewPreviewSelection?.anchor ?? null}
               disabled={anyPipelineRunning || !activeReviewSection}
+              formatEnabled={Boolean(
+                reviewPreviewSelection &&
+                  reviewPreviewSelection.end > reviewPreviewSelection.start
+              )}
               onBold={() => {
                 if (!activeReviewSection || !reviewPreviewSelection) return;
+                if (
+                  !(reviewPreviewSelection.end > reviewPreviewSelection.start)
+                ) {
+                  return;
+                }
                 const { next } = toggleWrapMarkers(
                   activeReviewMarkdown,
                   reviewPreviewSelection.start,
@@ -4685,6 +4813,11 @@ function ProposalDraftWorkspaceInner({
               }}
               onItalic={() => {
                 if (!activeReviewSection || !reviewPreviewSelection) return;
+                if (
+                  !(reviewPreviewSelection.end > reviewPreviewSelection.start)
+                ) {
+                  return;
+                }
                 const { next } = toggleWrapMarkers(
                   activeReviewMarkdown,
                   reviewPreviewSelection.start,
@@ -4701,17 +4834,18 @@ function ProposalDraftWorkspaceInner({
               onAskToChange={() => {
                 if (!activeReviewSection) return;
                 const selected =
-                  reviewPreviewSelection != null
+                  (reviewPreviewSelection?.text || "").trim() ||
+                  (reviewPreviewSelection != null &&
+                  reviewPreviewSelection.end > reviewPreviewSelection.start
                     ? activeReviewMarkdown.slice(
                         reviewPreviewSelection.start,
                         reviewPreviewSelection.end
                       )
-                    : null;
+                    : null);
                 handleReviewComment(selected);
+                setReviewPreviewSelection(null);
               }}
             />
-            </>
-            )}
             <div className="proposal-content-layout flex-1 min-h-0">
             <div
               ref={contentScrollRef}

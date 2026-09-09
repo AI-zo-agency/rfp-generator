@@ -149,13 +149,20 @@ def apply_zero_fabrication_guards(
             scrubbed_body, mix_logs = scrub_duplicate_budget_breakdown_tables(
                 section.content or ""
             )
-            if mix_logs:
+            from app.services.proposal_budget_playbook import (
+                normalize_hourly_rate_schedule_table,
+            )
+
+            scrubbed_body, norm_logs = normalize_hourly_rate_schedule_table(
+                scrubbed_body, budget=resolved_budget
+            )
+            if mix_logs or norm_logs:
                 sections = list(draft.sections)
                 sections[budget_idx] = section.model_copy(
                     update={"content": scrubbed_body}
                 )
                 draft = draft.model_copy(update={"sections": sections})
-                for line in mix_logs:
+                for line in [*mix_logs, *norm_logs]:
                     report.logs.append(f"{label}: budget breakdown — {line}")
 
         from app.services.proposal_pricing_sync_repair import scrub_invented_ceiling_claims
@@ -271,6 +278,17 @@ def apply_zero_fabrication_guards(
             report.logs.append(f"{label}: edge-case — {line}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s edge-case guards skipped: %s", label, exc)
+
+    try:
+        from app.services.proposal_fulfill_rfp_structure import (
+            repair_empty_manuscript_sections,
+        )
+
+        draft, empty_logs = repair_empty_manuscript_sections(draft)
+        for line in empty_logs:
+            report.logs.append(f"{label}: empty-section — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s empty-section repair skipped: %s", label, exc)
 
     try:
         from app.services.proposal_client_facing_integrity import (

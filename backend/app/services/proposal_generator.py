@@ -1376,8 +1376,16 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
 
     logger.info("Phase 2 intelligence starting for %s", rfp_id)
     from app.services.proposal_generation_cancel import check_generation_cancelled
+    from app.services.rfp_page_limit import remember_resolved_page_limit
 
     await check_generation_cancelled(rfp_id)
+    resolved_page_limit = remember_resolved_page_limit(
+        rfp.id,
+        manual_page_limit=rfp.page_limit,
+        rfp_text=rfp_context,
+    )
+    if resolved_page_limit and resolved_page_limit > 0:
+        rfp = rfp.model_copy(update={"page_limit": resolved_page_limit})
     with pipeline_step(
         "intelligence_graph",
         rfp_context_chars=len(rfp_context or ""),
@@ -1391,7 +1399,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
                 rfp_sector=rfp.sector,
                 rfp_location=rfp.location or None,
                 rfp_context=rfp_context,
-                page_limit=rfp.page_limit,
+                page_limit=resolved_page_limit or rfp.page_limit,
             )
         except IntelligenceError as exc:
             step_trace(
@@ -3169,6 +3177,61 @@ async def _run_phase3_5_budget_inner(
             "phase3_5_phase_table_conflicts",
             rfp_id=rfp_id,
             conflicts=zf_report.phase_table_conflicts[:6],
+        )
+
+    # Final RFP Cost-demand coverage pass — catch anything reshape / sync / ZF
+    # stripped, and stub remaining gaps so Cost never silently omits RFP asks.
+    try:
+        from app.services.proposal_budget_content import find_budget_section_index
+        from app.services.rfp_cost_demands import (
+            approach_digest_from_draft_sections,
+            ensure_rfp_cost_demands_in_budget_markdown,
+            pricing_flags_for_rfp_cost_demands,
+        )
+
+        idx = find_budget_section_index(list(draft.sections))
+        if idx is not None:
+            approach = approach_digest_from_draft_sections(draft.sections)
+            cost_body = draft.sections[idx].content or ""
+            covered, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+                cost_body,
+                rfp_text=rfp_context or "",
+                approach_digest=approach,
+                budget=budget,
+                # Stub-only: Stage 3 + incorporate already rewrote; avoid a
+                # second LLM rewrite that can bloat Terms / leak MFILL tokens.
+                rewrite=False,
+            )
+            if covered.strip() != cost_body.strip():
+                sections = list(draft.sections)
+                sections[idx] = sections[idx].model_copy(
+                    update={"content": covered, "status": "generated"}
+                )
+                draft = draft.model_copy(update={"sections": sections})
+            for line in demand_logs[:12]:
+                logger.info("Phase 3.5 final rfp_cost_demand: %s — %s", rfp_id, line)
+            demand_flags = pricing_flags_for_rfp_cost_demands(demands)
+            if demand_flags or demands:
+                prior = [
+                    f
+                    for f in (budget.pricing_flags or [])
+                    if not str(f).startswith("RFP Cost demand [")
+                ]
+                budget = budget.model_copy(
+                    update={"pricing_flags": prior + demand_flags}
+                )
+                if research:
+                    research = research.model_copy(update={"budget": budget})
+                step_trace(
+                    "phase3_5_rfp_cost_demands",
+                    rfp_id=rfp_id,
+                    demand_count=len(demands),
+                    unmet=len(demand_flags),
+                    ids=[d.id for d in demands][:24],
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Phase 3.5 final RFP cost-demand pass failed for %s: %s", rfp_id, exc
         )
 
     try:

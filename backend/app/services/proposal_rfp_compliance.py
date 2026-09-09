@@ -1314,6 +1314,17 @@ def reconcile_requirement_ledger(
     # closing, and scored requirement owners.
     applied_cuts: list[AppliedCutAction] = list(removed_admin_stubs)
     page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
+    if page_limit and page_limit > 0 and not (getattr(rfp, "page_limit", None) or 0):
+        try:
+            from app.services.rfp_page_limit import remember_resolved_page_limit
+
+            remember_resolved_page_limit(
+                getattr(rfp, "id", "") or "",
+                manual_page_limit=getattr(rfp, "page_limit", None),
+                rfp_text=rfp_text,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # Always strip padding-only sections (checklist dumps, static duplicates)
     # even when no page limit is known — they dilute trust and burn pages.

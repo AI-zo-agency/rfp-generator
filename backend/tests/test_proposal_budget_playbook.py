@@ -125,6 +125,8 @@ class BudgetRebuildAskTests(unittest.TestCase):
                 "Reconcile and complete the Cost of base proposal section"
             )
         )
+        self.assertTrue(user_asks_budget_rebuild("add budget here for this rfp"))
+        self.assertTrue(user_asks_budget_rebuild("add budget"))
         self.assertFalse(user_asks_budget_rebuild("make the Oregon Employment case warmer"))
 
     def test_implement_budget_table_here_is_section_local_not_stage35(self) -> None:

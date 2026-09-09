@@ -23,5 +23,13 @@ class PricingContract(BaseModel):
         alias="commissionRate",
         description="Fraction 0–1 when known; never invented.",
     )
+    must_disclose_media_compensation: bool = Field(
+        default=False,
+        alias="mustDiscloseMediaCompensation",
+        description=(
+            "RFP requires Cost to state commission / markup / pass-through treatment "
+            "even when feeModel is not commission (flat/phased planning fee)."
+        ),
+    )
     evidence_notes: list[str] = Field(default_factory=list, alias="evidenceNotes")
     confidence: ContractConfidence = "low"

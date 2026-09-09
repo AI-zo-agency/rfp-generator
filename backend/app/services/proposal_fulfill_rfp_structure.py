@@ -84,6 +84,11 @@ _QUAL_TITLE_HINTS = (
 
 COMPANY_BLOCK_HEADER_ID = "rfp-structure-company-block-header"
 
+_COMPANY_BLOCK_CHROME_NOTE = (
+    "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+    "this header matches the RFP TOC label only.]"
+)
+
 _POINTER_DELEGATION_RE = re.compile(
     r"company background for this submission is sections?\s*1\.1",
     re.IGNORECASE,
@@ -104,6 +109,189 @@ def is_pointer_only_company_delegation(content: str) -> bool:
     if "sections 1.1–1.5 below" in t.casefold() and len(t) < 450:
         return True
     return False
+
+
+def _company_block_header_is_chrome_only(content: str) -> bool:
+    """True when the Firm Profile / Company Overview tab is designer-note only."""
+    body = (content or "").strip()
+    if not body:
+        return True
+    cf = body.casefold()
+    if "follow immediately below" in cf and "designer note" in cf:
+        stripped = re.sub(r"(?is)\[DESIGNER NOTE:[^\]]*\]", " ", body)
+        stripped = re.sub(r"(?m)^#{1,6}\s+.*$", " ", stripped)
+        words = re.findall(r"\b\w+\b", stripped)
+        return len(words) < 40
+    return False
+
+
+def _static_section_1_bodies(draft: ProposalDraft) -> list[tuple[str, str]]:
+    """Ordered (title, body) for Sections 1.1–1.5 that already have prose."""
+    wanted = (
+        ("section-1-who", r"(?i)^\s*1\.1\b", "1.1 — Who We Are"),
+        ("section-1-org", r"(?i)^\s*1\.2\b", "1.2 — Organizational Structure"),
+        ("section-1-business", r"(?i)^\s*1\.3\b", "1.3 — Business Information"),
+        ("section-1-cert", r"(?i)^\s*1\.4\b", "1.4 — Certifications"),
+        ("section-1-insurance", r"(?i)^\s*1\.5\b", "1.5 — Insurance Information"),
+    )
+    out: list[tuple[str, str]] = []
+    for id_prefix, title_re, fallback_title in wanted:
+        section = next(
+            (
+                s
+                for s in draft.sections
+                if (s.id or "").startswith(id_prefix)
+                or re.match(title_re, s.title or "")
+            ),
+            None,
+        )
+        if section is None:
+            continue
+        body = (section.content or "").strip()
+        if not body or _company_block_header_is_chrome_only(body):
+            continue
+        title = (section.title or "").strip() or fallback_title
+        out.append((title, body))
+    return out
+
+
+def company_block_header_content(
+    draft: ProposalDraft,
+    *,
+    title: str,
+) -> str:
+    """Full Firm Profile body from Sections 1.1–1.5 — never designer-note-only.
+
+    The RFP TOC label tab must carry the same drafted firm package the static
+    tabs hold. A chrome-only DESIGNER NOTE made Alameda's Firm Profile look
+    emptied while 1.1–1.5 still had the prose.
+    """
+    heading = (title or "Company Overview").strip() or "Company Overview"
+    parts: list[str] = [f"## {heading}", ""]
+    blocks = _static_section_1_bodies(draft)
+    if blocks:
+        for sub_title, body in blocks:
+            parts.append(f"### {sub_title}")
+            parts.append("")
+            parts.append(body.strip())
+            parts.append("")
+        return "\n".join(parts).rstrip() + "\n"
+    # Static tabs not drafted yet — honest fill tag, never empty chrome.
+    return (
+        f"## {heading}\n\n"
+        "[MANUAL FILL: Draft full firm profile for this RFP — Who We Are, "
+        "organization, business information, certifications, and insurance. "
+        "Do not leave this tab as a designer-note-only header.]\n"
+    )
+
+
+def enrich_chrome_only_company_block_header(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Restore Firm Profile / Company Overview chrome tabs from Sections 1.1–1.5."""
+    logs: list[str] = []
+    sections = list(draft.sections)
+    changed = False
+    for i, section in enumerate(sections):
+        is_header = section.id == COMPANY_BLOCK_HEADER_ID or (
+            _title_is_company_block_wrap_label(section.title or "")
+            and _company_block_header_is_chrome_only(section.content or "")
+        )
+        if not is_header:
+            continue
+        if not _company_block_header_is_chrome_only(section.content or ""):
+            # Already has real prose — leave it.
+            if section.id == COMPANY_BLOCK_HEADER_ID:
+                continue
+            continue
+        title = (section.title or "").strip() or "Company Overview"
+        next_body = company_block_header_content(draft, title=title)
+        if next_body.strip() == (section.content or "").strip():
+            continue
+        sections[i] = section.model_copy(
+            update={
+                "content": next_body,
+                "status": "generated",
+                "word_target": max(section.word_target or 0, 600),
+            }
+        )
+        logs.append(
+            f"RFP structure: restored “{title}” from Sections 1.1–1.5 "
+            "(was designer-note / empty)."
+        )
+        changed = True
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+def repair_empty_manuscript_sections(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Hard rule: no manuscript tab may persist empty or chrome-only.
+
+    Company-block wrap labels are refilled from 1.1–1.5. Every other hollow
+    tab gets an honest MANUAL FILL stub — never a blank body marked complete.
+    Bio / case-study designer PDF handoffs that already name the asset stay.
+    """
+    logs: list[str] = []
+    draft, company_logs = enrich_chrome_only_company_block_header(draft)
+    logs.extend(company_logs)
+    sections: list[ProposalSection] = []
+    changed = bool(company_logs)
+    for section in draft.sections:
+        body = (section.content or "").strip()
+        title = (section.title or "").strip() or "this section"
+        sid = section.id or ""
+        # Intentional PDF handoff stubs (bios / case studies) — keep.
+        if re.search(
+            r"(?i)\[DESIGNER NOTE:\s*(?:Insert approved bio PDF|Place approved case study)",
+            body,
+        ):
+            sections.append(section)
+            continue
+        if section.id == COMPANY_BLOCK_HEADER_ID or (
+            _title_is_company_block_wrap_label(title)
+            and _company_block_header_is_chrome_only(body)
+        ):
+            # enrich already handled; if still chrome, force fill again.
+            filled = company_block_header_content(draft, title=title)
+            if filled.strip() != body:
+                sections.append(
+                    section.model_copy(
+                        update={
+                            "content": filled,
+                            "status": "generated",
+                            "word_target": max(section.word_target or 0, 600),
+                        }
+                    )
+                )
+                logs.append(f"filled empty company tab “{title}”")
+                changed = True
+                continue
+            sections.append(section)
+            continue
+        hollow = (not body) or _company_block_header_is_chrome_only(body)
+        if not hollow:
+            sections.append(section)
+            continue
+        stub = (
+            f"## {title}\n\n"
+            f"[MANUAL FILL: Draft full «{title}» for this RFP — do not leave "
+            "this tab empty. Cover every scored ask for this section.]\n"
+        )
+        sections.append(
+            section.model_copy(
+                update={"content": stub, "status": "generated"}
+            )
+        )
+        logs.append(f"filled empty section “{title}” ({sid or 'no-id'})")
+        changed = True
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
 def _section_has_substantive_body(section: ProposalSection) -> bool:
@@ -2325,6 +2513,8 @@ def apply_rfp_toc_layout(
     logs.extend(order_logs)
     draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
     logs.extend(wrap_logs)
+    draft, empty_logs = repair_empty_manuscript_sections(draft)
+    logs.extend(empty_logs)
     draft, cover_fix_logs = repair_cover_letter_misused_as_company_header(draft)
     logs.extend(cover_fix_logs)
     from app.services.proposal_section_dedup import repair_emptied_vendor_questionnaires
@@ -2385,10 +2575,9 @@ def ensure_company_block_wrapper_heading(
     header = ProposalSection(
         id=COMPANY_BLOCK_HEADER_ID,
         title=wrap_spec.rfp_title,
-        content=(
-            f"## {wrap_spec.rfp_title}\n\n"
-            "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
-            "this header matches the RFP TOC label only.]"
+        content=company_block_header_content(
+            draft.model_copy(update={"sections": sections}),
+            title=wrap_spec.rfp_title,
         ),
         status="generated",
         source="generated",
@@ -2399,7 +2588,7 @@ def ensure_company_block_wrapper_heading(
     sections.insert(first_company, header)
     logs.append(
         f"RFP structure: labeled Sections 1.1–1.5 as “{wrap_spec.rfp_title}” "
-        "(header only — company tabs unchanged)."
+        "(filled from static company tabs — never chrome-only)."
     )
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
@@ -2517,10 +2706,9 @@ def repair_cover_letter_misused_as_company_header(
             wrap = ProposalSection(
                 id=COMPANY_BLOCK_HEADER_ID,
                 title="Company Overview",
-                content=(
-                    "## Company Overview\n\n"
-                    "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
-                    "this header matches the RFP TOC label only.]"
+                content=company_block_header_content(
+                    draft.model_copy(update={"sections": sections}),
+                    title="Company Overview",
                 ),
                 status="generated",
                 source="generated",
