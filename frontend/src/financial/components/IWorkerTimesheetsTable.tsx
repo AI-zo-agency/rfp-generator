@@ -33,7 +33,12 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
 import { AnimatedNumber } from "./AnimatedNumber";
-import type { PeriodInsights, PeriodHistoryPoint, PeriodGranularity } from "../types/iworker";
+import type {
+  PeriodInsights,
+  PeriodHistoryPoint,
+  PeriodGranularity,
+  TeamworkReconcileRowStatus,
+} from "../types/iworker";
 import { entryDateInPeriod } from "../lib/iworker-period";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -181,6 +186,24 @@ function utilizationHelpText(granularity: PeriodGranularity): string {
     `Utilization = logged hours ÷ expected hours × 100.`,
     `Low utilization mid-${periodWord} usually means missing timesheet rows, not idle capacity.`,
   ].join(" ");
+}
+
+function reconcileStatusStyles(status: TeamworkReconcileRowStatus): {
+  label: string;
+  className: string;
+} {
+  switch (status) {
+    case "match":
+      return { label: "Match", className: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+    case "mismatch":
+      return { label: "Mismatch", className: "bg-amber-50 text-amber-800 border-amber-200" };
+    case "iworker_only":
+      return { label: "iWorker only", className: "bg-orange-50 text-orange-800 border-orange-200" };
+    case "no_teamwork_match":
+      return { label: "No Teamwork user", className: "bg-zinc-100 text-zinc-700 border-zinc-200" };
+    default:
+      return { label: status, className: "bg-zinc-100 text-zinc-700 border-zinc-200" };
+  }
 }
 
 function contractorUtilizationDetail(
@@ -849,8 +872,8 @@ export function IWorkerTimesheetsTable({
                 </div>
                 <p className="text-[11px] text-zo-text-muted mt-1.5">
                   {periodInsights.current.hours > 0
-                    ? periodInsights.selected.label
-                    : periodEmptyCopy}
+                    ? `${periodInsights.selected.label} · ${periodInsights.expected_hours.toFixed(1)} hrs expected`
+                    : `${periodEmptyCopy} · ${periodInsights.expected_hours.toFixed(1)} hrs expected`}
                 </p>
               </div>
             </div>
@@ -928,6 +951,104 @@ export function IWorkerTimesheetsTable({
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* Teamwork ↔ iWorker reconciliation */}
+          {periodInsights.teamwork_reconciliation && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                    Teamwork ↔ iWorker Hours
+                  </p>
+                  <p className="text-xs text-zo-text-muted mt-1">
+                    Compare sheet hours to Teamwork timelogs for {periodInsights.selected.label}
+                    {periodInsights.teamwork_reconciliation.tolerance_hours
+                      ? ` (±${periodInsights.teamwork_reconciliation.tolerance_hours}h tolerance)`
+                      : ""}
+                    .
+                  </p>
+                </div>
+                {periodInsights.teamwork_reconciliation.status === "ok" && (
+                  <p className="text-[11px] font-semibold text-zo-text-muted">
+                    {periodInsights.teamwork_reconciliation.summary.matched} match ·{" "}
+                    {periodInsights.teamwork_reconciliation.summary.mismatched} mismatch ·{" "}
+                    {periodInsights.teamwork_reconciliation.summary.iworker_only} iWorker-only
+                    {periodInsights.teamwork_reconciliation.summary.no_teamwork_match > 0
+                      ? ` · ${periodInsights.teamwork_reconciliation.summary.no_teamwork_match} no Teamwork user`
+                      : ""}
+                  </p>
+                )}
+              </div>
+              {periodInsights.teamwork_reconciliation.status !== "ok" ? (
+                <div className="px-6 py-5 text-sm text-zo-text-muted">
+                  {periodInsights.teamwork_reconciliation.detail ||
+                    "Teamwork hours are unavailable for this period."}
+                </div>
+              ) : periodInsights.teamwork_reconciliation.rows.length === 0 ? (
+                <div className="px-6 py-5 text-sm text-zo-text-muted">
+                  No contractors to reconcile for this period.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-zinc-50 border-b border-zinc-100">
+                      <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
+                        <th className="px-6 py-3">Contractor</th>
+                        <th className="px-4 py-3 text-right">iWorker</th>
+                        <th className="px-4 py-3 text-right">Teamwork</th>
+                        <th className="px-4 py-3 text-right">Δ</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-6 py-3">Teamwork jobs</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-100">
+                      {periodInsights.teamwork_reconciliation.rows.map((row) => {
+                        const badge = reconcileStatusStyles(row.status);
+                        const jobs = (row.teamwork_projects || [])
+                          .slice(0, 3)
+                          .map((p) => `${p.name} (${p.hours}h)`)
+                          .join(", ");
+                        return (
+                          <tr key={row.contractor} className="hover:bg-zinc-50/80">
+                            <td className="px-6 py-3 font-semibold text-foreground">
+                              {row.contractor}
+                              {row.teamwork_name &&
+                                row.teamwork_name.toLowerCase() !== row.contractor.toLowerCase() && (
+                                  <span className="block text-[10px] font-normal text-zo-text-muted">
+                                    Teamwork: {row.teamwork_name}
+                                  </span>
+                                )}
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums">
+                              {row.iworker_hours.toFixed(1)}h
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums">
+                              {row.teamwork_hours === null ? "—" : `${row.teamwork_hours.toFixed(1)}h`}
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums font-semibold">
+                              {row.delta_hours === null
+                                ? "—"
+                                : `${row.delta_hours > 0 ? "+" : ""}${row.delta_hours.toFixed(1)}h`}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge.className}`}
+                              >
+                                {badge.label}
+                              </span>
+                            </td>
+                            <td className="px-6 py-3 text-zo-text-muted max-w-[18rem]">
+                              {jobs || "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 

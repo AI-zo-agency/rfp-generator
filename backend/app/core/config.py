@@ -72,7 +72,18 @@ class Settings(BaseSettings):
     # Financial workspace (QuickBooks + Teamwork insights/chat). Empty key
     # falls back to openrouter_api_key; empty model falls back to openrouter_model.
     openrouter_api_key_financial: str = ""
-    openrouter_model_financial: str = "google/gemini-3.6-flash"
+    # Prose: the nightly brief, QuickBooks chat, Teamwork insights. An OpenAI
+    # model because across four live prompts on this ledger it produced zero
+    # verifiable factual errors against Gemini's seven — a $100k addition
+    # mistake, vendor purchase orders counted as revenue, a client down 58%
+    # described as "stable".
+    openrouter_model_financial: str = "openai/gpt-5-mini"
+    # Numbers: the forecast nodes, kept separate so the two jobs move
+    # independently. Gemini 3.6 Flash won all four scored horizons against nine
+    # other models — 13-week cash 2.96%, full year 0.31%. It is the better
+    # forecaster and the worse writer, which is exactly why these are two
+    # settings and not one.
+    openrouter_model_forecast: str = "google/gemini-3.6-flash"
 
     # Monid — server-side company enrichment only. Never expose this to the frontend.
     monid_api_key: str = ""

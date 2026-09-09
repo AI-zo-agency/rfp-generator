@@ -136,6 +136,29 @@ def test_post_client_map_link_runs_requested_passes(monkeypatch):
     run_link.assert_awaited_once_with(include_ai=False)
 
 
+def test_post_client_map_sync_imports_then_links(monkeypatch):
+    monkeypatch.setattr(fin_router.settings, "quickbooks_cron_secret", "s3cret")
+    monkeypatch.setattr(
+        fin_router,
+        "import_tags_sheet",
+        lambda: {"inserted": 3, "skipped": 1},
+    )
+    run_link = AsyncMock(return_value={"confirmed": 2, "suggested": 4, "teamwork_tag": 1})
+    monkeypatch.setattr(fin_router, "run_client_map_link", run_link)
+
+    response = client.post(
+        "/api/v1/financials/client-map/sync",
+        headers={"X-Cron-Secret": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "import": {"inserted": 3, "skipped": 1},
+        "link": {"confirmed": 2, "suggested": 4, "teamwork_tag": 1},
+    }
+    run_link.assert_awaited_once_with(include_ai=True)
+
+
 def test_get_agency_overview_returns_builder_payload(monkeypatch):
     payload = {
         "year": 2026,

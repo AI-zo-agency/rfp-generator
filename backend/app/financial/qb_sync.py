@@ -12,6 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.financial.qb_forecast_llm import generate_and_store as generate_forecast
+from app.financial.qb_forecast_monthly import generate_and_store_current as generate_monthly_forecast
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_map import params_hash
 from app.financial.qb_panels_from_db import build_overview
@@ -426,6 +428,28 @@ def _run_nightly(
             "operation=_run_nightly step=ai_insights run_id=%s status=%s",
             run_id,
             insight_status,
+        )
+        # After the panel cache is written, so the forecast reads the same
+        # numbers the tab will show. Returns rather than raises on any failure;
+        # a bad forecast leaves last night's standing.
+        forecast_status = generate_forecast(
+            realm_id,
+            {**overview, "sync_status": "ok"},
+            year,
+            as_of.isoformat(),
+        )
+        logger.info(
+            "operation=_run_nightly step=forecast run_id=%s status=%s",
+            run_id,
+            forecast_status,
+        )
+        monthly_status = generate_monthly_forecast(
+            realm_id, year, as_of.isoformat()
+        )
+        logger.info(
+            "operation=_run_nightly step=monthly_forecast run_id=%s status=%s",
+            run_id,
+            monthly_status,
         )
     now = datetime.now(timezone.utc).isoformat()
     logger.info(

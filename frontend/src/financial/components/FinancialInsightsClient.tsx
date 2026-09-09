@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { FinancialHeader } from "./FinancialHeader";
 import {
   FINANCIAL_TABS,
@@ -18,6 +19,7 @@ import type { IWorkerTimesheetsResponse, PeriodGranularity } from "../types/iwor
 import { AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
+import { expoOutEase } from "@/lib/motion";
 import { TeamworkPanels } from "./TeamworkPanels";
 import { ClientMapPanels } from "./ClientMapPanels";
 
@@ -231,14 +233,32 @@ export function FinancialInsightsClient({
         />
 
         {loading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center">
-            <div className="flex flex-col items-center gap-3">
+          <motion.div
+            className="flex min-h-0 flex-1 items-center justify-center"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="flex flex-col items-center gap-3"
+              initial={{ opacity: 0, scale: 0.9, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              transition={{ duration: 0.45, ease: expoOutEase }}
+            >
               <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent" />
               <p className="text-xs font-medium text-zo-text-muted animate-pulse">Loading Financial Insights...</p>
-            </div>
-          </div>
+            </motion.div>
+          </motion.div>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
+          <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            className="flex min-h-0 flex-1 flex-col"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          >
             {activeTab === "agency" ? (
               <TabFade
                 active
@@ -284,7 +304,8 @@ export function FinancialInsightsClient({
             >
               <DataSourcesGrid sources={sourcesData} />
             </TabFade>
-          </div>
+          </motion.div>
+          </AnimatePresence>
         )}
       </div>
     </div>

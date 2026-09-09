@@ -144,12 +144,32 @@ _FINANCIAL_LLM_NODES = frozenset(
         "teamwork_chat.answer",
         "financial.ai_insights",
         "client_map.link",
+        "qb_forecast_cash",
+        "qb_forecast_year",
+        "qb_forecast_month",
+        # Explains the forecast in plain English. Financial, so it uses the
+        # financial key and the prose model — it is listed here and pointedly
+        # not in _FORECAST_LLM_NODES below.
+        "qb_forecast_narrative",
     }
+)
+
+# Forecasting and narrative were measured separately and did not pick the same
+# model, so they do not share one setting. Gemini 3.6 Flash won both forecast
+# horizons outright (2.96% on 13-week cash, 0.31% on the year holdout) while
+# producing the most factual errors in its prose; the narrative model is chosen
+# for the opposite property. See `qb_forecast_llm`.
+_FORECAST_LLM_NODES = frozenset(
+    {"qb_forecast_cash", "qb_forecast_year", "qb_forecast_month"}
 )
 
 
 def _is_financial_node(node_name: str | None) -> bool:
     return (node_name or "") in _FINANCIAL_LLM_NODES
+
+
+def _is_forecast_node(node_name: str | None) -> bool:
+    return (node_name or "") in _FORECAST_LLM_NODES
 
 
 def _provider_routing(
@@ -198,6 +218,13 @@ def resolve_llm_model(tier: LlmTier = "heavy", *, node_name: str | None = None) 
 
     Financial workspace nodes use OPENROUTER_MODEL_FINANCIAL when set.
     """
+    if _is_forecast_node(node_name):
+        forecast = getattr(settings, "openrouter_model_forecast", "")
+        if isinstance(forecast, str) and forecast.strip():
+            return forecast.strip()
+        # Unset falls through to the financial model rather than the shared
+        # default, so an operator who never sets it still gets a financial-grade
+        # model instead of whatever the RFP pipeline happens to use.
     if _is_financial_node(node_name):
         financial = getattr(settings, "openrouter_model_financial", "")
         if isinstance(financial, str) and financial.strip():

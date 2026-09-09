@@ -168,6 +168,102 @@ export interface QuickBooksOverview {
     net_cash_change: number | null;
   } | null;
   /**
+   * Forward-looking figures. `year` and `quarter` are computed in Python;
+   * `llm` is Gemini's, which won every scored horizon in testing. Both are
+   * shown for the year so a disagreement between them is visible rather than
+   * averaged away.
+   */
+  forecast: {
+    as_of: string;
+    year: {
+      method: string;
+      months_booked: number;
+      ytd: number;
+      point: number;
+      expected_error_pct: number;
+      year: number;
+    } | null;
+    quarter: {
+      method: string;
+      point: number;
+      monthly_basis: number;
+      expected_error_pct: number;
+      /** ~19% error. Do not render without saying so. */
+      low_confidence: boolean;
+      months_of_history: number;
+    } | null;
+    /** Deliberately absent — best measured monthly error was 19.8%. */
+    month: null;
+    month_omitted_reason: string;
+    llm: {
+      cash_13w: {
+        weeks: {
+          week: number;
+          ending: string;
+          from_open_invoices: number;
+          from_new_billing: number;
+          outflow: number;
+          closing_balance: number;
+        }[];
+        trough: { amount: number; week: number } | null;
+        low: number | null;
+        high: number | null;
+        assumptions: string | null;
+        risks: string[] | null;
+      } | null;
+      year: {
+        reasoning: string | null;
+        point: number;
+        low: number | null;
+        high: number | null;
+        remaining_months: number | null;
+        confidence: "low" | "medium" | "high" | null;
+      } | null;
+      /**
+       * The same forecast in plain English, written by the prose model rather
+       * than the forecasting one. This is what the tab shows; `assumptions` and
+       * `reasoning` above are the forecaster's own working and are too
+       * technical for the person reading this screen.
+       */
+      plain: {
+        cash: string | null;
+        year: string | null;
+        watch: string | null;
+      } | null;
+    } | null;
+    llm_as_of?: string | null;
+    llm_model?: string | null;
+    /** Last night's model run failed; the figures are older than the ledger. */
+    llm_stale?: boolean;
+    /**
+     * Month-scoped revenue forecasts. Past years are a scorecard (forecast vs
+     * actual); the current year holds remaining-month recommendations.
+     */
+    monthly?: {
+      year?: number;
+      months: {
+        month: string;
+        label: string;
+        forecast: number | null;
+        low?: number | null;
+        high?: number | null;
+        actual?: number | null;
+        error_pct?: number | null;
+        as_of?: string | null;
+        method?: string | null;
+        baseline_trail3?: number | null;
+        confidence?: "low" | "medium" | "high" | null;
+        reasoning?: string | null;
+      }[];
+      mape?: number | null;
+      scored_months?: number | null;
+      lookback_months?: number | null;
+      generated_at?: string | null;
+      as_of?: string | null;
+      model?: string | null;
+    } | null;
+  } | null;
+  /**
    * Bills arrive after the month they belong to, so a recent month's cost is
    * incomplete and its margin reads high. `adjusted_gross_margin_pct` is the
    * same span with the missing cost estimated in — never a ledger actual.

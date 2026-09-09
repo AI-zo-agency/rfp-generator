@@ -41,6 +41,14 @@ JOBS: tuple[ScheduledJob, ...] = (
         body={"mode": "auto"},
         timeout_seconds=600,
     ),
+    # After TW + QB caches refresh so tag/exact links see tonight's projects/customers.
+    ScheduledJob(
+        id="client_map_nightly",
+        path="/api/v1/financials/client-map/sync",
+        cron="15 23 * * *",
+        timezone="America/Los_Angeles",
+        timeout_seconds=600,
+    ),
     ScheduledJob(
         id="agency_weekly_snapshot",
         path="/api/v1/financials/agency/ai-insights/snapshot",

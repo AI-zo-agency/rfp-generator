@@ -1,16 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useGSAP } from "@gsap/react";
+import gsap from "gsap";
+import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
 import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { IconSwitch } from "@/components/ui/icons";
+import { expoOutEase } from "@/lib/motion";
+import { prefersReducedMotion } from "../lib/fin-motion";
 import "./QuickBooksLedger.css";
 
 export function FinancialShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const headerRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
@@ -26,6 +32,18 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
     return () => document.documentElement.classList.remove("fin-lock");
   }, []);
 
+  useGSAP(
+    () => {
+      if (!isAuthenticated || !headerRef.current || prefersReducedMotion()) return;
+      gsap.fromTo(
+        headerRef.current.querySelectorAll("[data-fin-shell]"),
+        { opacity: 0, y: -14 },
+        { opacity: 1, y: 0, duration: 0.55, stagger: 0.08, ease: "power3.out" },
+      );
+    },
+    { dependencies: [isAuthenticated], scope: headerRef },
+  );
+
   const handleLogout = () => {
     localStorage.removeItem("auth_token");
     localStorage.removeItem("auth_user");
@@ -38,8 +56,11 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="shell-app flex h-dvh max-h-dvh flex-col overflow-clip">
-      <header className="shell-header z-30 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2.5 md:px-8">
-        <div className="flex items-center gap-4">
+      <header
+        ref={headerRef}
+        className="shell-header z-30 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2.5 md:px-8"
+      >
+        <div className="flex items-center gap-4" data-fin-shell>
           <Link href="/choose" className="flex items-center gap-3">
             <ZoLogo size="compact" />
           </Link>
@@ -48,7 +69,7 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
           </span>
         </div>
 
-        <div className="flex items-center gap-2 md:gap-3">
+        <div className="flex items-center gap-2 md:gap-3" data-fin-shell>
           <Link href="/choose" className="zo-btn secondary !py-3" aria-label="Switch workspace">
             <IconSwitch className="h-4 w-4" />
             <span className="hidden sm:inline">Switch Workspace</span>
@@ -59,9 +80,14 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1 overflow-clip">
+      <motion.main
+        className="flex min-h-0 flex-1 overflow-clip"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.45, delay: 0.12, ease: expoOutEase }}
+      >
         {children}
-      </main>
+      </motion.main>
     </div>
   );
 }

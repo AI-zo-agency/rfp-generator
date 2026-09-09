@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+import { useGSAP } from "@gsap/react";
+import { playFinTabEnter } from "../lib/fin-motion";
 
 interface TabFadeProps {
   active: boolean;
@@ -9,24 +11,17 @@ interface TabFadeProps {
   id?: string;
 }
 
-/** Plays a quick native fade+rise the moment a tab becomes active — never
- * remounts children, so each tab's own filters/expanded rows persist. */
+/** GSAP entrance when a tab becomes active — never remounts children. */
 export function TabFade({ active, children, className = "", id }: TabFadeProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const wasActive = useRef(active);
 
-  useEffect(() => {
-    if (active && !wasActive.current && ref.current) {
-      ref.current.animate(
-        [
-          { opacity: 0, transform: "translateY(4px)" },
-          { opacity: 1, transform: "translateY(0)" },
-        ],
-        { duration: 220, easing: "cubic-bezier(0.16, 1, 0.3, 1)" }
-      );
-    }
-    wasActive.current = active;
-  }, [active]);
+  useGSAP(
+    () => {
+      if (!active || !ref.current) return;
+      playFinTabEnter(ref.current);
+    },
+    { dependencies: [active], scope: ref },
+  );
 
   return (
     <div

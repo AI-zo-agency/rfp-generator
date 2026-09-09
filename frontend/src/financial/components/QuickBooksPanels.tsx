@@ -13,12 +13,17 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceArea,
+  ReferenceDot,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { RefreshCw, Sparkles } from "lucide-react";
+import { RefreshCw, Sparkles, TrendingUp } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -40,6 +45,7 @@ const VIEWS = [
   { id: "revenue", label: "Revenue" },
   { id: "clients", label: "Clients" },
   { id: "costs", label: "Costs" },
+  { id: "forecast", label: "Forecast" },
 ] as const;
 
 /* ── chart chrome ──────────────────────────────────────────────────────── */
@@ -351,6 +357,434 @@ function isAbortError(err: unknown) {
   );
 }
 
+/* ── forecast ──────────────────────────────────────────────────────────────── */
+
+/** Beyond this the two year methods are treated as disagreeing rather than
+ *  agreeing imprecisely, and the reader is told instead of shown one number. */
+const _DIVERGENCE_PCT = 10;
+
+/** "2026-09-24" -> "Sep 24". Dates on an axis need no year and no weekday. */
+function _shortDate(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  return Number.isNaN(d.getTime())
+    ? iso.slice(5)
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+/**
+ * "Week 3" over "Sep 24". The week number is what the prose refers to; the date
+ * is what the reader checks against their own calendar. One line holding both
+ * is unreadable at thirteen columns.
+ */
+function WeekTick({ x, y, payload }: {
+  x?: number; y?: number; payload?: { value?: string };
+}) {
+  const [week, date] = String(payload?.value ?? "").split("|");
+  return (
+    <g transform={`translate(${x ?? 0},${y ?? 0})`}>
+      <text textAnchor="middle" dy={14} className="qb-tick-week">{week}</text>
+      <text textAnchor="middle" dy={30} className="qb-tick-date">{date}</text>
+    </g>
+  );
+}
+
+/** "medium confidence" is a modelling term. This is how a person says it. */
+const CONFIDENCE_WORDS: Record<string, string> = {
+  low: "not very sure",
+  medium: "reasonably sure",
+  high: "quite sure",
+};
+
+/**
+ * The forecast view. Only forecasts — the ledger's open items, aging and
+ * segment splits already have their own tabs, and repeating them here would
+ * bury the two figures this view exists for.
+ *
+ * The year is deliberately shown twice: Gemini's and the Python line. They were
+ * within noise of each other across eighteen backtested origins, so neither
+ * earns the right to be the single number, and their disagreement is the most
+ * honest confidence signal available.
+ */
+function ForecastView({ data }: { data: QuickBooksOverview }) {
+  const f = data.forecast;
+  const currentYear = new Date().getFullYear();
+  const isPastYear = data.year < currentYear;
+  const [grain, setGrain] = useState<"weekly" | "monthly">("weekly");
+
+  if (!f) return <Empty>No forecast yet — it is built during the nightly sync.</Empty>;
+
+  if (isPastYear) {
+    return (
+      <Panel
+        title={`Monthly revenue, ${data.year}`}
+        meta={f.monthly?.as_of ? `as of ${f.monthly.as_of}` : undefined}
+        hint="Coral is what the model predicted from the prior ten months. Teal is what actually booked. The trail-3 line is a simple average of the last three closed months."
+      >
+        <MonthlyRevenueChart year={data.year} monthly={f.monthly ?? null} />
+      </Panel>
+    );
+  }
+
+  return <WeeklyCashForecast data={data} grain={grain} onGrainChange={setGrain} />;
+}
+
+function MonthlyRevenueChart({
+  year,
+  monthly,
+}: {
+  year: number;
+  monthly: NonNullable<QuickBooksOverview["forecast"]>["monthly"] | null;
+}) {
+  const months = monthly?.months ?? [];
+  const chartRows = useMemo(
+    () =>
+      months.map((m) => ({
+        label: m.label.replace(` ${year}`, ""),
+        forecast: m.forecast ?? 0,
+        actual: m.actual ?? null,
+        trail3: m.baseline_trail3 ?? null,
+      })),
+    [months, year],
+  );
+
+  if (!months.length) {
+    return <Empty>No monthly revenue forecast yet.</Empty>;
+  }
+
+  return (
+    <>
+      <div className="qb-legend">
+        <span>
+          <span className="qb-swatch" style={{ background: "var(--zo-coral)" }} aria-hidden />
+          Forecast
+        </span>
+        <span>
+          <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+          Actual
+        </span>
+        <span>
+          <span className="qb-swatch qb-swatch-line" aria-hidden />
+          Trail-3 mean
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={330}>
+        <ComposedChart data={chartRows} margin={{ top: 8, right: 8, bottom: 8, left: -8 }}>
+          <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+          <XAxis dataKey="label" {...AXIS} />
+          <YAxis {...AXIS} width={62} tickFormatter={(v: number) => compact(v)} />
+          <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+          <Bar dataKey="forecast" name="Forecast" fill="var(--zo-coral)" maxBarSize={28} />
+          <Bar dataKey="actual" name="Actual" fill="var(--zo-teal)" maxBarSize={28} />
+          <Line
+            type="monotone"
+            dataKey="trail3"
+            name="Trail-3"
+            stroke="var(--zo-primary)"
+            strokeWidth={2}
+            dot={false}
+            connectNulls={false}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </>
+  );
+}
+
+function WeeklyCashForecast({
+  data,
+  grain,
+  onGrainChange,
+}: {
+  data: QuickBooksOverview;
+  grain: "weekly" | "monthly";
+  onGrainChange: (grain: "weekly" | "monthly") => void;
+}) {
+  const f = data.forecast;
+  const llm = f?.llm ?? null;
+  const cash = llm?.cash_13w ?? null;
+  const llmYear = llm?.year ?? null;
+  const plain = llm?.plain ?? null;
+  const pyYear = f?.year ?? null;
+  const monthly = f?.monthly ?? null;
+
+  const weeks = useMemo(
+    () =>
+      (cash?.weeks ?? []).map((w) => ({
+        // "Week 3|Sep 24" — split by WeekTick into two rows.
+        label: `Week ${w.week}|${_shortDate(w.ending)}`,
+        committed: w.from_open_invoices ?? 0,
+        forecast: w.from_new_billing ?? 0,
+        outflow: -(w.outflow ?? 0),
+        balance: w.closing_balance ?? 0,
+      })),
+    [cash],
+  );
+
+  const divergence =
+    llmYear?.point && pyYear?.point
+      ? Math.abs(llmYear.point - pyYear.point) / pyYear.point * 100
+      : null;
+
+  // The shaded band runs from zero down to the deepest thing on the chart, so
+  // it always reaches the axis floor rather than stopping mid-air.
+  const dangerFloor = useMemo(
+    () => Math.min(0, ...weeks.map((w) => w.outflow), ...weeks.map((w) => w.balance)),
+    [weeks],
+  );
+
+  const troughIsLastWeek =
+    cash?.trough != null && weeks.length > 0 && cash.trough.week >= weeks.length;
+
+  const grainToggle = (
+    <ToggleGroup
+      type="single"
+      value={grain}
+      onValueChange={(v) => {
+        if (v === "weekly" || v === "monthly") onGrainChange(v);
+      }}
+      className="qb-years"
+      aria-label="Forecast grain"
+    >
+      <ToggleGroupItem value="weekly">Weekly</ToggleGroupItem>
+      <ToggleGroupItem value="monthly">Monthly</ToggleGroupItem>
+    </ToggleGroup>
+  );
+
+  return (
+    <>
+      <div className="qb-moneyline">
+        {cash?.trough ? (
+          <Figure
+            label="Lowest your cash gets"
+            size="lg"
+            metric="risk"
+            tone={cash.trough.amount < 0 ? "warn" : undefined}
+            value={usd(cash.trough.amount)}
+            sub={
+              troughIsLastWeek && cash.low != null && cash.high != null
+                ? // The suppressed sibling carried the band; it moves here
+                  // rather than disappearing with the card.
+                  `week ${cash.trough.week}, the last · range ${compact(cash.low)} – ${compact(cash.high)}`
+                : `week ${cash.trough.week} of ${weeks.length || 13}`
+            }
+          />
+        ) : null}
+        {/* Suppressed when the low point *is* the final week — otherwise the
+            strip prints the same figure twice under two labels, which reads as
+            a bug rather than as the two facts coinciding. */}
+        {weeks.length && !troughIsLastWeek ? (
+          <Figure
+            label="Cash in three months"
+            size="lg"
+            metric="cash"
+            value={usd(weeks[weeks.length - 1].balance)}
+            sub={cash?.low != null && cash?.high != null
+              ? `range ${compact(cash.low)} – ${compact(cash.high)}`
+              : undefined}
+          />
+        ) : null}
+        {llmYear ? (
+          <Figure
+            label={`Expected income, ${data.year}`}
+            size="lg"
+            metric="booked"
+            value={usd(llmYear.point)}
+            sub={llmYear.low != null && llmYear.high != null
+              ? `range ${compact(llmYear.low)} – ${compact(llmYear.high)}`
+              : undefined}
+          />
+        ) : null}
+        {pyYear ? (
+          <Figure
+            label="If the year keeps this pace"
+            size="lg"
+            metric="income"
+            value={usd(pyYear.point)}
+            sub={`${pyYear.months_booked} months in · give or take ${pyYear.expected_error_pct}%`}
+          />
+        ) : null}
+      </div>
+
+      <Panel
+        title={
+          grain === "weekly"
+            ? "Your cash over the next three months"
+            : `Monthly revenue outlook, ${data.year}`
+        }
+        action={grainToggle}
+        meta={
+          grain === "weekly" && cash?.trough ? (
+            <span className="qb-subhead">
+              Lowest cash balance:{" "}
+              <strong>
+                {usd(cash.trough.amount)} in week {cash.trough.week}
+              </strong>
+            </span>
+          ) : grain === "monthly" && monthly?.as_of ? (
+            <span className="qb-subhead">as of {monthly.as_of}</span>
+          ) : undefined
+        }
+        hint={
+          grain === "weekly"
+            ? "Dark green is money from invoices you have already sent — that is close to certain. Orange is money from work you have not billed yet, so it depends on the months ahead going normally. Bars below the line are money going out."
+            : "Coral is the model forecast. Teal is what booked. The trail-3 line is the average of the last three closed months."
+        }
+      >
+        <div key={grain} className="qb-chart-swap">
+          {grain === "monthly" ? (
+            <MonthlyRevenueChart year={data.year} monthly={monthly} />
+          ) : weeks.length ? (
+            <>
+              <div className="qb-legend">
+                <span>
+                  <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                  Coming in — already invoiced
+                </span>
+                <span>
+                  <span className="qb-swatch" style={{ background: "var(--zo-coral)" }} aria-hidden />
+                  Coming in — not billed yet
+                </span>
+                <span>
+                  <span className="qb-swatch" style={{ background: "#8095b3" }} aria-hidden />
+                  Going out
+                </span>
+                <span>
+                  <span className="qb-swatch qb-swatch-line" aria-hidden />
+                  Cash balance
+                </span>
+              </div>
+              <ResponsiveContainer width="100%" height={330}>
+                <ComposedChart data={weeks} margin={{ top: 8, right: 8, bottom: 28, left: -8 }}>
+                  <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+                  {/* Below zero the company cannot pay its bills. Drawn behind the
+                      bars at low opacity: outflow bars legitimately sit down here
+                      too, and the band must not read as "these bars are bad". */}
+                  <ReferenceArea
+                    y1={dangerFloor}
+                    y2={0}
+                    fill="var(--zo-danger)"
+                    fillOpacity={0.05}
+                    ifOverflow="extendDomain"
+                  />
+                  <XAxis
+                    dataKey="label"
+                    {...AXIS}
+                    interval={0}
+                    height={44}
+                    tick={<WeekTick />}
+                  />
+                  <YAxis {...AXIS} width={62} tickFormatter={(v: number) => compact(v)} />
+                  <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+                  <ReferenceLine y={0} stroke="var(--zo-text)" strokeWidth={1.4} />
+                  <Bar dataKey="committed" stackId="in" name="Already invoiced" fill="var(--zo-teal)" maxBarSize={30} />
+                  <Bar dataKey="forecast" stackId="in" name="Not billed yet" fill="var(--zo-coral)" radius={[4, 4, 0, 0]} maxBarSize={30} />
+                  {/* [4,4,0,0], not [0,0,4,4]. Recharts applies the radius array as though
+                      every bar grew upward, so on a downward bar it rounds the $0 end and
+                      squares off the far end — the opposite of what a bar hanging from the
+                      axis should look like. */}
+                  <Bar dataKey="outflow" name="Going out" fill="#8095b3" radius={[4, 4, 0, 0]} maxBarSize={30} />
+                  <Line
+                    dataKey="balance"
+                    name="Cash balance"
+                    stroke="var(--zo-text)"
+                    strokeWidth={2.2}
+                    dot={{ r: 3.5, fill: "var(--zo-card-bg)", stroke: "var(--zo-text)", strokeWidth: 2 }}
+                    activeDot={{ r: 5 }}
+                  />
+                  {/* The one week worth naming on the chart itself. */}
+                  {cash?.trough ? (
+                    <ReferenceDot
+                      x={weeks[Math.min(cash.trough.week, weeks.length) - 1]?.label}
+                      y={cash.trough.amount}
+                      r={5}
+                      fill="var(--zo-primary)"
+                      stroke="var(--zo-card-bg)"
+                      strokeWidth={2}
+                      isFront
+                    />
+                  ) : null}
+                </ComposedChart>
+              </ResponsiveContainer>
+              {plain?.cash ? (
+                <p className="qb-takeaway">
+                  <span className="qb-takeaway-mark" aria-hidden>
+                    <TrendingUp size={15} />
+                  </span>
+                  <span>{plain.cash}</span>
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <Empty>No cash forecast in the latest run.</Empty>
+          )}
+        </div>
+      </Panel>
+
+      <Panel
+        title={`Income for all of ${data.year}`}
+        meta={pyYear ? `${usd(pyYear.ytd)} earned so far` : undefined}
+        hint="Two different ways of estimating the same thing. When they agree, you can trust the figure. When they drift apart, treat it as a range."
+      >
+        {llmYear || pyYear ? (
+          <>
+            <div className="qb-two">
+              {llmYear ? (
+                <Figure
+                  label="Our best estimate"
+                  metric="booked"
+                  value={usd(llmYear.point)}
+                  sub={llmYear.confidence ? CONFIDENCE_WORDS[llmYear.confidence] : undefined}
+                />
+              ) : null}
+              {pyYear ? (
+                <Figure
+                  label="If the rest of the year matches"
+                  metric="income"
+                  value={usd(pyYear.point)}
+                  sub={`based on your first ${pyYear.months_booked} months`}
+                />
+              ) : null}
+            </div>
+            {divergence != null ? (
+              <Note>
+                {divergence >= _DIVERGENCE_PCT ? (
+                  <>
+                    <strong>These two answers are {Math.round(divergence)}% apart.</strong>{" "}
+                    Treat the year as a range rather than a single figure for now.
+                  </>
+                ) : (
+                  <>Both ways of working this out give a similar answer.</>
+                )}
+              </Note>
+            ) : null}
+            {plain?.year ? <Note>{plain.year}</Note> : null}
+          </>
+        ) : (
+          <Empty>No revenue forecast in the latest run.</Empty>
+        )}
+      </Panel>
+
+      {plain?.watch ? (
+        <Panel title="What to keep an eye on">
+          <p className="qb-watch">{plain.watch}</p>
+        </Panel>
+      ) : null}
+      {f?.llm_stale ? (
+        <Note>
+          These estimates were last updated {f.llm_as_of ?? "earlier"}. Last night&rsquo;s
+          update did not run, so they are older than the rest of this page.
+        </Note>
+      ) : null}
+      {/* `month_omitted_reason` is deliberately not rendered. It explains to a
+          developer why there is no monthly figure; on the tab it reads as an
+          apology for something the reader never asked for. The reason stays in
+          the API payload so nobody adds a monthly forecast back without meeting
+          it first. */}
+    </>
+  );
+}
+
 export function QuickBooksPanels() {
   const currentYear = new Date().getFullYear();
   const years = [currentYear, currentYear - 1, currentYear - 2];
@@ -358,18 +792,20 @@ export function QuickBooksPanels() {
   const [view, setView] = useState<string>("today");
   const [data, setData] = useState<QuickBooksOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (y: number) => {
+  const load = useCallback(async (y: number, opts?: { soft?: boolean }) => {
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
     setLoading(true);
     setError(null);
     // Drop the previous year immediately so stale totals cannot linger
-    // while the overview request is in flight.
-    setData(null);
+    // while the overview request is in flight — unless this is a soft
+    // reload after sync, where keeping the old panel is less jarring.
+    if (!opts?.soft) setData(null);
     try {
       const res = await fetch(
         `${API_BASE}/api/v1/financials/quickbooks/overview?year=${y}`,
@@ -386,6 +822,26 @@ export function QuickBooksPanels() {
       if (!ac.signal.aborted) setLoading(false);
     }
   }, []);
+
+  const refresh = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/financials/quickbooks/refresh`, {
+        method: "POST",
+      });
+      if (res.status === 409) {
+        throw new Error("A sync is already running — try again in a minute.");
+      }
+      if (!res.ok) throw new Error(`Sync returned ${res.status}`);
+      await load(year, { soft: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not refresh QuickBooks");
+    } finally {
+      setSyncing(false);
+    }
+  }, [load, syncing, year]);
 
   useEffect(() => {
     void load(year);
@@ -407,25 +863,27 @@ export function QuickBooksPanels() {
   const managers = am?.managers.filter((m) => !m.is_overhead && m.income > 0) ?? [];
   const managerMax = Math.max(...managers.map((m) => m.income), 1);
   const bookedRows = trend ? trimTrailing(trend.months, (m) => m.amount > 0) : [];
-  const syncFailed = !loading && data?.sync_status === "failed";
+  const busy = loading || syncing;
+  const syncFailed = !busy && data?.sync_status === "failed";
   let syncLabel = "Synced";
-  if (loading) syncLabel = `Reading ${year}…`;
+  if (syncing) syncLabel = "Syncing ledger…";
+  else if (loading) syncLabel = `Reading ${year}…`;
   else if (syncFailed) syncLabel = "Sync failed";
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="qb-ledger" aria-busy={loading || undefined}>
-        <div className="qb-toolbar">
+      <div className="qb-ledger" aria-busy={busy || undefined} data-fin="panel">
+        <div className="qb-toolbar" data-fin="chrome">
           <p className="qb-sync" data-failed={syncFailed ? "true" : undefined}>
-            <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
+            <span className="qb-sync-dot" data-busy={busy ? "true" : undefined} aria-hidden />
             {syncLabel}
-            {!loading && data?.synced_at ? (
+            {!busy && data?.synced_at ? (
               <span className="qb-sync-meta">{new Date(data.synced_at).toLocaleString()}</span>
             ) : null}
-            {!loading && data?.company ? (
+            {!busy && data?.company ? (
               <span className="qb-sync-meta">{data.company.legal_name}</span>
             ) : null}
-            {!loading && data?.activity ? (
+            {!busy && data?.activity ? (
               <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
             ) : null}
           </p>
@@ -443,13 +901,28 @@ export function QuickBooksPanels() {
                 <span className="qb-ai-trigger-count">{insights.highImpact}</span>
               ) : null}
             </button>
+            <button
+              type="button"
+              className="qb-retry"
+              onClick={() => void refresh()}
+              disabled={busy}
+              data-active={syncing ? "true" : undefined}
+            >
+              <RefreshCw
+                className={syncing ? "animate-spin" : undefined}
+                size={13}
+                strokeWidth={2.25}
+                aria-hidden
+              />
+              Refresh
+            </button>
             <ToggleGroup
               type="single"
               value={String(year)}
               onValueChange={(v) => v && setYear(Number(v))}
               className="qb-years"
               aria-label="Fiscal year"
-              aria-busy={loading || undefined}
+              aria-busy={busy || undefined}
             >
               {years.map((y) => (
                 <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
@@ -461,24 +934,40 @@ export function QuickBooksPanels() {
         </div>
 
         <Tabs value={view} onValueChange={setView} className="qb-tabs">
-          <TabsList className="qb-tablist">
-            {VIEWS.map((v) => (
-              <TabsTrigger key={v.id} value={v.id}>
-                {v.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <div className="qb-tabs-head">
+            <TabsList className="qb-tablist">
+              {VIEWS.map((v) => (
+                <TabsTrigger key={v.id} value={v.id}>
+                  {v.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
 
-          {loading ? <LedgerSkeleton /> : null}
-          {!loading && (error || !data) ? (
+          {loading && !data ? <LedgerSkeleton /> : null}
+          {!loading && error ? (
             <div className="qb-error">
-              <p>{error ?? "No QuickBooks data"}</p>
+              <p>{error}</p>
+              <button
+                type="button"
+                onClick={() => void (data ? refresh() : load(year))}
+                className="qb-retry"
+                disabled={busy}
+              >
+                <RefreshCw size={13} strokeWidth={2.25} aria-hidden />
+                {data ? "Retry sync" : "Try again"}
+              </button>
+            </div>
+          ) : null}
+          {!loading && !error && !data ? (
+            <div className="qb-error">
+              <p>No QuickBooks data</p>
               <button type="button" onClick={() => void load(year)} className="qb-retry">
                 <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
               </button>
             </div>
           ) : null}
-          {!loading && data ? (
+          {data ? (
             <>
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
@@ -856,6 +1345,11 @@ export function QuickBooksPanels() {
                 )}
               </Panel>
             </div>
+          </TabsContent>
+
+          {/* ── forecast ── */}
+          <TabsContent value="forecast" className="qb-view">
+            <ForecastView data={data} />
           </TabsContent>
             </>
           ) : null}

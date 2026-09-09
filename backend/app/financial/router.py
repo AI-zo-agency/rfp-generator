@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.iworker_period_insights import build_period_insights, parse_entry_date
+from app.financial.iworker_teamwork_reconcile import reconcile_iworker_vs_teamwork
 from app.financial.iworker_snapshots import (
     list_period_history,
     rows_for_current_periods,
@@ -51,6 +52,13 @@ from app.financial.qb_repository import list_customers
 from app.financial.qb_panels_from_db import list_invoices
 from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
+from app.financial.qb_forecast_llm import SOURCE as QB_FORECAST_SOURCE
+from app.financial.qb_forecast import forecast as build_forecast_panel
+from app.financial.qb_forecast_monthly import (
+    SOURCE as QB_FORECAST_MONTHLY_SOURCE,
+    run_backfill as run_monthly_forecast_backfill,
+    scope_key as monthly_forecast_scope,
+)
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -459,6 +467,27 @@ def _build_audit_queue(
         granularity=granularity,
         period_start=period_start,
     )
+    try:
+        selected = insights.get("selected") or {}
+        roster: list[str] = []
+        seen: set[str] = set()
+        for entry in timesheets:
+            name = str(entry.get("contractor") or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            roster.append(name)
+        recon = reconcile_iworker_vs_teamwork(
+            timesheets,
+            start=date.fromisoformat(str(selected["start"])),
+            end=date.fromisoformat(str(selected["end"])),
+            roster=roster,
+        )
+        if recon.get("status") == "ok":
+            insights["signals"] = list(insights.get("signals") or []) + list(recon.get("signals") or [])
+    except Exception:
+        logger.exception("operation=audit_queue teamwork_reconciliation=failed")
     items = _build_audit_items_from_timesheets(in_period)
     seen_ids = {item["id"] for item in items}
     for signal in insights.get("signals", []):
@@ -762,6 +791,49 @@ def get_iworker_timesheets(
         contractor=contractor_filter,
     )
     unparsed = period_insights.pop("unparsed_date_count", 0)
+
+    roster = [str(t.get("name") or "").strip() for t in tabs_meta if str(t.get("name") or "").strip()]
+    selected = period_insights.get("selected") or {}
+    teamwork_reconciliation: dict[str, Any] = {
+        "status": "unavailable",
+        "detail": "Teamwork reconciliation was not run.",
+        "period_start": str(selected.get("start") or ""),
+        "period_end": str(selected.get("end") or ""),
+        "tolerance_hours": 0.5,
+        "rows": [],
+        "summary": {
+            "matched": 0,
+            "mismatched": 0,
+            "iworker_only": 0,
+            "no_teamwork_match": 0,
+        },
+        "signals": [],
+    }
+    try:
+        recon_start = date.fromisoformat(str(selected["start"]))
+        recon_end = date.fromisoformat(str(selected["end"]))
+        teamwork_reconciliation = reconcile_iworker_vs_teamwork(
+            filtered,
+            start=recon_start,
+            end=recon_end,
+            roster=roster,
+            contractor_filter=contractor_filter,
+        )
+        if teamwork_reconciliation.get("status") == "ok":
+            period_insights["signals"] = list(period_insights.get("signals") or []) + list(
+                teamwork_reconciliation.get("signals") or []
+            )
+    except Exception:
+        logger.exception(
+            "operation=iworker_timesheets teamwork_reconciliation=failed contractor=%s",
+            contractor_filter or "all",
+        )
+        teamwork_reconciliation = {
+            **teamwork_reconciliation,
+            "status": "error",
+            "detail": "Failed to reconcile Teamwork hours for this period.",
+        }
+    period_insights["teamwork_reconciliation"] = teamwork_reconciliation
 
     grain = "month" if granularity == "month" else "week"
     period_history: list[dict] = []
@@ -1295,6 +1367,26 @@ async def link_client_map(payload: ClientMapLinkBody):
     return result
 
 
+@router.post("/client-map/sync")
+async def client_map_sync(request: Request):
+    """Nightly: seed tags from sheet, then exact/tag/AI link. Cron-secret only."""
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning("operation=client_map_sync status=unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    logger.info("operation=client_map_sync status=started")
+    imported = import_tags_sheet()
+    linked = await run_client_map_link(include_ai=True)
+    result = {"import": imported, "link": linked}
+    logger.info(
+        "operation=client_map_sync status=completed inserted=%s confirmed=%s suggested=%s",
+        imported.get("inserted"),
+        linked.get("confirmed"),
+        linked.get("suggested"),
+    )
+    return result
+
+
 @router.get("/agency/overview")
 def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
     payload = build_agency_overview(year=year)
@@ -1599,6 +1691,8 @@ _QB_PANEL_KEYS = (
     "client_profitability",
     "monthly_trend",
     "pl_summary",
+    "cost_completeness",
+    "forecast",
     "unattached_cost",
     "activity",
     "cash_collections",
@@ -1628,6 +1722,23 @@ def _cron_authorized(secret: str | None) -> bool:
     return compare_digest(secret, expected)
 
 
+def _run_quickbooks_sync(mode: str, *, operation: str) -> dict[str, str]:
+    """Shared entry for cron and the ledger Refresh button."""
+    logger.info("operation=%s mode=%s status=started", operation, mode)
+    try:
+        result = run_sync(mode)
+    except LeaseHeld as exc:
+        logger.warning("operation=%s mode=%s status=lease_held", operation, mode)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "operation=%s mode=%s status=completed run_id=%s",
+        operation,
+        result.get("mode", mode),
+        result.get("run_id"),
+    )
+    return result
+
+
 @router.post("/quickbooks/sync")
 def quickbooks_sync(
     request: Request,
@@ -1640,20 +1751,45 @@ def quickbooks_sync(
             mode,
         )
         raise HTTPException(status_code=401, detail="Invalid cron secret")
+    return _run_quickbooks_sync(mode, operation="quickbooks_sync")
 
-    logger.info("operation=quickbooks_sync mode=%s status=started", mode)
-    try:
-        result = run_sync(mode)
-    except LeaseHeld as exc:
+
+@router.post("/quickbooks/refresh")
+def quickbooks_refresh():
+    """Ledger UI Refresh — same `run_sync(auto)` path the nightly cron uses.
+
+    Open like ai-insights/regenerate (internal financial dashboard). Cron
+    continues to hit `/quickbooks/sync` with the secret.
+    """
+    return _run_quickbooks_sync("auto", operation="quickbooks_refresh")
+
+
+@router.post("/quickbooks/forecast/monthly/backfill")
+def quickbooks_monthly_forecast_backfill(
+    request: Request,
+    year: int = Query(..., ge=2000, le=2100),
+):
+    """One-shot past-year monthly revenue scorecard. Cron-secret only."""
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
         logger.warning(
-            "operation=quickbooks_sync mode=%s status=lease_held",
-            mode,
+            "operation=quickbooks_monthly_forecast_backfill year=%s status=unauthorized",
+            year,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    realm_id = settings.quickbooks_realm_id
     logger.info(
-        "operation=quickbooks_sync mode=%s status=completed run_id=%s",
-        result.get("mode", mode),
-        result.get("run_id"),
+        "operation=quickbooks_monthly_forecast_backfill realm_id=%s year=%s status=started",
+        realm_id,
+        year,
+    )
+    result = run_monthly_forecast_backfill(realm_id, year)
+    logger.info(
+        "operation=quickbooks_monthly_forecast_backfill realm_id=%s year=%s "
+        "status=%s months=%s",
+        realm_id,
+        year,
+        result.get("status"),
+        result.get("months"),
     )
     return result
 
@@ -1749,7 +1885,131 @@ def quickbooks_overview(
             refresh,
             since is not None,
         )
+    result["forecast"] = _merge_llm_forecast(
+        _forecast_panel_or_compute(result, realm_id),
+        realm_id,
+        year=year,
+    )
     return result
+
+
+def _forecast_panel_or_compute(
+    overview: dict[str, Any], realm_id: str
+) -> dict[str, Any] | None:
+    """Use the cached forecast panel, or rebuild it from monthly_trend.
+
+    Caches written before the forecast panel shipped have no `forecast` key.
+    Recomputing from the trend already on the overview avoids a full Intuit
+    sync just to unblank the tab; the next nightly write stores it again.
+    """
+    panel = overview.get("forecast")
+    if isinstance(panel, dict):
+        return panel
+    trend = overview.get("monthly_trend")
+    year = overview.get("year")
+    if not isinstance(trend, dict) or not isinstance(year, int):
+        return None
+    as_of_raw = overview.get("as_of")
+    try:
+        as_of = (
+            date.fromisoformat(str(as_of_raw)[:10])
+            if as_of_raw
+            else date.today()
+        )
+    except ValueError:
+        as_of = date.today()
+    try:
+        rebuilt = build_forecast_panel(
+            realm_id, year, as_of=as_of, monthly_trend=trend
+        )
+    except Exception as exc:  # noqa: BLE001 — blank tab is worse than a soft miss
+        logger.warning(
+            "operation=quickbooks_overview status=forecast_recompute_failed "
+            "realm_id=%s year=%s error=%s",
+            realm_id,
+            year,
+            str(exc)[:200],
+        )
+        return None
+    logger.info(
+        "operation=quickbooks_overview status=forecast_recomputed "
+        "realm_id=%s year=%s",
+        realm_id,
+        year,
+    )
+    return rebuilt
+
+
+def _monthly_forecast_payload(realm_id: str, year: int) -> dict[str, Any] | None:
+    try:
+        row = get_latest_insight(
+            QB_FORECAST_MONTHLY_SOURCE, monthly_forecast_scope(realm_id, year)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "operation=quickbooks_overview status=monthly_forecast_lookup_failed "
+            "realm_id=%s year=%s error=%s",
+            realm_id,
+            year,
+            str(exc)[:200],
+        )
+        return None
+    if not row:
+        return None
+    payload = row.get("payload") or {}
+    return {
+        **payload,
+        "as_of": row.get("as_of"),
+        "model": row.get("model"),
+    }
+
+
+def _merge_llm_forecast(
+    panel: dict[str, Any] | None,
+    realm_id: str,
+    *,
+    year: int,
+) -> dict[str, Any] | None:
+    """Attach weekly LLM + monthly revenue forecasts to the Python panel.
+
+    Past years never receive live `cash_13w` — that chart is forward-looking
+    from today and must not be relabeled under 2024/2025.
+    """
+    if panel is None:
+        return None
+    monthly = _monthly_forecast_payload(realm_id, year)
+    current_year = datetime.now().year
+    past_year = year < current_year
+
+    llm_payload: dict[str, Any] | None = None
+    llm_as_of = None
+    llm_model = None
+    llm_stale = False
+    if not past_year:
+        try:
+            row = get_latest_insight(QB_FORECAST_SOURCE, realm_id)
+        except Exception as exc:  # noqa: BLE001 — a missing table must not blank the tab
+            logger.warning(
+                "operation=quickbooks_overview status=forecast_lookup_failed "
+                "realm_id=%s error=%s",
+                realm_id,
+                str(exc)[:200],
+            )
+            row = None
+        if row:
+            llm_payload = row.get("payload") or None
+            llm_as_of = row.get("as_of")
+            llm_model = row.get("model")
+            llm_stale = bool(llm_as_of) and llm_as_of != _today_iso()
+
+    return {
+        **panel,
+        "llm": llm_payload,
+        "llm_as_of": llm_as_of,
+        "llm_model": llm_model,
+        "llm_stale": llm_stale,
+        "monthly": monthly,
+    }
 
 
 def _today_iso() -> str:
