@@ -122,7 +122,6 @@ _BUDGET_TOPIC_RE = re.compile(
     r"\b("
     r"budget|pricing|price proposal|fee schedule|cost proposal|"
     r"cost of (?:the )?base|cost section|fee table|"
-    r"compensation|"
     r"commission|pass-?through|media spend|line item|tier|lump sum|hourly rate|"
     r"investment|investments|invested|invest|"
     r"agency revenue|project management|pm\b"
@@ -171,15 +170,33 @@ _SAFE_BUDGET_COMPLETE_RE = re.compile(
 
 
 def section_is_budget_related(section: ProposalSection) -> bool:
-    return budget_section_score(section.title or "") > 0
+    """True for real fee / Cost Proposal tabs — not insurance 'compensation' forms."""
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+
+    title = section.title or ""
+    score = budget_section_score(title)
+    if score <= 0:
+        return False
+    # Weak incidental hits (score 1–3) without a pricing title are not fee tabs.
+    if score < 4 and not is_pricing_outline_title(title):
+        return False
+    return True
 
 
 def user_message_targets_budget(text: str) -> bool:
+    """Legacy helper for summary/explain helpers — not the Improve playbook gate."""
     return bool(_BUDGET_TOPIC_RE.search(text or ""))
 
 
-def should_apply_budget_playbook(section: ProposalSection, user_message: str) -> bool:
-    return section_is_budget_related(section) or user_message_targets_budget(user_message)
+def should_apply_budget_playbook(section: ProposalSection, user_message: str = "") -> bool:
+    """Fee ledger collapse / sync only when the OPEN tab is a real Cost/Pricing section.
+
+    Do NOT keyword-scan the chat message. The section planner / Improve pin owns
+    understanding — if the user wants fees while parked on Workers' Comp, remap to
+    the fee tab instead of running Cost Proposal collapse on the wrong form.
+    """
+    del user_message
+    return section_is_budget_related(section)
 
 
 def user_asks_budget_summary_reconcile(text: str) -> bool:

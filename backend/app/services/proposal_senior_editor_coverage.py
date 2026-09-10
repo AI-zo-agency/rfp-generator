@@ -133,6 +133,20 @@ async def apply_senior_editor_section_coverage_audit(
     if specs:
         draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
         logs.extend(stub_logs)
+        # Budget phase may already be done — fill any pricing stubs minted here
+        # so Rate/Fee Schedule is not left as MANUAL FILL after Budget went green.
+        try:
+            from app.services.proposal_budget_content import (
+                fill_hollow_pricing_stubs_from_canon_budget,
+            )
+
+            budget = research.budget if research else None
+            draft, fill_logs = fill_hollow_pricing_stubs_from_canon_budget(
+                draft, budget, rfp_text=rfp_text or ""
+            )
+            logs.extend(fill_logs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Hollow pricing stub fill skipped: %s", exc)
 
     mapped = list(research.rfp_sections or []) if research else []
     seen_ticket_ids: set[str] = set()

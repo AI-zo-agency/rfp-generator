@@ -1199,8 +1199,10 @@ async def improve_section_endpoint(
                 apply_chat_preview_quality_guards,
             )
 
+            # Improve pin: scrub only the open tab — never rewrite other forms.
+            pin_ids = {section_id} if body.improve_section_pinned else None
             draft = apply_chat_preview_quality_guards(
-                draft, label="chat-preview"
+                draft, label="chat-preview", section_ids=pin_ids
             )
             section = next(
                 (s for s in draft.sections if s.id == section_id),

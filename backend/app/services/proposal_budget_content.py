@@ -532,6 +532,16 @@ _INCIDENTAL_BUDGET_LIST_RE = re.compile(
 
 def budget_section_score(title: str) -> int:
     t = title.lower()
+    # Workers' Comp / WC insurance certificates are compliance forms — NOT fee tabs.
+    # "compensation" alone used to score them as budget and chat Improve collapsed
+    # PROPOSAL RATE/FEE SCHEDULE into WORKER'S COMPENSATION CERTIFICATE.
+    if re.search(
+        r"\bworkers?'?\s*compensation\b|\bworker's\s*compensation\b|"
+        r"\bwc\b.{0,24}\b(certificate|insurance|affidavit|cert)\b|"
+        r"\b(certificate|insurance|affidavit)\b.{0,24}\bworkers?'?\s*comp",
+        t,
+    ):
+        return 0
     # Sections that merely list "budgets" among SOW/compliance topics are NOT
     # the Cost Proposal tab (e.g. "… Timelines, Budgets, Reporting …").
     if re.search(
@@ -556,6 +566,7 @@ def budget_section_score(title: str) -> int:
         score += 2
     if "cost" in t:
         score += 1
+    # "compensation schedule" / fee compensation — not workers' comp (handled above).
     if "compensation" in t:
         score += 2
     if _BUDGET_TITLE_PATTERN.search(title):
@@ -605,7 +616,39 @@ def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
     markdown (or trigger restore/reshape). Prefer a dedicated Budget section when
     both exist; never score a filled official form as the sole write target when a
     narrative budget sibling is present.
+
+    Hollow Strict-RFP pricing stubs (e.g. PROPOSAL RATE/FEE SCHEDULE still showing
+    "Draft this RFP-required section") beat Zo "Budget & Pricing" so Phase 3.5
+    writes the fee table into the buyer's demanded tab — not a sibling that leaves
+    the RFP fee schedule empty after Budget goes green.
     """
+    from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+
+    hollow_rfp_pricing: list[tuple[int, int]] = []
+    for i, section in enumerate(sections):
+        title = section.title or ""
+        score = budget_section_score(title)
+        # Only true pricing / fee tabs — never insurance "compensation" certificates.
+        pricingish = bool(
+            _DEDICATED_BUDGET_TITLE_RE.search(title)
+            or is_pricing_outline_title(title)
+            or score >= 8
+        )
+        if not pricingish or score <= 0:
+            continue
+        if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+            section.content or ""
+        ):
+            continue
+        if section_is_rfp_draft_stub(section):
+            # Boost above Zo Budget & Pricing (score 15) so Budget phase fills
+            # the buyer's Rate/Fee Schedule stub instead of a parallel Zo tab.
+            hollow_rfp_pricing.append((max(score, 8) + 100, i))
+    if hollow_rfp_pricing:
+        hollow_rfp_pricing.sort(reverse=True)
+        return hollow_rfp_pricing[0][1]
+
     best_idx: int | None = None
     best_score = 0
     filled_form_idx: int | None = None
@@ -3572,6 +3615,87 @@ def apply_rfp_required_budget_instrument(
     if reshaped is None:
         return draft, budget, False
     return reshaped, budget, True
+
+
+
+def fill_hollow_pricing_stubs_from_canon_budget(
+    draft: ProposalDraft,
+    budget: ProposalBudget | None,
+    *,
+    rfp_text: str = "",
+) -> tuple[ProposalDraft, list[str]]:
+    """When Senior Editor mints a Rate/Fee stub AFTER Budget phase, fill it now.
+
+    Staging logs: Budget goes green, then coverage audit adds
+    ``PROPOSAL RATE/FEE SCHEDULE`` as MANUAL FILL — so Budget never had a chance
+    to write that tab. Copy the best already-filled budgetish body, or render
+    from the canonical ProposalBudget.
+    """
+    logs: list[str] = []
+    if budget is None and not draft.sections:
+        return draft, logs
+
+    from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+    from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+    source = ""
+    best_score = -1
+    for section in draft.sections:
+        title = section.title or ""
+        if budget_section_score(title) <= 0 and not is_pricing_outline_title(title):
+            continue
+        if section_is_rfp_draft_stub(section):
+            continue
+        body = (section.content or "").strip()
+        if len(body) < 200 or not re.search(r"\$\s*[\d,]", body):
+            continue
+        score = budget_section_score(title)
+        if score > best_score:
+            best_score = score
+            source = body
+
+    if not source and budget is not None:
+        source = render_budget_markdown(
+            budget,
+            rfp_text=rfp_text or "",
+            approach_digest=approach_digest_from_draft_sections(draft.sections),
+        ).strip()
+    if not source:
+        return draft, logs
+
+    sections = list(draft.sections)
+    changed = False
+    for i, section in enumerate(sections):
+        title = section.title or ""
+        pricingish = (
+            budget_section_score(title) >= 8
+            or is_pricing_outline_title(title)
+            or bool(_DEDICATED_BUDGET_TITLE_RE.search(title))
+        )
+        if not pricingish or budget_section_score(title) <= 0:
+            continue
+        if not section_is_rfp_draft_stub(section):
+            continue
+        sections[i] = section.model_copy(
+            update={"content": source, "status": "generated"}
+        )
+        changed = True
+        logs.append(
+            f"Filled hollow pricing stub «{title}» from canonical budget "
+            "(stub was added after Budget phase)"
+        )
+    if not changed:
+        return draft, logs
+    from datetime import datetime, timezone
+
+    updated = draft.model_copy(
+        update={
+            "sections": sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return updated, logs
 
 
 async def incorporate_budget_into_draft(

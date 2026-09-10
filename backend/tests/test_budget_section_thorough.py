@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from app.models.proposal import ProposalDraft, ProposalSection
+from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
 from app.services.proposal_budget_content import (
     budget_section_score,
+    fill_hollow_pricing_stubs_from_canon_budget,
     find_budget_section_index,
 )
 from app.services.proposal_ralph import apply_ralph_to_draft
@@ -45,6 +46,19 @@ class BudgetSectionTargetingTests(unittest.TestCase):
             budget_section_score("Budgets, Timelines, and Reporting Requirements"),
             2,
         )
+
+    def test_hollow_rfp_fee_schedule_stub_beats_zo_budget_pricing(self) -> None:
+        """Strict RFP Rate/Fee Schedule stub must receive Budget phase write."""
+        stub_body = (
+            "## PROPOSAL RATE/FEE SCHEDULE\n\n"
+            "[MANUAL FILL: Draft this RFP-required section — PROPOSAL RATE/FEE SCHEDULE]\n\n"
+            "RFP instructions: Required in this RFP's submission sequence."
+        )
+        sections = [
+            _sec("bp", "Budget & Pricing", "Zo template fee shell"),
+            _sec("fee", "PROPOSAL RATE/FEE SCHEDULE", stub_body),
+        ]
+        self.assertEqual(find_budget_section_index(sections), 1)
 
 
 class BudgetStaticSkipTests(unittest.TestCase):
@@ -89,3 +103,60 @@ class RalphBudgetExemptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HollowPricingStubFillTests(unittest.TestCase):
+    def test_senior_editor_late_fee_schedule_stub_gets_canon_budget(self) -> None:
+        """Reproduce staging: Budget green, then Rate/Fee stub minted empty."""
+        bp = _sec(
+            "bp",
+            "Budget & Pricing",
+            "## Proposed Investment\n\n"
+            "| Phase | Fee |\n|---|---|\n"
+            "| Discovery | $12,000 |\n| Build | $40,000 |\n\n"
+            "Total proposed investment: $52,000. " * 3,
+        )
+        stub = _sec(
+            "fee",
+            "PROPOSAL RATE/FEE SCHEDULE",
+            "## PROPOSAL RATE/FEE SCHEDULE\n\n"
+            "[MANUAL FILL: Draft this RFP-required section — PROPOSAL RATE/FEE SCHEDULE]\n\n"
+            "RFP instructions: Required.",
+        )
+        draft = ProposalDraft(rfpId="r1", sections=[bp, stub], updatedAt="t")
+        budget = ProposalBudget(
+            rfpId="r1", updatedAt="t", budgetFormat="phased", lumpSumTotal=52000
+        )
+        updated, logs = fill_hollow_pricing_stubs_from_canon_budget(draft, budget)
+        fee = next(s for s in updated.sections if s.id == "fee")
+        self.assertTrue(logs)
+        self.assertNotIn("Draft this RFP-required section", fee.content or "")
+        self.assertIn("$", fee.content or "")
+
+
+class WorkersCompNotBudgetTests(unittest.TestCase):
+    def test_workers_comp_certificate_score_zero(self) -> None:
+        self.assertEqual(budget_section_score("WORKER'S COMPENSATION CERTIFICATE"), 0)
+        self.assertEqual(budget_section_score("Workers Compensation Insurance"), 0)
+
+    def test_improve_workers_comp_does_not_collapse_fee_schedule(self) -> None:
+        from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+        from app.services.proposal_budget_playbook import should_apply_budget_playbook
+
+        wc = _sec(
+            "wc",
+            "WORKER'S COMPENSATION CERTIFICATE",
+            "[MANUAL FILL: Draft this RFP-required section — WORKER'S COMPENSATION CERTIFICATE]",
+        )
+        fee = _sec(
+            "fee",
+            "PROPOSAL RATE/FEE SCHEDULE",
+            "## Fees\n\n| Phase | Amount |\n|---|---|\n| A | $10,000 |\n" * 3,
+        )
+        self.assertFalse(
+            should_apply_budget_playbook(wc, "Improve this section for the RFP.")
+        )
+        collapsed, logs = collapse_duplicate_cost_proposal_tabs([wc, fee])
+        self.assertFalse(logs)
+        self.assertEqual(len(collapsed), 2)
+        self.assertEqual(find_budget_section_index([wc, fee]), 1)

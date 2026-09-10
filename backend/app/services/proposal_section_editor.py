@@ -3099,10 +3099,11 @@ Rules:
    provided, ALWAYS scan it before planning. If THIS edit would make any shared agency fact
    disagree with another tab (legal name, address, email, phone, primary/authorized contact,
    signer, team size, named personnel, certs, insurance, registration, budget totals/ceilings,
-   phase fees, case-study claims, coverage statuses, etc.), you MUST emit siblingEdits that
-   update those other tabs in the same turn. Empty siblingEdits only when no other tab states
-   a conflicting or now-stale value. This applies to fill, rewrite, voice, scrub, and replace
-   asks alike — never optimize the open tab alone.
+   phase fees, case-study claims, coverage statuses, etc.), emit siblingEdits for those tabs.
+   Empty siblingEdits when nothing conflicts. NEVER invent siblingEdits for unrelated forms
+   (e.g. Environmental Purchasing) when the user only asked to improve THIS open tab and no
+   shared fact changed. Improve-pin / open-tab-only asks: prefer siblingEdits=[] unless a
+   real same-fact contradiction would remain.
 10. RFP REQUIREMENTS: When RFP CONTEXT is provided, each editorInstruction (and full_rewrite
    understoodAsk) MUST require covering the scored / demanded asks for THIS section without
    RFP-echo (answer what we will do/prove; do not paraphrase the buyer). Do not drop a
@@ -7579,19 +7580,42 @@ def apply_chat_preview_quality_guards(
     draft: ProposalDraft,
     *,
     label: str = "chat-preview",
+    section_ids: set[str] | list[str] | frozenset[str] | None = None,
 ) -> ProposalDraft:
     """Consistency + Rev 6 on a draft that is NOT yet persisted (preview panel).
 
     Persist path already runs these inside `_persist_section_improve_draft`. Preview
     must still show cross-section-aligned, Rev-6-scrubbed prose before Apply.
+
+    When ``section_ids`` is set (Improve pin), only touch those tabs — never rewrite
+    unrelated forms just because a draft-wide scrub found a touch-up.
     """
     working = draft
+    focus = {str(x) for x in (section_ids or []) if str(x).strip()} or None
     try:
         from app.services.proposal_consistency_enforcement import (
             apply_consistency_enforcement,
         )
 
-        working, cons_logs = apply_consistency_enforcement(working)
+        if focus is None:
+            working, cons_logs = apply_consistency_enforcement(working)
+        else:
+            # Draft-wide consistency can rewrite sibling tabs; for Improve pin
+            # keep other sections verbatim from the incoming draft.
+            before_map = {s.id: (s.content or "") for s in working.sections}
+            working, cons_logs = apply_consistency_enforcement(working)
+            restored: list = []
+            for s in working.sections:
+                if s.id in focus:
+                    restored.append(s)
+                elif s.id in before_map and (s.content or "") != before_map[s.id]:
+                    restored.append(
+                        s.model_copy(update={"content": before_map[s.id]})
+                    )
+                else:
+                    restored.append(s)
+            working = working.model_copy(update={"sections": restored})
+            cons_logs = [x for x in cons_logs if any(fid in x for fid in focus)] or cons_logs[:0]
         if cons_logs:
             logger.info(
                 "%s consistency: %s",
@@ -7609,7 +7633,9 @@ def apply_chat_preview_quality_guards(
             apply_chat_rev6_voice_to_draft,
         )
 
-        working, voice_logs = apply_chat_rev6_voice_to_draft(working)
+        working, voice_logs = apply_chat_rev6_voice_to_draft(
+            working, section_ids=focus
+        )
         if voice_logs:
             logger.info(
                 "%s rev6 voice: %s",
@@ -11391,6 +11417,20 @@ async def improve_proposal_section(
                 brand_voice=brand_voice_dict,
                 kb_zo_voice=kb_zo_voice,
             )
+            # Improve pin = one-tab agent. Cross-tab siblings only when proposal-wide.
+            if improve_section_pinned and not proposal_wide and scope_plan.sibling_edits:
+                print(
+                    f"[chat-plan] cleared {len(scope_plan.sibling_edits)} siblingEdits "
+                    "(Improve pin — stay on open tab)",
+                    flush=True,
+                )
+                scope_plan = EditScopePlan(
+                    understood_ask=scope_plan.understood_ask,
+                    mode=scope_plan.mode,
+                    patches=list(scope_plan.patches or []),
+                    kb_queries=list(scope_plan.kb_queries or []),
+                    sibling_edits=[],
+                )
             if scope_plan.mode == "patch" and scope_plan.patches:
                 planned_spans = _locate_planned_patches(
                     section.content or "",
