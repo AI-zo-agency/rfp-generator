@@ -18,10 +18,15 @@ export async function POST(
   const backendPath = qs
     ? `${backendUrl}/api/v1/rfps/${id}/proposal/generate/sections-1-3?${qs}`
     : `${backendUrl}/api/v1/rfps/${id}/proposal/generate/sections-1-3`;
+  const bodyText = await request.text();
   try {
     const res = await longRunningFetch(backendPath, {
       method: "POST",
       timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
+      body: bodyText.trim() ? bodyText : undefined,
+      headers: bodyText.trim()
+        ? { "Content-Type": "application/json", Accept: "application/json" }
+        : { Accept: "application/json" },
     });
     const text = await res.text();
     if (!text.trim()) {

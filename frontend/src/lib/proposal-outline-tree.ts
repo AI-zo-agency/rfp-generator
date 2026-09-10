@@ -282,12 +282,13 @@ export function buildOutlineSectionTree(
   return positioned.map((entry) => entry.node);
 }
 
-/** RFP tabs continue 4, 5, 6… after static Sections 1–3. */
+/** RFP tabs continue after static Sections 1–3 (4…) or from 1 when strict RFP. */
 export function buildRfpTabDisplayNumbers(
   sections: OutlineSection[],
 ): Map<string, number> {
   const map = new Map<string, number>();
-  let n = 4;
+  const hasZoStatic = sections.some((section) => isZoStaticSubsection(section));
+  let n = hasZoStatic ? 4 : 1;
   for (const section of getManuscriptSections(sections)) {
     if (isZoStaticSubsection(section)) continue;
     if (section.id.startsWith("section-4-") || section.id.startsWith("section-5-")) {

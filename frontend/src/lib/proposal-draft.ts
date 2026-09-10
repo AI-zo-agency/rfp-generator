@@ -8,6 +8,80 @@ export const STATIC_SECTION_PREFIXES = [
   "section-3-work-",
 ] as const;
 
+/** Zo Agency template shells — never shown in strict_rfp mode. */
+export const ZO_TEMPLATE_SHELL_PREFIXES = [
+  "section-1-",
+  "section-2-",
+  "section-3-",
+  "section-4-",
+  "section-5-",
+] as const;
+
+export function isZoTemplateShellSectionId(id: string): boolean {
+  return (
+    ZO_TEMPLATE_SHELL_PREFIXES.some((prefix) => id.startsWith(prefix)) ||
+    LEGACY_MONOLITH_SECTION_IDS.has(id)
+  );
+}
+
+export function stripZoTemplateShellSections(
+  draft: ProposalOutline
+): ProposalOutline {
+  const sections = draft.sections.filter(
+    (s) => !isZoTemplateShellSectionId(s.id)
+  );
+  if (sections.length === draft.sections.length) return draft;
+  return { ...draft, sections };
+}
+
+/**
+ * Live polls / reconnect must never blank prose the UI already shows.
+ * Prefer the longer body per section id; keep server order when the server
+ * has at least as many sections.
+ */
+export function mergeOutlinePreferRicherContent(
+  local: ProposalOutline,
+  incoming: ProposalOutline
+): ProposalOutline {
+  const localById = new Map(local.sections.map((s) => [s.id, s]));
+  const mergedSections = incoming.sections.map((incomingSec) => {
+    const prev = localById.get(incomingSec.id);
+    if (!prev) return incomingSec;
+    const prevLen = (prev.content || "").trim().length;
+    const nextLen = (incomingSec.content || "").trim().length;
+    if (prevLen > nextLen) {
+      return {
+        ...incomingSec,
+        content: prev.content,
+        status: prev.status ?? incomingSec.status,
+      };
+    }
+    return incomingSec;
+  });
+  // Keep local-only sections (e.g. custom) that the poll omitted.
+  const incomingIds = new Set(incoming.sections.map((s) => s.id));
+  for (const section of local.sections) {
+    if (!incomingIds.has(section.id) && (section.content || "").trim()) {
+      mergedSections.push(section);
+    }
+  }
+  const localFilled = local.sections.filter((s) =>
+    (s.content || "").trim()
+  ).length;
+  const mergedFilled = mergedSections.filter((s) =>
+    (s.content || "").trim()
+  ).length;
+  if (localFilled > 0 && mergedFilled < localFilled && incoming.sections.length === 0) {
+    return local;
+  }
+  return {
+    ...incoming,
+    sections: mergedSections,
+    selectedKeyPersonas:
+      incoming.selectedKeyPersonas ?? local.selectedKeyPersonas,
+  };
+}
+
 // Legacy IDs kept for backwards compat with saved drafts
 export const STATIC_SECTION_IDS = [
   "section-1-company-overview",
@@ -172,18 +246,24 @@ function slugify(title: string): string {
     .replace(/(^-|-$)/g, "");
 }
 
-export function buildDefaultOutline(rfp: RfpRecord): ProposalOutline {
+export function buildDefaultOutline(
+  rfp: RfpRecord,
+  options?: { outlineMode?: "zo_template" | "strict_rfp" }
+): ProposalOutline {
   const pageBudget = rfp.pageLimit ?? 30;
   const scale = pageBudget / 34;
+  const strict = options?.outlineMode === "strict_rfp";
 
-  const sections: OutlineSection[] = DEFAULT_SECTIONS.map((section) => ({
-    ...section,
-    pageLimit: section.pageLimit
-      ? Math.max(1, Math.round(section.pageLimit * scale))
-      : undefined,
-    content: "",
-    status: "outline" as const,
-  }));
+  const sections: OutlineSection[] = strict
+    ? []
+    : DEFAULT_SECTIONS.map((section) => ({
+        ...section,
+        pageLimit: section.pageLimit
+          ? Math.max(1, Math.round(section.pageLimit * scale))
+          : undefined,
+        content: "",
+        status: "outline" as const,
+      }));
 
   return {
     sections,
@@ -225,7 +305,8 @@ export function rebuildOutlineFromResearch(
   research: ProposalResearch,
   existingDraft?: ProposalOutline | null
 ): ProposalOutline {
-  const defaults = buildDefaultOutline(rfp);
+  const outlineMode = research.outlineMode ?? "zo_template";
+  const defaults = buildDefaultOutline(rfp, { outlineMode });
   const existingById = new Map(
     (existingDraft?.sections ?? []).map((section) => [section.id, section])
   );
@@ -236,32 +317,42 @@ export function rebuildOutlineFromResearch(
   // Section 1 subsections are a fixed set from defaults. Sections 2/3 are dynamic
   // (one per team member / work example) — prefer real generated ones already in
   // the draft over the generic placeholder, which only exists pre-generation.
-  const dynamicExisting = (existingDraft?.sections ?? []).filter(
-    (s) =>
-      (s.id.startsWith("section-2-bio-") && s.id !== "section-2-bio-placeholder") ||
-      (s.id.startsWith("section-3-work-") && s.id !== "section-3-work-placeholder")
-  );
+  const dynamicExisting =
+    outlineMode === "strict_rfp"
+      ? []
+      : (existingDraft?.sections ?? []).filter(
+          (s) =>
+            (s.id.startsWith("section-2-bio-") &&
+              s.id !== "section-2-bio-placeholder") ||
+            (s.id.startsWith("section-3-work-") &&
+              s.id !== "section-3-work-placeholder")
+        );
   const hasDynamicBios = dynamicExisting.some((s) => s.id.startsWith("section-2-bio-"));
   const hasDynamicWork = dynamicExisting.some((s) => s.id.startsWith("section-3-work-"));
 
-  const staticSections: OutlineSection[] = [
-    ...defaults.sections
-      .filter((s) => isStaticId(s.id))
-      .filter((s) => {
-        if (s.id === "section-2-bio-placeholder") return !hasDynamicBios;
-        if (s.id === "section-3-work-placeholder") return !hasDynamicWork;
-        return true;
-      })
-      .map((base) => {
-        const fromDraft = existingById.get(base.id);
-        return {
-          ...base,
-          content: fromDraft?.content ?? "",
-          status: fromDraft?.content ? ("generated" as const) : ("outline" as const),
-        };
-      }),
-    ...dynamicExisting,
-  ];
+  const staticSections: OutlineSection[] =
+    outlineMode === "strict_rfp"
+      ? []
+      : [
+          ...defaults.sections
+            .filter((s) => isStaticId(s.id))
+            .filter((s) => {
+              if (s.id === "section-2-bio-placeholder") return !hasDynamicBios;
+              if (s.id === "section-3-work-placeholder") return !hasDynamicWork;
+              return true;
+            })
+            .map((base) => {
+              const fromDraft = existingById.get(base.id);
+              return {
+                ...base,
+                content: fromDraft?.content ?? "",
+                status: fromDraft?.content
+                  ? ("generated" as const)
+                  : ("outline" as const),
+              };
+            }),
+          ...dynamicExisting,
+        ];
 
   const rfpSections: OutlineSection[] = (research.rfpSections ?? [])
     .filter((mapped) => !isStaticId(mapped.id))

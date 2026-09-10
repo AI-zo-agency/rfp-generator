@@ -320,17 +320,26 @@ VERIFIED_NAME_CORRECTIONS = {
 
 
 def _canonicalize_verified_name(name: str) -> str:
+    from app.services.evidence_trust.personnel_grounding import (
+        VERIFIED_NAME_CORRECTIONS as _CORRECTIONS,
+    )
+
     normalized = " ".join(name.strip().split())
-    return VERIFIED_NAME_CORRECTIONS.get(normalized.casefold(), normalized)
+    return _CORRECTIONS.get(normalized.casefold(), normalized)
 
 
 def _apply_verified_corrections(text: str, rfp_client: str = "") -> str:
     """Deterministic post-processing: fix known spelling/template errors in all generated content.
 
     These corrections are programmatic (no LLM) and 100% safe to apply universally.
+    Team-name repairs use folded whole-phrase replace (no regex).
     """
     if not text:
         return text
+
+    from app.services.evidence_trust.personnel_grounding import (
+        apply_verified_name_corrections,
+    )
 
     # 1. Legal name — must have apostrophe (LLM often garbles Z'Onion → Zohman/ZOnion)
     text = re.sub(r"\bZohman\b", "Z'Onion", text, flags=re.I)
@@ -340,14 +349,8 @@ def _apply_verified_corrections(text: str, rfp_client: str = "") -> str:
     # 2. Vivek Patel name — never "Vince Patel"
     text = re.sub(r"\bVince\s+Patel\b", "Vivek Patel", text, flags=re.I)
 
-    # 3. Team names — correct known OCR/LLM garbling from roster extraction.
-    for garbled, canonical in VERIFIED_NAME_CORRECTIONS.items():
-        text = re.sub(
-            rf"\b{re.escape(garbled)}\b",
-            canonical,
-            text,
-            flags=re.I,
-        )
+    # 3. Team names — correct known OCR/LLM garbling from roster extraction (no regex).
+    text = apply_verified_name_corrections(text)
 
     # 4. Miguel Pérez / Miguel Perez title correction
     text = re.sub(

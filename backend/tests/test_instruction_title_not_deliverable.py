@@ -152,6 +152,62 @@ class InstructionTitleNotDeliverableTests(unittest.TestCase):
         self.assertEqual(humanize_outline_title(_DQ_WARNING), "")
         self.assertEqual(humanize_outline_title("Cover Letter"), "Cover Letter")
 
+    def test_enrich_does_not_reexpand_form_into_instruction_prose(self) -> None:
+        from app.services.proposal_outline_dedup import enrich_outline_title_from_rfp
+
+        rfp = (
+            "STATEMENT OF COMPLIANCE\n"
+            "If any exceptions are taken, this Statement of Compliance shall include "
+            "a detailed description of each exception.\n"
+        )
+        out = enrich_outline_title_from_rfp("Statement of Compliance", rfp)
+        self.assertNotIn("if any exceptions", out.casefold())
+        self.assertIn("compliance", out.casefold())
+
+        kept, _ = filter_lean_outline_sections(
+            [
+                {
+                    "id": "c",
+                    "title": _EXCEPTIONS_DRAFTING,
+                    "required": True,
+                }
+            ],
+            rfp_context=rfp,
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["title"].casefold(), "statement of compliance")
+
+    def test_mandated_titles_retitle_instruction_even_when_near_dup(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            apply_rfp_mandated_section_titles,
+        )
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="x",
+                    title=(
+                        "If any exceptions are taken, this Statement of Compliance "
+                        "shall include a"
+                    ),
+                    status="outline",
+                )
+            ],
+        )
+        out, logs = apply_rfp_mandated_section_titles(
+            draft,
+            [
+                RfpSectionSpec(
+                    rfp_title="Statement of Compliance",
+                    mandated_submission_format=True,
+                )
+            ],
+        )
+        self.assertEqual(out.sections[0].title.casefold(), "statement of compliance")
+        self.assertTrue(logs)
+
     def test_research_cache_scrub_drops_instruction_maps(self) -> None:
         from app.models.proposal import ProposalResearchCache, RfpSectionMap
         from app.services.proposal_fulfill_rfp_structure import (

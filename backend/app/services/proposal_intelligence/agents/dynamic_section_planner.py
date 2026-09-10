@@ -186,6 +186,52 @@ Return JSON only:
 """
 
 
+_ZO_FIRST_OUTLINE_RULES = """- zö static Sections 1–3 (company / team / experience) are ALWAYS drafted first and keep
+  their existing titles (Who We Are, Organizational Structure, Business Information,
+  Certifications, Insurance, bios, our work). Do not rename or merge them in the outline.
+- Every section AFTER that must come ONLY from THIS RFP's TOC, submission checklist,
+  evaluation criteria, and required forms — read the full excerpt including mid-document
+  forms (references tables, vendor questionnaire, pricing/quotation forms).
+- Emit those RFP-varying (intelligence) tabs IN THIS RFP's stated order only —
+  copy the buyer's TOC / "shall submit" sequence. Do not apply a default
+  cover-letter / technical / cost stack. Omit any package this RFP does not name.
+  Company identity in the TOC is already Sections 1.1–1.5 — do NOT outline a
+  second company-background essay tab.
+- Include a section ONLY if the RFP (or its evaluation criteria) clearly asks for it.
+- Do NOT invent a default "Methodology" / "Timeline" / "Budget" stack.
+- Prefer the RFP's numbered outline when present (including nested 4, 4.1, 4.2).
+- ONE section per distinct RFP ask — do NOT add near-duplicate tabs that would rehash
+  the same proof already covered by Sections 1–3 or another RFP tab.
+- NEVER outline tabs that only restate static Sections 1–3 identity blocks already written
+  before RFP tabs (Who We Are, Company History + Client Roster, Organizational Structure,
+  Team Overview bios as a block, Insurance Information / Certificate of Insurance coverage
+  narrative — limits, carriers, GL/E&O/workers/cyber). Coverage facts live in Section 1.5;
+  if the RFP only needs a returned COI PDF, use a short attachments checklist / MANUAL FILL
+  for the file — do NOT add a second insurance essay tab."""
+
+_STRICT_RFP_OUTLINE_RULES = """- STRICT RFP outline mode: there is NO Zo Agency Sections 1–3 template in this manuscript.
+- Emit ONLY what THIS RFP demands: TOC / submission-package headings (verbatim titles + order)
+  UNION every scored parent criterion and required form/submittal not already covered by a
+  TOC tab. Use the buyer's own wording for titles whenever possible.
+- Firm qualifications, company overview, key personnel / bios, past performance / case
+  studies, insurance, and certifications are REAL outline tabs when the RFP names them —
+  companyfacts / bios / case studies are woven into those tabs at draft time.
+- Do NOT invent Zo-numbered Who We Are / Team Overview / Our Work shells.
+- Include a section ONLY if the RFP (or its evaluation criteria) clearly asks for it.
+- Do NOT invent a default "Methodology" / "Timeline" / "Budget" stack.
+- Prefer the RFP's numbered outline when present (including nested 4, 4.1, 4.2).
+- ONE section per distinct RFP ask — do NOT add near-duplicate tabs that rehash the same ask.
+- Insurance / COI: if the RFP only needs a returned PDF, use a checklist / MANUAL FILL tab;
+  if the RFP asks for an insurance narrative or coverage response, keep that as its own tab."""
+
+
+def _planner_system_prompt(outline_mode: str) -> str:
+    mode = (outline_mode or "zo_template").strip().lower()
+    if mode == "strict_rfp":
+        return _SYSTEM.replace(_ZO_FIRST_OUTLINE_RULES, _STRICT_RFP_OUTLINE_RULES)
+    return _SYSTEM
+
+
 def _parse_page_limit(rfp_meta: dict[str, str] | None) -> int | None:
     if not rfp_meta:
         return None
@@ -204,8 +250,14 @@ async def run_dynamic_section_planner(
     plan: ProposalExecutionPlan,
     rfp_context: str,
     rfp_meta: dict[str, str] | None = None,
+    outline_mode: str = "zo_template",
 ) -> ProposalExecutionPlan:
     from app.services.proposal_outline_dedup import max_rfp_outline_sections
+
+    mode = (outline_mode or "zo_template").strip().lower()
+    if mode not in {"zo_template", "strict_rfp"}:
+        mode = "zo_template"
+    skip_static = mode == "strict_rfp"
 
     page_limit = _parse_page_limit(rfp_meta)
     evaluation = plan.opportunity.evaluation
@@ -253,7 +305,9 @@ async def run_dynamic_section_planner(
     structure_specs = await extract_rfp_submission_format_specs(
         rfp_context,
         rfp_title=rfp_title,
-        existing_section_titles=static_company_block_titles(),
+        existing_section_titles=(
+            [] if skip_static else static_company_block_titles()
+        ),
     )
     used_align_extract = False
     provider = ""
@@ -261,6 +315,7 @@ async def run_dynamic_section_planner(
         from_specs = outline_sections_from_rfp_specs(
             structure_specs,
             section_factory=lambda raw: OutlineSection.model_validate(raw),
+            skip_static_dedupe=skip_static,
         )
         if from_specs:
             used_align_extract = True
@@ -274,15 +329,20 @@ async def run_dynamic_section_planner(
     if not used_align_extract:
         raw, provider = await safe_chat_json(
             [
-                {"role": "system", "content": _SYSTEM},
+                {"role": "system", "content": _planner_system_prompt(mode)},
                 {
                     "role": "user",
                     "content": (
                         f"{scoreboard}\n\n"
                         f"{char_limit_line}\n"
                         f"{eval_shape_rule}\n"
-                        f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
-                        f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
+                        f"OUTLINE MODE: {mode}.\n"
+                        + (
+                            f"HARD MAXIMUM outline tabs (full manuscript — no Zo 1–3 shell): {section_cap}. "
+                            if skip_static
+                            else f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
+                        )
+                        + f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
                         f"Page limit from RFP: {page_limit if page_limit else 'not stated'}. "
                         f"Under a tight page budget, emit ONLY the buyer's required Proposal "
                         f"Content / submission-package tabs in their stated order — no rubric "
@@ -363,6 +423,7 @@ async def run_dynamic_section_planner(
     kept, dropped = filter_lean_outline_sections(
         list(outline.sections),
         rfp_context=rfp_context,
+        skip_static_dedupe=skip_static,
     )
     if not kept and outline.sections:
         # Avoid emptying the outline when generic-filler rules are too aggressive
@@ -371,6 +432,7 @@ async def run_dynamic_section_planner(
             list(outline.sections),
             rfp_context=rfp_context,
             drop_generic_filler=False,
+            skip_static_dedupe=skip_static,
         )
         dropped = list(dropped) + list(dropped_safe)
     from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
@@ -395,6 +457,7 @@ async def run_dynamic_section_planner(
             kept,
             rfp_context=rfp_context,
             drop_generic_filler=False,
+            skip_static_dedupe=skip_static,
         )
         dropped = list(dropped) + list(post_dropped)
     # Deterministic backstop: the planner is an LLM under 20+ anti-bloat rules,
@@ -425,6 +488,7 @@ async def run_dynamic_section_planner(
         kept,
         structure_specs,
         section_factory=lambda raw: OutlineSection.model_validate(raw),
+        skip_static_dedupe=skip_static,
     )
     align_added = [
         line
@@ -437,6 +501,14 @@ async def run_dynamic_section_planner(
             AGENT,
             align_logs[:8],
         )
+    # Align / stubs can reintroduce instruction-shaped titles — lean again.
+    kept, post_align_dropped = filter_lean_outline_sections(
+        kept,
+        rfp_context=rfp_context,
+        drop_generic_filler=False,
+        skip_static_dedupe=skip_static,
+    )
+    dropped = list(dropped) + list(post_align_dropped)
     # Focused completeness check on the outline actually produced (including
     # any tabs Align-extract just stubbed). Same single-question pass as before.
     kept, exhibit_added = await ensure_missing_submittals_coverage(

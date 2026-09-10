@@ -659,6 +659,57 @@ class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase)
         titles = [s.title for s in plan.writing.proposal_outline.sections]
         self.assertIn("Technical Approach", titles)
 
+    async def test_strict_rfp_keeps_company_overview_toc_tab(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_fulfill_rfp_structure import RfpSectionSpec
+        from app.services.proposal_intelligence.agents.dynamic_section_planner import (
+            run_dynamic_section_planner,
+        )
+        from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+        specs = [
+            RfpSectionSpec(rfp_title="Company Overview"),
+            RfpSectionSpec(rfp_title="Key Personnel"),
+            RfpSectionSpec(rfp_title="Technical Approach"),
+        ]
+        with (
+            patch(
+                "app.services.proposal_fulfill_rfp_structure.extract_rfp_submission_format_specs",
+                new=AsyncMock(return_value=specs),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.safe_chat_json",
+                new=AsyncMock(side_effect=AssertionError("planner LLM must not run")),
+            ),
+            patch(
+                "app.services.proposal_closing_ledger.get_or_extract_closing_ledger",
+                new=AsyncMock(return_value=(None, None)),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.ensure_missing_submittals_coverage",
+                new=AsyncMock(side_effect=lambda kept, *_a, **_k: (kept, [])),
+            ),
+        ):
+            zo = await run_dynamic_section_planner(
+                plan=ProposalExecutionPlan(rfpId="r1"),
+                rfp_context="1. Company Overview\n2. Key Personnel\n3. Technical Approach\n",
+                rfp_meta={"title": "Test RFP"},
+                outline_mode="zo_template",
+            )
+            strict = await run_dynamic_section_planner(
+                plan=ProposalExecutionPlan(rfpId="r1"),
+                rfp_context="1. Company Overview\n2. Key Personnel\n3. Technical Approach\n",
+                rfp_meta={"title": "Test RFP"},
+                outline_mode="strict_rfp",
+            )
+        zo_titles = [s.title for s in zo.writing.proposal_outline.sections]
+        strict_titles = [s.title for s in strict.writing.proposal_outline.sections]
+        self.assertNotIn("Company Overview", zo_titles)
+        self.assertIn("Company Overview", strict_titles)
+        self.assertIn("Key Personnel", strict_titles)
+        self.assertIn("Technical Approach", strict_titles)
+
 
 if __name__ == "__main__":
     unittest.main()

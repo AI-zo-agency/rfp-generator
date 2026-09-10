@@ -854,19 +854,33 @@ async def plan_section_queries_agent(
     rfp_title: str = "",
 ) -> list[str]:
     title_cf = (section_title or "").casefold()
-    ask_cf = (user_message or "").casefold()
-    is_budget = any(
-        k in title_cf or k in ask_cf
+    # Use ONLY the real user ask for budget detection — never instruction
+    # boilerplate that mentions 00_Guide_Pricing as a doc hint (that was forcing
+    # Pricing Guide queries on phone/email / contact asks).
+    ask_raw = (user_message or "").strip()
+    import re as _re
+    _um = _re.search(
+        r"(?is)(?:User message|Fact-check ask)[:\s]+(.+?)(?:\n\nOpen tab:|\n\nHighlighted|\n\nPlan queries|\Z)",
+        ask_raw,
+    )
+    ask_for_budget = (_um.group(1).strip() if _um else ask_raw)[:500]
+    ask_cf = ask_for_budget.casefold()
+    title_is_budget = any(
+        k in title_cf
         for k in ("budget", "pricing", "cost of", "fee", "compensation", "cost proposal")
     )
-    if is_budget:
+    ask_is_budget = any(
+        k in ask_cf
+        for k in ("budget", "pricing", "cost of", "fee", "compensation", "cost proposal", "hourly", "/hr", "line item")
+    )
+    if title_is_budget or ask_is_budget:
         from app.services.proposal_budget_playbook import (
             user_asks_budget_fee_structure_mutation,
         )
 
         # Fee-dollar rebuilds stay on the Pricing Guide. Table/layout/name asks
         # use the normal planner (roster / bios) — do not force Guide-only queries.
-        if user_asks_budget_fee_structure_mutation(user_message):
+        if user_asks_budget_fee_structure_mutation(ask_for_budget):
             guide_queries = [
                 "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
                 "00_Guide_Pricing 9.1 9.2 Project Management 5-8 percent floor Average tier",

@@ -703,14 +703,20 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
     if phase == "sections-1-3":
         from app.services.proposal_repository import aget_proposal_draft
 
-        draft = await aget_proposal_draft(rfp_id)
-        if not static_sections_1_3_have_content(draft):
-            await record_phase_failed(
-                rfp_id,
-                phase,
-                "Sections 1–3 incomplete — one or more static sections (Company, Team, Case Studies) has no content",
-            )
-            return
+        research = await aget_research_cache(rfp_id)
+        mode = (
+            str(research.outline_mode or "").strip().lower() if research else ""
+        )
+        # Strict RFP has no Zo Sections 1–3 shell — treat prep as complete.
+        if mode != "strict_rfp":
+            draft = await aget_proposal_draft(rfp_id)
+            if not static_sections_1_3_have_content(draft):
+                await record_phase_failed(
+                    rfp_id,
+                    phase,
+                    "Sections 1–3 incomplete — one or more static sections (Company, Team, Case Studies) has no content",
+                )
+                return
 
     if phase == "phase-3-6-self-edit":
         from app.services.proposal_repository import aget_proposal_draft
@@ -1024,6 +1030,11 @@ def phase_is_complete(
     phase: str,
 ) -> bool:
     if phase == "sections-1-3":
+        mode = (
+            str(research.outline_mode or "").strip().lower() if research else ""
+        )
+        if mode == "strict_rfp":
+            return True
         return static_sections_1_3_have_content(draft)
 
     if not research:
@@ -1146,20 +1157,31 @@ async def resolve_resume_phase(
         research = await aget_research_cache(rfp_id)
 
     if draft is not None and not static_sections_1_3_have_content(draft):
-        return "sections-1-3"
+        mode = (
+            str(research.outline_mode or "").strip().lower() if research else ""
+        )
+        if mode != "strict_rfp":
+            return "sections-1-3"
 
     cp = research.pipeline_checkpoint if research else None
     if cp:
         if cp.last_failed_phase and cp.last_failed_phase in PIPELINE_PHASES:
-            if cp.last_failed_phase == "phase-3-6-self-edit":
-                err = (cp.last_error or "").lower()
-                # Budget runs before senior editor — if editor failed on VERIFY but budget
-                # is missing, finish budget first then return to editor.
-                if ("verify" in err or "placeholder" in err) and not phase_is_complete(
-                    draft=draft, research=research, phase="phase-3-5-budget"
-                ):
-                    return "phase-3-5-budget"
-            return cp.last_failed_phase
+            mode = (
+                str(research.outline_mode or "").strip().lower() if research else ""
+            )
+            # Stale failure from strict no-op (Zo 1–3 content check) — ignore.
+            if not (
+                cp.last_failed_phase == "sections-1-3" and mode == "strict_rfp"
+            ):
+                if cp.last_failed_phase == "phase-3-6-self-edit":
+                    err = (cp.last_error or "").lower()
+                    # Budget runs before senior editor — if editor failed on VERIFY but budget
+                    # is missing, finish budget first then return to editor.
+                    if ("verify" in err or "placeholder" in err) and not phase_is_complete(
+                        draft=draft, research=research, phase="phase-3-5-budget"
+                    ):
+                        return "phase-3-5-budget"
+                return cp.last_failed_phase
         if cp.in_progress_phase and cp.in_progress_phase in PIPELINE_PHASES:
             return cp.in_progress_phase
 

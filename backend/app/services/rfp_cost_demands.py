@@ -116,9 +116,14 @@ def demands_require_omit_guide_reimbursables(demands: list[RfpCostDemand]) -> bo
 def approach_digest_from_draft_sections(
     sections: list | None,
     *,
-    max_chars: int = 8000,
+    max_chars: int = 14000,
 ) -> str:
-    """Non-Cost section prose for workstream/scope context (no title synonym filter)."""
+    """Full non-Cost manuscript for cost-demand / layout grounding.
+
+    No keyword synonym priority list — include every filled tab (skip only the
+    Cost tab that already carries Fee Detail / Proposed Investment) and let the
+    cost-demands LLM judge THIS RFP's meaning.
+    """
     if not sections:
         return ""
     chunks: list[str] = []
@@ -128,15 +133,11 @@ def approach_digest_from_draft_sections(
         body = (getattr(section, "content", None) or "").strip()
         if not body:
             continue
-        # Skip the Cost tab itself — caller already has Cost content separately.
-        blob = f"{title}\n{body[:80]}".casefold()
-        if "fee detail" in blob or "proposed investment" in blob:
-            if any(
-                k in (title or "").casefold()
-                for k in ("cost", "budget", "pricing", "fee", "rate structure")
-            ):
-                continue
-        piece = f"## {title}\n{body[:2200]}"
+        body_cf = body.casefold()
+        # Skip the Cost instrument tab itself.
+        if "fee detail" in body_cf and "proposed investment" in body_cf:
+            continue
+        piece = f"## {title}\n{body[:2800]}"
         if total + len(piece) > max_chars:
             remain = max_chars - total
             if remain < 200:

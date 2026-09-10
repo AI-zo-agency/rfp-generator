@@ -645,9 +645,11 @@ export function messageLooksChatQuestion(message: string): boolean {
   if (!text) return false;
   // Explicit mutate verbs win unless the sentence is a clear question opener.
   const hasEditVerb =
-    /\b(?:change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|remove|replace|fill|patch|insert|delete|correct|tighten|trim|reword|rephrase|polish|expand|condense)\b/i.test(
+    /\b(?:change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|remove|replace|fill|patch|insert|delete|correct|tighten|trim|reword|rephrase|polish|expand|condense|add|swap)\b/i.test(
       text
-    );
+    ) ||
+    /\binstead\s+of\b/i.test(text) ||
+    /\bhow\s+about\b/i.test(text);
   const questionOpener =
     /^(?:what|whats|what's|who|why|when|where|how|explain|summarize|describe|tell\s+me|is|are|does|do|can\s+you\s+(?:tell|explain|confirm|verify|check))\b/i.test(
       text
@@ -679,18 +681,22 @@ export function chatBusyStatusLabel(
 ): string {
   const title = sectionTitle.trim() || "section";
   const trimmed = message.trim();
-  if (options?.proposalWide) return "Reviewing the full proposal…";
+  // Improve / section pin always binds status to THIS tab — never "full proposal".
+  if (options?.proposalWide && !options?.sameSectionPinned) {
+    return "Reviewing the full proposal…";
+  }
   if (/apply these fixes|patch-wise across|across the proposal/i.test(trimmed)) {
     return "Applying patch-wise fixes across the proposal…";
   }
-  if (messageLooksChatQuestion(trimmed)) {
-    return `Answering about ${title}…`;
-  }
+  // Improve pin: prefer Improving/Editing over "Answering" (trailing ? on edit asks).
   if (options?.sameSectionPinned && options.referenceMode === "selection") {
     return `Editing excerpt in ${title}…`;
   }
   if (options?.sameSectionPinned && options.referenceMode === "section") {
     return `Improving ${title}…`;
+  }
+  if (messageLooksChatQuestion(trimmed)) {
+    return `Answering about ${title}…`;
   }
   if (
     messageLooksOutlineStructure(trimmed) ||
@@ -834,7 +840,14 @@ export function messageLooksOutlineStructure(message: string): boolean {
       text
     ) ||
     /\b(?:delete|remove)\b.{0,40}\b(?:section|tab|bio|case\s*stud)/i.test(text) ||
-    /\binstead\s+of\b.{0,80}\b(?:add|use|put)\b/i.test(text) ||
+    // Sidebar swap only (bio/case study/section tab). Plain "instead of X add Y"
+    // on a pinned Improve tab is an in-place edit — not proposal-wide outline.
+    /\binstead\s+of\b.{0,100}\b(?:add|use|put)\b.{0,60}\b(?:bio|resume|case\s*stud|sidebar\s+)?(?:section|tab)\b/i.test(
+      text
+    ) ||
+    /\binstead\s+of\b.{0,60}\b(?:bio|resume|case\s*stud)\b.{0,80}\b(?:add|use|put)\b/i.test(
+      text
+    ) ||
     /\bmore\s+\d*\s*(?:team\s*)?bios?\b/i.test(text) ||
     /\bnew\s+section\b/i.test(text)
   );

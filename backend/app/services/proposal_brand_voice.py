@@ -15,7 +15,7 @@ from typing import Any, Literal
 from app.models.rfp import RfpRecord
 from app.services import proposal_knowledge_base_tools
 
-Register = Literal["narrative", "procurement"]
+Register = Literal["narrative", "procurement", "cover_letter"]
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STANDARDS_PATH = _REPO_ROOT / "branding" / "ZO_BRAND_AND_WRITING_STANDARDS_REV6.md"
@@ -148,6 +148,31 @@ EXAMPLE · same fact, wrong vs right:
 
 Note: RFP instructions may say "Vendor". That is form language. Narrative sections must still use first-person zö voice."""
 
+COVER_LETTER_REGISTER_BLOCK = """## COVER LETTER / TRANSMITTAL REGISTER (Rev 6 signed passage)
+
+Governing standard: branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md — signed passages
+inside a proposal follow the correspondence standard; the rest of the proposal stays
+deliverable register.
+
+CONTENT / STRUCTURE (highest priority after Rev 6 voice bans):
+- Follow THIS RFP's cover-letter / letter-of-transmittal format and required statements
+  (addressee, required attestations, contact/signature block, page limit).
+- Do not invent a Zo template letter that ignores the RFP's own package instructions.
+- When 06_WON / past won-proposal cover letters or letters of transmittal appear in
+  evidence: use them as FORM / STRUCTURE / VOICE models only (salutation → intent →
+  short offer summary → close / signature shape). NEVER copy their client names,
+  project claims, dates, dollar figures, or prior RFP facts — rewrite for THIS buyer.
+
+VOICE (Rev 6 correspondence for signed passages):
+- First person from the authorized signer (I / we). Address the recipient by name when known.
+- Warm, contracted, human — still no em dashes, no negation-contrast, no empty hype.
+- NEVER open with "On behalf of zö agency" or other third-person agency boilerplate.
+- Name "zö agency" when identifying the offeror, certifications, or contact block — as the
+  firm, not as a corporate narrator speaking "on behalf of" itself.
+
+If a wet-ink / signed PDF is required: write the letter body + [DESIGNER NOTE] to attach
+the signed file. Never invent signature dates or claim the PDF is already attached."""
+
 PROCUREMENT_REGISTER_BLOCK = """## PROCUREMENT REGISTER (this section)
 
 Use formal third-person language appropriate for attachments, legal forms, certifications, pricing tables, or compliance schedules.
@@ -161,9 +186,21 @@ def classify_section_register(
     title: str = "",
     zo_mode: str = "write",
 ) -> Register:
-    """Narrative (we/our) vs procurement (Vendor/form) register for a section."""
+    """Narrative / cover-letter correspondence / procurement register for a section."""
     sid = section_id.lower()
     t = title.lower()
+
+    # Signed passages (Rev 6) — before generic narrative / Zo 1–3 defaults.
+    if any(
+        k in t
+        for k in (
+            "cover letter",
+            "letter of transmittal",
+            "transmittal letter",
+            "letter of offer",
+        )
+    ) or "cover-letter" in sid or "transmittal" in sid:
+        return "cover_letter"
 
     if sid.startswith(
         ("section-1", "section-2", "section-3", "section-4", "section-5")
@@ -202,7 +239,6 @@ def classify_section_register(
         return "procurement"
 
     narrative_signals = (
-        "cover letter",
         "executive summary",
         "company overview",
         "team overview",
@@ -218,8 +254,6 @@ def classify_section_register(
         "work plan",
         "narrative",
         "introductory",
-        "letter of transmittal",
-        "transmittal letter",
     )
     if any(sig in t for sig in narrative_signals):
         return "narrative"
@@ -231,11 +265,11 @@ def classify_section_register(
 
 
 def format_register_block(register: Register) -> str:
-    return (
-        NARRATIVE_REGISTER_BLOCK
-        if register == "narrative"
-        else PROCUREMENT_REGISTER_BLOCK
-    )
+    if register == "cover_letter":
+        return COVER_LETTER_REGISTER_BLOCK
+    if register == "procurement":
+        return PROCUREMENT_REGISTER_BLOCK
+    return NARRATIVE_REGISTER_BLOCK
 
 
 def format_brand_voice_block(

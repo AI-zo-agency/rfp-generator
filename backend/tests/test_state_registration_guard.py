@@ -78,6 +78,42 @@ class StateRegistrationGuardTests(unittest.TestCase):
         self.assertIn("We are registered to conduct business in Oregon.", body)
         self.assertFalse(logs)
 
+    def test_drops_stale_do_not_assert_fill_when_jurisdiction_verified(self) -> None:
+        """Claim + contradictory MANUAL FILL must not ship side by side."""
+        draft = ProposalDraft(
+            rfpId="rfp-ca",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-1-business-info",
+                    title="1.3 — Business Information",
+                    content=(
+                        "### State Registrations\n\n"
+                        "| State | Status |\n"
+                        "| California | Active |\n"
+                        "| Oregon | Active |\n"
+                    ),
+                ),
+                ProposalSection(
+                    id="rfp-sec-license",
+                    title="Business License",
+                    content=(
+                        "We hold the business registration and standing this contract "
+                        "requires to operate in California.\n\n"
+                        "[MANUAL FILL: Sonja — do not assert California business "
+                        "registration until it appears in companyfacts / Section 1.3 "
+                        "State Registrations.]\n"
+                    ),
+                ),
+            ],
+        )
+        updated, logs = scrub_unverified_state_registration_claims(draft)
+        body = next(s.content or "" for s in updated.sections if s.id == "rfp-sec-license")
+        self.assertIn("California", body)
+        self.assertNotIn("do not assert California", body)
+        self.assertNotIn("MANUAL FILL", body)
+        self.assertTrue(any("stale" in line.casefold() for line in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

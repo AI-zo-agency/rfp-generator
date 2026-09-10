@@ -42,6 +42,20 @@ export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
   complete: "Complete",
 };
 
+/** Strict RFP has no Zo 1–3 shell — first step is outline prep only. */
+export function pipelinePhaseLabel(
+  phase: PipelinePhase | string,
+  outlineMode?: "zo_template" | "strict_rfp" | null
+): string {
+  if (phase === "sections-1-3" && outlineMode === "strict_rfp") {
+    return "Outline prep";
+  }
+  if (phase in PIPELINE_PHASE_LABELS) {
+    return PIPELINE_PHASE_LABELS[phase as PipelinePhase];
+  }
+  return String(phase);
+}
+
 export interface ProposalPipelineCheckpoint {
   lastCompletedPhase?: PipelinePhase | null;
   inProgressPhase?: PipelineInProgressPhase | null;
@@ -205,6 +219,17 @@ export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[
   { phase: "build-finalize", label: "Final checks" },
 ];
 
+export function fullProposalStepLabels(
+  outlineMode?: "zo_template" | "strict_rfp" | null
+): { phase: PipelinePhase; label: string }[] {
+  if (outlineMode !== "strict_rfp") return FULL_PROPOSAL_STEP_LABELS;
+  return FULL_PROPOSAL_STEP_LABELS.map((step) =>
+    step.phase === "sections-1-3"
+      ? { ...step, label: "Outline prep" }
+      : step
+  );
+}
+
 export interface ProposalPipelineStatus {
   resumeFromPhase: PipelinePhase;
   completedPhases: PipelinePhase[];
@@ -332,6 +357,7 @@ export function phaseIsComplete(
   phase: PipelinePhase
 ): boolean {
   if (phase === "sections-1-3") {
+    if (research?.outlineMode === "strict_rfp") return true;
     return staticSections1to3Complete(draft);
   }
   if (!research) return false;
@@ -429,7 +455,10 @@ export function resolveResumePhase(
   draft: ProposalOutline | null,
   research: ProposalResearch | null
 ): PipelinePhase {
-  if (!staticSections1to3Complete(draft)) {
+  if (
+    research?.outlineMode !== "strict_rfp" &&
+    !staticSections1to3Complete(draft)
+  ) {
     return "sections-1-3";
   }
 
@@ -644,11 +673,14 @@ export function shouldRunPhase(
   return phaseIndex(phase) >= phaseIndex(resumeFrom);
 }
 
-export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
+export function inProgressPhaseLabel(
+  phase: PipelineInProgressPhase,
+  outlineMode?: "zo_template" | "strict_rfp" | null
+): string {
   if (phase === FULFILL_SCAN_PHASE) return "Complete & clean draft";
   if (phase === ALIGN_RFP_OUTLINE_PHASE) return "Align to RFP outline";
   if (phase === PACKET_REDISTRIBUTE_PHASE) return "Place content in RFP tabs";
-  return PIPELINE_PHASE_LABELS[phase];
+  return pipelinePhaseLabel(phase, outlineMode);
 }
 
 const IN_PROGRESS_STALE_MS = 900_000;

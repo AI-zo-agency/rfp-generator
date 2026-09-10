@@ -4,7 +4,7 @@ import { longRunningFetch } from "@/lib/long-running-fetch";
 export const runtime = "nodejs";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -12,13 +12,17 @@ export async function POST(
     process.env.NEXT_PUBLIC_BACKEND_URL ||
     process.env.BACKEND_URL ||
     "http://localhost:8001";
+  const bodyText = await request.text();
   try {
     const response = await longRunningFetch(
       `${backendUrl}/api/v1/rfps/${id}/proposal/restart-from-intelligence`,
       {
         method: "POST",
-        headers: { Accept: "application/json" },
+        headers: bodyText.trim()
+          ? { "Content-Type": "application/json", Accept: "application/json" }
+          : { Accept: "application/json" },
         cache: "no-store",
+        body: bodyText.trim() ? bodyText : undefined,
       }
     );
     const text = await response.text();
@@ -38,10 +42,7 @@ export async function POST(
     const message =
       error instanceof Error
         ? error.message
-        : "Restart from Intelligence failed";
-    return NextResponse.json(
-      { detail: `Cannot reach API at ${backendUrl}. (${message})` },
-      { status: 503 }
-    );
+        : "Failed to restart from intelligence";
+    return NextResponse.json({ detail: message }, { status: 502 });
   }
 }

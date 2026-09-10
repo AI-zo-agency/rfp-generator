@@ -45,10 +45,18 @@ _METHODOLOGY_TITLE_TOKENS = (
     "training",
     "timeline",
     "knowledge transfer",
-    "transmittal",
     "project management",
     "qa process",
     "quality assurance",
+)
+
+# Cover / transmittal letters must retrieve 06_WON form exemplars — never treat
+# as plan-only methodology (the old "transmittal" token starved that path).
+_COVER_LETTER_TITLE_TOKENS = (
+    "cover letter",
+    "letter of transmittal",
+    "transmittal letter",
+    "letter of offer",
 )
 
 _MONEY_MARKERS = (
@@ -160,6 +168,18 @@ def decide_evidence_action(
         result = EvidenceGateResult(
             action=EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET,
             reason="money_or_budget_claim",
+        )
+        _log(section_id, result)
+        return result
+
+    title_cf = (title or "").casefold()
+    if any(tok in title_cf for tok in _COVER_LETTER_TITLE_TOKENS) or any(
+        tok in (section_id or "").casefold() for tok in ("cover-letter", "transmittal")
+    ):
+        result = EvidenceGateResult(
+            action=EvidenceDecision.RETRIEVE_THEN_WRITE,
+            requires_retrieval=True,
+            reason="cover_letter_won_exemplars",
         )
         _log(section_id, result)
         return result

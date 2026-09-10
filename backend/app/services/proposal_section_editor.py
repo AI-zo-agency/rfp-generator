@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -666,8 +666,15 @@ def _build_verification_kb_queries(
     short_first = sorted(needles, key=len)
     for needle in short_first:
         seeds.append(needle)
-    for needle in short_first:
-        seeds.append(f"{needle} case study")
+    # Only attach "case study" when THIS tab is about case studies / portfolio —
+    # never on Primary Contact / forms / bios (was polluting every verify ask).
+    title_cf = (section.title or "").casefold()
+    if any(
+        k in title_cf
+        for k in ("case stud", "our work", "portfolio", "relevant experience", "past performance")
+    ):
+        for needle in short_first:
+            seeds.append(f"{needle} case study")
     excerpt_snip = re.sub(r"\s+", " ", (excerpt or "").strip())[:120]
     if excerpt_snip and len(excerpt_snip) >= 12:
         seeds.append(excerpt_snip)
@@ -749,21 +756,16 @@ async def _plan_verification_kb_queries(
 
     from app.services.proposal_langchain_agents import AgentRole, plan_section_queries_agent
 
-    task_parts = [
-        "Fact-check ask: plan Supermemory queries to verify whether the draft "
-        "excerpt or user concern matches zö agency verified facts.",
-        "Prefer 01_companyfacts verified.docx for agency profile (legal name, "
-        "email, phone, team size, certifications). Use 03_CS / 06_WON for "
-        "case-study claims. For capacity/hours/budget tables use 00_Guide_Pricing. "
-        "For awards / recognition / agency honors asks, plan queries for 05_Awards "
-        "and companyfacts awards sections — YOU decide exact query wording. "
-        "Return queries only — empty list if KB cannot help.",
-        f"User message: {user_message.strip()}",
-        f"Open tab: {section.title or ''}",
-    ]
+    # Pass the REAL user ask only — never wrap with "use 00_Guide_Pricing" text
+    # (that previously forced Pricing Guide searches on contact/phone asks).
+    focus: list[str] = []
     if excerpt.strip():
-        task_parts.append(f"Highlighted excerpt under review:\n{excerpt[:800]}")
-    task = "\n\n".join(task_parts)
+        focus.append(excerpt[:400])
+    focus.append(
+        "Prefer 01_companyfacts / 04_Bio / ClientList for contact phone/email. "
+        "Use 03_CS only for case-study claims. Use 00_Guide_Pricing ONLY if the "
+        "user ask is about fees/rates/budget."
+    )
 
     try:
         planned = await plan_section_queries_agent(
@@ -775,9 +777,9 @@ async def _plan_verification_kb_queries(
             requirements=_rfp_section_requirements_list(
                 research, section.id, section_title=section.title or ""
             ),
-            retrieval_focus=[excerpt[:400]] if excerpt.strip() else [],
+            retrieval_focus=focus,
             prior_queries=heuristic,
-            user_message=task,
+            user_message=user_message.strip(),
             current_content=(section.content or "")[:2000],
         )
     except Exception:
@@ -786,11 +788,32 @@ async def _plan_verification_kb_queries(
         )
         return heuristic
 
+    title_cf = (section.title or "").casefold()
+    ask_cf = (user_message or "").casefold()
+    allow_guide = any(
+        k in title_cf or k in ask_cf
+        for k in (
+            "budget",
+            "pricing",
+            "cost proposal",
+            "cost of",
+            "fee",
+            "compensation",
+            "hourly",
+            "/hr",
+            "line item",
+        )
+    )
+
     merged: list[str] = []
     seen: set[str] = set()
     for q in [*heuristic, *(planned or [])]:
         key = q.casefold()
         if key in seen:
+            continue
+        if not allow_guide and "00_guide_pricing" in key.replace(" ", "_"):
+            continue
+        if not allow_guide and "guide_pricing" in key.replace(" ", ""):
             continue
         seen.add(key)
         merged.append(q)
@@ -1556,6 +1579,9 @@ async def _finish_chat_structure_plan(
     )
 
 
+
+
+
 def decide_chat_route(
     *,
     chat_intent: str,
@@ -1563,6 +1589,7 @@ def decide_chat_route(
     selection_mode: bool,
     conversation_history: list[dict[str, str]] | None = None,
     improve_pinned: bool = False,
+    section_content: str = "",
 ) -> ChatRoute:
     """Decide advisory vs edit for one chat turn.
 
@@ -1617,18 +1644,14 @@ def decide_chat_route(
         from app.services.proposal_chat_structure import is_add_section_intent
 
         # New sidebar tab still goes through the outline planner.
-        if is_add_section_intent(user_message):
+        if chat_intent == "structure" or is_add_section_intent(user_message):
             return ChatRoute(advisory=False, reason="structure_ask")
-        # Questions about THIS tab: answer, do not rewrite, do not ask which section.
-        if _is_verification_only_ask(user_message):
-            return ChatRoute(advisory=True, reason="improve_pin_verify_ask")
-        if _is_informational_only_ask(user_message):
-            return ChatRoute(advisory=True, reason="improve_pin_informational_ask")
-        if _selection_ask_is_advisory(
-            user_message, conversation_history=conversation_history
-        ):
-            return ChatRoute(advisory=True, reason="improve_pin_question")
-        # Change request / default "Improve this section for the RFP." → rewrite this tab.
+        # Trust the LLM manuscript-intent classifier — no regex "ends with ?" gate.
+        if chat_intent == "advisory":
+            return ChatRoute(advisory=True, reason="improve_pin_classifier_advisory")
+        if chat_intent in {"single_edit", "multi_patch"}:
+            return ChatRoute(advisory=False, reason=f"improve_pin_{chat_intent}")
+        # Classifier abstained: pinned Improve means edit this tab.
         return ChatRoute(advisory=False, reason="improve_pin_edit")
 
     from app.services.proposal_chat_structure import (
@@ -1761,6 +1784,11 @@ def _user_asks_reference_integrity_fix(
 
 
 def _user_asks_reference_contact_fix(user_message: str) -> bool:
+    """Legacy path for pasted ClientList contacts into References only.
+
+    General asks on any section must go through `_plan_section_improve` →
+    Supermemory queries — the LLM understands the ask; do not expand this detector.
+    """
     text = user_message or ""
     if _message_targets_non_references_section(text):
         return False
@@ -3031,7 +3059,10 @@ Return ONLY JSON:
       "editorInstruction": "precise instruction for THIS passage only"
     }
   ],
-  "kbQueries": ["0-4 optional Supermemory queries needed for these edits"]
+  "kbQueries": ["0-4 optional Supermemory queries needed for these edits"],
+  "siblingEdits": [
+    {"sectionTitle": "exact sidebar title from OTHER SECTIONS", "editorInstruction": "…"}
+  ]
 }
 
 Rules:
@@ -3053,9 +3084,37 @@ Rules:
    HTML/div, or "styled as …". The note body must be a layout/production handoff
    (callout box, columns, attach signed form/PDF, visual separation) — never meta
    commentary like "This section establishes…" or "critical for budget control".
-7. If the user asks to REMOVE or ADD a named person, bio, row, sentence, or fact:
+7. If the user asks to REMOVE a named person/row OR ADD someone alongside (keep others):
    mode MUST be patch. Anchor the paragraph, list item, or table row that contains
    that name (or the team/staff block for an add). NEVER full_rewrite the section.
+   Exception: REPLACE / instead-of / swap A→B follows rule 8 (update all related fields).
+8. SMART REPLACE (any entity — person, client, contact, case study, role, figure): when
+   the user asks to replace / swap / use instead-of A with B INSIDE this section, do NOT
+   change only the surface name. Update EVERY related field that belonged to A from KB for B
+   (name row, title/role, phone, email, org, metrics, prose, EVERY table cell). When a
+   labeled form/table (Name/Title/Phone/Email) + narrative must stay coherent: mode MUST be
+   full_rewrite. kbQueries for B's profile — never invent; missing fields → MANUAL FILL /
+   VERIFY only — never leave A's leftover values on B.
+9. UNIVERSAL CROSS-SECTION (every ask, every section type): When OTHER SECTIONS digest is
+   provided, ALWAYS scan it before planning. If THIS edit would make any shared agency fact
+   disagree with another tab (legal name, address, email, phone, primary/authorized contact,
+   signer, team size, named personnel, certs, insurance, registration, budget totals/ceilings,
+   phase fees, case-study claims, coverage statuses, etc.), you MUST emit siblingEdits that
+   update those other tabs in the same turn. Empty siblingEdits only when no other tab states
+   a conflicting or now-stale value. This applies to fill, rewrite, voice, scrub, and replace
+   asks alike — never optimize the open tab alone.
+10. RFP REQUIREMENTS: When RFP CONTEXT is provided, each editorInstruction (and full_rewrite
+   understoodAsk) MUST require covering the scored / demanded asks for THIS section without
+   RFP-echo (answer what we will do/prove; do not paraphrase the buyer). Do not drop a
+   required form field, eval criterion, or demanded subsection to polish tone.
+11. REV 6 / zö BRANDING (every editorInstruction): Require first-person we/our in narrative
+   tabs; company name "zö agency"; no em dashes; no negation-contrast (rather than / instead
+   of / "X, not Y" / not just); no significance-closes; no "worth noting/naming"; no empty
+   hype. Patches and rewrites must stay in Rev 6 voice — never flatten to generic consultant
+   prose.
+
+Return siblingEdits (may be empty) in the same JSON:
+  "siblingEdits": [{"sectionTitle": "exact sidebar title", "editorInstruction": "…"}]
 """
 
 
@@ -3071,6 +3130,7 @@ class EditScopePlan:
     mode: str  # patch | full_rewrite
     patches: list[EditScopePatch]
     kb_queries: list[str]
+    sibling_edits: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def anchor_excerpt(self) -> str:
@@ -3299,14 +3359,152 @@ def _locate_planned_patches(
     return _merge_overlapping_located_patches(located)
 
 
+
+def _section_has_contact_name_row(content: str) -> bool:
+    """True when section has a form/table Name row (contact identity must stay coherent)."""
+    text = content or ""
+    return bool(
+        re.search(r"(?im)^\|\s*\*?\*?Name\*?\*?\s*\|", text)
+        or re.search(r"(?im)^\*?\*?Name\*?\*?\s*:", text)
+    )
+
+
+def _find_draft_section_by_title(
+    draft: ProposalDraft, title: str
+) -> ProposalSection | None:
+    want = re.sub(r"\s+", " ", (title or "").strip().casefold())
+    if not want:
+        return None
+    exact = [
+        s
+        for s in draft.sections
+        if re.sub(r"\s+", " ", (s.title or "").strip().casefold()) == want
+    ]
+    if exact:
+        return exact[0]
+    # Soft contain match (sidebar title substring)
+    soft = [
+        s
+        for s in draft.sections
+        if want in re.sub(r"\s+", " ", (s.title or "").strip().casefold())
+        or re.sub(r"\s+", " ", (s.title or "").strip().casefold()) in want
+    ]
+    return soft[0] if len(soft) == 1 else None
+
+
+async def _apply_sibling_section_edits(
+    *,
+    draft: ProposalDraft,
+    open_section_id: str,
+    sibling_edits: list[tuple[str, str]],
+    rfp: RfpRecord,
+    rfp_context: str,
+    brand_voice_dict: dict[str, Any] | None,
+    kb_zo_voice: str,
+    research: ProposalResearchCache | None,
+    kb_block: str,
+    fact_blob: str,
+    user_ask: str,
+    manuscript_digest: str = "",
+) -> tuple[ProposalDraft, list[str]]:
+    """Apply cross-tab consistency edits planned alongside the open-section change."""
+    if not sibling_edits:
+        return draft, []
+    updated = draft
+    touched: list[str] = []
+    for title, instruction in sibling_edits[:8]:
+        sibling = _find_draft_section_by_title(updated, title)
+        if sibling is None or sibling.id == open_section_id:
+            continue
+        body = sibling.content or ""
+        if not body.strip():
+            continue
+        try:
+            digest = manuscript_digest or _manuscript_digest(
+                updated, max_chars=10_000
+            )
+            new_sec, _provider, _fills = await _improve_section_selection(
+                section=sibling,
+                rfp=rfp,
+                rfp_context=rfp_context,
+                user_message=instruction,
+                selection_start=0,
+                selection_end=len(body),
+                selection_text=body,
+                brand_voice=brand_voice_dict,
+                kb_zo_voice=kb_zo_voice,
+                evidence=[],
+                kb_block=kb_block,
+                fact_blob=fact_blob,
+                avoidance_block="",
+                research=research,
+                compliance_user_message=user_ask,
+                lean=False,
+                manuscript_digest=digest,
+            )
+        except Exception:
+            logger.exception(
+                "Sibling edit failed for %r (open=%s)", title, open_section_id
+            )
+            continue
+        if (new_sec.content or "") == body:
+            continue
+        merged = [
+            new_sec if s.id == sibling.id else s for s in updated.sections
+        ]
+        updated = updated.model_copy(
+            update={
+                "sections": merged,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        touched.append(sibling.title or title)
+        print(
+            f"[chat-plan] sibling applied: {sibling.title or title}",
+            flush=True,
+        )
+    return updated, touched
+
 async def _plan_edit_scope(
     *,
     section: ProposalSection,
     rfp: RfpRecord,
     user_message: str,
+    manuscript_digest: str = "",
+    rfp_context: str = "",
+    brand_voice: dict[str, Any] | None = None,
+    kb_zo_voice: str = "",
 ) -> EditScopePlan:
     """LLM understands the ask and chooses patch vs full rewrite (no keyword rules)."""
     content = section.content or ""
+    other = (manuscript_digest or "").strip()
+    other_block = (
+        f"\n\nOTHER SECTIONS (cross-check contradictions — same facts must agree):\n"
+        f"{other[:14_000]}\n"
+        if other
+        else ""
+    )
+    rfp_block = ""
+    ctx = (rfp_context or "").strip()
+    if ctx:
+        rfp_block = f"\n\nRFP CONTEXT (cover scored/demanded asks for this section):\n{ctx[:8_000]}\n"
+    register = classify_section_register(
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
+    voice_block = format_brand_voice_block(
+        brand_voice,
+        kb_zo_voice=kb_zo_voice or "",
+        rfp_client=rfp.client,
+        register=register,
+        compact=True,
+    )
+    voice_plan = (
+        f"\n\nREV 6 / zö BRANDING (mandatory in every editorInstruction):\n{voice_block[:3_500]}\n"
+        if voice_block.strip()
+        else ""
+    )
     raw, _ = await llm.chat_json(
         [
             {"role": "system", "content": EDIT_SCOPE_PLAN_PROMPT},
@@ -3317,6 +3515,9 @@ async def _plan_edit_scope(
                     f"Section: {section.title}\n\n"
                     f"User message:\n{user_message.strip()}\n\n"
                     f"Current section content:\n{content[:6000]}"
+                    + other_block
+                    + rfp_block
+                    + voice_plan
                 ),
             },
         ],
@@ -3332,15 +3533,55 @@ async def _plan_edit_scope(
     queries: list[str] = []
     if isinstance(queries_raw, list):
         queries = [str(q).strip()[:240] for q in queries_raw if str(q).strip()][:4]
+    if is_cover_letter_section_title(section.title or ""):
+        won_seeds = [
+            "06_WON cover letter Dear Sincerely authorized signature",
+            "06_WON letter of transmittal submitted proposal respectfully",
+        ]
+        queries = list(dict.fromkeys([*won_seeds, *queries]))[:6]
     patches = _parse_edit_scope_patches(raw if isinstance(raw, dict) else {}, user_message)
     if mode == "full_rewrite":
         patches = []
-    return EditScopePlan(
+    siblings: list[tuple[str, str]] = []
+    for item in raw.get("siblingEdits") or raw.get("sibling_edits") or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("sectionTitle") or item.get("section_title") or "").strip()
+        instr = str(
+            item.get("editorInstruction") or item.get("editor_instruction") or ""
+        ).strip()
+        if title and instr:
+            siblings.append((title, instr))
+    plan = EditScopePlan(
         understood_ask=str(raw.get("understoodAsk") or raw.get("understood_ask") or "").strip(),
         mode=mode,
         patches=patches,
         kb_queries=queries,
+        sibling_edits=siblings,
     )
+    other_n = max(0, (manuscript_digest or "").count("### ") - 1)
+    _print_chat_plan_to_backend_terminal(
+        section_id=section.id or "",
+        section_title=section.title or "",
+        user_message=user_message,
+        understood=plan.understood_ask or user_message,
+        edit_mode=("preserve_structure_fill" if mode == "patch" else "full_rewrite"),
+        outline_action="edit_open_section",
+        queries=list(plan.kb_queries or []),
+        other_sections_seen=other_n,
+    )
+    if siblings:
+        print(
+            f"[chat-plan] siblingEdits={len(siblings)}: "
+            + ", ".join(t for t, _ in siblings[:6]),
+            flush=True,
+        )
+    print(
+        f"[chat-plan] source=edit_scope mode={plan.mode} "
+        f"patches={len(plan.patches)}",
+        flush=True,
+    )
+    return plan
 
 
 VERIFICATION_FACT_MIN_SIMILARITY = 0.35
@@ -3550,6 +3791,10 @@ async def _section_chat_advisory_reply(
     )
 
     if user_asks_kb_fetch_or_fill(user_message or ""):
+        print(
+            f"[chat-advisory] KB fetch/fill pack for section={section.title!r}",
+            flush=True,
+        )
         packed, packed_sources = await fetch_packed_section_kb_evidence(
             section_title=section.title or "",
             user_message=user_message or "",
@@ -3575,8 +3820,8 @@ async def _section_chat_advisory_reply(
         else:
             kb_block = (
                 "\n\nKB status: searched the knowledge base for this fetch ask but "
-                "found no matching case-study snippets. Say what is still missing — "
-                "do NOT claim you searched if this block is empty.\n"
+                "found no matching snippets for THIS section. Say what is still "
+                "missing — do NOT claim you searched if this block is empty.\n"
             )
         kb_block = bio_block + kb_block
     elif _advisory_needs_kb_lookup(user_message or "", excerpt):
@@ -3588,6 +3833,16 @@ async def _section_chat_advisory_reply(
             rfp_sector=rfp.sector or "",
             rfp_title=rfp.title or "",
             research=research,
+        )
+        _print_chat_plan_to_backend_terminal(
+            section_id=section.id or "",
+            section_title=section.title or "",
+            user_message=user_message or "",
+            understood=(user_message or "").strip()[:300],
+            edit_mode="advisory_verify",
+            outline_action="edit_open_section",
+            queries=list(queries or []),
+            other_sections_seen=max(0, len(draft.sections) - 1) if draft else 0,
         )
         prefer = _verification_needles_from_content(
             section.title or "", section.content or ""
@@ -3851,6 +4106,7 @@ Return ONLY JSON:
 {
   "understoodAsk": "One sentence: what the user wants done",
   "outlineAction": "edit_open_section" | "add_sidebar_section" | "delete_sidebar_section",
+  "editMode": "full_rewrite" | "preserve_structure_fill",
   "editorInstruction": "Clear instruction for the rewriter — address the ask, cover listed RFP needs, fill VERIFY from KB only when evidenced, keep unconfirmed legal attestations as [VERIFY: …]",
   "kbQueries": ["3-6 targeted Supermemory queries derived from the understood ask + RFP needs + VERIFY gaps"],
   "rfpNeedsAddressed": ["short phrases of RFP requirements this edit must cover"]
@@ -3862,15 +4118,20 @@ Rules:
 - outlineAction=delete_sidebar_section when they want a sidebar tab removed.
 - outlineAction=edit_open_section only when they want THIS/open/named existing tab rewritten.
 - understoodAsk must reflect the user's actual request (not a generic 'improve section').
-- kbQueries must chase specific facts those needs require (zö agency + field + doc hint like 01 companyfacts / 03_CS_).
-- For examples / case studies / campaign results: include at least one query that seeks
-  real KB results/KPIs for clients or projects named in the draft (use those names — never the RFP buyer).
-- For REFERENCES tabs (or "proper references" / "based on RFP" asks): kbQueries MUST chase
-  RFP-mapped reference needs (count, sector, institution type) and sector-comparable
-  ClientList / past-proposal contact rows — do NOT re-query clients that appear only in the
-  prior draft when the user wants RFP-fit replacements. Never use the RFP buyer as a search subject.
-- For awards / recognition / agency honors asks: kbQueries MUST target 05_Awards and
-  companyfacts — the query planner decides wording; never skip retrieval.
+- ALWAYS plan kbQueries from the understood ask + THIS section's job (title, draft gaps, RFP needs).
+  Every content ask on every section type (references, bios, approach, budget, forms, cover letter,
+  case studies, compliance, …) must produce 3–6 targeted Supermemory queries — the agent decides
+  wording from meaning. Never skip retrieval because the ask was informal ("get me some…",
+  "can you fill this", "related X here"). Only return kbQueries: [] for pure voice/delete/reformat
+  with zero new facts needed.
+- editMode=preserve_structure_fill when the ask is to fill/add/complete rows, contacts, MANUAL FILL /
+  VERIFY cells, or tables/forms already in the draft — keep existing markdown structure (headers,
+  columns, numbered forms). Never invent phones/emails/rates/certs. Never emit empty numbered
+  pipe padding rows. Use full_rewrite only when they clearly want the whole tab rewritten from scratch.
+- kbQueries must chase specific zö / ClientList / past-proposal facts those needs require
+  (doc hints like 01 companyfacts, 02 master template, 03_CS_, 04 bio, 05_Awards, ClientList,
+  prior proposal contact rows). NEVER use the RFP buyer/client name as the search subject.
+- Prefer editMode=preserve_structure_fill for fill/complete asks on structured tabs.
 - Never invent E-Verify enrollment as a searchable 'confirmed' fact — search companyfacts; leave enrollment VERIFY unless facts prove it.
 - If the user only wants VERIFY tags filled, say so in editorInstruction and keep surrounding prose intact.
 - When the user lists multiple issues, defects, or requirements: editorInstruction MUST enumerate
@@ -3878,7 +4139,11 @@ Rules:
 - editorInstruction must say: cite KPIs/results present in KB evidence; use [VERIFY] or
   [MANUAL FILL: Sonja — …] only for fields still missing after retrieval — never invent
   team members, awards, carriers, metrics, or compliance statuses.
-- DEFAULT STYLE: Unless the user asks for more detail, instruct the editor to write concisely — cover every RFP requirement but in the fewest tight, proof-led sentences. No filler, no restating the RFP back to the evaluator. ANTI-RFP-ECHO: editorInstruction must require a proposal answer (what we will do/prove), never a paraphrase of the buyer's ask."""
+- DEFAULT STYLE: Unless the user asks for more detail, instruct the editor to write concisely — cover every RFP requirement but in the fewest tight, proof-led sentences. No filler, no restating the RFP back to the evaluator. ANTI-RFP-ECHO: editorInstruction must require a proposal answer (what we will do/prove), never a paraphrase of the buyer's ask.
+- CROSS-SECTION (mandatory every turn when OTHER SECTIONS digest is present): editorInstruction MUST require matching agency facts already stated elsewhere (legal name, email/phone, team size, certifications, insurance, registration, budget totals, named personnel, primary contact, case-study claims) — never invent a conflicting value. Prefer MANUAL FILL / VERIFY over contradicting another tab. If the ask changes a shared fact, say which other tabs must stay aligned.
+- RFP (mandatory): editorInstruction MUST require covering this section's scored/demanded RFP needs from RFP CONTEXT without echoing the buyer. Partial coverage is unacceptable when needs are listed.
+- REV 6 / zö (mandatory every editorInstruction): first-person we/our in narrative; "zö agency"; no em dashes; no negation-contrast; no significance-closes; no worth noting/naming; no empty hype. Never flatten to generic consultant prose.
+- SMART REPLACE: If the ask swaps/replaces any entity (person, contact, client, case), editorInstruction MUST require updating all related fields from KB for the NEW entity — not a name-only string swap. Plan kbQueries for the new entity's full profile."""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
 
@@ -3902,6 +4167,13 @@ Rules:
 5b. ANTI-RFP-ECHO: Write the proposal answer only. Never paraphrase RFP requirements,
     Opportunity Understanding, or evaluation criteria into the body. Do not open by
     telling the client what they asked for or already built.
+5c. CROSS-SECTION FACTS: Obey ALREADY COVERED / OTHER SECTIONS digests. Same agency
+    fact (email, phone, team size, certs, insurance, registration, budget totals,
+    named people) must match those tabs and companyfacts. Never invent a conflicting
+    value; use [MANUAL FILL] / [VERIFY] instead of contradicting another section.
+5d. SMART REPLACE: When replacing entity A with B, rewrite every related cell and
+    sentence (name, title/role, phone, email, org, narrative). Pull B from KB/evidence.
+    Never leave A's title/phone/email next to B's name. Missing B fields → MANUAL FILL.
 6. Follow the REGISTER block: narrative sections use first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance.
    CONSISTENCY: Once a paragraph starts with "We", do NOT switch to "zö agency" mid-paragraph.
    Use "zö agency" only on first mention or in headings; everywhere else use "we/our/us".
@@ -3920,6 +4192,7 @@ Rules:
     process steps, cadence, comparisons, and roles — whenever that improves evaluator scanability.
     Dense, scannable layouts score better than walls of text. If the user explicitly asks to "convert to bullet points" or "format as a table", you MUST rewrite the content into that exact markdown format.
 12a. PRESERVE EXISTING TABLES: If the previous draft contains a markdown table or bulleted list, you MUST preserve it as a table/list in your output. Do not flatten existing tables into paragraphs.
+12b. REFERENCES / CONTACT TABLES (critical): Keep the exact header row and column count from the prior draft. Fill only real evidenced rows (name + organization at minimum). For missing phone/email use one [MANUAL FILL: Sonja — …] cell — never invent contacts. NEVER emit empty numbered padding rows like `| 1 | | | |` or `| 19 | | | |`. NEVER stack repeated MANUAL FILL tags inside Description of Services. Prefer fewer complete rows over many hollow rows. Do not delete honest gap notes unless you replaced them with real evidenced rows.
 13. DESIGNER NOTES: Insert ONLY as a standalone paragraph
     `[DESIGNER NOTE: concrete layout handoff]` after a blank line — never **Designer Note:**,
     HTML/div, or "styled as". Content is a production handoff (callout box title + placement,
@@ -3948,12 +4221,19 @@ The user highlighted a span of text. You receive the FULL section for context (v
 Return ONLY the replacement text for that span — not the full section.
 
 Rules:
-1. Change ONLY what the user asked for in the selected excerpt.
+1. Change ONLY what the user asked for in the selected excerpt — but if OTHER SECTIONS or
+   RFP CONTEXT show a contradiction or missed requirement that this span states, fix that
+   fact inside the span too (do not invent; prefer VERIFY / MANUAL FILL).
 2. Match the surrounding section's voice, rhythm, and register (first person we/our in narrative sections).
-3. Preserve BRAND VOICE from the voice block — warm, proof-led, client-centered.
-3a. REV 6 HARD BANS in the replacement: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just / more than just); no significance-closes ("That's the kind of…"); no hedging ("worth noting" / "worth naming"); no empty hype words. State what the thing is.
+3. Preserve BRAND VOICE from the voice block — warm, proof-led, client-centered. Always
+   obey the Rev 6 / zö block when provided (even on lean edits).
+3a. REV 6 HARD BANS in the replacement: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just / more than just); no significance-closes ("That's the kind of…"); no hedging ("worth noting" / "worth naming"); no empty hype words. State what the thing is. Company name always "zö agency".
 4. Use ONLY facts from KB excerpts when provided. Use [VERIFY: specific field] if a fact is still missing.
 5. Do NOT invent reference contacts, phone numbers, or metrics.
+5a. CROSS-SECTION: Never write a value that contradicts OTHER SECTIONS digest (contacts,
+   team size, certs, insurance, budget totals, named people). Match those tabs or VERIFY.
+5b. RFP: When RFP CONTEXT is present, keep this span compliant with demanded asks for the
+   section — proposal answer, not RFP echo.
 6. Keep markdown structure inside the excerpt (lists, table rows) if the selection had them.
 7. NEVER insert citation markers like [E1], [E14], or **[E3]** into the excerpt.
 8. Return ONLY JSON: {"replacement": "revised excerpt text only"}
@@ -4196,6 +4476,9 @@ def _clean_local_edit_body(body: str) -> str:
         text,
     )
     return text.strip(" .,")
+
+
+
 
 
 def _understand_local_edit(user_message: str) -> LocalChatEdit | None:
@@ -4920,6 +5203,40 @@ async def _plan_selection_edit(
     return editor_instruction, queries
 
 
+
+def _print_chat_plan_to_backend_terminal(
+    *,
+    section_id: str,
+    section_title: str,
+    user_message: str,
+    understood: str,
+    edit_mode: str,
+    outline_action: str,
+    queries: list[str],
+    other_sections_seen: int = 0,
+) -> None:
+    """Always visible in the uvicorn/backend terminal (not Celery)."""
+    lines = [
+        "",
+        "=" * 64,
+        "CHAT PLAN (backend API process — not LLM-only; KB + ZF follow)",
+        f"  section: {section_title or section_id}",
+        f"  user said: {(user_message or '').strip()[:240]}",
+        f"  agent understood: {(understood or '').strip()[:300]}",
+        f"  outlineAction: {outline_action}",
+        f"  editMode: {edit_mode}",
+        f"  other sections visible to planner: {other_sections_seen}",
+    ]
+    if queries:
+        lines.append(f"  will query Supermemory ({len(queries)}):")
+        for i, q in enumerate(queries, 1):
+            lines.append(f"    {i}. {(q or '').strip()[:200]}")
+    else:
+        lines.append("  will query Supermemory: no (planner returned 0 queries)")
+    lines.append("=" * 64)
+    print("\n".join(lines), flush=True)
+
+
 async def _plan_section_improve(
     *,
     section: ProposalSection,
@@ -4927,14 +5244,24 @@ async def _plan_section_improve(
     rfp_section: RfpSectionMap | None,
     user_message: str,
     prior_queries: list[str],
-) -> tuple[str, str, list[str], str]:
+    manuscript_digest: str = "",
+) -> tuple[str, str, list[str], str, str]:
     """LLM understands the user ask + RFP needs first, then plans KB queries.
 
-    Returns (understood_ask, editor_instruction, kb_queries, outline_action).
+    Returns (understood_ask, editor_instruction, kb_queries, outline_action, edit_mode).
+    Not LLM-only end-to-end: this only plans; Supermemory + rewrite + ZF persist follow.
     """
     requirements = rfp_section.requirements if rfp_section else []
     retrieval_focus = rfp_section.retrieval_focus if rfp_section else []
     gaps = _gap_fields_from_text(section.content or "")
+    other_block = ""
+    digest = (manuscript_digest or "").strip()
+    if digest:
+        other_block = (
+            "\n\nOTHER SECTIONS (match facts — do not plan queries that invent "
+            "conflicting values):\n"
+            f"{digest[:12_000]}\n"
+        )
     raw, _ = await llm.chat_json(
         [
             {"role": "system", "content": SECTION_IMPROVE_PLAN_PROMPT},
@@ -4953,6 +5280,7 @@ async def _plan_section_improve(
                     + ("\n".join(f"- {q}" for q in prior_queries[:20]) or "- (none)")
                     + f"\n\nUser message:\n{user_message.strip()}\n\n"
                     f"Current draft excerpt:\n{(section.content or '')[:3500]}"
+                    + other_block
                 ),
             },
         ],
@@ -4990,6 +5318,17 @@ async def _plan_section_improve(
         outline_action = "add_sidebar_section"
     if not editor_instruction:
         editor_instruction = user_message.strip() or f"Improve {section.title} against RFP requirements."
+    edit_mode = str(raw.get("editMode") or raw.get("edit_mode") or "full_rewrite").strip()
+    if edit_mode not in {"full_rewrite", "preserve_structure_fill"}:
+        edit_mode = "full_rewrite"
+    if edit_mode == "preserve_structure_fill":
+        editor_instruction = (
+            f"{editor_instruction}\n\n"
+            "STRUCTURE LOCK: Keep the existing markdown table/form headers and column layout. "
+            "Fill only from Supermemory/KB evidence. Missing contacts → one [MANUAL FILL: Sonja — …] "
+            "cell. Never invent phones/emails. Never emit empty numbered pipe rows like "
+            "| 1 | | | | or | 19 | | | |. Prefer fewer complete rows over hollow padding."
+        )
     if not queries:
         # Fall back to refined planner if understand-step returned no queries.
         queries = await _plan_refined_queries(
@@ -5001,13 +5340,27 @@ async def _plan_section_improve(
             current_content=section.content or "",
         )
     logger.info(
-        "Section improve understood ask for %s: %r outline=%s → %d KB queries",
+        "Section improve understood ask for %s: %r outline=%s mode=%s → %d KB queries",
         section.id,
         understood[:160],
         outline_action,
+        edit_mode,
         len(queries),
     )
-    return understood, editor_instruction, queries, outline_action
+    other_n = 0
+    if manuscript_digest.strip():
+        other_n = max(0, manuscript_digest.count("### ") - 1)
+    _print_chat_plan_to_backend_terminal(
+        section_id=section.id or "",
+        section_title=section.title or "",
+        user_message=user_message,
+        understood=understood,
+        edit_mode=edit_mode,
+        outline_action=outline_action,
+        queries=queries,
+        other_sections_seen=other_n,
+    )
+    return understood, editor_instruction, queries, outline_action, edit_mode
 
 
 def _understood_ask_implies_sidebar_add(understood: str) -> bool:
@@ -5792,11 +6145,12 @@ async def _improve_section_selection(
     research: ProposalResearchCache | None = None,
     compliance_user_message: str = "",
     lean: bool = False,
+    manuscript_digest: str = "",
 ) -> tuple[ProposalSection, str, int]:
     """Surgical excerpt edit — splice replacement only.
 
-    lean=True: minimal prompt (excerpt + short neighbors only) — for planned patches
-    that do not need a second KB fan-out or full-section dump.
+    lean=True: shorter prompt for planned patches, but still includes compact Rev 6,
+    RFP context, and OTHER SECTIONS digest so edits cannot contradict the manuscript.
     """
     content = section.content or ""
     if not _selection_bounds_valid(
@@ -5822,6 +6176,7 @@ async def _improve_section_selection(
         kb_zo_voice="" if lean else kb_zo_voice,
         rfp_client=rfp.client,
         register=register,
+        compact=bool(lean),
     )
 
     # Protect MANUAL FILL tags from incidental rewrite (mask → validate → unmask).
@@ -5892,14 +6247,35 @@ async def _improve_section_selection(
     raw: dict | None = None
     for attempt in (1, 2):
         if lean:
+            other = (manuscript_digest or "").strip()
+            other_snip = (
+                f"OTHER SECTIONS (do not contradict):\n{other[:6_000]}\n\n"
+                if other
+                else ""
+            )
+            rfp_snip = _budget_rfp_context(rfp_context)
             user_block = (
+                f"BRAND VOICE / REV 6 (mandatory):\n{voice_block}\n\n"
                 f"Client: {rfp.client}\n"
-                f"Section: {section.title}\n\n"
+                f"Section: {section.title}\n"
+                f"Register: {register}\n\n"
                 f"User instruction:\n{user_message.strip()}\n\n"
                 f"Text immediately before excerpt:\n\"\"\"{neighbor_before}\"\"\"\n\n"
                 f"Selected excerpt (replace ONLY this span):\n\"\"\"{masked_excerpt}\"\"\"\n\n"
                 f"Text immediately after excerpt:\n\"\"\"{neighbor_after}\"\"\"\n\n"
-                "Return ONLY the revised excerpt. Do not rewrite surrounding text.\n"
+                + (
+                    f"RFP context:\n{rfp_snip[:4_000]}\n\n"
+                    if (rfp_snip or "").strip()
+                    else ""
+                )
+                + other_snip
+                + (
+                    f"KB excerpts:\n{kb_block[:3_000]}\n\n"
+                    if kb_block.strip()
+                    else ""
+                )
+                + "Return ONLY the revised excerpt. Obey Rev 6 + OTHER SECTIONS. "
+                "Do not rewrite surrounding text.\n"
             )
         else:
             user_block = (
@@ -5909,12 +6285,24 @@ async def _improve_section_selection(
                 f"RFP: {rfp.title}\n"
                 f"Section: {section.title}\n"
                 f"Register: {register}\n\n"
-                f"User instruction:\n{user_message.strip()}\n\n"
+                + (
+                    "COVER LETTER EDIT: Keep THIS RFP's letter format. Rev 6 signed-passage "
+                    "voice (first person). Never introduce 'On behalf of zö agency' "
+                    "boilerplate. Name zö agency only as the offeror where the RFP asks.\n\n"
+                    if register == "cover_letter"
+                    else ""
+                )
+                + f"User instruction:\n{user_message.strip()}\n\n"
                 f"Selected excerpt (replace ONLY this span):\n\"\"\"{masked_excerpt}\"\"\"\n\n"
                 f"Full section (context — do NOT rewrite outside the excerpt):\n"
                 f"\"\"\"{masked_content[:8000]}\"\"\"\n\n"
                 f"RFP context:\n{_budget_rfp_context(rfp_context)}\n\n"
             )
+            if (manuscript_digest or "").strip():
+                user_block += (
+                    f"OTHER SECTIONS (do not contradict):\n"
+                    f"{manuscript_digest.strip()[:8_000]}\n\n"
+                )
             if evidence:
                 user_block += f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
             if kb_block.strip():
@@ -6397,8 +6785,8 @@ async def _redraft_rfp_section(
             word_target_line = (
                 f"Word target: {ceiling} MAX — cover letter must be thorough and deep; "
                 f"aim for {floor}-{ceiling} words of multi-paragraph letter prose. "
-                "Intent, buyer understanding, proof-led fit, contact, every RFP "
-                "cover-letter element, Sonja Anderson (Founder) close — no thin stub. "
+                "Hit every THIS-RFP cover-letter / transmittal ask; close as the "
+                "authorized signer — no thin stub. "
             )
         if voice_ask:
             word_target_line = (
@@ -6412,8 +6800,19 @@ async def _redraft_rfp_section(
             else "Go above 75% ONLY if substance demands it.\n"
         )
         format_hint = (
-            "FORMAT: Multi-paragraph letter prose (salutation → body → close). "
-            "Keep the signed-PDF designer note. Do not collapse into a checklist.\n"
+            "FORMAT / PRIORITY (cover letter):\n"
+            "1) Follow THIS RFP's cover-letter / letter-of-transmittal package "
+            "(addressee, required statements, contact/signature block, page limit) "
+            "— never a generic Zo template letter.\n"
+            "2) If KB / evidence includes 06_WON cover letters or letters of "
+            "transmittal, mirror their letter FORM and correspondence voice only. "
+            "Never copy prior client names, project claims, dates, or dollars.\n"
+            "3) Rev 6 signed-passage voice: first person from the authorized signer; "
+            "address the recipient by name when known; multi-paragraph letter prose "
+            "(salutation → body → close). NEVER open with 'On behalf of zö agency' "
+            "or third-person agency boilerplate. Name zö agency only as the offeror / "
+            "in the signature or certification lines the RFP asks for.\n"
+            "4) Keep any signed-PDF [DESIGNER NOTE]. Do not collapse into a checklist.\n"
             if is_cover_letter
             else (
                 "FORMAT: Prefer short paragraphs, markdown bullets, and compact markdown tables for "
@@ -6475,7 +6874,25 @@ async def _redraft_rfp_section(
         ]
         dedup_rules = format_anti_duplication_rules()
         prior_block = format_prior_sections_block(prior_secs, exclude_ids={section.id})
-        user_block = f"{dedup_rules}\n\n{prior_block}\n\n{user_block}" if prior_block else f"{dedup_rules}\n\n{user_block}"
+        consistency_pin = (
+            "CROSS-SECTION FACT CONSISTENCY (hard): Match legal name, contact, "
+            "team size, certifications, insurance, registration, budget totals, "
+            "and named personnel already stated in OTHER SECTIONS / companyfacts. "
+            "Never invent a conflicting value. Prefer [MANUAL FILL] / [VERIFY] over "
+            "contradicting another tab. Do not dump another tab's full content here — "
+            "only keep facts consistent.\n"
+        )
+        print(
+            f"[chat-rewrite] other sections in context: {len(prior_secs)} "
+            f"(anti-dup + fact consistency)",
+            flush=True,
+        )
+        if prior_block:
+            user_block = (
+                f"{dedup_rules}\n\n{consistency_pin}\n{prior_block}\n\n{user_block}"
+            )
+        else:
+            user_block = f"{dedup_rules}\n\n{consistency_pin}\n{user_block}"
         if attempt == 2 and mfill_originals:
             user_block = (
                 "RETRY: Previous output dropped protected «MFILL_N» tokens. "
@@ -7157,6 +7574,57 @@ async def _try_voice_style_only_pass(
     return working, updated_draft, research, provider, reply, True
 
 
+
+def apply_chat_preview_quality_guards(
+    draft: ProposalDraft,
+    *,
+    label: str = "chat-preview",
+) -> ProposalDraft:
+    """Consistency + Rev 6 on a draft that is NOT yet persisted (preview panel).
+
+    Persist path already runs these inside `_persist_section_improve_draft`. Preview
+    must still show cross-section-aligned, Rev-6-scrubbed prose before Apply.
+    """
+    working = draft
+    try:
+        from app.services.proposal_consistency_enforcement import (
+            apply_consistency_enforcement,
+        )
+
+        working, cons_logs = apply_consistency_enforcement(working)
+        if cons_logs:
+            logger.info(
+                "%s consistency: %s",
+                label,
+                "; ".join(cons_logs[:8]),
+            )
+            print(
+                f"[{label}] consistency enforcement: {len(cons_logs)} fix(es)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s consistency skipped: %s", label, exc)
+    try:
+        from app.services.proposal_voice_enforcement import (
+            apply_chat_rev6_voice_to_draft,
+        )
+
+        working, voice_logs = apply_chat_rev6_voice_to_draft(working)
+        if voice_logs:
+            logger.info(
+                "%s rev6 voice: %s",
+                label,
+                "; ".join(voice_logs[:8]),
+            )
+            print(
+                f"[{label}] rev6 voice: {len(voice_logs)} scrub(s)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s rev6 voice skipped: %s", label, exc)
+    return working
+
+
 async def _persist_section_improve_draft(
     updated_draft: ProposalDraft,
     research: ProposalResearchCache,
@@ -7255,11 +7723,38 @@ async def _persist_section_improve_draft(
     except Exception as exc:  # noqa: BLE001
         logger.warning("rev6 voice enforcement skipped on chat-persist: %s", exc)
 
+    # Deterministic cross-tab consistency (contacts, schedule/approach overlap, etc.)
+    # before the hard zero-fabrication gate — chat is never "LLM rewrite only".
+    try:
+        from app.services.proposal_consistency_enforcement import (
+            apply_consistency_enforcement,
+        )
+
+        updated_draft, cons_logs = apply_consistency_enforcement(
+            updated_draft,
+            research=research,
+        )
+        if cons_logs:
+            logger.info(
+                "consistency enforcement (chat-persist): %s",
+                "; ".join(cons_logs[:8]),
+            )
+            print(
+                f"[chat-persist] consistency enforcement: {len(cons_logs)} fix(es)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("consistency enforcement skipped on chat-persist: %s", exc)
+
     guarded, _report = await apply_zero_fabrication_guards_before_persist(
         updated_draft,
         research=research,
         budget=research.budget if research else None,
         label="chat-persist",
+    )
+    print(
+        "[chat-persist] zero-fabrication guards applied before save",
+        flush=True,
     )
     to_save = push_after_section_edit_snapshot(
         guarded,
@@ -9703,14 +10198,30 @@ async def improve_proposal_section(
     if apply_fix:
         route = ChatRoute(advisory=False, reason="apply_fix")
     else:
+        _route_section = _find_draft_section(draft, section_id)
         route = decide_chat_route(
             chat_intent=chat_intent,
             user_message=raw_user_message,
             selection_mode=bool(selection_mode),
             conversation_history=conversation_history,
             improve_pinned=bool(improve_section_pinned),
+            section_content=(_route_section.content or "") if _route_section else "",
         )
     logger.info("chat route=%s reason=%s", "advisory" if route.advisory else "edit", route.reason)
+    # Universal for EVERY section (not References/Cost-specific): show route in
+    # the backend API terminal before advisory vs edit branches.
+    _focus_for_log = _find_draft_section(draft, section_id)
+    print(
+        "\n"
+        + "=" * 64
+        + "\nCHAT TURN (every section — same pipeline)\n"
+        f"  section: {(_focus_for_log.title if _focus_for_log else section_id) or section_id}\n"
+        f"  route: {'advisory' if route.advisory else 'edit'} ({route.reason})\n"
+        f"  user said: {(raw_user_message or '').strip()[:240]}\n"
+        f"  other sections in draft: {max(0, len(draft.sections) - 1)}\n"
+        + "=" * 64,
+        flush=True,
+    )
     if route.advisory:
         section = _find_draft_section(draft, section_id) or (
             draft.sections[0] if draft.sections else None
@@ -9723,11 +10234,15 @@ async def improve_proposal_section(
             section_title=section.title or "",
             rfp_full_text=rfp_full_text,
         )
-        # Always build a fresh manuscript digest for advisory — do not bury it
-        # inside a truncated RFP excerpt (that made the model "only see" Who We Are).
-        # Numbered "section N about?" asks get a titles-only TOC inside the reply
-        # helper so RFP clause numbers cannot steal the answer.
-        manuscript_digest = _manuscript_digest(draft) if proposal_wide else ""
+        # ALWAYS feed other tabs on advisory for ANY section — cross-section
+        # consistency (budget vs approach, contacts, team size, etc.).
+        # Titles-only for "what is section N?" is applied inside the reply helper.
+        manuscript_digest = _manuscript_digest(draft, max_chars=36_000)
+        print(
+            f"[chat-advisory] manuscript digest chars={len(manuscript_digest)} "
+            f"sections={len(draft.sections)}",
+            flush=True,
+        )
         reply, suggested_fix = await _section_chat_advisory_reply(
             section=section,
             rfp=rfp,
@@ -10008,8 +10523,11 @@ async def improve_proposal_section(
     if requirements_block:
         rfp_context = f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"
 
-    manuscript_digest = (
-        _manuscript_digest(draft) if proposal_wide or not selection_mode else ""
+    # Every section edit sees the rest of the manuscript (consistency).
+    # Selection-only patches still get a compact digest so facts match.
+    manuscript_digest = _manuscript_digest(
+        draft,
+        max_chars=36_000 if (proposal_wide or not selection_mode) else 12_000,
     )
     if manuscript_digest:
         rfp_context = f"{rfp_context}\n\n{manuscript_digest}"
@@ -10868,6 +11386,10 @@ async def improve_proposal_section(
                 section=section,
                 rfp=rfp,
                 user_message=latest_user_ask,
+                manuscript_digest=_manuscript_digest(draft, max_chars=14_000),
+                rfp_context=rfp_context,
+                brand_voice=brand_voice_dict,
+                kb_zo_voice=kb_zo_voice,
             )
             if scope_plan.mode == "patch" and scope_plan.patches:
                 planned_spans = _locate_planned_patches(
@@ -10887,7 +11409,34 @@ async def improve_proposal_section(
                         should_collapse_edit_scope_to_selection,
                     )
 
-                    if improve_section_pinned and improve_pin_needs_full_rewrite(
+
+                    # Contact / identity table + replace: never leave Name row vs prose
+                    # disagreeing from tiny patches — rewrite the whole open tab.
+                    if (
+                        planned_spans
+                        and scope_plan.mode == "patch"
+                        and _section_has_contact_name_row(section.content or "")
+                        and re.search(
+                            r"(?i)\b(?:replac|instead|swap|change\s+(?:the\s+)?(?:contact|name))\b",
+                            scope_plan.understood_ask or latest_user_ask or "",
+                        )
+                    ):
+                        planned_spans = None
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="full_rewrite",
+                            patches=[],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                            sibling_edits=list(scope_plan.sibling_edits or []),
+                        )
+                        logger.info(
+                            "Contact-table replace → full_rewrite for %s / %s",
+                            rfp_id,
+                            section_id,
+                        )
+
+                    elif improve_section_pinned and improve_pin_needs_full_rewrite(
                         latest_user_ask, section.content or ""
                     ):
                         # Missing I.2 / multi-issue lists cannot be selection-spliced.
@@ -10898,6 +11447,7 @@ async def improve_proposal_section(
                             mode="full_rewrite",
                             patches=[],
                             kb_queries=list(scope_plan.kb_queries or []),
+                            sibling_edits=list(scope_plan.sibling_edits or []),
                         )
                         logger.info(
                             "Improve pin forced full_rewrite (structural/multi-issue) "
@@ -10906,7 +11456,8 @@ async def improve_proposal_section(
                             section_id,
                         )
                     elif (
-                        len(planned_spans) == 1
+                        planned_spans
+                        and len(planned_spans) == 1
                         and should_collapse_edit_scope_to_selection(
                             improve_section_pinned=improve_section_pinned,
                             user_message=latest_user_ask,
@@ -10920,7 +11471,7 @@ async def improve_proposal_section(
                         ]
                         selection_mode = True
                         user_message = only.editor_instruction
-                    elif len(planned_spans) == 1:
+                    elif planned_spans and len(planned_spans) == 1:
                         # Improve pin + non-collapsible single patch → full rewrite.
                         planned_spans = None
                         scope_plan = EditScopePlan(
@@ -10929,6 +11480,7 @@ async def improve_proposal_section(
                             mode="full_rewrite",
                             patches=[],
                             kb_queries=list(scope_plan.kb_queries or []),
+                            sibling_edits=list(scope_plan.sibling_edits or []),
                         )
                 else:
                     logger.info(
@@ -10959,6 +11511,7 @@ async def improve_proposal_section(
                                     )
                                 ],
                                 kb_queries=list(scope_plan.kb_queries or []),
+                            sibling_edits=list(scope_plan.sibling_edits or []),
                             )
                             logger.info(
                                 "Recovered localized patch for %s chars %d-%d",
@@ -10991,6 +11544,7 @@ async def improve_proposal_section(
                                 )
                             ],
                             kb_queries=list(scope_plan.kb_queries or []),
+                            sibling_edits=list(scope_plan.sibling_edits or []),
                         )
                         coerced = True
                         logger.info(
@@ -11190,6 +11744,7 @@ async def improve_proposal_section(
                 research=research,
                 compliance_user_message=latest_user_ask,
                 lean=True,
+                manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
             )
             total_kb_fills += kb_fills
             applied += 1
@@ -11238,6 +11793,30 @@ async def improve_proposal_section(
                     f"**{applied}** passage(s) in **{section.title}** "
                     f"({before_words} → {after_words} words)."
                 )
+            if scope_plan and scope_plan.sibling_edits:
+                updated_draft, sibling_titles = await _apply_sibling_section_edits(
+                    draft=updated_draft,
+                    open_section_id=section_id,
+                    sibling_edits=list(scope_plan.sibling_edits),
+                    rfp=rfp,
+                    rfp_context=rfp_context,
+                    brand_voice_dict=brand_voice_dict,
+                    kb_zo_voice=kb_zo_voice,
+                    research=research,
+                    kb_block=kb_block,
+                    fact_blob=fact_blob,
+                    user_ask=latest_user_ask,
+                    manuscript_digest=_manuscript_digest(updated_draft, max_chars=10_000),
+                )
+                working_section = (
+                    _find_draft_section(updated_draft, section_id) or working_section
+                )
+                if sibling_titles:
+                    assistant_message += (
+                        " Also aligned **"
+                        + "**, **".join(sibling_titles[:6])
+                        + "** so the same fact does not contradict elsewhere."
+                    )
             logger.info(
                 "Multi-patch section edit complete for %s / %s: %d patches (%d → %d words)",
                 rfp_id,
@@ -11510,6 +12089,7 @@ async def improve_proposal_section(
             research=research,
             compliance_user_message=latest_user_ask,
             lean=lean_patch,
+            manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
         )
         if research is None:
             research = ProposalResearchCache(
@@ -11562,6 +12142,40 @@ async def improve_proposal_section(
                 f"**{section.title}** ({excerpt_before_words} → {excerpt_after_words} "
                 f"words in that span). The rest of the section is unchanged."
             )
+        if scope_plan and scope_plan.sibling_edits:
+            updated_draft, sibling_titles = await _apply_sibling_section_edits(
+                draft=updated_draft,
+                open_section_id=section_id,
+                sibling_edits=list(scope_plan.sibling_edits),
+                rfp=rfp,
+                rfp_context=rfp_context,
+                brand_voice_dict=brand_voice_dict,
+                kb_zo_voice=kb_zo_voice,
+                research=research,
+                kb_block=kb_block,
+                fact_blob=fact_blob,
+                user_ask=latest_user_ask,
+                manuscript_digest=_manuscript_digest(updated_draft, max_chars=10_000),
+            )
+            updated_section = (
+                _find_draft_section(updated_draft, section_id) or updated_section
+            )
+            if sibling_titles:
+                assistant_message += (
+                    " Also aligned **"
+                    + "**, **".join(sibling_titles[:6])
+                    + "** so the same fact does not contradict elsewhere."
+                )
+                if persist:
+                    updated_draft = await _persist_section_improve_draft(
+                        updated_draft,
+                        research,
+                        section_title=section.title,
+                    )
+                    updated_section = (
+                        _find_draft_section(updated_draft, section_id)
+                        or updated_section
+                    )
         logger.info(
             "Section selection edit complete for %s / %s (%d → %d words)",
             rfp_id,
@@ -11600,24 +12214,25 @@ async def improve_proposal_section(
             rfp=rfp,
             prior_queries=prior_queries,
         )
-        skip_kb = _chat_improve_skip_kb(gate, raw_user_message)
-        if skip_kb:
-            understood_ask = raw_user_message.strip()
-            editor_instruction = raw_user_message.strip()
-            planned = []
-            outline_action = "edit_open_section"
-            logger.info(
-                "static section_improve planner skipped (no retrieval) %s / %s",
-                rfp_id,
-                section_id,
-            )
-        else:
-            understood_ask, editor_instruction, planned, outline_action = await _plan_section_improve(
+        # Always LLM-understand first (visible in backend terminal). Retrieval
+        # only runs when the planner returns kbQueries.
+        understood_ask, editor_instruction, planned, outline_action, _edit_mode = (
+            await _plan_section_improve(
                 section=section,
                 rfp=rfp,
                 rfp_section=rfp_section,
                 user_message=query_focus,
                 prior_queries=[*prior_queries, *seeded],
+                manuscript_digest=_manuscript_digest(draft, max_chars=12_000),
+            )
+        )
+        skip_kb = _chat_improve_skip_kb(gate, raw_user_message)
+        if skip_kb:
+            planned = []
+            logger.info(
+                "static section_improve retrieval skipped by gate after plan %s / %s",
+                rfp_id,
+                section_id,
             )
         if outline_action in {"add_sidebar_section", "delete_sidebar_section"}:
             logger.info(
@@ -11728,36 +12343,46 @@ async def improve_proposal_section(
         )
 
         if _open_tab_kb_fetch_ask(raw_user_message):
+            # Still run the LLM planner so ANY fetch/fill ask gets Supermemory queries
+            # for THIS section — do not skip understanding + retrieval.
             from app.services.proposal_capability_bio_grounding import (
                 is_personnel_bio_section,
                 pack_04_bio_kb_for_section,
             )
 
-            understood_ask = raw_user_message.strip()
+            understood_ask, editor_instruction, queries, outline_action, _edit_mode = (
+                await _plan_section_improve(
+                    section=section,
+                    rfp=rfp,
+                    rfp_section=rfp_section,
+                    user_message=query_focus,
+                    prior_queries=prior_queries,
+                    manuscript_digest=_manuscript_digest(draft, max_chars=12_000),
+                )
+            )
+            if outline_action in {"add_sidebar_section", "delete_sidebar_section"}:
+                forced = await _redirect_sidebar_add_to_structure(
+                    rfp_id=rfp_id,
+                    draft=draft,
+                    section_id=section_id,
+                    raw_user_message=raw_user_message,
+                    rfp=rfp,
+                    rfp_context=rfp_context,
+                    research=research,
+                    persist=persist,
+                    outline_hint=outline_action,
+                )
+                if forced is not None:
+                    return forced
+            user_message = editor_instruction
             if is_personnel_bio_section(section):
                 user_message = (
-                    f"{understood_ask}\n\n"
-                    "Claude: YOU decide queries. Ground named team members to 04_Bio only. "
-                    "REPLACE invented specialization / year claims with 2–4 sentences "
-                    "from that person's packed 04_Bio. Keep Role lines. "
-                    "Never leave only a Role line when 04_Bio has facts. "
-                    "Never invent government/municipal/enterprise specialization. "
+                    f"{user_message}\n\n"
+                    "Ground named team members to 04_Bio only. REPLACE invented "
+                    "specialization / year claims with 2–4 sentences from that person's "
+                    "packed 04_Bio. Keep Role lines. Never invent specialization. "
                     "Strip [E#] markers. Drop empty headers with no body."
                 )
-            else:
-                user_message = (
-                    f"{understood_ask}\n\n"
-                    "Claude: YOU decide tools and queries. Obey the user instruction above. "
-                    "Prefer the smallest edit that fully satisfies it. "
-                    "Use PACKED KB / tools only for missing zö facts — do not invent."
-                )
-            queries = []
-            logger.info(
-                "kb_fetch_fast_path: skipping section_improve planner for %s / %s",
-                rfp_id,
-                section_id,
-            )
-            if is_personnel_bio_section(section):
                 try:
                     bio_pack = await pack_04_bio_kb_for_section(
                         section, user_message=raw_user_message
@@ -11771,19 +12396,12 @@ async def improve_proposal_section(
                         "=== 04_Bio approved files (authoritative — write ONLY from this) ===\n"
                         f"{bio_pack[:20_000]}\n"
                     )
-                    logger.info(
-                        "kb_fetch_fast_path: injected 04_Bio pack (%d chars) for %s",
-                        len(bio_pack),
-                        section_id,
-                    )
-        elif _chat_improve_skip_kb(gate, raw_user_message):
-            understood_ask = raw_user_message.strip()
-            queries = []
-            user_message = raw_user_message.strip()
             logger.info(
-                "section_improve_planner_skipped (no retrieval) rfp_id=%s section_id=%s",
+                "kb_fetch_path: planned %d Supermemory queries for %s / %s ask=%r",
+                len(queries),
                 rfp_id,
                 section_id,
+                understood_ask[:120],
             )
         elif scope_plan is not None:
             understood_ask = (
@@ -11791,20 +12409,67 @@ async def improve_proposal_section(
             ).strip()
             queries = list(scope_plan.kb_queries or [])
             user_message = raw_user_message.strip()
+            print(
+                f"[chat-plan] reusing edit-scope understood={understood_ask[:200]!r} "
+                f"kbQueries={len(queries)}",
+                flush=True,
+            )
+            if not queries:
+                # Edit-scope understood the ask but returned no retrieval plan —
+                # still run section_improve_plan so Supermemory is targeted.
+                (
+                    understood_ask,
+                    editor_instruction,
+                    queries,
+                    outline_action,
+                    _edit_mode,
+                ) = await _plan_section_improve(
+                    section=section,
+                    rfp=rfp,
+                    rfp_section=rfp_section,
+                    user_message=query_focus,
+                    prior_queries=prior_queries,
+                    manuscript_digest=_manuscript_digest(draft, max_chars=12_000),
+                )
+                if editor_instruction.strip():
+                    user_message = (
+                        f"{raw_user_message.strip()}\n\n"
+                        f"Planner notes (secondary):\n{editor_instruction.strip()}"
+                    )
+            else:
+                # Banner already printed by _plan_edit_scope; echo queries for brain run.
+                _print_chat_plan_to_backend_terminal(
+                    section_id=section_id,
+                    section_title=section.title or "",
+                    user_message=raw_user_message,
+                    understood=understood_ask,
+                    edit_mode=(
+                        "preserve_structure_fill"
+                        if scope_plan.mode == "patch"
+                        else "full_rewrite"
+                    ),
+                    outline_action="edit_open_section",
+                    queries=queries,
+                    other_sections_seen=max(
+                        0, len(draft.sections) - 1
+                    ),
+                )
             logger.info(
-                "section_improve_planner_skipped (reuse edit-scope) rfp_id=%s "
-                "section_id=%s queries=%d",
+                "section_improve reuse edit-scope rfp_id=%s section_id=%s "
+                "queries=%d understood=%r",
                 rfp_id,
                 section_id,
                 len(queries),
+                understood_ask[:120],
             )
         else:
-            understood_ask, editor_instruction, queries, outline_action = await _plan_section_improve(
+            understood_ask, editor_instruction, queries, outline_action, _edit_mode = await _plan_section_improve(
                 section=section,
                 rfp=rfp,
                 rfp_section=rfp_section,
                 user_message=query_focus,
                 prior_queries=prior_queries,
+                manuscript_digest=_manuscript_digest(draft, max_chars=12_000),
             )
             if outline_action in {"add_sidebar_section", "delete_sidebar_section"}:
                 logger.info(
@@ -11839,6 +12504,12 @@ async def improve_proposal_section(
                 user_message = raw_user_message.strip()
         skip_kb = _chat_improve_skip_kb(gate, raw_user_message)
         if skip_kb:
+            print(
+                f"[chat-brain] gate says no retrieval this turn "
+                f"({gate.action.value if gate else 'none'}) — "
+                f"understood ask still logged above; skipping Supermemory.",
+                flush=True,
+            )
             queries = []
             logger.info(
                 "section_improve_kb_skipped_by_gate rfp_id=%s section_id=%s decision=%s",
@@ -11873,9 +12544,20 @@ async def improve_proposal_section(
                 and is_personnel_bio_section(section)
                 and "04_Bio approved files" in (user_message or "")
             ):
+                # Never lead Supermemory with raw chat ("Can you pls…") — use the
+                # understood ask or first planned KB query.
+                pack_lead = (
+                    (queries[0] if queries else "")
+                    or understood_ask
+                    or (section.title or "")
+                ).strip()
+                print(
+                    f"[chat-brain] packed-evidence lead → {pack_lead[:160]!r}",
+                    flush=True,
+                )
                 packed_block, _packed_sources = await fetch_packed_section_kb_evidence(
                     section_title=section.title or "",
-                    user_message=raw_user_message,
+                    user_message=pack_lead,
                     requirements=list(rfp_section.requirements or [])
                     if rfp_section
                     else [],
@@ -11888,26 +12570,38 @@ async def improve_proposal_section(
 
         query_count = len(queries)
 
-        if _open_tab_kb_fetch_ask(raw_user_message):
-            corpus = prior_corpus
-            evidence_added = 0
-            section_evidence = _evidence_for_section(section_id, corpus)
-            logger.info(
-                "kb_fetch_fast_path: skipping extra section queries for %s / %s",
-                rfp_id,
-                section_id,
+        # Always run planner queries against Supermemory when present.
+        all_hits: list[dict[str, Any]] = []
+        if queries:
+            print(
+                f"\n[chat-brain] running {len(queries)} Supermemory quer"
+                f"{'y' if len(queries) == 1 else 'ies'} for {section.title or section_id}…",
+                flush=True,
             )
-        else:
-            all_hits: list[dict[str, Any]] = []
-            for query in queries:
-                hits = await _search_hits(query)
-                all_hits.extend(hits)
-                logger.info("Section refine search %s: %d hits for %r", section_id, len(hits), query[:60])
+        for query in queries:
+            print(f"[chat-brain] query → {(query or '').strip()[:180]}", flush=True)
+            hits = await _search_hits(query)
+            all_hits.extend(hits)
+            print(
+                f"[chat-brain] hits ← {len(hits)} for {(query or '').strip()[:80]!r}",
+                flush=True,
+            )
+            logger.info(
+                "Section refine search %s: %d hits for %r",
+                section_id,
+                len(hits),
+                query[:60],
+            )
 
-            prior_corpus_len = len(prior_corpus)
-            corpus = _merge_hits_into_corpus(prior_corpus, all_hits, section_id)
-            evidence_added = len(corpus) - prior_corpus_len
-            section_evidence = _evidence_for_section(section_id, corpus)
+        prior_corpus_len = len(prior_corpus)
+        corpus = _merge_hits_into_corpus(prior_corpus, all_hits, section_id)
+        evidence_added = len(corpus) - prior_corpus_len
+        section_evidence = _evidence_for_section(section_id, corpus)
+        print(
+            f"[chat-brain] evidence added this turn: {evidence_added} "
+            f"(corpus now {len(corpus)})\n",
+            flush=True,
+        )
 
         from app.services.proposal_generator import _static_sections_from_draft
 
@@ -12111,6 +12805,52 @@ async def improve_proposal_section(
             + ", ".join(f"`{g}`" for g in remaining_gaps[:6])
             + "."
         )
+
+    if scope_plan and scope_plan.sibling_edits:
+        kb_block_sib = ""
+        fact_blob_sib = ""
+        if scope_plan.kb_queries:
+            try:
+                kb_block_sib, fact_blob_sib = await _fetch_kb_blob_for_selection(
+                    list(scope_plan.kb_queries),
+                    evidence_blob="",
+                    supplemental_blob="",
+                )
+            except Exception:
+                logger.exception("Sibling KB fetch failed after full rewrite")
+        updated_draft, sibling_titles = await _apply_sibling_section_edits(
+            draft=updated_draft,
+            open_section_id=section_id,
+            sibling_edits=list(scope_plan.sibling_edits),
+            rfp=rfp,
+            rfp_context=rfp_context,
+            brand_voice_dict=brand_voice_dict,
+            kb_zo_voice=kb_zo_voice,
+            research=research,
+            kb_block=kb_block_sib,
+            fact_blob=fact_blob_sib,
+            user_ask=latest_user_ask,
+            manuscript_digest=_manuscript_digest(updated_draft, max_chars=10_000),
+        )
+        updated_section = (
+            _find_draft_section(updated_draft, section_id) or updated_section
+        )
+        if sibling_titles:
+            assistant_message += (
+                " Also aligned **"
+                + "**, **".join(sibling_titles[:6])
+                + "** so the same fact does not contradict elsewhere."
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=updated_section.title,
+                    focus_section_id=section_id,
+                )
+                updated_section = (
+                    _find_draft_section(updated_draft, section_id) or updated_section
+                )
 
     logger.info(
         "Section improve complete for %s / %s (%d words)",

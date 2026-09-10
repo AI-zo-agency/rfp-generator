@@ -141,7 +141,7 @@ import {
   ALIGN_RFP_OUTLINE_PHASE,
   PACKET_REDISTRIBUTE_PHASE,
 } from "./proposal-pipeline-checkpoint";
-import { staticSections1to3Complete } from "./proposal-draft";
+import { staticSections1to3Complete, stripZoTemplateShellSections } from "./proposal-draft";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "./proposal-stage-timeout";
 
 export type { PipelinePhase, ProposalPipelineStatus };
@@ -475,7 +475,7 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 4_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
-const LIVE_DRAFT_POLL_INTERVAL_MS = 4_000;
+const LIVE_DRAFT_POLL_INTERVAL_MS = 2_000;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
 /** Start endpoints return 202 immediately — keep this short. */
@@ -653,7 +653,9 @@ function isPhaseFinishedOnSnapshot(
 async function waitForProposalPhase(
   rfpId: string,
   phase: PipelinePhase,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onDraftUpdate?: (draft: ProposalOutline) => void,
+  onResearchUpdate?: (research: ProposalResearch | null) => void
 ): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
@@ -661,11 +663,29 @@ async function waitForProposalPhase(
   const deadline = Date.now() + STAGE_POLL_MAX_MS;
   let observedRunning = false;
   const startedWall = Date.now();
+  let lastFingerprint = "";
+
+  const fingerprint = (draft: ProposalOutline) => {
+    const parts = draft.sections.map(
+      (s) => `${s.id}:${s.status}:${(s.content || "").length}:${(s.content || "").slice(0, 40)}`
+    );
+    return `${draft.updatedAt}|${parts.join("|")}`;
+  };
 
   while (Date.now() < deadline) {
     throwIfAborted(signal);
 
     const snapshot = await fetchProposalDraft(rfpId);
+    if (snapshot.draft && onDraftUpdate) {
+      const next = fingerprint(snapshot.draft);
+      if (next !== lastFingerprint) {
+        lastFingerprint = next;
+        onDraftUpdate(snapshot.draft);
+      }
+    }
+    if (snapshot.research && onResearchUpdate) {
+      onResearchUpdate(snapshot.research);
+    }
     const cp = snapshot.research?.pipelineCheckpoint;
     const job = await fetchProposalJobStatus(rfpId);
 
@@ -872,7 +892,11 @@ async function runProposalPhaseAsync(
   phase: PipelinePhase,
   path: string,
   signal?: AbortSignal,
-  options?: { body?: string }
+  options?: {
+    body?: string;
+    onDraftUpdate?: (draft: ProposalOutline) => void;
+    onResearchUpdate?: (research: ProposalResearch | null) => void;
+  }
 ): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
@@ -884,6 +908,9 @@ async function runProposalPhaseAsync(
     body: options?.body,
   });
   if (started.mode === "sync") {
+    if (started.draft && options?.onDraftUpdate) {
+      options.onDraftUpdate(apiDraftToOutline(started.draft));
+    }
     return {
       draft: started.draft ? apiDraftToOutline(started.draft) : null,
       research: started.research ?? null,
@@ -891,7 +918,13 @@ async function runProposalPhaseAsync(
       review: started.review,
     };
   }
-  const waited = await waitForProposalPhase(rfpId, phase, signal);
+  const waited = await waitForProposalPhase(
+    rfpId,
+    phase,
+    signal,
+    options?.onDraftUpdate,
+    options?.onResearchUpdate
+  );
   return waited;
 }
 
@@ -1030,12 +1063,15 @@ export async function generateFullProposalStaged(
     forceRestart?: boolean;
     /** Re-run startFrom and every later phase even if previously complete. */
     forceRerunFromStart?: boolean;
+    outlineMode?: "zo_template" | "strict_rfp";
     onDraftUpdate?: (draft: ProposalOutline) => void;
     onResearchUpdate?: (research: ProposalResearch | null) => void;
     signal?: AbortSignal;
   }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const signal = options?.signal;
+  const outlineMode = options?.outlineMode ?? "zo_template";
+  const strictRfp = outlineMode === "strict_rfp";
   try {
   throwIfAborted(signal);
   await clearProposalGenerationStop(rfpId);
@@ -1056,6 +1092,11 @@ export async function generateFullProposalStaged(
     resumeFrom = options.startFrom;
   } else if (options?.startFrom && options.startFrom === "phase-2") {
     resumeFrom = "phase-2";
+  } else if (strictRfp) {
+    resumeFrom =
+      pipelineStatus?.resumeFromPhase ??
+      research?.pipelineCheckpoint?.resumeFromPhase ??
+      "sections-1-3";
   } else {
     resumeFrom =
       pipelineStatus?.resumeFromPhase ??
@@ -1064,8 +1105,11 @@ export async function generateFullProposalStaged(
   }
 
   // Keep incomplete 1–3 from blocking an explicit Intelligence+ start.
+  // Strict RFP never gates on Zo Sections 1–3.
   const skipStaticGate =
-    resumeFrom === "phase-2" || options?.forceRerunFromStart === true;
+    strictRfp ||
+    resumeFrom === "phase-2" ||
+    options?.forceRerunFromStart === true;
   if (draft && !staticSections1to3Complete(draft) && !skipStaticGate) {
     resumeFrom = "sections-1-3";
   }
@@ -1111,11 +1155,19 @@ export async function generateFullProposalStaged(
           generateProposalSections1to3(rfpId, signal, {
             // Full restart must rebuild 1–3. Case-studies / resume keep complete
             // Company + Bios and only fill missing Our Work.
+            // strict_rfp: backend no-ops and clears Zo static tabs.
             forceRegenerate: Boolean(options?.forceRestart),
+            outlineMode,
+            onDraftUpdate: options?.onDraftUpdate,
+            onResearchUpdate: options?.onResearchUpdate,
           }),
         options?.onResearchUpdate
       );
       ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
+      if (strictRfp && draft) {
+        draft = stripZoTemplateShellSections(draft);
+        options?.onDraftUpdate?.(draft);
+      }
       lastRanPhaseThisInvocation = "sections-1-3";
     }
   }
@@ -1124,40 +1176,86 @@ export async function generateFullProposalStaged(
     if (!(await skipIfPhaseAlreadyFinished("phase-2"))) {
       throwIfAborted(signal);
       onProgress?.("phase-2");
-      research = await runPhase2Retrieval(rfpId, signal);
+      research = await runPhase2Retrieval(rfpId, signal, {
+        outlineMode,
+        onDraftUpdate: options?.onDraftUpdate,
+        onResearchUpdate: options?.onResearchUpdate,
+      });
       ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
       // Seed RFP tabs from fresh Intelligence so the sidebar updates before Phase 3.
+      // Preserve any prose already on the server — Celery may have chained into
+      // Phase 3 before this client seed runs; blanking content + onDraftUpdate
+      // made the editor look empty until a hard refresh.
       if (draft && research?.rfpSections?.length) {
-        const isStatic = (id: string) =>
+        const isZoShell = (id: string) =>
           id.startsWith("section-1-") ||
           id.startsWith("section-2-") ||
-          id.startsWith("section-3-");
+          id.startsWith("section-3-") ||
+          id.startsWith("section-4-") ||
+          id.startsWith("section-5-");
+        const keepStatic = !strictRfp;
+        const priorById = new Map(draft.sections.map((s) => [s.id, s]));
         const rebuilt: ProposalOutline = {
           ...draft,
           sections: [
-            ...draft.sections.filter((s) => isStatic(s.id)),
+            ...(keepStatic
+              ? draft.sections.filter(
+                  (s) =>
+                    isZoShell(s.id) &&
+                    (s.id.startsWith("section-1-") ||
+                      s.id.startsWith("section-2-") ||
+                      s.id.startsWith("section-3-"))
+                )
+              : []),
             ...research.rfpSections
-              .filter((mapped) => !isStatic(mapped.id))
-              .map((mapped) => ({
-                id: mapped.id,
-                title: mapped.title,
-                pageLimit: mapped.pageLimit ?? undefined,
-                wordTarget: mapped.pageLimit
-                  ? Math.max(300, mapped.pageLimit * 350)
-                  : 800,
-                required: true,
-                custom: false,
-                content: "",
-                status: "outline" as const,
-                source: "rfp" as const,
-                mode: mapped.zoMode ?? ("write" as const),
-              })),
+              .filter((mapped) => !isZoShell(mapped.id))
+              .map((mapped) => {
+                const prior = priorById.get(mapped.id);
+                const content = (prior?.content || "").trim()
+                  ? prior!.content
+                  : "";
+                return {
+                  id: mapped.id,
+                  title: mapped.title,
+                  pageLimit: mapped.pageLimit ?? undefined,
+                  wordTarget: mapped.pageLimit
+                    ? Math.max(300, mapped.pageLimit * 350)
+                    : 800,
+                  required: true,
+                  custom: false,
+                  content,
+                  status: (content
+                    ? prior?.status ?? "generated"
+                    : "outline") as OutlineSection["status"],
+                  source: "rfp" as const,
+                  mode: mapped.zoMode ?? ("write" as const),
+                };
+              }),
           ],
           updatedAt: new Date().toISOString(),
         };
-        draft = rebuilt;
-        await saveProposalDraft(rfpId, draft);
-        options?.onDraftUpdate?.(draft);
+        const serverFilled = countSectionsWithContent(draft);
+        const rebuiltFilled = countSectionsWithContent(rebuilt);
+        // Never push a blanked outline over a manuscript Celery already wrote.
+        if (serverFilled > 0 && rebuiltFilled < serverFilled) {
+          options?.onDraftUpdate?.(draft);
+        } else {
+          draft = rebuilt;
+          if (rebuiltFilled === 0 || rebuiltFilled >= serverFilled) {
+            try {
+              await saveProposalDraft(rfpId, draft);
+            } catch {
+              // 409 refuse-empty / transient — fall through to server refresh.
+            }
+          }
+          const snap = await refreshProposalSnapshot(rfpId);
+          if (snap.draft && countSectionsWithContent(snap.draft) >= rebuiltFilled) {
+            draft = strictRfp
+              ? stripZoTemplateShellSections(snap.draft)
+              : snap.draft;
+          }
+          options?.onDraftUpdate?.(draft);
+        }
         options?.onResearchUpdate?.(research);
       }
       lastRanPhaseThisInvocation = "phase-2";
@@ -1171,7 +1269,11 @@ export async function generateFullProposalStaged(
       const phase3 = await withLiveDraftPolling(
         rfpId,
         options?.onDraftUpdate,
-        () => runPhase3Drafting(rfpId, signal),
+        () =>
+          runPhase3Drafting(rfpId, signal, {
+            onDraftUpdate: options?.onDraftUpdate,
+            onResearchUpdate: options?.onResearchUpdate,
+          }),
         options?.onResearchUpdate
       );
       draft = phase3.draft;
@@ -1425,15 +1527,45 @@ export async function fetchProposalDraft(
   return empty;
 }
 
+export class ProposalSaveConflictError extends Error {
+  readonly status = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = "ProposalSaveConflictError";
+  }
+}
+
+export function isProposalSaveConflict(error: unknown): boolean {
+  if (error instanceof ProposalSaveConflictError) return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    /refusing to (drop|overwrite)/i.test(error.message) ||
+    /stale autosave/i.test(error.message)
+  );
+}
+
 export async function saveProposalDraft(
   rfpId: string,
   outline: ProposalOutline
 ): Promise<void> {
-  await fetch(`/api/rfps/${rfpId}/proposal`, {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(outlineToApiDraft(rfpId, outline)),
   });
+  if (!res.ok) {
+    let detail = `Save failed (${res.status})`;
+    try {
+      const data = (await res.json()) as { detail?: unknown };
+      detail = formatApiDetail(data.detail, detail);
+    } catch {
+      // keep status fallback
+    }
+    if (res.status === 409) {
+      throw new ProposalSaveConflictError(detail);
+    }
+    throw new Error(detail);
+  }
 }
 
 export async function generateFullProposalWithResearch(
@@ -1496,16 +1628,25 @@ export async function resetProposal(rfpId: string): Promise<void> {
   }
 }
 
-/** Keep Sections 1–3; delete Intelligence / RFP tabs / budget / review for a clean Phase 2 rebuild. */
+/** Keep Sections 1–3 (unless strict_rfp); delete Intelligence / RFP tabs for a clean Phase 2 rebuild. */
 export async function restartProposalFromIntelligence(
-  rfpId: string
+  rfpId: string,
+  options?: { outlineMode?: "zo_template" | "strict_rfp" }
 ): Promise<ProposalOutline> {
   const res = await fetch(
     `/api/rfps/${rfpId}/proposal/restart-from-intelligence`,
     {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(options?.outlineMode
+          ? { "Content-Type": "application/json" }
+          : {}),
+      },
       cache: "no-store",
+      body: options?.outlineMode
+        ? JSON.stringify({ outlineMode: options.outlineMode })
+        : undefined,
     }
   );
   const text = await res.text();
@@ -1622,17 +1763,31 @@ export async function matchCaseStudiesForRfp(
 export async function generateProposalSections1to3(
   rfpId: string,
   signal?: AbortSignal,
-  options?: { forceRegenerate?: boolean }
+  options?: {
+    forceRegenerate?: boolean;
+    outlineMode?: "zo_template" | "strict_rfp";
+    onDraftUpdate?: (draft: ProposalOutline) => void;
+    onResearchUpdate?: (research: ProposalResearch | null) => void;
+  }
 ): Promise<ProposalOutline> {
   const forceRegenerate = options?.forceRegenerate !== false;
   const qs = new URLSearchParams({
     force_regenerate: forceRegenerate ? "true" : "false",
   });
+  const body =
+    options?.outlineMode != null
+      ? JSON.stringify({ outlineMode: options.outlineMode })
+      : undefined;
   const result = await runProposalPhaseAsync(
     rfpId,
     "sections-1-3",
     `/api/rfps/${rfpId}/proposal/generate/sections-1-3?${qs.toString()}`,
-    signal
+    signal,
+    {
+      body,
+      onDraftUpdate: options?.onDraftUpdate,
+      onResearchUpdate: options?.onResearchUpdate,
+    }
   );
   if (!result.draft) {
     throw new Error("No draft returned after Sections 1–3 generation");
@@ -1642,13 +1797,27 @@ export async function generateProposalSections1to3(
 
 export async function runPhase2Retrieval(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: {
+    outlineMode?: "zo_template" | "strict_rfp";
+    onDraftUpdate?: (draft: ProposalOutline) => void;
+    onResearchUpdate?: (research: ProposalResearch | null) => void;
+  }
 ): Promise<ProposalResearch> {
+  const body =
+    options?.outlineMode != null
+      ? JSON.stringify({ outlineMode: options.outlineMode })
+      : undefined;
   const result = await runProposalPhaseAsync(
     rfpId,
     "phase-2",
     `/api/rfps/${rfpId}/proposal/phase-2-retrieval`,
-    signal
+    signal,
+    {
+      body,
+      onDraftUpdate: options?.onDraftUpdate,
+      onResearchUpdate: options?.onResearchUpdate,
+    }
   );
   if (!result.research) {
     throw new Error("No research data returned after Phase 2");
@@ -1658,13 +1827,21 @@ export async function runPhase2Retrieval(
 
 export async function runPhase3Drafting(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: {
+    onDraftUpdate?: (draft: ProposalOutline) => void;
+    onResearchUpdate?: (research: ProposalResearch | null) => void;
+  }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const result = await runProposalPhaseAsync(
     rfpId,
     "phase-3",
     `/api/rfps/${rfpId}/proposal/phase-3-drafting`,
-    signal
+    signal,
+    {
+      onDraftUpdate: options?.onDraftUpdate,
+      onResearchUpdate: options?.onResearchUpdate,
+    }
   );
   if (!result.draft || !result.research) {
     throw new Error("No draft or research returned after Phase 3");
@@ -2441,6 +2618,8 @@ export async function improveProposalSection(
     proposalWide?: boolean;
     applyFix?: boolean;
     improveSectionPinned?: boolean;
+    /** Default true — revise but do not save until confirm-preview. */
+    previewOnly?: boolean;
   }
 ): Promise<{
   section: OutlineSection;
@@ -2448,6 +2627,7 @@ export async function improveProposalSection(
   research: ProposalResearch | null;
   assistantMessage: string;
   draftChanged: boolean;
+  previewPending: boolean;
   suggestedFix: {
     sectionId: string;
     instruction: string;
@@ -2491,6 +2671,7 @@ export async function improveProposalSection(
         ...(options?.proposalWide ? { proposalWide: true } : {}),
         ...(options?.applyFix ? { applyFix: true } : {}),
         ...(options?.improveSectionPinned ? { improveSectionPinned: true } : {}),
+        previewOnly: options?.previewOnly !== false,
       }),
     }
   );
@@ -2502,6 +2683,7 @@ export async function improveProposalSection(
     research?: ProposalResearch;
     assistantMessage?: string;
     draftChanged?: boolean;
+    previewPending?: boolean;
     suggestedFix?: {
       sectionId?: string;
       instruction?: string;
@@ -2564,8 +2746,55 @@ export async function improveProposalSection(
       data.assistantMessage ??
       `Updated ${data.section.title}. Review the draft above.`,
     draftChanged: data.draftChanged !== false,
+    previewPending: data.previewPending === true,
     suggestedFix,
     agentActivity,
+  };
+}
+
+export async function confirmChatPreview(
+  rfpId: string,
+  draft: ProposalOutline
+): Promise<{
+  section: OutlineSection;
+  draft: ProposalOutline;
+  research: ProposalResearch | null;
+  assistantMessage: string;
+}> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/confirm-preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(outlineToApiDraft(rfpId, draft)),
+  });
+  const text = await res.text();
+  let data: {
+    detail?: unknown;
+    section?: OutlineSection;
+    draft?: ApiProposalDraft;
+    research?: ProposalResearch;
+    assistantMessage?: string;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (confirm preview timed out).");
+  }
+  if (!res.ok) {
+    const detail =
+      typeof data.detail === "string"
+        ? data.detail
+        : `Confirm preview failed (${res.status})`;
+    throw new Error(detail);
+  }
+  if (!data.section || !data.draft) {
+    throw new Error("Incomplete confirm-preview response");
+  }
+  return {
+    section: data.section,
+    draft: apiDraftToOutline(data.draft),
+    research: data.research ?? null,
+    assistantMessage:
+      data.assistantMessage ?? "Applied your confirmed revision.",
   };
 }
 

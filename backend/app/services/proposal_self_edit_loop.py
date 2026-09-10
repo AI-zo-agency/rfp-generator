@@ -1176,12 +1176,22 @@ async def run_self_edit_loop(
     if not draft:
         raise ProposalError("No proposal draft for self-edit.", status_code=400)
 
+    research = await aget_research_cache(rfp_id)
+    outline_mode = (
+        str(getattr(research, "outline_mode", "") or "").strip().lower()
+        if research
+        else ""
+    )
+    strict_rfp = outline_mode == "strict_rfp"
+
     from app.services.proposal_generator import (
         generate_sections_1_3,
         static_sections_1_3_have_content,
     )
 
-    if not static_sections_1_3_have_content(draft):
+    # Zo template needs Sections 1–3 before polish. Strict RFP has no Zo shell —
+    # bios/case studies live in RFP-named tabs; do not fail or regenerate 1–3.
+    if not strict_rfp and not static_sections_1_3_have_content(draft):
         logger.warning(
             "Self-edit preflight: sections 1–3 incomplete for %s — generating before polish",
             rfp_id,
@@ -1195,7 +1205,6 @@ async def run_self_edit_loop(
                 status_code=400,
             )
 
-    research = await aget_research_cache(rfp_id)
     from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
 
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)

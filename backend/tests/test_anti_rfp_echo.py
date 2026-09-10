@@ -87,6 +87,22 @@ class TestStripRfpRequirementEcho:
     def test_empty_requirements_leave_body_alone(self) -> None:
         assert strip_rfp_requirement_echo_sentences(GILROY_OPENING, []) == GILROY_OPENING
 
+    def test_outline_demand_opener_is_stripped(self) -> None:
+        body = (
+            "This section covers the staffing requirements the RFP demands for "
+            "day-to-day account coordination.\n\n"
+            f"{PROPOSAL_ANSWER}"
+        )
+        out = strip_rfp_requirement_echo_sentences(body, GILROY_REQUIREMENTS)
+        assert "this section covers" not in out.casefold()
+        assert "rfp demands" not in out.casefold()
+        assert "rock the locks" in out.casefold()
+
+    def test_rules_forbid_outline_echo(self) -> None:
+        lower = ANTI_RFP_ECHO_RULES.casefold()
+        assert "outline" in lower or "toc" in lower
+        assert "demanded" in lower or "checklist" in lower
+
 
 class TestDraftPromptZonesCarryAntiEcho:
     def test_zone_a_includes_anti_rfp_echo_rules(self) -> None:

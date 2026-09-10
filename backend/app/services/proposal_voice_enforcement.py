@@ -314,6 +314,25 @@ _NOT_X_ITS_Y_RES = re.compile(
     r"(?:,\s*)?(?:it(?:'s| is| was)|they(?:'re| are)|we(?:'re| are))\s+",
     re.IGNORECASE,
 )
+# "not a single campaign, but a system…" / "not X, but Y" — keep the affirmative tail.
+_NOT_X_BUT_Y_RE = re.compile(
+    r"\b(?:is\s+|isn't\s+|is not\s+)?not\s+(?:a\s+|an\s+)?"
+    r"(?:single|mere|just|only|simply)?\s*[^,.;]{0,70}?,\s*but\s+(?:also\s+|rather\s+)?",
+    re.IGNORECASE,
+)
+# Adjacent sentence pair: "It isn't X. It's Y" / "She is not X. She is Y" → keep Y.
+_NEGATION_SENTENCE_PAIR_RE = re.compile(
+    r"(?i)\b("
+    r"(?:She|He|They|It|We|This|That)\s+"
+    r"(?:is\s+not|isn't|are\s+not|aren't|was\s+not|wasn't|were\s+not|weren't)\s+"
+    r"[^.!?\n]{8,160}[.!?]\s*"
+    r")"
+    r"("
+    r"(?:She|He|They|It|We|This|That)"
+    r"(?:'s|'re|\s+is|\s+are|\s+was|\s+were)\s+"
+    r"[^.!?\n]{8,200}[.!]?"
+    r")"
+)
 
 # Rev 6 pattern shapes — deterministic strip on every narrative path + persist.
 _TAGLINE_EXEMPT_RE = re.compile(
@@ -402,6 +421,26 @@ _PLACEHOLDER_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Mid-word splices left by older empty-string deletes (decision+the, choice+ust).
+# Non-greedy stem so "choicejust" → choice+just (not choicej+ust).
+_REV6_WORD_SPLICE_RE = re.compile(
+    r"(?i)(?<![a-z])([a-z]{5,}?)(just|the|ust)(?![a-z])",
+)
+# "directlytely" — ly+tely orphan fragment (not real English *lytely words).
+_REV6_LYTELY_RE = re.compile(r"(?i)([a-z]{3,}ly)tely\b")
+
+
+def _repair_rev6_word_glue(text: str) -> str:
+    def _spl(m: re.Match[str]) -> str:
+        stem, tail = m.group(1), m.group(2)
+        if tail.casefold() == "ust":
+            return f"{stem} just"
+        return f"{stem} {tail}"
+
+    out = _REV6_WORD_SPLICE_RE.sub(_spl, text)
+    out = _REV6_LYTELY_RE.sub(r"\1", out)
+    return out
+
 
 def _scrub_rev6_fragment(text: str, logs: list[str]) -> str:
     """Apply Rev 6 voice bans to a prose fragment (paragraph or table cell)."""
@@ -435,31 +474,47 @@ def _scrub_rev6_fragment(text: str, logs: list[str]) -> str:
     if _WED_RATHER_THAN_RE.search(out):
         out = _WED_RATHER_THAN_RE.sub(_wed_rather_keep, out)
 
+    def _drop(match: re.Match[str]) -> str:
+        """Delete a match but never glue the surrounding words together."""
+        return " "
+
     if _RATHER_THAN_TAIL_RE.search(out):
-        out = _RATHER_THAN_TAIL_RE.sub("", out)
+        out = _RATHER_THAN_TAIL_RE.sub(_drop, out)
         logs.append("Rev6: scrubbed rather-than negation-contrast")
 
     if _NEGATION_INSTEAD_OF_RE.search(out):
-        out = _NEGATION_INSTEAD_OF_RE.sub("", out)
+        out = _NEGATION_INSTEAD_OF_RE.sub(_drop, out)
         logs.append("Rev6: scrubbed instead-of negation-contrast")
 
     if _NEGATION_X_NOT_Y_RE.search(out):
-        out = _NEGATION_X_NOT_Y_RE.sub("", out)
+        out = _NEGATION_X_NOT_Y_RE.sub(_drop, out)
         logs.append("Rev6: scrubbed X-not-Y negation-contrast")
+
+    if _NOT_X_BUT_Y_RE.search(out):
+        out = _NOT_X_BUT_Y_RE.sub(_drop, out)
+        logs.append("Rev6: scrubbed not-X-but-Y negation-contrast")
+
+    if _NOT_X_ITS_Y_RES.search(out):
+        out = _NOT_X_ITS_Y_RES.sub(_drop, out)
+        logs.append("Rev6: scrubbed not-X-it's-Y negation-contrast")
+
+    if _NEGATION_SENTENCE_PAIR_RE.search(out):
+        out = _NEGATION_SENTENCE_PAIR_RE.sub(r"\2", out)
+        logs.append("Rev6: scrubbed negation-contrast sentence pair")
 
     for pat in _NEGATION_PHRASE_RES:
         if pat.search(out):
-            out = pat.sub("", out)
+            out = pat.sub(_drop, out)
             logs.append("Rev6: scrubbed negation-contrast phrase")
 
     for pat in _SIGNIFICANCE_CLOSE_SENTENCE_RES:
         if pat.search(out):
-            out = pat.sub(lambda m: m.group(1) if m.lastindex else "", out)
+            out = pat.sub(lambda m: (m.group(1) if m.lastindex else "") or " ", out)
             logs.append("Rev6: scrubbed significance-close")
 
     for pat in _HEDGE_ANNOUNCE_RES:
         if pat.search(out):
-            out = pat.sub(lambda m: m.group(1) if m.lastindex else "", out)
+            out = pat.sub(lambda m: (m.group(1) if m.lastindex else "") or " ", out)
             logs.append("Rev6: scrubbed hedging announcement")
 
     for pat in _CASE_STUDY_FALSE_FRAMING_RES:
@@ -467,16 +522,19 @@ def _scrub_rev6_fragment(text: str, logs: list[str]) -> str:
             if "existing asset" in pat.pattern.casefold():
                 out = pat.sub("a prior engagement", out)
             else:
-                out = pat.sub("", out)
+                out = pat.sub(_drop, out)
             logs.append("Rev6: scrubbed case-study false framing")
 
     if _DANGLING_BEFORE_RE.search(out):
-        out = _DANGLING_BEFORE_RE.sub("", out)
+        out = _DANGLING_BEFORE_RE.sub(_drop, out)
         logs.append("Rev6: scrubbed dangling 'before'")
 
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r" +([,.;:!?])", r"\1", out)
     out = re.sub(r"\s+\.", ".", out)
+    # Repair accidental mid-word glue from older empty-string scrub passes
+    # ("decisionthe", "choiceust", "directlytely").
+    out = _repair_rev6_word_glue(out)
     out = out.strip(" ,;")
 
     for i, original in enumerate(placeholders):
@@ -520,6 +578,10 @@ def find_rev6_voice_violations(content: str) -> list[str]:
             _add("negation-contrast (instead of)")
         if _NEGATION_X_NOT_Y_RE.search(sample):
             _add("negation-contrast (X, not Y)")
+        if _NOT_X_BUT_Y_RE.search(sample):
+            _add("negation-contrast (not X, but Y)")
+        if _NOT_X_ITS_Y_RES.search(sample) or _NEGATION_SENTENCE_PAIR_RE.search(sample):
+            _add("negation-contrast (not X / it's Y)")
         for pat in _NEGATION_PHRASE_RES:
             if pat.search(sample):
                 _add("negation-contrast phrase (not just / not only / …)")
@@ -640,6 +702,21 @@ def apply_writing_standards_mechanics(content: str) -> str:
     return text
 
 
+_ON_BEHALF_OF_ZO_RE = re.compile(
+    r"(?i)\bon\s+behalf\s+of\s+z[oö]\s+agency\b\s*[,:]?\s*"
+)
+
+
+def scrub_cover_letter_agency_boilerplate(content: str) -> tuple[str, list[str]]:
+    """Strip 'On behalf of zö agency' openers — Rev 6 signed passages are first-person."""
+    if not content or not _ON_BEHALF_OF_ZO_RE.search(content):
+        return content or "", []
+    cleaned = _ON_BEHALF_OF_ZO_RE.sub("", content)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip(), ["Cover letter: removed 'On behalf of zö agency' boilerplate"]
+
+
 def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
     """Manuscript-wide Rev 6 voice scrub for Complete Scan / ZF persist."""
     from app.models.proposal import ProposalDraft as _Draft
@@ -666,6 +743,13 @@ def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDr
         cleaned = re.sub(r"\bzo\s+agency\b", "zö agency", cleaned)
         cleaned = re.sub(r",\s*,", ",", cleaned)
         cleaned = re.sub(r"[ \t]+,", ",", cleaned)
+        if classify_section_register(
+            section_id=section.id or "",
+            title=section.title or "",
+            zo_mode=getattr(section, "mode", None) or "write",
+        ) == "cover_letter":
+            cleaned, cover_logs = scrub_cover_letter_agency_boilerplate(cleaned)
+            section_logs.extend(cover_logs)
         if cleaned != body:
             changed = True
             sections.append(section.model_copy(update={"content": cleaned}))
@@ -769,6 +853,10 @@ def enforce_narrative_voice(
         title=title,
         zo_mode=zo_mode,
     )
+    if reg == "cover_letter":
+        text = apply_writing_standards_mechanics(content)
+        text, _ = scrub_cover_letter_agency_boilerplate(text)
+        return text
     if reg != "narrative":
         return apply_writing_standards_mechanics(content)
     return fix_narrative_register(content)

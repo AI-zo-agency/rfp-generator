@@ -1162,38 +1162,36 @@ def _parse_budget_cap(raw_cap: Any) -> float | None:
 
 
 def _manuscript_pricing_digest(draft: Any) -> str:
-    """Pull approach + current budget prose so Stage 3 prices fund what narrative promises."""
+    """Feed Stage 3 the full manuscript (except hollow shells) so THIS RFP's
+    layout / billing / NTE language from any tab can shape the budget.
+
+    No keyword synonym filter — the pricing LLM judges meaning from the text.
+    """
     from app.models.proposal import ProposalDraft
 
     if not isinstance(draft, ProposalDraft):
         return ""
     parts: list[str] = []
+    total = 0
+    max_chars = 28_000
     for section in draft.sections:
-        title = (section.title or "").casefold()
+        title = (section.title or "").strip() or "Section"
         content = (section.content or "").strip()
         if not content:
             continue
-        is_budget = any(
-            k in title
-            for k in ("budget", "pricing", "fee", "cost proposal", "compensation")
-        )
-        is_approach = any(
-            k in title
-            for k in (
-                "technical",
-                "ability",
-                "approach",
-                "methodology",
-                "work plan",
-                "scope",
-                "phase",
-            )
-        )
-        if not (is_budget or is_approach):
+        # Skip the Cost instrument tab itself (has Fee Detail + Proposed Investment).
+        body_cf = content.casefold()
+        if "fee detail" in body_cf and "proposed investment" in body_cf:
             continue
-        label = "BUDGET SECTION" if is_budget else "APPROACH / PHASE NARRATIVE"
-        parts.append(f"### {label}: {section.title}\n{content[:4500]}")
-        if len(parts) >= 4:
+        piece = f"### {title}\n{content[:5000]}"
+        if total + len(piece) > max_chars:
+            remain = max_chars - total
+            if remain < 400:
+                break
+            piece = piece[:remain]
+        parts.append(piece)
+        total += len(piece)
+        if total >= max_chars:
             break
     return "\n\n".join(parts)
 

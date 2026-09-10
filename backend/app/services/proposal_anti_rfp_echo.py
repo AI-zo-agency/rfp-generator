@@ -26,6 +26,8 @@ NEVER restate, paraphrase, quote, summarize, or "acknowledge" the RFP as content
 - Do not open by telling the client what they asked for, what they already built,
   what they need, or what the RFP requires
 - Do not list scope items in the buyer's order as if that were the proposal
+- Do not paste the RFP outline, TOC, section titles checklist, or "what the RFP
+  demanded" as manuscript prose — cover those asks with our answer, never the outline
 - Do not write "you are not asking…", "you built…", "what you need now…",
   "this RFP requires…", "the solicitation asks…", or "we understand you want…"
 - Do not narrate evaluation criteria back to the evaluator
@@ -53,10 +55,12 @@ _ECHO_OPENER_MARKERS = (
     "this rfp",
     "the rfp requires",
     "the rfp asks",
+    "the rfp demands",
     "the solicitation",
     "as stated in the rfp",
     "per the rfp",
     "as outlined in the rfp",
+    "as required by the rfp",
     "we understand you",
     "we recognize you",
     "you are seeking",
@@ -66,6 +70,13 @@ _ECHO_OPENER_MARKERS = (
     "evaluation criteria",
     "will be evaluated on",
     "this proposal will be assessed",
+    "this section covers",
+    "this section addresses",
+    "this section responds to",
+    "the following requirements",
+    "the rfp outline",
+    "per the outline",
+    "table of contents",
 )
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")

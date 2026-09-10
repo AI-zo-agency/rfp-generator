@@ -290,6 +290,32 @@ def apply_zero_fabrication_guards(
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s empty-section repair skipped: %s", label, exc)
 
+    # Name corrections BEFORE role alignment — Strict RFP never hits Zo Sections graph
+    # name fixes; Dyetola→Oyetola must land before Account Manager→Operations Coordinator.
+    try:
+        from app.services.proposal_fulfill_rfp_repairs import (
+            apply_deterministic_roster_fixes,
+        )
+
+        sections: list = []
+        roster_changed = False
+        for section in draft.sections:
+            body = section.content or ""
+            fixed, roster_logs = apply_deterministic_roster_fixes(
+                body, identity_only=True
+            )
+            if roster_logs:
+                roster_changed = True
+                for line in roster_logs:
+                    report.logs.append(f"{label}: roster — {line}")
+                sections.append(section.model_copy(update={"content": fixed}))
+            else:
+                sections.append(section)
+        if roster_changed:
+            draft = draft.model_copy(update={"sections": sections})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s roster fixes skipped: %s", label, exc)
+
     try:
         from app.services.proposal_client_facing_integrity import (
             apply_client_facing_integrity_to_draft,
@@ -322,30 +348,6 @@ def apply_zero_fabrication_guards(
             report.logs.append(f"{label}: state registration — {line}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s state registration guard skipped: %s", label, exc)
-
-    try:
-        from app.services.proposal_fulfill_rfp_repairs import (
-            apply_deterministic_roster_fixes,
-        )
-
-        sections: list = []
-        roster_changed = False
-        for section in draft.sections:
-            body = section.content or ""
-            fixed, roster_logs = apply_deterministic_roster_fixes(
-                body, identity_only=True
-            )
-            if roster_logs:
-                roster_changed = True
-                for line in roster_logs:
-                    report.logs.append(f"{label}: roster — {line}")
-                sections.append(section.model_copy(update={"content": fixed}))
-            else:
-                sections.append(section)
-        if roster_changed:
-            draft = draft.model_copy(update={"sections": sections})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s roster fixes skipped: %s", label, exc)
 
     try:
         from app.services.evidence_trust.personnel_grounding import (
@@ -399,11 +401,16 @@ async def apply_zero_fabrication_guards_before_persist(
     budget: ProposalBudget | None = None,
     rfp_text: str = "",
     label: str = "before-persist",
+    skip_llm_repairs: bool = False,
 ) -> tuple[ProposalDraft, ZeroFabricationReport]:
     """Mandatory anti-fabrication stack before any draft save from chat or scan.
 
     Runs the full deterministic suite, then LLM forms integrity on Required
     Forms & Attachments tabs (verbatim quote replace only).
+
+    ``skip_llm_repairs=True`` (chat confirm-preview / Apply): keep deterministic ZF +
+    roster/bio scrubs, but do not run forms-LLM or agentic QC that would rewrite
+    prose again after the user already approved Original vs Revised.
     """
     draft, report = apply_zero_fabrication_guards(
         draft,
@@ -413,51 +420,54 @@ async def apply_zero_fabrication_guards_before_persist(
         label=label,
     )
 
-    try:
-        from app.services.proposal_forms_attachments_integrity import (
-            audit_and_repair_forms_attachments,
-            section_is_forms_attachments,
-        )
-
-        sections = list(draft.sections or [])
-        changed = False
-        for idx, section in enumerate(sections):
-            if not section_is_forms_attachments(section):
-                continue
-            fix = await audit_and_repair_forms_attachments(
-                section.content or "",
-                draft=draft,
-                research=research,
+    if not skip_llm_repairs:
+        try:
+            from app.services.proposal_forms_attachments_integrity import (
+                audit_and_repair_forms_attachments,
+                section_is_forms_attachments,
             )
-            if fix.changed:
-                sections[idx] = section.model_copy(update={"content": fix.content})
-                changed = True
-                for line in fix.fix_logs:
-                    report.logs.append(f"{label}: forms integrity — {line}")
-        if changed:
-            from datetime import datetime, timezone
 
-            draft = draft.model_copy(
-                update={
-                    "sections": sections,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
+            sections = list(draft.sections or [])
+            changed = False
+            for idx, section in enumerate(sections):
+                if not section_is_forms_attachments(section):
+                    continue
+                fix = await audit_and_repair_forms_attachments(
+                    section.content or "",
+                    draft=draft,
+                    research=research,
+                )
+                if fix.changed:
+                    sections[idx] = section.model_copy(update={"content": fix.content})
+                    changed = True
+                    for line in fix.fix_logs:
+                        report.logs.append(f"{label}: forms integrity — {line}")
+            if changed:
+                from datetime import datetime, timezone
+
+                draft = draft.model_copy(
+                    update={
+                        "sections": sections,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s forms attachments integrity skipped: %s", label, exc)
+
+        try:
+            from app.services.proposal_agentic_qc_repair import (
+                run_agentic_manuscript_qc_repair,
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s forms attachments integrity skipped: %s", label, exc)
 
-    try:
-        from app.services.proposal_agentic_qc_repair import (
-            run_agentic_manuscript_qc_repair,
-        )
-
-        draft, qc_logs = await run_agentic_manuscript_qc_repair(
-            draft, rfp_text=rfp_text, max_sections=8
-        )
-        for line in qc_logs:
-            report.logs.append(f"{label}: agentic QC — {line}")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s agentic QC skipped: %s", label, exc)
+            draft, qc_logs = await run_agentic_manuscript_qc_repair(
+                draft, rfp_text=rfp_text, max_sections=8
+            )
+            for line in qc_logs:
+                report.logs.append(f"{label}: agentic QC — {line}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s agentic QC skipped: %s", label, exc)
+    else:
+        report.logs.append(f"{label}: skipped LLM repairs (confirm-preview apply)")
 
     try:
         from app.services.proposal_capability_bio_grounding import ground_bios_to_kb

@@ -14,7 +14,7 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 
 logger = logging.getLogger(__name__)
 
-# Client-facing leaks — matched as literal line/bracket text, not regex.
+# Client-facing leaks — matched as literal line/bracket text, not capability synonyms.
 _LEAK_LINE_MARKERS = (
     "delete this section",
     "deletion notice",
@@ -22,6 +22,15 @@ _LEAK_LINE_MARKERS = (
     "previous draft contained unverified reference",
     "references package removed",
     "do not invent names or emails",
+)
+
+# UI chrome that must start the line (or be the whole line) — never mid-sentence.
+_LEAK_LINE_PREFIXES = (
+    "action needed",
+    "needs your input",
+    "needs input",
+    "edit source",
+    "flag for sonja",
 )
 
 
@@ -46,6 +55,8 @@ def _bracket_span_is_leak(inner: str) -> bool:
     if "no verified clientlist" in cf:
         return True
     if "do not invent names or emails" in cf:
+        return True
+    if cf.startswith("action needed") or cf.startswith("needs your input"):
         return True
     return False
 
@@ -81,6 +92,42 @@ def _drop_leaked_lines(text: str) -> tuple[str, bool]:
         body = line.strip().casefold()
         if not body:
             kept.append(line)
+            continue
+        # Markdown table rows: strip chrome cells; drop the row if nothing usable remains.
+        if body.startswith("|"):
+            cells = [c.strip() for c in body.strip("|").split("|")]
+            new_cells: list[str] = []
+            row_changed = False
+            for cell in cells:
+                cf_cell = cell.casefold()
+                if any(cf_cell.startswith(prefix) for prefix in _LEAK_LINE_PREFIXES):
+                    row_changed = True
+                    continue
+                # Mid-cell chrome: "…, Needs your input — Sonja…"
+                if any(
+                    marker in cf_cell
+                    for marker in (
+                        "needs your input",
+                        "action needed",
+                        "do not invent names or emails",
+                        "no verified clientlist",
+                    )
+                ):
+                    row_changed = True
+                    continue
+                if any(marker in cf_cell for marker in _LEAK_LINE_MARKERS):
+                    row_changed = True
+                    continue
+                new_cells.append(cell)
+            if row_changed:
+                changed = True
+                if not new_cells or all(not c or c == "---" or set(c) <= {"-", ":"} for c in new_cells):
+                    continue
+                ending = "\n" if line.endswith("\n") else ""
+                kept.append("| " + " | ".join(new_cells) + " |" + ending)
+                continue
+        if any(body.startswith(prefix) for prefix in _LEAK_LINE_PREFIXES):
+            changed = True
             continue
         if any(marker in body for marker in _LEAK_LINE_MARKERS):
             changed = True
@@ -175,15 +222,46 @@ def apply_leaked_fragment_scrub_to_draft(
     for section in draft.sections:
         body = section.content or ""
         cleaned, leak_logs = scrub_leaked_system_fragments(body)
+        title = section.title or ""
+        new_title = _strip_ui_chrome_from_title(title)
+        updates: dict[str, str] = {}
         if leak_logs and cleaned != body:
-            changed = True
-            sections.append(section.model_copy(update={"content": cleaned}))
+            updates["content"] = cleaned
             logs.append(f"{section.title or section.id}: {leak_logs[0]}")
+        if new_title != title:
+            updates["title"] = new_title
+            logs.append(f"{section.id}: stripped UI chrome from title")
+        if updates:
+            changed = True
+            sections.append(section.model_copy(update=updates))
         else:
             sections.append(section)
     if not changed:
         return draft, logs
     return draft.model_copy(update={"sections": sections}), logs
+
+
+def _strip_ui_chrome_from_title(title: str) -> str:
+    """Remove editor chrome glued onto titles (needs input / Edit source)."""
+    out = (title or "").strip()
+    if not out:
+        return out
+    # Common glued suffixes from DOM textContent scrapes / bad saves.
+    for suffix in (
+        "**· needs input**",
+        "**· needs input",
+        "· needs input**",
+        "· needs input",
+        "Edit source",
+        "Done editing",
+    ):
+        while suffix.casefold() in out.casefold():
+            idx = out.casefold().rfind(suffix.casefold())
+            if idx < 0:
+                break
+            out = (out[:idx] + out[idx + len(suffix) :]).strip()
+    out = out.rstrip("*").rstrip()
+    return out
 
 
 def repair_sole_proprietor_language(content: str) -> tuple[str, list[str]]:

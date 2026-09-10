@@ -230,6 +230,37 @@ class EdgeCaseGuardTests(unittest.TestCase):
         self.assertIn("[MANUAL FILL", body)
         self.assertGreater(len(body.split()), 40)
 
+    def test_list_shaped_references_rebuild_to_column_table(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-refs",
+            sections=[
+                _sec(
+                    "refs",
+                    "References",
+                    (
+                        "Single 4-column table, one column per reference; "
+                        "no additional layout needed.\n\n"
+                        "1. City of Umatilla, Oregon, Rock the Locks\n"
+                        "**Contact:**\n\n"
+                        "1. Deschutes County, Oregon, Brand Identity\n"
+                        "2. City of Santa Clara, California, Campaign\n\n"
+                        "These references reflect comparable municipal work.\n"
+                    ),
+                ),
+            ],
+            updatedAt="2026-09-10T00:00:00Z",
+        )
+        out, logs = apply_edge_case_guards_to_draft(draft)
+        self.assertTrue(any("rebuilt References" in log for log in logs))
+        body = out.sections[0].content or ""
+        self.assertIn("| Field |", body)
+        self.assertIn("Reference 1", body)
+        self.assertIn("City of Umatilla", body)
+        self.assertIn("Deschutes County", body)
+        self.assertNotIn("no additional layout needed", body.casefold())
+        self.assertNotRegex(body, r"(?m)^\*\*Contact:\*\*\s*$")
+        self.assertNotRegex(body, r"(?m)^1\.\s+City of Umatilla")
+
 
 if __name__ == "__main__":
     unittest.main()

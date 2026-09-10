@@ -16,10 +16,19 @@ function isThematicBreak(line: string): boolean {
 function parseSubheadingLine(line: string): string | null {
   const trimmed = line.trim();
   const boldOnly = trimmed.match(/^\*\*([^*]+)\*\*:?\s*$/);
-  if (boldOnly) return boldOnly[1].trim();
   const colonLead = trimmed.match(/^([A-Z0-9][^.\n]{2,88}):\s*$/);
-  if (colonLead && !colonLead[1].includes("|")) return colonLead[1].trim();
-  return null;
+  const candidate = (boldOnly?.[1] ?? colonLead?.[1] ?? "").trim();
+  if (!candidate) return null;
+  // Field labels in References / forms — never promote to empty H3 chrome.
+  if (
+    /^(contact|phone|email|fax|title|organization|name|address|client|role|company|reference contact|contact info)$/i.test(
+      candidate
+    )
+  ) {
+    return null;
+  }
+  if (candidate.includes("|")) return null;
+  return candidate;
 }
 
 /** A [MANUAL FILL: …] tag's own body never contains a real "]" (the backend
@@ -56,12 +65,13 @@ function InlineGapTag({
   if (compact) {
     return (
       <span
-        className={`inline text-[0.85em] italic ${
+        className={`inline text-[0.85em] font-medium ${
           highlighted ? "text-amber-800" : "text-zo-text-muted"
         }`}
         title={h.action || h.detail || h.title}
       >
-        TBD — {h.title}
+        {/^\[VERIFY/i.test(tag) ? "[VERIFY]" : "[MANUAL FILL]"}
+        {h.detail ? ` — ${h.detail.slice(0, 72)}${h.detail.length > 72 ? "…" : ""}` : ""}
       </span>
     );
   }
@@ -175,6 +185,18 @@ export function stripManuscriptDisplayArtifacts(text: string): string {
     t = t.replace(/\n```\s*$/i, "");
   }
   t = t.replace(/<!--[\s\S]*?-->/g, "");
+  // Drop leaked layout instructions that are not client-facing prose.
+  t = t
+    .split("\n")
+    .filter((ln) => {
+      const s = ln.trim();
+      if (!s) return true;
+      if (/^(?:single\s+)?\d[\s-]*column\s+table\b/i.test(s)) return false;
+      if (/one\s+column\s+per\s+reference/i.test(s)) return false;
+      if (/no\s+additional\s+layout\s+needed/i.test(s)) return false;
+      return true;
+    })
+    .join("\n");
   return t.trim();
 }
 

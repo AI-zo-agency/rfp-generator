@@ -73,4 +73,18 @@ describe("RFP tab list numbering", () => {
     );
     expect(sectionListLabel(sections[11], numbers)).toBe("6. Capacity");
   });
+
+  it("numbers RFP tabs from 1 when there is no Zo static shell", () => {
+    const sections = [
+      sec("rfp-sec-transmission", "1. Transmission Letter"),
+      sec("rfp-sec-approval", "2. Approval of Governing Body"),
+      sec("rfp-sec-firm", "Company Overview"),
+    ];
+    const numbers = buildRfpTabDisplayNumbers(sections);
+    expect(sectionListLabel(sections[0], numbers)).toBe("1. Transmission Letter");
+    expect(sectionListLabel(sections[1], numbers)).toBe(
+      "2. Approval of Governing Body",
+    );
+    expect(sectionListLabel(sections[2], numbers)).toBe("3. Company Overview");
+  });
 });

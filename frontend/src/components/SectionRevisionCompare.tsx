@@ -14,6 +14,10 @@ interface SectionRevisionCompareProps {
   /** When live draft still shows Before (stale overwrite), offer to re-apply After. */
   showReapply?: boolean;
   onReapply?: () => void;
+  /** Preview-first: user must Apply before the draft is saved. */
+  awaitingConfirm?: boolean;
+  onConfirmApply?: () => void | Promise<void>;
+  confirmBusy?: boolean;
   onDismiss: () => void;
 }
 
@@ -36,6 +40,9 @@ export function SectionRevisionCompare({
   instruction,
   showReapply = false,
   onReapply,
+  awaitingConfirm = false,
+  onConfirmApply,
+  confirmBusy = false,
   onDismiss,
 }: SectionRevisionCompareProps) {
   const [theme, setTheme] = useState<RevisionCompareTheme>("warm");
@@ -63,7 +70,9 @@ export function SectionRevisionCompare({
     >
       <header className="proposal-revision-drawer-header">
         <div className="min-w-0 flex-1">
-          <p className="proposal-revision-eyebrow">What changed</p>
+          <p className="proposal-revision-eyebrow">
+            {awaitingConfirm ? "Review before applying" : "What changed"}
+          </p>
           <p className="proposal-revision-stats">
             {identical
               ? "No text change in this section"
@@ -73,6 +82,11 @@ export function SectionRevisionCompare({
                     wordDelta >= 0 ? "+" : ""
                   }${wordDelta} words (${wordsBefore} → ${wordsAfter})`}
           </p>
+          {awaitingConfirm ? (
+            <p className="proposal-revision-request-inline text-amber-800">
+              Nothing is saved until you click Apply changes.
+            </p>
+          ) : null}
           {instruction ? (
             <p className="proposal-revision-request-inline">
               Request: &ldquo;{instruction}&rdquo;
@@ -80,7 +94,27 @@ export function SectionRevisionCompare({
           ) : null}
         </div>
         <div className="proposal-revision-drawer-header-actions">
-          {showReapply && onReapply ? (
+          {awaitingConfirm && onConfirmApply ? (
+            <button
+              type="button"
+              onClick={() => void onConfirmApply()}
+              disabled={confirmBusy || identical}
+              className="zo-btn !py-1.5 !px-2.5 !text-xs"
+            >
+              {confirmBusy ? "Applying…" : "Apply changes"}
+            </button>
+          ) : null}
+          {awaitingConfirm ? (
+            <button
+              type="button"
+              onClick={onDismiss}
+              disabled={confirmBusy}
+              className="zo-btn secondary !py-1.5 !px-2.5 !text-xs"
+            >
+              Discard
+            </button>
+          ) : null}
+          {showReapply && onReapply && !awaitingConfirm ? (
             <button
               type="button"
               onClick={onReapply}
@@ -151,13 +185,17 @@ export function SectionRevisionCompare({
             style={{ minHeight: "min(28rem, 55dvh)" }}
           >
             <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
-              <p className="proposal-revision-stage-label">Before</p>
+              <p className="proposal-revision-stage-label">
+                {awaitingConfirm ? "Original" : "Before"}
+              </p>
               <div className="proposal-revision-stage-body whitespace-pre-wrap">
                 {(before || "").trim() || "(empty)"}
               </div>
             </div>
             <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
-              <p className="proposal-revision-stage-label">After</p>
+              <p className="proposal-revision-stage-label">
+                {awaitingConfirm ? "Revised (not saved yet)" : "After"}
+              </p>
               <div className="proposal-revision-stage-body whitespace-pre-wrap">
                 {(after || "").trim() || "(empty)"}
               </div>
@@ -194,13 +232,17 @@ export function SectionRevisionCompare({
             >
               {active?.before ? (
                 <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
-                  <p className="proposal-revision-stage-label">Before</p>
+                  <p className="proposal-revision-stage-label">
+                {awaitingConfirm ? "Original" : "Before"}
+              </p>
                   <div className="proposal-revision-stage-body">{active.before}</div>
                 </div>
               ) : null}
               {active?.after ? (
                 <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
-                  <p className="proposal-revision-stage-label">After</p>
+                  <p className="proposal-revision-stage-label">
+                {awaitingConfirm ? "Revised (not saved yet)" : "After"}
+              </p>
                   <div className="proposal-revision-stage-body">{active.after}</div>
                 </div>
               ) : null}

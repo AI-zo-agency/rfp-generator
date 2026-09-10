@@ -20,6 +20,8 @@ import {
   rebuildOutlineFromResearch,
   staticSections1to3Complete,
   stripLegacyMonolithSections,
+  stripZoTemplateShellSections,
+  mergeOutlinePreferRicherContent,
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, renumberGroupedSectionTitles, resolveManuscriptJumpTarget, buildManuscriptIndexMap, stripLeadingOutlineNumber } from "@/lib/proposal-outline-tree";
 import {
@@ -62,6 +64,8 @@ import {
   stopProposalGeneration,
   downloadProposalDocx,
   saveProposalDraft,
+  confirmChatPreview,
+  isProposalSaveConflict,
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
   getProposalJobStatus,
@@ -174,11 +178,23 @@ function loadStoredRevisions(rfpId: string): SectionRevisionMap {
 function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): void {
   if (typeof window === "undefined") return;
   try {
-    if (Object.keys(revisions).length === 0) {
+    // Never session-store pending preview drafts (large + not yet confirmed).
+    const slim: SectionRevisionMap = {};
+    for (const [id, rev] of Object.entries(revisions)) {
+      if (rev.awaitingConfirm) continue;
+      slim[id] = {
+        before: rev.before,
+        after: rev.after,
+        summary: rev.summary,
+        instruction: rev.instruction,
+        updatedAt: rev.updatedAt,
+      };
+    }
+    if (Object.keys(slim).length === 0) {
       sessionStorage.removeItem(revisionsStorageKey(rfpId));
       return;
     }
-    sessionStorage.setItem(revisionsStorageKey(rfpId), JSON.stringify(revisions));
+    sessionStorage.setItem(revisionsStorageKey(rfpId), JSON.stringify(slim));
   } catch {
     // ignore quota errors
   }
@@ -406,41 +422,13 @@ function ProposalDraftWorkspaceInner({
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);
+  /** ON = Zo Sections 1–3 template; OFF = strict RFP outline. */
+  const [useZoTemplate, setUseZoTemplate] = useState(true);
   const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [sectionListQuery, setSectionListQuery] = useState("");
   const [addingSection, setAddingSection] = useState(false);
   const [editorPreview, setEditorPreview] = useState(true);
-
-  useEffect(() => {
-    if (!advancedMenuOpen) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!advancedMenuRef.current?.contains(event.target as Node)) {
-        setAdvancedMenuOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAdvancedMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [advancedMenuOpen]);
-
-  useEffect(() => {
-    if (!mobileSectionsOpen && !mobileChatOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMobileSectionsOpen(false);
-        setMobileChatOpen(false);
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [mobileSectionsOpen, mobileChatOpen]);
 
   const [hydrated, setHydrated] = useState(false);
   const [draftLoadState, setDraftLoadState] = useState<
@@ -488,6 +476,62 @@ function ProposalDraftWorkspaceInner({
   const submitScrollRef = useRef<HTMLDivElement | null>(null);
   const liveContentFingerprintRef = useRef<Map<string, number>>(new Map());
   const outlineRef = useRef(outline);
+
+  useEffect(() => {
+    if (!research?.outlineMode) return;
+    setUseZoTemplate(research.outlineMode !== "strict_rfp");
+  }, [research?.outlineMode]);
+
+  // Strict RFP: never keep Zo Section 1–5 template shells in the sidebar/editor.
+  useEffect(() => {
+    if (useZoTemplate) return;
+    setOutline((prev) => {
+      const next = stripZoTemplateShellSections(prev);
+      return next === prev ? prev : next;
+    });
+  }, [useZoTemplate, outline.sections.length]);
+
+  useEffect(() => {
+    if (useZoTemplate) return;
+    if (
+      selectedSectionId &&
+      outline.sections.some((s) => s.id === selectedSectionId)
+    ) {
+      return;
+    }
+    setSelectedSectionId(outline.sections[0]?.id ?? null);
+  }, [useZoTemplate, outline.sections, selectedSectionId]);
+
+  useEffect(() => {
+    if (!advancedMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!advancedMenuRef.current?.contains(event.target as Node)) {
+        setAdvancedMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAdvancedMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [advancedMenuOpen]);
+
+  useEffect(() => {
+    if (!mobileSectionsOpen && !mobileChatOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileSectionsOpen(false);
+        setMobileChatOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mobileSectionsOpen, mobileChatOpen]);
+
   useEffect(() => {
     outlineRef.current = outline;
   }, [outline]);
@@ -495,6 +539,7 @@ function ProposalDraftWorkspaceInner({
   const [revisionDrawerSectionId, setRevisionDrawerSectionId] = useState<string | null>(
     null
   );
+  const [revisionConfirmBusy, setRevisionConfirmBusy] = useState(false);
   const [sectionChatReference, setSectionChatReference] = useState<SectionChatReference | null>(
     null
   );
@@ -636,8 +681,22 @@ function ProposalDraftWorkspaceInner({
   const applyOutlineFromServer = useCallback((draft: ProposalOutline) => {
     saveGenerationRef.current += 1;
     skipNextSaveRef.current = true;
-    setOutline(prepareOutline(draft));
-  }, []);
+    const prepared = prepareOutline(draft);
+    const cleaned = useZoTemplate
+      ? prepared
+      : stripZoTemplateShellSections(prepared);
+    setOutline((prev) => {
+      // During live generation, never blank prose the UI already shows.
+      if (
+        fullProposalInFlightRef.current ||
+        isFullProposalRunning ||
+        isFulfillingRfpGaps
+      ) {
+        return mergeOutlinePreferRicherContent(prev, cleaned);
+      }
+      return cleaned;
+    });
+  }, [useZoTemplate, isFullProposalRunning, isFulfillingRfpGaps]);
 
   const handlePersonasDraftSynced = useCallback(
     (draft: ProposalOutline) => {
@@ -703,7 +762,9 @@ function ProposalDraftWorkspaceInner({
             updatedAt: new Date().toISOString(),
           };
           applyOutlineFromServer(repaired);
-          void saveProposalDraft(rfp.id, repaired);
+          void saveProposalDraft(rfp.id, repaired).catch(() => {
+            // 409 / transient — server already has richer tabs
+          });
           return;
         }
         // In-flight autosave can also overwrite the improve save with pre-edit
@@ -732,7 +793,9 @@ function ProposalDraftWorkspaceInner({
             updatedAt: new Date().toISOString(),
           };
           applyOutlineFromServer(repaired);
-          void saveProposalDraft(rfp.id, repaired);
+          void saveProposalDraft(rfp.id, repaired).catch(() => {
+            // 409 / transient — server already has richer tabs
+          });
           return;
         }
         applyOutlineFromServer(snap.draft);
@@ -1115,8 +1178,12 @@ function ProposalDraftWorkspaceInner({
     // that race was wiping full Supabase manuscripts (snapshots survived, live draft did not).
     if (draftLoadState !== "ready") return;
     if (navPausedRef.current) return;
+    const pipelineBusy = Boolean(
+      research?.pipelineCheckpoint?.inProgressPhase
+    );
     if (
       isFullProposalRunning ||
+      pipelineBusy ||
       isFulfillingRfpGaps ||
       isAligningRfpOutline ||
       isPlacingPacketContent ||
@@ -1134,12 +1201,26 @@ function ProposalDraftWorkspaceInner({
     const timer = setTimeout(() => {
       if (navPausedRef.current) return;
       if (generation !== saveGenerationRef.current) return;
-      void saveProposalDraft(rfp.id, outline).then(() => {
-        if (navPausedRef.current) return;
-        if (generation === saveGenerationRef.current) {
-          startTransition(() => setLastSavedAt(Date.now()));
-        }
-      });
+      void saveProposalDraft(rfp.id, outline)
+        .then(() => {
+          if (navPausedRef.current) return;
+          if (generation === saveGenerationRef.current) {
+            startTransition(() => setLastSavedAt(Date.now()));
+          }
+        })
+        .catch(async (error) => {
+          // Server has newer tabs (Celery / another tab) — adopt them; never crash the UI.
+          if (!isProposalSaveConflict(error)) return;
+          try {
+            const snap = await fetchProposalDraft(rfp.id);
+            if (navPausedRef.current || !snap.draft) return;
+            if (generation !== saveGenerationRef.current) return;
+            applyOutlineFromServer(snap.draft);
+            if (snap.research) setResearch(snap.research);
+          } catch {
+            // ignore reload failure
+          }
+        });
     }, 800);
     return () => clearTimeout(timer);
   }, [
@@ -1153,6 +1234,7 @@ function ProposalDraftWorkspaceInner({
     isPlacingPacketContent,
     isRestoringSnapshot,
     draftLoadState,
+    applyOutlineFromServer,
   ]);
 
   useEffect(() => {
@@ -1235,9 +1317,7 @@ function ProposalDraftWorkspaceInner({
 
   useEffect(() => {
     setEditorPreview(Boolean(selectedSection?.content));
-    // Intentionally only when the open section changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSectionId]);
+  }, [selectedSectionId, selectedSection?.content]);
 
   const assistantViewSectionId =
     selectedSectionId ??
@@ -1722,20 +1802,18 @@ function ProposalDraftWorkspaceInner({
 
   const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
     if (navPausedRef.current) return;
-    startTransition(() => {
-      setHydrated(true);
-      applyOutlineFromServer(draft);
-      // Do not force Review tab on each poll — user may be on Sections or Submit while generating.
-      const withContent = draft.sections.filter((s) => s.content?.trim());
-      setLiveGeneratedCount(withContent.length);
+    // Apply content immediately — startTransition delayed prose until refresh.
+    setHydrated(true);
+    applyOutlineFromServer(draft);
+    const withContent = draft.sections.filter((s) => s.content?.trim());
+    setLiveGeneratedCount(withContent.length);
 
-    // Section 1 must be readable first. While any 1.x subsection is still empty,
-    // keep focus on the newest Section 1 subsection instead of jumping ahead.
+    // Zo Section 1 gate only when those tabs exist. Strict RFP has none.
     const section1Ids = draft.sections
       .filter((s) => s.id.startsWith("section-1-"))
       .map((s) => s.id);
     const section1Complete =
-      section1Ids.length > 0 &&
+      section1Ids.length === 0 ||
       section1Ids.every((id) =>
         draft.sections.find((s) => s.id === id)?.content?.trim()
       );
@@ -1748,7 +1826,6 @@ function ProposalDraftWorkspaceInner({
     );
     const prev = liveContentFingerprintRef.current;
 
-    // Currently writing = content grew since last poll (not merely "last completed").
     let growing: OutlineSection | undefined;
     for (const section of draft.sections) {
       const len = fingerprints.get(section.id) ?? 0;
@@ -1758,7 +1835,6 @@ function ProposalDraftWorkspaceInner({
       }
     }
 
-    // Frontier = first empty section in order (what's next / about to fill).
     const frontier = draft.sections.find((s) => !(s.content || "").trim());
 
     liveContentFingerprintRef.current = fingerprints;
@@ -1771,20 +1847,18 @@ function ProposalDraftWorkspaceInner({
         nonSection1[nonSection1.length - 1] ??
         withContent[withContent.length - 1];
 
-    // Prefer in-flight / next empty so the button does not keep naming a finished
-    // section (e.g. 3.2 Oregon) while the next case study is drafting.
     const focus = !section1Complete
       ? growing ?? newestInGroup("section-1-") ?? frontier ?? latestComplete
-      : growing ?? frontier ?? latestComplete;
+      : growing ?? latestComplete ?? frontier;
 
-    // Progress chip: only name a section that is still writing or next up —
-    // never linger on a completed title like "3.2 — Oregon…".
     const progressTitle = growing?.title ?? frontier?.title ?? null;
     setLiveLatestSectionTitle(progressTitle);
     if (focus) {
       setSelectedSectionId(focus.id);
+      if ((focus.content || "").trim()) {
+        setEditorPreview(true);
+      }
     }
-    });
   }, [applyOutlineFromServer]);
 
   const handleResearchPoll = useCallback((updated: ProposalResearch | null) => {
@@ -1892,6 +1966,31 @@ function ProposalDraftWorkspaceInner({
   const handleResearchPollRef = useRef(handleResearchPoll);
   handleLiveDraftUpdateRef.current = handleLiveDraftUpdate;
   handleResearchPollRef.current = handleResearchPoll;
+
+  /**
+   * Always poll the saved draft while Build / server pipeline is active.
+   * Phase-scoped withLiveDraftPolling stops between phases and on HTTP end —
+   * that left Strict RFP looking empty until a hard refresh (then content
+   * vanished again on the next empty seed).
+   */
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!isFullProposalRunning && !serverPipelineActive && !isFulfillingRfpGaps) {
+      return;
+    }
+    const stop = startLiveDraftPolling(
+      rfp.id,
+      (draft) => handleLiveDraftUpdateRef.current(draft),
+      (updated) => handleResearchPollRef.current(updated)
+    );
+    return () => stop();
+  }, [
+    hydrated,
+    rfp.id,
+    isFullProposalRunning,
+    serverPipelineActive,
+    isFulfillingRfpGaps,
+  ]);
 
   /** Resume live manuscript updates when user reopens during backend generation. */
   useEffect(() => {
@@ -2062,6 +2161,14 @@ function ProposalDraftWorkspaceInner({
         const { draft, research: updatedResearch } =
           await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
             signal: abort.signal,
+            outlineMode:
+              research?.outlineMode === "strict_rfp"
+                ? "strict_rfp"
+                : research?.outlineMode === "zo_template"
+                  ? "zo_template"
+                  : useZoTemplate
+                    ? "zo_template"
+                    : "strict_rfp",
             onDraftUpdate: (d) => handleLiveDraftUpdateRef.current(d),
             onResearchUpdate: (r) => handleResearchPollRef.current(r),
           });
@@ -2105,6 +2212,8 @@ function ProposalDraftWorkspaceInner({
     isFulfillingRfpGaps,
     isAligningRfpOutline,
     research?.pipelineCheckpoint?.inProgressPhase,
+    research?.outlineMode,
+    useZoTemplate,
     rfp.id,
     applyOutlineFromServer,
     applyFulfillScanSuccessUi,
@@ -2869,9 +2978,9 @@ function ProposalDraftWorkspaceInner({
     } else if (startAfterSections1to3) {
       const intelligenceOk = await confirm({
         title: "Start from Intelligence?",
-        description:
-          "This DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\n\n" +
-          "Sections 1–3 are kept.",
+        description: useZoTemplate
+          ? "This DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\n\nSections 1–3 are kept."
+          : "This DELETES existing Intelligence, RFP tabs, Budget, Review, and Zo Sections 1–3 — then rebuilds a strict RFP outline from Phase 2.",
         confirmLabel: "Start from Intelligence",
         tone: "danger",
       });
@@ -2929,13 +3038,15 @@ function ProposalDraftWorkspaceInner({
     setGenerateError(null);
     setGenerateNotice(null);
 
+    const outlineMode = useZoTemplate ? "zo_template" : "strict_rfp";
+
     // Fresh start: clear the editor immediately so old manuscript cannot flash
     // while the server soft-regenerates Sections 1–3 in place (no DB wipe).
     // Keep Key Persona picks — buildDefaultOutline() starts at [] and must not
     // erase the selection the generate-gate just confirmed.
     if (forceRestart) {
       const defaults = {
-        ...buildDefaultOutline(rfp),
+        ...buildDefaultOutline(rfp, { outlineMode }),
         selectedKeyPersonas: outline.selectedKeyPersonas ?? [],
       };
       saveGenerationRef.current += 1;
@@ -2995,7 +3106,9 @@ function ProposalDraftWorkspaceInner({
         } catch {
           // Best-effort: nothing may be running.
         }
-        const stripped = await restartProposalFromIntelligence(rfp.id);
+        const stripped = await restartProposalFromIntelligence(rfp.id, {
+          outlineMode,
+        });
         saveGenerationRef.current += 1;
         skipNextSaveRef.current = true;
         liveContentFingerprintRef.current = new Map();
@@ -3039,6 +3152,7 @@ function ProposalDraftWorkspaceInner({
               ? "sections-1-3"
               : undefined,
           forceRerunFromStart: startAfterSections1to3 || startFromCaseStudies,
+          outlineMode,
           signal: abort.signal,
           onDraftUpdate: handleLiveDraftUpdate,
           onResearchUpdate: handleResearchPoll,
@@ -3165,7 +3279,7 @@ function ProposalDraftWorkspaceInner({
         setFullProposalProgress(null);
       }
     }
-  }, [confirm, rfp, buildPipelineComplete, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
+  }, [confirm, rfp, buildPipelineComplete, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer, useZoTemplate]);
 
   const handleResetOutline = async () => {
     setIsResettingDraft(true);
@@ -3192,8 +3306,9 @@ function ProposalDraftWorkspaceInner({
           : "Server reset failed — local outline still cleared.";
     }
 
-    // 2. Reset local state to defaults
-    const defaults = buildDefaultOutline(rfp);
+    // 2. Reset local state to defaults (respect outline mode toggle)
+    const outlineMode = useZoTemplate ? "zo_template" : "strict_rfp";
+    const defaults = buildDefaultOutline(rfp, { outlineMode });
     saveGenerationRef.current += 1;
     skipNextSaveRef.current = true;
     setOutline(defaults);
@@ -3209,7 +3324,9 @@ function ProposalDraftWorkspaceInner({
     setGenerateNotice(
       resetFailed
         ? "Local outline cleared, but server wipe failed — try Reset again before generating."
-        : "Reset complete. Live draft and research cache cleared."
+        : outlineMode === "strict_rfp"
+          ? "Reset complete. Strict RFP mode is on — click Build my proposal to generate from the RFP outline."
+          : "Reset complete. Live draft and research cache cleared."
     );
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
@@ -3336,7 +3453,9 @@ function ProposalDraftWorkspaceInner({
       if (activity) {
         return activity.length > 44 ? `${activity.slice(0, 43)}…` : activity;
       }
-      if (effectiveFullProposalProgress === "sections-1-3") return "Sections 1–3…";
+      if (effectiveFullProposalProgress === "sections-1-3") {
+        return useZoTemplate ? "Sections 1–3…" : "Outline prep…";
+      }
       if (effectiveFullProposalProgress === "phase-2") return "Intelligence…";
       if (effectiveFullProposalProgress === "phase-3") {
         if (rfpTabProgress) {
@@ -3373,6 +3492,7 @@ function ProposalDraftWorkspaceInner({
     research?.pipelineCheckpoint?.activityLabel,
     rfpTabProgress,
     manualFillCount,
+    useZoTemplate,
   ]);
 
   const updateSection = (id: string, patch: Partial<OutlineSection>) => {
@@ -4004,9 +4124,10 @@ function ProposalDraftWorkspaceInner({
               </CapabilityHoverTip>
               {advancedMenuOpen ? (
                 <div
-                  className="absolute right-0 top-[calc(100%+0.35rem)] z-40 w-[19rem] rounded-lg border border-zo-border/80 bg-white p-2 shadow-lg"
+                  className="absolute right-0 top-[calc(100%+0.35rem)] z-40 flex max-h-[min(28rem,calc(100dvh-5.5rem))] w-[19rem] flex-col overflow-hidden rounded-lg border border-zo-border/80 bg-white shadow-lg"
                   role="menu"
                 >
+                  <div className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-2 pb-3">
                   <div className="px-1.5 pb-2">
                     <CapabilityHoverTip id="savedVersion" side="bottom">
                       <span className="proposal-snapshot-field-label">
@@ -4206,8 +4327,46 @@ function ProposalDraftWorkspaceInner({
                   >
                     Reset draft
                   </button>
+                  </div>
                 </div>
               ) : null}
+            </div>
+            <div
+              className="inline-flex shrink-0 items-center rounded-lg border border-zo-border/80 bg-white p-0.5"
+              role="group"
+              aria-label="Proposal outline mode"
+              title={
+                useZoTemplate
+                  ? "Zo template: Sections 1–3 first, then RFP tabs"
+                  : "Strict RFP: exact TOC + evaluation asks only"
+              }
+            >
+              <button
+                type="button"
+                disabled={anyPipelineRunning}
+                aria-pressed={useZoTemplate}
+                onClick={() => setUseZoTemplate(true)}
+                className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  useZoTemplate
+                    ? "bg-[#fff1e8] text-[#c2410c]"
+                    : "text-zo-text-muted hover:text-zo-text-secondary"
+                }`}
+              >
+                Zo template
+              </button>
+              <button
+                type="button"
+                disabled={anyPipelineRunning}
+                aria-pressed={!useZoTemplate}
+                onClick={() => setUseZoTemplate(false)}
+                className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  !useZoTemplate
+                    ? "bg-[#fff1e8] text-[#c2410c]"
+                    : "text-zo-text-muted hover:text-zo-text-secondary"
+                }`}
+              >
+                Strict RFP
+              </button>
             </div>
             <CapabilityHoverTip id="keyPersonas" side="bottom">
               <span className="inline-flex">
@@ -4569,6 +4728,10 @@ function ProposalDraftWorkspaceInner({
                   outline={outline}
                   optimisticScanProfile={isFulfillingRfpGaps ? "targeted_fix" : null}
                   buildFinalizeEnabled={pipelineStatus?.buildFinalizeEnabled}
+                  outlineMode={
+                    research?.outlineMode ??
+                    (useZoTemplate ? "zo_template" : "strict_rfp")
+                  }
                 />
               </div>
             ) : null}
@@ -5043,6 +5206,10 @@ function ProposalDraftWorkspaceInner({
               outline={outline}
               optimisticScanProfile={isFulfillingRfpGaps ? "targeted_fix" : null}
               buildFinalizeEnabled={pipelineStatus?.buildFinalizeEnabled}
+              outlineMode={
+                research?.outlineMode ??
+                (useZoTemplate ? "zo_template" : "strict_rfp")
+              }
             />
             </div>
             </div>
@@ -5063,9 +5230,43 @@ function ProposalDraftWorkspaceInner({
                       research!.pipelineCheckpoint!.inProgressPhase!
                     )
                   }. Wait for it to finish instead of starting another run.`
-                : "Generate the full proposal (Sections 1–3 + RFP-specific sections)."}
+                : useZoTemplate
+                  ? "Generate the full proposal (Sections 1–3 + RFP-specific sections)."
+                  : "Generate a strict RFP outline (exact TOC + evaluation asks; no Zo Sections 1–3 shell)."}
             </p>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              <div
+                className="inline-flex items-center rounded-xl border border-zo-border/80 bg-white p-1"
+                role="group"
+                aria-label="Proposal outline mode"
+              >
+                <button
+                  type="button"
+                  disabled={anyPipelineRunning}
+                  aria-pressed={useZoTemplate}
+                  onClick={() => setUseZoTemplate(true)}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    useZoTemplate
+                      ? "bg-[#fff1e8] text-[#c2410c]"
+                      : "text-zo-text-muted hover:text-zo-text-secondary"
+                  }`}
+                >
+                  Zo template
+                </button>
+                <button
+                  type="button"
+                  disabled={anyPipelineRunning}
+                  aria-pressed={!useZoTemplate}
+                  onClick={() => setUseZoTemplate(false)}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    !useZoTemplate
+                      ? "bg-[#fff1e8] text-[#c2410c]"
+                      : "text-zo-text-muted hover:text-zo-text-secondary"
+                  }`}
+                >
+                  Strict RFP
+                </button>
+              </div>
               <CapabilityHoverTip id="generateProposal" side="bottom">
                 <button
                   type="button"
@@ -5298,7 +5499,43 @@ function ProposalDraftWorkspaceInner({
                   after={activeRevision.after}
                   summary={activeRevision.summary}
                   instruction={activeRevision.instruction}
+                  awaitingConfirm={!!activeRevision.awaitingConfirm}
+                  confirmBusy={revisionConfirmBusy}
+                  onConfirmApply={async () => {
+                    if (!revisionDrawerSectionId || !activeRevision.pendingDraft) {
+                      return;
+                    }
+                    setRevisionConfirmBusy(true);
+                    try {
+                      const confirmed = await confirmChatPreview(
+                        rfp.id,
+                        activeRevision.pendingDraft
+                      );
+                      applySectionImproveFromServer(
+                        confirmed.draft,
+                        confirmed.research ?? activeRevision.pendingResearch ?? null
+                      );
+                      recordSectionRevision(revisionDrawerSectionId, {
+                        ...activeRevision,
+                        awaitingConfirm: false,
+                        pendingDraft: undefined,
+                        pendingResearch: undefined,
+                        summary: confirmed.assistantMessage,
+                        updatedAt: Date.now(),
+                      });
+                      setRevisionDrawerSectionId(null);
+                    } catch (err) {
+                      window.alert(
+                        err instanceof Error
+                          ? err.message
+                          : "Could not apply the revision."
+                      );
+                    } finally {
+                      setRevisionConfirmBusy(false);
+                    }
+                  }}
                   showReapply={
+                    !activeRevision.awaitingConfirm &&
                     !!revisionDrawerSection &&
                     (revisionDrawerSection.content || "") !==
                       (activeRevision.after || "") &&

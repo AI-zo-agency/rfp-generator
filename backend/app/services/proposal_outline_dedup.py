@@ -831,6 +831,11 @@ def enrich_outline_title_from_rfp(title: str, rfp_context: str) -> str:
     if len(outline_title_tokens(title)) >= 4 and not is_generic_filler_outline_title(title):
         return title
 
+    from app.services.proposal_fulfill_rfp_structure import (
+        recover_deliverable_title_from_instruction,
+        title_is_rfp_instruction_not_deliverable,
+    )
+
     best = ""
     core_tokens = outline_title_tokens(title)
     skip_starts = re.compile(
@@ -842,6 +847,11 @@ def enrich_outline_title_from_rfp(title: str, rfp_context: str) -> str:
         if len(line) < 8 or len(line) > 140:
             continue
         if skip_starts.match(line):
+            continue
+        # Never "enrich" a short form name into packaging / drafting prose that
+        # happens to mention the form (e.g. Statement of Compliance → "If any
+        # exceptions are taken, this Statement of Compliance shall include…").
+        if title_is_rfp_instruction_not_deliverable(line):
             continue
         numbered = bool(re.match(r"^\d+(?:\.\d+)*\s+", line))
         title_case = bool(
@@ -882,6 +892,9 @@ def enrich_outline_title_from_rfp(title: str, rfp_context: str) -> str:
     # Never replace a longer concrete title with a shorter boring one.
     if len(normalize_outline_title(enriched)) < len(core):
         return title
+    if title_is_rfp_instruction_not_deliverable(enriched):
+        recovered = recover_deliverable_title_from_instruction(enriched)
+        return recovered or title
     return enriched or title
 
 
@@ -890,11 +903,15 @@ def filter_lean_outline_sections(
     *,
     rfp_context: str = "",
     drop_generic_filler: bool = True,
+    skip_static_dedupe: bool = False,
 ) -> tuple[list[Any], list[str]]:
     """Enrich titles, drop true static/near-dups, keep important + closing tabs.
 
     When ``drop_generic_filler`` is False (assembler re-pass without RFP text),
     only static + near-duplicate hygiene runs.
+
+    When ``skip_static_dedupe`` is True (strict RFP outline mode), do not drop
+    tabs that would otherwise be owned by Zo Sections 1–3.
     """
     rfp_blob = (rfp_context or "").casefold()
     kept: list[Any] = []
@@ -960,6 +977,16 @@ def filter_lean_outline_sections(
                 )
                 continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
+        # Enrich must never re-expand a recovered form name into instruction prose.
+        if _title_is_non_deliverable(title):
+            recovered = recover_deliverable_title_from_instruction(title)
+            if recovered:
+                title = recovered
+            else:
+                dropped.append(
+                    f"{title} (RFP instruction / eligibility after enrich — not a deliverable)"
+                )
+                continue
         # Strip points-table wording a wrapped PDF row leaks into a heading
         # ("SECTION III Strategic Planning - UP TO 160"). Applied at this shared
         # choke point so no outline consumer can carry the fragment into a
@@ -981,12 +1008,17 @@ def filter_lean_outline_sections(
         # duplicate, taking a required submittal out of the proposal. Our
         # certifications narrative and a form we must return are different
         # things that happen to share vocabulary.
-        if not scored and not protected and (
-            should_skip_rfp_section_as_static_duplicate(
-                title=title,
-                duplicate_of_static_section=_dup_static(section),
+        if (
+            not skip_static_dedupe
+            and not scored
+            and not protected
+            and (
+                should_skip_rfp_section_as_static_duplicate(
+                    title=title,
+                    duplicate_of_static_section=_dup_static(section),
+                )
+                or is_duplicate_static_rfp_section(title)
             )
-            or is_duplicate_static_rfp_section(title)
         ):
             # Phase 2 owns this: tabs already covered by Sections 1–3 never
             # reach Phase 3 drafting. Sample-work / agency-requirements / scored

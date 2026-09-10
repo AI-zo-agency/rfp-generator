@@ -123,3 +123,24 @@ def test_drafting_without_finding_uses_section_title() -> None:
         finding=None,
     )
     assert decision.action == EvidenceDecision.WRITE_FROM_PLAN
+
+
+def test_cover_letter_retrieves_won_exemplars() -> None:
+    decision = decide_evidence_action(
+        section_id="rfp-cover",
+        section_title="Cover Letter",
+        finding=None,
+    )
+    assert decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE
+    assert decision.requires_retrieval is True
+    assert "cover_letter" in decision.reason
+
+
+def test_letter_of_transmittal_retrieves_not_plan_only() -> None:
+    decision = decide_evidence_action(
+        section_id="rfp-transmittal",
+        section_title="Letter of Transmittal",
+        finding=None,
+    )
+    assert decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE
+    assert decision.requires_retrieval is True

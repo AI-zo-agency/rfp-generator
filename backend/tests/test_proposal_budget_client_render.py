@@ -501,8 +501,8 @@ class QualifyingLanguageFormatTests(unittest.TestCase):
 
 
 class KbClassificationScheduleRenderTests(unittest.TestCase):
-    def test_verified_rates_paint_schedule_without_rfp_mandate_text(self) -> None:
-        """Chat/seeded rates must appear even when RFP excerpt lacks mandate keywords."""
+    def test_verified_rates_do_not_paint_schedule_without_rfp_mandate(self) -> None:
+        """KB rates alone must not invent a rate table the RFP never asked for."""
         from app.models.proposal import VerifiedRate
 
         b = _budget(
@@ -538,10 +538,50 @@ class KbClassificationScheduleRenderTests(unittest.TestCase):
             ],
         )
         md = render_budget_markdown(b, rfp_text="phased fees only — no schedule words")
+        self.assertNotIn("## Hourly Rate Schedule by Classification", md)
+        self.assertIn("## Fee Detail by Phase", md)
+        self.assertIn("Phase 1 Discovery", md)
+
+    def test_verified_rates_paint_when_rfp_mandates_hourly_schedule(self) -> None:
+        from app.models.proposal import VerifiedRate
+
+        b = _budget(
+            agencyRevenueEstimate=121350,
+            agencyFeeSubtotal=121350,
+            totalClientInvoicing=121350,
+            budgetFormat="phased",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    category="Fees",
+                    description="Phase 1 Discovery",
+                    quantity=1,
+                    unit="lump",
+                    rate=50000,
+                    extended=50000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            verifiedRates=[
+                VerifiedRate(
+                    personName="",
+                    role="Account Manager",
+                    hourlyRate=275,
+                    source="Agency Role Rates",
+                ),
+            ],
+        )
+        md = render_budget_markdown(
+            b,
+            rfp_text=(
+                "Provide a complete hourly rate schedule by classification "
+                "for the initial term and option years."
+            ),
+        )
+        self.assertIn("## Fee Detail by Phase", md)
         self.assertIn("## Hourly Rate Schedule by Classification", md)
         self.assertIn("Account Manager", md)
         self.assertIn("275", md)
-        self.assertIn("Agency Director", md)
 
 
 if __name__ == "__main__":

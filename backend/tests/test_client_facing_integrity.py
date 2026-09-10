@@ -102,6 +102,46 @@ class FormatEchoTests(unittest.TestCase):
 
 
 class DraftWireTests(unittest.TestCase):
+    def test_strict_rfp_dyetola_name_and_role_corrected(self) -> None:
+        """Strict manuscripts lack Zo Section 2 — floor roles + name scrub must still fire."""
+        from app.services.proposal_fulfill_rfp_repairs import (
+            apply_deterministic_roster_fixes,
+        )
+
+        dirty = (
+            "## Staff Assigned\n\n"
+            "| Name | Role |\n"
+            "| --- | --- |\n"
+            "| Dyetola Doyewunmi | Account Manager |\n\n"
+            "Dyetola Doyewunmi, as Account Manager, is the natural owner of day-to-day "
+            "coordination. Ela's background is bridging client priorities with delivery."
+        )
+        named, name_logs = apply_deterministic_roster_fixes(dirty, identity_only=True)
+        self.assertTrue(name_logs)
+        self.assertNotIn("Dyetola", named)
+        self.assertNotIn("Doyewunmi", named)
+        self.assertIn("Oyetola Oyewunmi", named)
+        self.assertIn("Ella's", named)
+        self.assertNotIn("Ela's", named)
+
+        draft = ProposalDraft(
+            rfpId="r",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="rfp-staffing",
+                    title="3. Staffing",
+                    content=named,
+                    status="generated",
+                )
+            ],
+        )
+        out, logs = apply_client_facing_integrity_to_draft(draft)
+        body = out.sections[0].content or ""
+        self.assertIn("| Oyetola Oyewunmi | Operations Coordinator |", body)
+        self.assertNotIn("Account Manager", body)
+        self.assertTrue(any("oyetola" in x.casefold() for x in logs))
+
     def test_draft_pass_fixes_roles_and_history(self) -> None:
         draft = ProposalDraft(
             rfpId="r",

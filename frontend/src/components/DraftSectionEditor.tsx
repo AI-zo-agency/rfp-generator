@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
 import { getTextareaCaretViewportRect } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
-import type { OutlineSection } from "@/types/proposal";
+import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import { MarkdownReportBody, stripEvidenceCitations } from "./MarkdownReportBody";
 import type { SectionChatReference } from "./ProposalSectionChatPanel";
 import { buildSectionPinReference } from "./ProposalSectionChatPanel";
@@ -18,6 +18,11 @@ export interface SectionRevisionRecord {
   summary: string;
   instruction: string;
   updatedAt: number;
+  /** True when AI proposed a change but the live draft is still Before. */
+  awaitingConfirm?: boolean;
+  /** Full preview draft to persist on Apply (includes multi-section edits). */
+  pendingDraft?: ProposalOutline;
+  pendingResearch?: ProposalResearch | null;
 }
 
 interface TextSelection {
@@ -372,7 +377,7 @@ export function DraftSectionEditor({
                 onMouseUp={captureTextareaSelection}
                 onKeyUp={captureTextareaSelection}
                 disabled={busy}
-                placeholder="Generate Sections 1–3 or run full proposal to auto-fill, or write manually…"
+                placeholder="Run Build my proposal to auto-fill, or write manually…"
                 className="proposal-draft-textarea zo-input w-full px-3 py-3 text-sm leading-[1.7] text-foreground outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
               />
             )}

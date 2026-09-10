@@ -65,6 +65,7 @@ class IntelligenceGraphState(TypedDict, total=False):
     rfp_location: str | None
     rfp_context: str
     page_limit: int | None
+    outline_mode: str
     plan: dict[str, Any]
     legacy: dict[str, Any]
     provider: str
@@ -233,6 +234,8 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
             call_kwargs["rfp_context"] = state.get("rfp_context") or ""
         if "rfp_meta" in accepted:
             call_kwargs["rfp_meta"] = _meta(state)
+        if "outline_mode" in accepted:
+            call_kwargs["outline_mode"] = state.get("outline_mode") or "zo_template"
         succeeded = False
         try:
             with llm_call_context(
@@ -301,7 +304,11 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
         page_limit_int = int(page_limit) if page_limit else None
     except (TypeError, ValueError):
         page_limit_int = None
-    legacy = derive_legacy_fields(plan, page_limit=page_limit_int)
+    legacy = derive_legacy_fields(
+        plan,
+        page_limit=page_limit_int,
+        outline_mode=str(state.get("outline_mode") or "zo_template"),
+    )
     sections = legacy.get("rfpSections") or []
     log_intel_event(
         "legacy_derived",
@@ -377,6 +384,7 @@ async def run_intelligence_graph(
     rfp_location: str | None,
     rfp_context: str,
     page_limit: int | None = None,
+    outline_mode: str = "zo_template",
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
     log_path = get_intelligence_log_path()
@@ -393,6 +401,10 @@ async def run_intelligence_graph(
         completed=completed_nodes,
     )
 
+    mode = (outline_mode or "zo_template").strip().lower()
+    if mode not in {"zo_template", "strict_rfp"}:
+        mode = "zo_template"
+
     initial: IntelligenceGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -401,6 +413,7 @@ async def run_intelligence_graph(
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,
         "page_limit": page_limit,
+        "outline_mode": mode,
         "plan": checkpoint_plan or ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
         "legacy": {},
         "completed_nodes": completed_nodes,
@@ -411,7 +424,9 @@ async def run_intelligence_graph(
         raise IntelligenceError(str(final["error"]))
 
     plan = ProposalExecutionPlan.model_validate(final.get("plan") or {})
-    legacy = final.get("legacy") or derive_legacy_fields(plan, page_limit=page_limit)
+    legacy = final.get("legacy") or derive_legacy_fields(
+        plan, page_limit=page_limit, outline_mode=mode
+    )
     log_intel_event(
         "graph_end",
         rfp_id=rfp_id,

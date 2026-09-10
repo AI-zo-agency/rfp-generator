@@ -899,6 +899,52 @@ def strip_leaked_manual_fill_identifiers(text: str) -> str:
 _MD_HEADING_LINE_RE = re.compile(r"^\s{0,3}#{1,6}\s+.+$")
 
 
+def collapse_duplicate_consecutive_headings(text: str) -> str:
+    """Drop back-to-back identical markdown headings (References header ×2)."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    out: list[str] = []
+    prev_heading_norm = ""
+    for line in lines:
+        stripped = line.strip()
+        is_heading = bool(re.match(r"^\s{0,3}#{1,6}\s+\S", line))
+        if is_heading:
+            norm = re.sub(r"^\s{0,3}#{1,6}\s+", "", stripped).casefold().strip()
+            if norm and norm == prev_heading_norm:
+                continue
+            prev_heading_norm = norm
+            out.append(line)
+            continue
+        if stripped:
+            prev_heading_norm = ""
+        out.append(line)
+    return "\n".join(out)
+
+
+def repair_truncated_manual_fill_tags(text: str) -> str:
+    """Close or convert cut-off MANUAL FILL openers that never got a closing bracket."""
+    if not text or "[MANUAL FILL" not in text.upper():
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        body = (match.group("body") or "").strip()
+        # Drop mid-cut tails: "(name…" / trailing ellipsis.
+        body = re.split(r"\s*\([^)]*$", body)[0]
+        body = body.rstrip(" .…;,—–-")
+        if not body:
+            return ""
+        return f"[MANUAL FILL: Sonja — {body}]"
+
+    # "[MANUAL FILL] — Sonja, supply … (name…" with no closing ]
+    return re.sub(
+        r"\[MANUAL\s+FILL\]\s*[—–\-:,]?\s*(?P<body>[^\n\]]{3,400})",
+        _repl,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def collapse_empty_subheadings(text: str) -> str:
     """Remove heading lines that have no substantive body content beneath them.
 
@@ -966,6 +1012,26 @@ def collapse_empty_subheadings(text: str) -> str:
     return cleaned.strip("\n")
 
 
+def scrub_empty_numbered_table_rows(text: str) -> str:
+    """Drop hollow numbered markdown rows like `| 1 | | | |` that LLMs invent as padding."""
+    if not text or "|" not in text:
+        return text or ""
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            nonempty = [c for c in cells if c and c not in {"---", ":---", "---:", ":---:"}]
+            # Sole content is a row index digit (or empty) — drop the padding row.
+            if nonempty and all(c.isdigit() for c in nonempty) and len(nonempty) <= 2:
+                if len(cells) >= 3 and sum(1 for c in cells if c) <= 2:
+                    continue
+            if not nonempty:
+                continue
+        out.append(line)
+    return "".join(out)
+
+
 def scrub_client_facing_section_artifacts(text: str) -> str:
     """Strip evidence markers + pricing flags from manuscript section bodies.
 
@@ -1004,14 +1070,30 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     cleaned = convert_instruction_blocks(cleaned)
     cleaned = convert_note_to_staff_lines(cleaned)
     cleaned = convert_bare_confirmation_lines(cleaned)
+    # UI chrome that leaked into manuscript ("TBD — Needs your input").
+    cleaned = re.sub(
+        r"(?i)\bTBD\s*[—–\-]\s*Needs?\s+your\s+input(?:\s*[—–\-]\s*[^\n|\]]{0,200})?",
+        "[MANUAL FILL: Sonja — confirm this field from ClientList/KB before submission]",
+        cleaned,
+    )
+    # Editor chrome glued into headings / bold titles.
+    cleaned = re.sub(
+        r"(?i)(\*\*)?\s*·\s*needs\s+input(\*\*)?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)Edit\s+source\b", "", cleaned)
     cleaned = convert_unresolved_template_tokens(cleaned)
     cleaned = strip_leaked_manual_fill_identifiers(cleaned)
     cleaned = strip_inline_instruction_tags(cleaned)
     cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
     cleaned = collapse_empty_subheadings(cleaned)
+    cleaned = collapse_duplicate_consecutive_headings(cleaned)
+    cleaned = repair_truncated_manual_fill_tags(cleaned)
     cleaned = normalize_designer_note_markup(cleaned)
     cleaned = strip_schema_description_tables(cleaned)
     cleaned = repair_flattened_markdown_tables(cleaned)
+    cleaned = scrub_empty_numbered_table_rows(cleaned)
     return cleaned
 
 

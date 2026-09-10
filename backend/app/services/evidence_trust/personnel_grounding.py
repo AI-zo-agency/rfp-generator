@@ -190,6 +190,65 @@ def replace_listed_names(text: str, names: tuple[str, ...], replacement: str) ->
     return out
 
 
+# Known OCR/LLM garbling of MasterTemplate / 04_Bio names → canonical roster spelling.
+# Keys are casefold phrases; longest match wins. No regex.
+VERIFIED_NAME_CORRECTIONS: dict[str, str] = {
+    "ron corner": "Ron Comer",
+    "dyetola doyewunmi": "Oyetola Oyewunmi",
+    "dyetola": "Oyetola",
+    "doyewunmi": "Oyewunmi",
+    "shawn dicrisio": "Shawn DiCriscio",
+    "ela's": "Ella's",
+    "ela": "Ella",
+}
+
+
+def _replace_whole_phrase(text: str, find: str, repl: str) -> str:
+    """Case-insensitive whole-phrase replace using folded token boundaries. No regex."""
+    if not text or not find:
+        return text
+    folded_find = _folded(find)
+    if not folded_find or not phrase_in(find, text):
+        return text
+    # Prefer original-casing scan when find is ASCII letters/spaces/apostrophe.
+    lower = text.casefold()
+    needle = find.casefold()
+    pieces: list[str] = []
+    i = 0
+    changed = False
+    while True:
+        j = lower.find(needle, i)
+        if j < 0:
+            pieces.append(text[i:])
+            break
+        before_ok = j == 0 or not text[j - 1].isalnum()
+        after = j + len(needle)
+        after_ok = after >= len(text) or not text[after].isalnum()
+        if before_ok and after_ok:
+            pieces.append(text[i:j])
+            pieces.append(repl)
+            i = after
+            changed = True
+        else:
+            pieces.append(text[i : j + 1])
+            i = j + 1
+    return "".join(pieces) if changed else text
+
+
+def apply_verified_name_corrections(text: str) -> str:
+    """Correct known garbled roster names to MasterTemplate spelling. No regex."""
+    if not text:
+        return text
+    out = text.replace("\u2019", "'")
+    for garbled, canonical in sorted(
+        VERIFIED_NAME_CORRECTIONS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        out = _replace_whole_phrase(out, garbled, canonical)
+    return out
+
+
 def personnel_claim_failure(
     *,
     requirement: str,

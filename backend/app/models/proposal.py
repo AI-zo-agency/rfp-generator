@@ -702,6 +702,14 @@ class ProposalResearchCache(BaseModel):
 
     rfp_id: str = Field(alias="rfpId")
     rfp_sections: list[RfpSectionMap] = Field(default_factory=list, alias="rfpSections")
+    outline_mode: str = Field(
+        default="zo_template",
+        alias="outlineMode",
+        description=(
+            "zo_template = fixed Zo Sections 1–3 then RFP tabs; "
+            "strict_rfp = RFP TOC+eval union only (no Zo 1–3 shell)."
+        ),
+    )
     requirement_ledger: RequirementLedger | None = Field(
         default=None,
         alias="requirementLedger",
@@ -947,6 +955,11 @@ class ProposalSectionImproveResponse(BaseModel):
     agent_activity: ProposalAgentActivity | None = Field(
         default=None, alias="agentActivity"
     )
+    preview_pending: bool = Field(
+        default=False,
+        alias="previewPending",
+        description="True when draftChanged but not yet saved — await user confirm.",
+    )
 
 
 class SectionChatTurn(BaseModel):
@@ -981,6 +994,14 @@ class SectionImproveRequest(BaseModel):
         default=False,
         alias="improveSectionPinned",
         description="User pinned Improve full section on this tab — never outline clarify.",
+    )
+    preview_only: bool = Field(
+        default=False,
+        alias="previewOnly",
+        description=(
+            "When true, compute the revised manuscript but do NOT persist. "
+            "Client shows Original vs Revised; confirm-preview saves."
+        ),
     )
 
     @field_validator("conversation_history", mode="before")

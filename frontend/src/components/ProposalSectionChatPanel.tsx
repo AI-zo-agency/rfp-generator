@@ -290,11 +290,13 @@ export function ProposalSectionChatPanel({
         onSetReference(null);
       }
 
-      // Structural add/delete: clear an unrelated pin so we don't rewrite the open tab.
+      // Structural add/delete of sidebar tabs: clear pin. Keep Improve pin for
+      // in-place asks on the open tab (any phrasing — replace person, fill gaps, etc.).
       if (
         messageLooksOutlineStructure(trimmed) &&
         activeReference &&
-        activeReference.mode !== "selection"
+        activeReference.mode !== "selection" &&
+        activeReference.mode !== "section"
       ) {
         activeReference = null;
         onSetReference(null);
@@ -440,28 +442,44 @@ export function ProposalSectionChatPanel({
           const beforeById = new Map(
             sections.map((s) => [s.id, s.content || ""] as const)
           );
-          onSectionUpdated(result.draft, result.research);
-
           const changed = result.draft.sections.filter((s) => {
             const prev = beforeById.get(s.id);
             return prev !== undefined && (s.content || "") !== prev;
           });
-
-          // Always stay on the tab the user asked about. Persist-time ZF / Rev6
-          // side-effects on bios must not steal focus into a resume page.
           const focusId = targetSection.id;
-          const targetChanged = changed.find((s) => s.id === focusId);
-          if (targetChanged) {
-            onRevisionRecorded?.(focusId, {
-              before: beforeById.get(focusId) || "",
-              after: targetChanged.content || "",
-              summary: result.assistantMessage,
-              instruction: trimmed,
-              updatedAt: Date.now(),
-            });
-            onRevisionDrawerOpenChange?.(focusId, true);
+          const targetChanged =
+            changed.find((s) => s.id === focusId) ?? changed[0] ?? null;
+
+          if (result.previewPending) {
+            // Preview-first: do NOT write the live draft until Apply.
+            if (targetChanged) {
+              onRevisionRecorded?.(focusId, {
+                before: beforeById.get(focusId) || "",
+                after: targetChanged.content || "",
+                summary: result.assistantMessage,
+                instruction: trimmed,
+                updatedAt: Date.now(),
+                awaitingConfirm: true,
+                pendingDraft: result.draft,
+                pendingResearch: result.research,
+              });
+              onRevisionDrawerOpenChange?.(focusId, true);
+            }
+            onFocusSection?.(focusId);
+          } else {
+            onSectionUpdated(result.draft, result.research);
+            if (targetChanged) {
+              onRevisionRecorded?.(focusId, {
+                before: beforeById.get(focusId) || "",
+                after: targetChanged.content || "",
+                summary: result.assistantMessage,
+                instruction: trimmed,
+                updatedAt: Date.now(),
+              });
+              onRevisionDrawerOpenChange?.(focusId, true);
+            }
+            onFocusSection?.(focusId);
           }
-          onFocusSection?.(focusId);
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";
@@ -568,24 +586,43 @@ export function ProposalSectionChatPanel({
           const beforeById = new Map(
             sections.map((s) => [s.id, s.content || ""] as const)
           );
-          onSectionUpdated(result.draft, result.research);
           const changed = result.draft.sections.filter((s) => {
             const prev = beforeById.get(s.id);
             return prev !== undefined && (s.content || "") !== prev;
           });
           const focusId = target.id;
-          const targetChanged = changed.find((s) => s.id === focusId);
-          if (targetChanged) {
-            onRevisionRecorded?.(focusId, {
-              before: beforeById.get(focusId) || "",
-              after: targetChanged.content || "",
-              summary: result.assistantMessage,
-              instruction,
-              updatedAt: Date.now(),
-            });
-            onRevisionDrawerOpenChange?.(focusId, true);
+          const targetChanged =
+            changed.find((s) => s.id === focusId) ?? changed[0] ?? null;
+
+          if (result.previewPending) {
+            if (targetChanged) {
+              onRevisionRecorded?.(focusId, {
+                before: beforeById.get(focusId) || "",
+                after: targetChanged.content || "",
+                summary: result.assistantMessage,
+                instruction,
+                updatedAt: Date.now(),
+                awaitingConfirm: true,
+                pendingDraft: result.draft,
+                pendingResearch: result.research,
+              });
+              onRevisionDrawerOpenChange?.(focusId, true);
+            }
+            onFocusSection?.(focusId);
+          } else {
+            onSectionUpdated(result.draft, result.research);
+            if (targetChanged) {
+              onRevisionRecorded?.(focusId, {
+                before: beforeById.get(focusId) || "",
+                after: targetChanged.content || "",
+                summary: result.assistantMessage,
+                instruction,
+                updatedAt: Date.now(),
+              });
+              onRevisionDrawerOpenChange?.(focusId, true);
+            }
+            onFocusSection?.(focusId);
           }
-          onFocusSection?.(focusId);
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Apply fix failed";
@@ -626,8 +663,6 @@ export function ProposalSectionChatPanel({
     ]
   );
 
-  if (sections.length === 0) return null;
-
   const viewingSection =
     sections.find((s) => s.id === viewingSectionId) ?? sections[0] ?? null;
 
@@ -661,6 +696,9 @@ export function ProposalSectionChatPanel({
     );
     setInput("Revise this section.");
   };
+
+  // After all hooks — empty outline mid-Strict rebuild must not skip useMemo.
+  if (sections.length === 0) return null;
 
   return (
     <aside className="proposal-section-chat" aria-label="Ask Ralph">

@@ -91,6 +91,43 @@ class OutlineProtectSurvivalTests(unittest.TestCase):
         self.assertIn("12. Certification of Proposal", titles)
         self.assertNotIn("Company Background", titles)
 
+    def test_skip_static_dedupe_keeps_firm_and_personnel_tabs(self) -> None:
+        """Strict RFP mode must not drop company/team TOC titles Zo owns."""
+
+        def factory(raw: dict) -> dict:
+            return raw
+
+        specs = [
+            RfpSectionSpec(rfp_title="1. Firm Qualifications"),
+            RfpSectionSpec(rfp_title="2. Key Personnel"),
+            RfpSectionSpec(rfp_title="3. Technical Approach"),
+            RfpSectionSpec(rfp_title="Company Background"),
+            RfpSectionSpec(rfp_title="Team Bios"),
+            RfpSectionSpec(
+                rfp_title="Company Overview",
+                satisfied_by_static_company_block=True,
+            ),
+        ]
+        default = outline_sections_from_rfp_specs(specs, section_factory=factory)
+        default_titles = [s["title"] for s in default]
+        self.assertIn("1. Firm Qualifications", default_titles)
+        self.assertIn("2. Key Personnel", default_titles)
+        self.assertIn("3. Technical Approach", default_titles)
+        self.assertNotIn("Company Background", default_titles)
+        self.assertNotIn("Team Bios", default_titles)
+        self.assertNotIn("Company Overview", default_titles)
+
+        strict = outline_sections_from_rfp_specs(
+            specs, section_factory=factory, skip_static_dedupe=True
+        )
+        strict_titles = [s["title"] for s in strict]
+        self.assertIn("1. Firm Qualifications", strict_titles)
+        self.assertIn("2. Key Personnel", strict_titles)
+        self.assertIn("3. Technical Approach", strict_titles)
+        self.assertIn("Company Background", strict_titles)
+        self.assertIn("Team Bios", strict_titles)
+        self.assertIn("Company Overview", strict_titles)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,6 +143,15 @@ def apply_deterministic_roster_fixes(
 ) -> tuple[str, list[str]]:
     logs: list[str] = []
     out = content or ""
+    # Grounded MasterTemplate name repairs (no regex) — Strict RFP never hits Zo 1–3.
+    from app.services.evidence_trust.personnel_grounding import (
+        apply_verified_name_corrections,
+    )
+
+    corrected = apply_verified_name_corrections(out)
+    if corrected != out:
+        out = corrected
+        logs.append("Roster fix: applied verified name corrections")
     fixes = _ROSTER_IDENTITY_FIXES if identity_only else _ROSTER_FIXES
     for pattern, repl in fixes:
         if pattern.search(out):

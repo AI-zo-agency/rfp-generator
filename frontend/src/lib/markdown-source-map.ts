@@ -52,9 +52,13 @@ const GAP_TAG =
 
 function visibleGapProjection(tag: string): string {
   if (isInternalScanTag(tag)) return "";
-  if (/^\[(?:VERIFY|MANUAL\s+FILL)/i.test(tag)) {
+  if (/^\[VERIFY/i.test(tag)) {
     const h = humanizeGapTag(tag);
-    return h.detail ? `${h.title} — ${h.detail}` : h.title;
+    return h.detail ? `[VERIFY] — ${h.detail}` : "[VERIFY]";
+  }
+  if (/^\[MANUAL\s+FILL/i.test(tag)) {
+    const h = humanizeGapTag(tag);
+    return h.detail ? `[MANUAL FILL] — ${h.detail}` : "[MANUAL FILL]";
   }
   return tag;
 }

@@ -6,7 +6,7 @@ import {
   PACKET_REDISTRIBUTE_PHASE,
   FULFILL_SCAN_PHASE,
   FULFILL_SCAN_STEP_LABELS,
-  FULL_PROPOSAL_STEP_LABELS,
+  fullProposalStepLabels,
   INTELLIGENCE_STEP_LABELS,
   inProgressPhaseLabel,
   type PipelineInProgressPhase,
@@ -65,6 +65,8 @@ interface ProposalWorkflowRailProps {
   /** From pipeline status. False = Final checks is switched off server-side, so
    *  the rail must not list a phase that can never run. */
   buildFinalizeEnabled?: boolean | null;
+  /** Zo template vs strict RFP — changes the first Build step label. */
+  outlineMode?: "zo_template" | "strict_rfp" | null;
 }
 
 function CategoryIcon({ label }: { label: string }) {
@@ -181,6 +183,7 @@ export function ProposalWorkflowRail({
   outline,
   optimisticScanProfile,
   buildFinalizeEnabled,
+  outlineMode,
 }: ProposalWorkflowRailProps) {
   // Categories show every step (agent) by default — the whole scan pipeline is
   // visible in the rail at a glance; a category can be collapsed to tidy up.
@@ -226,10 +229,11 @@ export function ProposalWorkflowRail({
   // shows it ONLY when the server explicitly reports it enabled. Hiding unless
   // opted in matches the backend default — the inverse would leave a phase in
   // the list that can never run whenever the status field is absent or stale.
+  const allBuildSteps = fullProposalStepLabels(outlineMode);
   const buildSteps =
     buildFinalizeEnabled === true
-      ? FULL_PROPOSAL_STEP_LABELS
-      : FULL_PROPOSAL_STEP_LABELS.filter((p) => p.phase !== "build-finalize");
+      ? allBuildSteps
+      : allBuildSteps.filter((p) => p.phase !== "build-finalize");
 
   const generatePhaseIndex = isGenerateRun
     ? buildSteps.findIndex((p) => p.phase === inProgressPhase)
@@ -310,7 +314,7 @@ export function ProposalWorkflowRail({
 
   const statusLabel = isRunning
     ? (inProgressPhase 
-        ? (isTargetedFix && inProgressPhase === FULFILL_SCAN_PHASE ? "Review Sections" : inProgressPhaseLabel(inProgressPhase)) 
+        ? (isTargetedFix && inProgressPhase === FULFILL_SCAN_PHASE ? "Review Sections" : inProgressPhaseLabel(inProgressPhase, outlineMode))
         : "Working").toUpperCase()
     : manualFillCount === 0 && hasCompletedFulfillReport
       ? "COMPLETE & CLEAN DRAFT"

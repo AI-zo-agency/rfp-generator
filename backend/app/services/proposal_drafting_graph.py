@@ -77,6 +77,19 @@ async def _draft_sections_parallel(
     rfp_id = str(state.get("rfp_id") or "")
     provider = str(state.get("provider") or _provider_name())
     results_by_index: dict[int, dict[str, Any]] = {}
+    persist_lock = asyncio.Lock()
+
+    async def _persist_partial() -> None:
+        callback = _SECTION_DRAFT_CALLBACKS.get(rfp_id)
+        if not callback or not results_by_index:
+            return
+        ordered_partial = [
+            results_by_index[i] for i in sorted(results_by_index.keys())
+        ]
+        drafted_sections = [
+            ProposalSection.model_validate(item) for item in ordered_partial
+        ]
+        await callback(drafted_sections, provider)
 
     async def draft_one(index: int, section: dict[str, Any]) -> None:
         nonlocal provider
@@ -120,6 +133,8 @@ async def _draft_sections_parallel(
                     "status": "outline",
                     "kbRefs": [],
                 }
+            async with persist_lock:
+                await _persist_partial()
 
     await asyncio.gather(*(draft_one(i, s) for i, s in enumerate(sections)))
     ordered = [results_by_index[i] for i in range(len(sections)) if i in results_by_index]
@@ -197,7 +212,7 @@ Rules (strict):
 25. NJ or geography-specific reference RFPs: use verified KB contacts; if no in-state client exists, disclose geography honestly — never [PLACEHOLDER] reference rows.
 26. Project management fees must stay within 5–8% of agency fees — do not leave unresolved PM ratio flags in budget prose.
 27. Address every Phase 2 uncovered requirement explicitly — compliance tables, forms, or narrative; do not assume a titled section alone satisfies the RFP.
-28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose.
+28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose as if it were THIS proposal. Exception for COVER LETTER / TRANSMITTAL: when 06_WON cover/transmittal exemplars are in evidence, mirror their letter FORM and correspondence voice only — rewrite every fact for THIS RFP.
 29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview / Executive Summary) MUST be drafted even when evidence is thin or empty. Read RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory as private direction — then write ONLY the proposal answer (our diagnosis, plan, proof, commitments). Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body. NEVER fill thin evidence by echoing the RFP.
 30. Understanding / Executive Summary sections must open with zö's proposal stance: what we will do, why it fits, and proof. Do NOT open by paraphrasing the client's ask, what they already built, or what they need. The evaluator already has the RFP.
 31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
@@ -215,7 +230,21 @@ Rules (strict):
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones. NEVER assert past technical deliveries (specific platforms, integrations, audit workflows) that the included case studies / bios / companyfacts do not evidence — use adjacent verified experience or [VERIFY].
 44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
 45. SCHEDULE / TIMELINE: Fit award→launch / contract windows stated in the RFP. Dates and milestones in a markdown pipe table (| Phase | Activities | Timing |) — methodology lives in Approach. Every Timing cell must have a week-from-award range. Never leave Timing blank. Never put spaces between every letter in headers (write PHASE not P H A S E). Never put | between individual letters. Use 4–6 columns max; wrap long cell text with normal sentences, not line breaks mid-row. Never put writer instructions in the tab ("do not restate…"). Missing calendar dates from the RFP → weeks from award, not [VERIFY] tags.
-46. COVER LETTER / TRANSMITTAL: If the RFP requires a physically signed cover letter or letter of transmittal, write the short offer letter AND set designerNote (or an inline [DESIGNER NOTE: …]) to attach the signed PDF separately. Do not claim the signed file is attached. Do not invent signature dates, notary numbers, or stamp IDs.
+46. COVER LETTER / TRANSMITTAL (Rev 6 signed passage · RFP format first · won form second):
+   Structure and required fields follow THIS RFP's cover-letter / letter-of-transmittal
+   instructions and submission package (addressee, required statements, page limits,
+   attachments) — never a generic Zo template letter.
+   When evidence includes 06_WON / past won cover letters or letters of transmittal,
+   treat them as FORM / STRUCTURE / VOICE models (how zö writes a signed letter) —
+   never copy their prior client, project claims, dates, or dollars into THIS letter.
+   Voice = Rev 6 correspondence for signed passages: first person from the authorized
+   signer (I/we), address the named recipient when known, real offer letter — NOT
+   corporate boilerplate openers like "On behalf of zö agency". Name zö agency when
+   stating the offeror, certifications, or contact block — not as a third-person
+   "on behalf of" agency voice.
+   If the RFP requires a physically signed cover letter / transmittal, write the letter
+   AND set designerNote (or [DESIGNER NOTE: …]) to attach the signed PDF separately.
+   Do not invent signature dates, notary numbers, or claim the PDF is attached.
 47. Concise ≠ incomplete: hit every RFP ask for the section, then STOP. No filler, no duplicated Sections 1–3, no Approach essay pasted into Schedule.
 48. TEAM / SPECIALIST ROLES: Only name roles that map to a real Section 2 bio person, or label them [MANUAL FILL: subcontractor / generalist coverage]. Never invent dedicated specialist titles with no matching named person on the roster. Staff / "Assigned to Account" tables MUST use the same role titles as Section 2 / org chart for each named person — never reassign Account Manager / Development Coordinator / etc. to the wrong teammate. Never write client-facing staffing history (who retired, who formerly held a seat, who "now carries his accounts") — present current assignees only.
 49. LEGAL ATTESTATIONS (higher bar than ordinary claims): NEVER state E-Verify / Contractor Affidavit enrollment, participation in a good-faith-effort / DVBE / MWBE vendor-outreach waiver, mandatory-conference attendance, "no conflicts of interest," or any other fact sworn under penalty of perjury as settled unless it is in evidence. Use [VERIFY: field — reason] instead, even when surrounding form language pressures you to fill every field. Do NOT invent names, phone numbers, or emails to complete a vendor/subcontractor outreach or good-faith-effort contact list — [VERIFY] each missing contact individually; never fabricate a plausible-looking one to avoid a blank field.
@@ -250,6 +279,7 @@ class DraftingGraphState(TypedDict, total=False):
     execution_plan: dict[str, Any] | None
     brand_voice: dict[str, Any]
     zo_sections_context: str
+    skip_static_dedupe: bool
     writing_avoidances: list[str]
     loss_lessons: list[dict[str, Any]]
     proof_points: list[dict[str, Any]]
@@ -477,6 +507,7 @@ def partition_phase3_sections(
     existing_by_id: dict[str, ProposalSection],
     *,
     static_section_text: str = "",
+    skip_static_dedupe: bool = False,
 ) -> tuple[list[RfpSectionMap], list[ProposalSection]]:
     """Split mapped sections into ones still needing a draft vs already filled."""
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
@@ -490,8 +521,8 @@ def partition_phase3_sections(
     ]
 
     for mapped in rfp_sections:
-        # Never omit Cost/Fees/Budget or scored tabs — RFP-demanded coverage.
-        if should_skip_rfp_section_as_static_duplicate(
+        # Strict RFP: every TOC/eval tab is draftable — never stub as "see Zo 1–3".
+        if not skip_static_dedupe and should_skip_rfp_section_as_static_duplicate(
             title=mapped.title or "",
             duplicate_of_static_section=mapped.duplicate_of_static_section,
             evaluation_weight=mapped.evaluation_weight,
@@ -519,6 +550,21 @@ def partition_phase3_sections(
 
         existing = existing_by_id.get(mapped.id)
         if existing and _phase3_content_is_usable(existing.content):
+            # Keep drafted content, but never keep an instruction-sentence tab
+            # label when Phase 2 lean already recovered the deliverable name.
+            if (
+                (mapped.title or "").strip()
+                and (mapped.title or "").strip() != (existing.title or "").strip()
+            ):
+                from app.services.proposal_fulfill_rfp_structure import (
+                    title_is_rfp_instruction_not_deliverable,
+                )
+
+                if title_is_rfp_instruction_not_deliverable(existing.title or ""):
+                    already.append(
+                        existing.model_copy(update={"title": mapped.title})
+                    )
+                    continue
             already.append(existing)
             continue
 
@@ -576,11 +622,17 @@ def _brand_voice_block(
     register: str = "narrative",
     rfp_client: str = "",
 ) -> str:
-    reg = "procurement" if register == "procurement" else "narrative"
+    from app.services.proposal_brand_voice import Register
+
+    reg: Register = "narrative"
+    if register == "procurement":
+        reg = "procurement"
+    elif register == "cover_letter":
+        reg = "cover_letter"
     return format_brand_voice_block(
         brand_voice,
         rfp_client=rfp_client,
-        register=reg,  # type: ignore[arg-type]
+        register=reg,
     )
 
 
@@ -954,6 +1006,56 @@ async def _ensure_jit_evidence(
         or any(k in section_title.lower() for k in ("budget", "pricing", "fees", "cost"))
     )
 
+    from app.services.proposal_draft_structure_stubs import is_cover_letter_section_title
+
+    is_cover_letter = is_cover_letter_section_title(section_title) or any(
+        tok in section_id.casefold() for tok in ("cover-letter", "transmittal")
+    )
+
+    # Cover / transmittal: always pull 06_WON letter exemplars (form models), like
+    # budget always pulls 00_Guide_Pricing — even when shared corpus is thin.
+    if is_cover_letter:
+        from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
+        from app.services.proposal_intelligence.schemas import RetrievalEntry
+
+        cover_entry = RetrievalEntry.model_validate(
+            {
+                "sectionId": section_id,
+                "requiredAssets": [
+                    "06_WON cover letter",
+                    "06_WON letter of transmittal",
+                ],
+                "queries": [
+                    "06_WON cover letter Dear Sincerely authorized signature zö agency",
+                    "06_WON letter of transmittal submitted proposal respectfully",
+                    "06_WON won proposal cover letter form salutation close",
+                ],
+                "priority": "required",
+                "expectedSources": ["won_proposals"],
+                "whyNeeded": (
+                    "Cover letter must follow how zö writes won cover/transmittal "
+                    "letters (form/voice only — rewrite facts for this RFP)"
+                ),
+            }
+        )
+        start = len(corpus) + 1
+        items = await retrieve_for_section(
+            cover_entry,
+            rfp_client=str(state.get("rfp_client") or ""),
+            start_index=start,
+            section_title=section_title,
+        )
+        for item in items:
+            dumped = item.model_dump(by_alias=True)
+            dumped["sectionIds"] = list(
+                dict.fromkeys([*(dumped.get("sectionIds") or []), section_id])
+            )
+            corpus.append(dumped)
+        state["evidence_corpus"] = corpus
+        tagged = _evidence_for_section(section_id, corpus)
+        if tagged:
+            return tagged
+
     # Budget narrative must ground in 00_Guide_Pricing — always supplement.
     if is_budget_section:
         from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
@@ -1130,6 +1232,9 @@ def _build_draft_prompt_zones(
     procurement_sections = [
         p for p in batch_payload if p.get("register") == "procurement"
     ]
+    cover_letter_sections = [
+        p for p in batch_payload if p.get("register") == "cover_letter"
+    ]
 
     # ------------------------------------------------------------------
     # Prompt zones (see docs/superpowers/specs/2026-08-11-proposal-llm-cost-
@@ -1158,6 +1263,15 @@ def _build_draft_prompt_zones(
         f"RFP: {state['rfp_title']}\n\n"
     )
     zone_c = ""
+    if cover_letter_sections:
+        zone_c += (
+            "COVER LETTER / TRANSMITTAL sections in this batch (Rev 6 signed passage):\n"
+            f"{format_register_block('cover_letter')}\n\n"
+            f"Brand voice for cover-letter sections:\n"
+            f"{_brand_voice_block(state.get('brand_voice'), register='cover_letter', rfp_client=state['rfp_client'])}\n\n"
+            "06_WON evidence in these sections is for letter FORM / VOICE only — "
+            "rewrite every fact for THIS RFP; never paste a prior won letter.\n\n"
+        )
     if narrative_sections:
         zone_c += (
             "NARRATIVE sections in this batch (first person we/our — never The Vendor):\n"
@@ -1392,11 +1506,25 @@ def _build_draft_prompt_zones(
                 )
             ):
                 zone_c += (
-                    f"COVER LETTER SECTION {payload.get('sectionId')}: "
-                    "Write a complete short offer letter addressing RFP submission asks. "
-                    "If the RFP requires a physically signed cover letter / transmittal, "
-                    "include designerNote instructing attachment of the signed PDF — "
-                    "do not invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
+                    f"COVER LETTER SECTION {payload.get('sectionId')}:\n"
+                    "1) FORMAT / CONTENT — follow THIS RFP's cover-letter or letter-of-"
+                    "transmittal requirements and requiredHeadings exactly (who to "
+                    "address, required attestations, contact block, page limit). Do not "
+                    "substitute a generic Zo marketing letter.\n"
+                    "2) WON EXEMPLARS — if evidence includes 06_WON cover letters / "
+                    "letters of transmittal, mirror their letter FORM and correspondence "
+                    "voice only. Never copy prior client names, project claims, dates, "
+                    "or dollars — rewrite for THIS buyer and THIS RFP.\n"
+                    "3) VOICE — Rev 6 signed-passage / correspondence standard "
+                    "(branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md): first person from "
+                    "the authorized signer; use the recipient's name when known; "
+                    "contractions warm prose. NEVER open with 'On behalf of zö agency' or "
+                    "similar third-person agency boilerplate. State the offeror as "
+                    "zö agency in the letter body / signature block where the RFP asks "
+                    "for firm identification.\n"
+                    "4) If the RFP requires a physically signed cover letter / "
+                    "transmittal, include designerNote to attach the signed PDF — do not "
+                    "invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
                 )
         zone_c += (
             f"DESIGNER-COMPACT {payload.get('sectionId')}: "
@@ -1599,6 +1727,13 @@ async def _draft_batch_once(
                 title=title,
                 zo_mode=zo_mode,
             )
+            # Grounded MasterTemplate name repairs on every Phase 3 section (Strict
+            # never hits Zo Sections 1–3 corrections).
+            from app.services.proposal_fulfill_rfp_repairs import (
+                apply_deterministic_roster_fixes,
+            )
+
+            content, _ = apply_deterministic_roster_fixes(content, identity_only=True)
         # Last line of defence for the section brief leaking into the body. The
         # prompt now fences the brief off as private direction; this catches the
         # cases where the model paraphrases it anyway — which is how tabs shipped
@@ -1654,8 +1789,11 @@ async def _draft_batch_once(
 async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     sections = state.get("rfp_sections") or []
     static_section_text = state.get("zo_sections_context") or ""
+    skip_static = bool(state.get("skip_static_dedupe"))
 
     def _skip(s: dict[str, Any]) -> bool:
+        if skip_static:
+            return False
         weight = s.get("evaluationWeight")
         if weight is None:
             weight = s.get("evaluation_weight")
@@ -1907,6 +2045,7 @@ async def run_drafting_graph(
     prior_drafted_sections: list[ProposalSection] | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
     rfp_due_date: str | None = None,
+    skip_static_dedupe: bool = False,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
     if not llm.is_configured():
         raise LlmError(
@@ -1991,6 +2130,7 @@ async def run_drafting_graph(
         "execution_plan": plan_dict if isinstance(plan_dict, dict) else None,
         "brand_voice": brand_voice.model_dump(by_alias=True) if brand_voice else {},
         "zo_sections_context": _zo_sections_context(zo_template_sections or []),
+        "skip_static_dedupe": bool(skip_static_dedupe),
         "writing_avoidances": writing_avoidances or [],
         "loss_lessons": [
             lesson.model_dump(by_alias=True) for lesson in (loss_lessons or [])

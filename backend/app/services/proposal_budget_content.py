@@ -253,6 +253,8 @@ def render_personnel_loading_form_markdown(
     """RFP-required Role | Hourly Rate | Year-2 % | Year-3 % table.
 
     Never invent missing role rates — MANUAL FILL when the guide/build has no hourly.
+    Returns empty string when there are no bindable rates and no RFP role labels
+    (caller must cut the hollow table rather than ship placeholder columns).
     """
     roles = extract_rfp_labor_role_labels(rfp_text)
     # Fall back to line-item role titles / descriptions when RFP parse is thin.
@@ -275,29 +277,30 @@ def render_personnel_loading_form_markdown(
         y2 = m2.group(1)
     if m3:
         y3 = m3.group(1)
+    show_yoy = bool(y2 or y3) or bool(
+        re.search(
+            r"(?i)year[\s-]*[23]|option\s+years?|%\s*increase",
+            rfp_text or "",
+        )
+    )
 
-    lines = [
-        "## Cost Proposal — Hourly Rate Schedule",
-        "",
-        "This table answers the RFP's scored Cost / hourly-rate instrument "
-        "(labor categories with Year-2 / Year-3 percentage increases). "
-        "Do not substitute a fixed-fee retainer for this form.",
-        "",
-        "| Role / Labor Category | Year-1 Hourly Rate | Year-2 % Increase | Year-3 % Increase |",
-        "| --- | ---: | ---: | ---: |",
-    ]
-
+    rate_rows: list[tuple[str, str, str, str]] = []
     used_ids: set[str] = set()
-    for role in roles or ["[MANUAL FILL: role from RFP hourly table]"]:
+    for role in roles:
         rate_val: float | None = None
         role_cf = role.casefold()
         for item in budget.line_items:
             if item.id in used_ids:
                 continue
             blob = f"{item.role_title or ''} {item.description or ''}".casefold()
-            if role_cf and (role_cf in blob or any(t in blob for t in role_cf.split() if len(t) > 3)):
+            if role_cf and (
+                role_cf in blob
+                or any(t in blob for t in role_cf.split() if len(t) > 3)
+            ):
                 rate_val = _hourly_rate_from_line(item)
-                if rate_val is None and item.rate is not None and (item.unit or "").casefold() in {
+                if rate_val is None and item.rate is not None and (
+                    item.unit or ""
+                ).casefold() in {
                     "hour",
                     "hours",
                     "hr",
@@ -306,10 +309,53 @@ def render_personnel_loading_form_markdown(
                     rate_val = float(item.rate)
                 used_ids.add(item.id)
                 break
+        if rate_val is None:
+            for vr in budget.verified_rates or []:
+                vr_role = (vr.role or vr.person_name or "").strip()
+                if not vr_role or not (vr.hourly_rate or 0):
+                    continue
+                if role_cf in vr_role.casefold() or vr_role.casefold() in role_cf:
+                    rate_val = float(vr.hourly_rate)
+                    break
         rate_cell = _usd(rate_val) if rate_val is not None else "—"
         y2_cell = f"{y2}%" if y2 else "—"
         y3_cell = f"{y3}%" if y3 else "—"
-        lines.append(f"| {role} | {rate_cell} | {y2_cell} | {y3_cell} |")
+        rate_rows.append((role, rate_cell, y2_cell, y3_cell))
+
+    # No RFP roles and no priced hourly rows → cut entirely (no MANUAL FILL shell).
+    has_any_rate = any(cell != "—" for _, cell, _, _ in rate_rows)
+    if not rate_rows and not has_any_rate:
+        return ""
+    if not rate_rows:
+        return ""
+    if not has_any_rate and not roles:
+        return ""
+
+    if show_yoy:
+        lines = [
+            "## Cost Proposal — Hourly Rate Schedule",
+            "",
+            "This table answers the RFP's scored Cost / hourly-rate instrument "
+            "(labor categories with Year-2 / Year-3 percentage increases). "
+            "Do not substitute a fixed-fee retainer for this form.",
+            "",
+            "| Role / Labor Category | Year-1 Hourly Rate | Year-2 % Increase | Year-3 % Increase |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+        for role, rate_cell, y2_cell, y3_cell in rate_rows:
+            lines.append(f"| {role} | {rate_cell} | {y2_cell} | {y3_cell} |")
+    else:
+        lines = [
+            "## Cost Proposal — Hourly Rate Schedule",
+            "",
+            "This table answers the RFP's scored Cost / hourly-rate instrument "
+            "(labor categories). Do not substitute a fixed-fee retainer for this form.",
+            "",
+            "| Role / Labor Category | Year-1 Hourly Rate |",
+            "| --- | ---: |",
+        ]
+        for role, rate_cell, _, _ in rate_rows:
+            lines.append(f"| {role} | {rate_cell} |")
 
     lines.append("")
     return "\n".join(lines)
@@ -394,6 +440,13 @@ def render_kb_classification_rate_schedule_markdown(
             labels.append(label)
     source_note = ", ".join(labels[:3]) if labels else "agency rate card"
 
+    show_yoy = bool(y2 or y3) or bool(
+        re.search(
+            r"(?i)year[\s-]*[23]|option\s+years?|%\s*increase",
+            rfp_text or "",
+        )
+    )
+
     lines = [
         "## Hourly Rate Schedule by Classification",
         "",
@@ -402,16 +455,30 @@ def render_kb_classification_rate_schedule_markdown(
         "Proposed investment remains the phase / project fees above "
         "(hours × rate is used only when the RFP scores a staff-loading form).",
         "",
-        "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |",
-        "| --- | ---: | ---: | ---: |",
     ]
-    for role, rate_val, _source in rows:
-        y2_cell = f"{y2}%" if y2 else "—"
-        y3_cell = f"{y3}%" if y3 else "—"
-        lines.append(
-            f"| {_md_table_cell(role)} | {_usd(rate_val)} | "
-            f"{_md_table_cell(y2_cell)} | {_md_table_cell(y3_cell)} |"
+    if show_yoy:
+        lines.extend(
+            [
+                "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |",
+                "| --- | ---: | ---: | ---: |",
+            ]
         )
+        for role, rate_val, _source in rows:
+            y2_cell = f"{y2}%" if y2 else "—"
+            y3_cell = f"{y3}%" if y3 else "—"
+            lines.append(
+                f"| {_md_table_cell(role)} | {_usd(rate_val)} | "
+                f"{_md_table_cell(y2_cell)} | {_md_table_cell(y3_cell)} |"
+            )
+    else:
+        lines.extend(
+            [
+                "| Role / Labor Category | Hourly Rate (billable) |",
+                "| --- | ---: |",
+            ]
+        )
+        for role, rate_val, _source in rows:
+            lines.append(f"| {_md_table_cell(role)} | {_usd(rate_val)} |")
     lines.append("")
 
     from app.services.proposal_budget_playbook import (
@@ -1844,9 +1911,12 @@ def _rollup_phase_fee_rows(
 ) -> list[tuple[str, str, float | None]]:
     """Collapse line items into one client row per phase.
 
-    Returns (phase, scope_summary, amount). Pass-through media is omitted here
-    (shown in Proposed Investment header only). Travel/reimbursable lines keep
-    their own phase bucket.
+    Fee Detail is professional-fee dollars only:
+    - ``client_passthrough`` never appears (ledger type — shown in investment header)
+    - lines without a positive extended amount never appear (hollow / MANUAL FILL
+      stubs go to outside-table notes, not zero-dollar table rows)
+
+    No title/description keyword lists — RFP wording varies; structure + ledger type win.
     """
     from collections import OrderedDict
 
@@ -1855,11 +1925,10 @@ def _rollup_phase_fee_rows(
     buckets: OrderedDict[str, dict[str, object]] = OrderedDict()
     for item in budget.line_items or []:
         kind = infer_line_item_type(item)
-        desc_raw = (item.description or "").strip()
-        is_manual_fill = desc_raw.startswith("[MANUAL FILL")
-        # Pass-through dollars live in the investment hea   der — except MANUAL FILL
-        # placeholders, which must remain visible until a human confirms them.
-        if kind == "client_passthrough" and not is_manual_fill:
+        if kind == "client_passthrough":
+            continue
+        amount_val = float(item.extended or 0) if item.extended is not None else 0.0
+        if amount_val <= 0:
             continue
         phase, desc = _client_line_label(item)
         phase = _md_cell(_no_em_dash(phase))
@@ -1872,15 +1941,12 @@ def _rollup_phase_fee_rows(
         label = _md_cell(desc)
         if label and label not in descs and label != "—":
             descs.append(label)
-        if isinstance(item.extended, (int, float)):
-            bucket["amount"] = float(bucket["amount"]) + float(item.extended)
-            bucket["has_amount"] = True
+        bucket["amount"] = float(bucket["amount"]) + amount_val
+        bucket["has_amount"] = True
 
     rows: list[tuple[str, str, float | None]] = []
     for phase, data in buckets.items():
         phase_cf = phase.casefold()
-        # Drop explicit reference-only placeholders only — never drop a positive
-        # fee line (that caused Proposed Investment $69k vs Fee Detail $67.5k).
         if "reference only" in phase_cf or "(reference)" in phase_cf:
             continue
         descs = list(data["descs"])  # type: ignore[arg-type]
@@ -1888,16 +1954,53 @@ def _rollup_phase_fee_rows(
             scope = _scope_sentence(phase, descs[:4]) + f" Plus {len(descs) - 4} more."
         else:
             scope = _scope_sentence(phase, descs)
-        amount: float | None
-        if data["has_amount"]:
-            amount = round(float(data["amount"]), 2)
-        else:
-            amount = None
-        # $0 rows pollute Fee Detail and "Fee phases:" prose — omit them.
-        if amount is not None and amount <= 0:
+        if not data["has_amount"]:
+            continue
+        amount = round(float(data["amount"]), 2)  # type: ignore[arg-type]
+        if amount <= 0:
             continue
         rows.append((phase, scope, amount))
     return rows
+
+
+def _outside_fee_detail_notes_markdown(budget: ProposalBudget) -> str:
+    """Notes for ledger lines that must not sit in Fee Detail as hollow rows.
+
+    Includes: client_passthrough (any), and agency/direct lines with no positive
+    extended (MANUAL FILL / unpriced stubs). Labels come from the line itself —
+    never a static synonym table of what “counts” as media/deployment.
+    """
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    notes: list[str] = []
+    for item in budget.line_items or []:
+        kind = infer_line_item_type(item)
+        desc = (item.description or item.role_title or item.category or "").strip()
+        if not desc:
+            continue
+        amount = float(item.extended or 0) if item.extended is not None else 0.0
+        hollow = amount <= 0
+        if kind == "client_passthrough" or hollow:
+            if desc.startswith("[MANUAL FILL") or desc.startswith("[VERIFY"):
+                notes.append(f"- {desc}")
+            elif hollow:
+                label = _md_cell(_no_em_dash(desc))[:100]
+                notes.append(
+                    f"- [MANUAL FILL: Sonja — confirm dollars for “{label}” and whether "
+                    "this sits inside or outside the professional-fee Total above]"
+                )
+            elif kind == "client_passthrough" and amount > 0:
+                # Priced pass-through already in Proposed Investment header — skip.
+                continue
+    if not notes:
+        return ""
+    return (
+        "### Items outside Fee Detail\n\n"
+        "These ledger lines are not fee-table rows (pass-through and/or unpriced). "
+        "Confirm each against THIS RFP’s cost ask before submission:\n\n"
+        + "\n".join(notes)
+        + "\n"
+    )
 
 
 def fee_detail_professional_total(budget: ProposalBudget) -> float:
@@ -2712,11 +2815,42 @@ def render_budget_markdown(
     wants_form = not wants_personnel and fmt == "blended_rate_form"
     strict_form = wants_form and rfp_forbids_quotation_form_changes(rfp_text)
 
+    from app.services.proposal_budget_playbook import rfp_mandates_hourly_rate_schedule
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    def _has_priced_fixed_fees() -> bool:
+        for item in budget.line_items or []:
+            unit = (item.unit or "").casefold()
+            if unit in {"hour", "hours", "hr", "hrs"}:
+                continue
+            if infer_line_item_type(item) in {"direct_expense", "client_passthrough"}:
+                continue
+            if float(item.extended or 0) > 0:
+                return True
+            if float(item.rate or 0) > 0 and float(item.quantity or 0) > 0:
+                return True
+        return False
+
+    rfp_wants_hourly_schedule = (
+        wants_personnel or rfp_mandates_hourly_rate_schedule(rfp_text)
+    )
+    # When RFP also prices phases / fixed fees, keep Fee Detail alongside the
+    # hourly instrument (strict per-section: both asks → both blocks).
+    also_wants_fee_detail = bool(budget.line_items) and (
+        not wants_personnel or _has_priced_fixed_fees()
+    )
+
     if wants_personnel:
-        lines.append(
-            render_personnel_loading_form_markdown(budget, rfp_text=rfp_text).rstrip()
-        )
-        lines.append("")
+        personnel_md = render_personnel_loading_form_markdown(
+            budget, rfp_text=rfp_text
+        ).rstrip()
+        if personnel_md:
+            lines.append(personnel_md)
+            lines.append("")
+        else:
+            # Hollow rate table — cut it; fall through to Fee Detail / MANUAL FILL.
+            wants_personnel = False
+            rfp_wants_hourly_schedule = rfp_mandates_hourly_rate_schedule(rfp_text)
     elif wants_form:
         lines.append(
             render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text).rstrip()
@@ -2782,23 +2916,28 @@ def render_budget_markdown(
         lines.append(ql)
         lines.append("")
 
-    if budget.line_items and not wants_personnel:
+    if also_wants_fee_detail and not wants_personnel:
         heading = (
             "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
         )
         _append_fee_detail_by_phase_table(lines, budget, heading=heading)
+        deploy = _outside_fee_detail_notes_markdown(budget)
+        if deploy.strip():
+            lines.append(deploy.rstrip())
+            lines.append("")
+    elif also_wants_fee_detail and wants_personnel and _has_priced_fixed_fees():
+        # RFP asked for hourly + fixed/phased dollars — both blocks.
+        _append_fee_detail_by_phase_table(
+            lines, budget, heading="## Fee Detail by Phase"
+        )
+        deploy = _outside_fee_detail_notes_markdown(budget)
+        if deploy.strip():
+            lines.append(deploy.rstrip())
+            lines.append("")
 
-    # Classification schedule: render whenever we have KB billable role rates on
-    # the ledger (chat seed or Stage 3.5) — do not wait on RFP-mandate regex.
-    # Mandate-only path keeps the MANUAL FILL gap when rates are still missing.
-    from app.services.proposal_budget_playbook import rfp_mandates_hourly_rate_schedule
-
-    has_verified_hourly = any(
-        (vr.hourly_rate or 0) > 0 for vr in (budget.verified_rates or [])
-    )
-    if not wants_personnel and (
-        has_verified_hourly or rfp_mandates_hourly_rate_schedule(rfp_text)
-    ):
+    # Classification schedule ONLY when THIS RFP explicitly demands it — never
+    # because KB verifiedRates happen to exist on the ledger.
+    if not wants_personnel and rfp_wants_hourly_schedule:
         schedule = render_kb_classification_rate_schedule_markdown(
             budget, rfp_text=rfp_text
         )
@@ -2823,6 +2962,7 @@ def render_budget_markdown(
         not wants_personnel
         and ("hour" in scope_cf or "hourly" in scope_cf)
         and not _budget_line_has_hourly_rate(budget)
+        and rfp_mandates_hourly_rate_schedule(rfp_text)
     ):
         lines.append("## Additional Work — Hourly Rates")
         lines.append("")
@@ -2832,29 +2972,123 @@ def render_budget_markdown(
         )
         lines.append("")
 
-    opt = (budget.option_term_notes or "").strip()
-    if opt:
-        opt2 = opt.replace("agency revenue estimate", "proposed fees")
+    # Always rebuild from ledger — never ship truncated/LLM-corrupted option prose
+    # (mid-sentence cuts like "Client media pass-through (at net. Total… $2,900").
+    from app.services.proposal_budget_validation import rebuild_option_term_notes
+
+    opt2 = rebuild_option_term_notes(budget, rfp_context=rfp_text or "")
+    if opt2:
+        opt2 = opt2.replace("agency revenue estimate", "proposed fees")
         opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
         opt2 = re.sub(r"(?i)agency commission revenue", "professional fees", opt2)
         opt2 = re.sub(r"(?i)not agency revenue", "not professional fees", opt2)
-        # Incomplete fragments (one short line, one dollar) confuse reviewers — omit.
-        amounts = _parse_dollar_amounts(opt2)
-        if len(opt2) < 160 and len(amounts) <= 1:
-            opt2 = ""
-        elif len(opt2) > 500:
-            opt2 = opt2[:500].rsplit(".", 1)[0].strip() + "."
-        if opt2:
-            lines.append("## Option Terms")
-            lines.append(opt2)
-            lines.append("")
+        lines.append("## Option Terms")
+        lines.append(opt2)
+        lines.append("")
 
     rendered = "\n".join(lines).strip()
     rendered, _mix_logs = scrub_duplicate_budget_breakdown_tables(rendered)
+    rendered = scrub_budget_designer_handoff_issues(
+        rendered,
+        budget=budget,
+        approach_digest=approach_digest,
+    )
     from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 
     rendered = scrub_client_facing_section_artifacts(rendered)
     return _scrub_internal_budget_jargon(rendered) + "\n"
+
+
+_TBD_NEEDS_INPUT_RE = re.compile(
+    r"(?i)\bTBD\s*[—–\-]\s*Needs?\s+your\s+input(?:\s*[—–\-]\s*[^\n|]{0,200})?"
+)
+
+
+def scrub_budget_designer_handoff_issues(
+    text: str,
+    *,
+    budget: ProposalBudget | None = None,
+    approach_digest: str = "",
+) -> str:
+    """Fix designer blockers on Generate Budget handoff — structural only.
+
+    - Convert leaked UI chrome ("TBD — Needs your input") back to MANUAL FILL
+    - Deduplicate repeated "Total proposed investment" clauses
+    - When ledger has pass-through dollars AND Expenses says absolute all-in with
+      zero additional billing, clarify that pass-through sits outside Fee Detail
+      (ledger-driven — not a synonym list of RFP phrases)
+    """
+    del approach_digest  # layout meaning comes from Stage 3 / cost-demands LLM
+    body = text or ""
+    if not body.strip():
+        return body
+
+    def _tbd_repl(match: re.Match[str]) -> str:
+        tail = match.group(0)
+        detail = re.sub(
+            r"(?i)^TBD\s*[—–\-]\s*Needs?\s+your\s+input\s*[—–\-]?\s*",
+            "",
+            tail,
+        ).strip(" .;")
+        if detail:
+            return f"[MANUAL FILL: Sonja — {detail}]"
+        return (
+            "[MANUAL FILL: Sonja — confirm this budget cell from ClientList/KB "
+            "before submission]"
+        )
+
+    body = _TBD_NEEDS_INPUT_RE.sub(_tbd_repl, body)
+    body = re.sub(
+        r"(?i)\bNeeds?\s+your\s+input\b(?:\s*[—–\-]\s*)?",
+        "",
+        body,
+    )
+
+    seen_total = False
+
+    def _dedupe_total(match: re.Match[str]) -> str:
+        nonlocal seen_total
+        if seen_total:
+            return ""
+        seen_total = True
+        return match.group(0)
+
+    body = re.sub(
+        r"(?i)\*{0,2}Total\s+proposed\s+investment:\*{0,2}\s*\$[\d,]+(?:\.\d{2})?"
+        r"(?:\s*\([^)]*\))?\*?\*?",
+        _dedupe_total,
+        body,
+    )
+    body = re.sub(r"[ \t]{2,}", " ", body)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+
+    passthrough = (
+        float(getattr(budget, "client_media_passthrough", 0) or 0) if budget else 0.0
+    )
+    has_passthrough_lines = False
+    if budget is not None:
+        from app.services.proposal_budget_validation import infer_line_item_type
+
+        has_passthrough_lines = any(
+            infer_line_item_type(item) == "client_passthrough"
+            for item in (budget.line_items or [])
+        )
+    if passthrough > 0 or has_passthrough_lines:
+        # Ledger says pass-through exists — Expenses must not claim absolute all-in.
+        body = re.sub(
+            r"(?is)(###\s+Expenses\s*\n\n)(.*?)(?=\n###\s+|\n##\s+|\Z)",
+            lambda m: (
+                m.group(1)
+                + "Professional fees in Fee Detail are all-in for scoped delivery. "
+                "Client pass-through amounts on the ledger (if any) are billed "
+                "separately outside that professional-fee Total — not implied as "
+                "zero additional billing.\n\n"
+            ),
+            body,
+            count=1,
+        )
+
+    return body.strip()
 
 
 def _budget_line_has_hourly_rate(budget: ProposalBudget) -> bool:

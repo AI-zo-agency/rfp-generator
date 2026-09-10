@@ -382,6 +382,98 @@ _DEFAULT_REF_TABLE_HEADER = (
     "|---|---|---|---|\n"
 )
 
+_LAYOUT_INSTRUCTION_RE = re.compile(
+    r"(?im)^(?:\s*(?:single\s+)?\d[\s-]*column\s+table[^\n]*|"
+    r"[^\n]*one\s+column\s+per\s+reference[^\n]*|"
+    r"[^\n]*no\s+additional\s+layout\s+needed[^\n]*|"
+    r"[^\n]*no\s+additional\s+layout[^\n]*)\s*$"
+)
+
+_REF_LIST_ITEM_RE = re.compile(
+    r"(?m)^\s*(?:\d{1,2}[\.)]\s+|[-*•]\s+)(.+?)\s*$"
+)
+
+_FIELD_LABEL_ONLY_RE = re.compile(
+    r"(?im)^\s*(?:\*\*|__)?\s*"
+    r"(?:contact|phone|email|title|organization|name|"
+    r"reference\s+contact|contact\s+info)"
+    r"\s*(?:\*\*|__)?\s*:?\s*(?:\*\*|__)?\s*$"
+)
+
+
+def _strip_reference_layout_instructions(body: str) -> str:
+    lines = [
+        ln
+        for ln in (body or "").splitlines()
+        if not _LAYOUT_INSTRUCTION_RE.match(ln.strip())
+    ]
+    return "\n".join(lines).strip()
+
+
+def _wants_column_per_reference(text: str) -> bool:
+    cf = (text or "").casefold()
+    return bool(
+        "column per reference" in cf
+        or "one column per reference" in cf
+        or re.search(r"\b\d[\s-]*column\b.{0,48}reference", cf)
+    )
+
+
+def _engagements_from_list_body(body: str) -> list[str]:
+    """Pull client/engagement labels from numbered or bulleted reference lists."""
+    items: list[str] = []
+    seen: set[str] = set()
+    for match in _REF_LIST_ITEM_RE.finditer(body or ""):
+        raw = match.group(1).strip()
+        if _FIELD_LABEL_ONLY_RE.match(raw):
+            continue
+        if re.match(r"(?i)^\[(?:MANUAL\s+FILL|VERIFY)\b", raw):
+            continue
+        if re.match(r"(?i)^(contact|phone|email)\s*:", raw):
+            continue
+        raw = re.split(r"(?i)\bContact\s*:", raw)[0].strip()
+        raw = re.sub(r"\*+", "", raw).strip(" -—–")
+        if len(raw) < 4:
+            continue
+        key = raw.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(raw[:140])
+        if len(items) >= 6:
+            break
+    return items
+
+
+def _build_row_per_reference_table(engagements: list[str]) -> str:
+    rows = [
+        f"| {eng} | Relevant past performance for this RFP | "
+        f"{_REF_CONTACT_FILL} | {_REF_CONTACT_FILL} |"
+        for eng in engagements
+    ]
+    if not rows:
+        rows = [
+            f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+            f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
+            f"{_REF_CONTACT_FILL} |"
+            for _ in range(3)
+        ]
+    return _DEFAULT_REF_TABLE_HEADER + "\n".join(rows)
+
+
+def _build_column_per_reference_table(engagements: list[str], *, columns: int = 4) -> str:
+    """RFP layout: one column per reference; rows are field labels."""
+    n = max(2, min(columns, 6))
+    refs = list(engagements[:n])
+    while len(refs) < n:
+        refs.append("[MANUAL FILL: Sonja — client / engagement from ClientList/KB]")
+    header = "| Field | " + " | ".join(f"Reference {i + 1}" for i in range(n)) + " |"
+    sep = "|---|" + "|".join(["---"] * n) + "|"
+    client = "| Client / Engagement | " + " | ".join(refs) + " |"
+    contact = "| Reference Contact | " + " | ".join([_REF_CONTACT_FILL] * n) + " |"
+    info = "| Phone / Email | " + " | ".join([_REF_CONTACT_FILL] * n) + " |"
+    return "\n".join([header, sep, client, contact, info])
+
 
 def _extract_markdown_table_block(content: str) -> str | None:
     """Return the first markdown table in ``content``, or None."""
@@ -404,9 +496,18 @@ def _extract_markdown_table_block(content: str) -> str | None:
                     "reference",
                     "contact",
                     "project",
+                    "field",
                 )
             ):
-                return "\n".join(block).strip()
+                # Header-only / separator-only is not a usable table.
+                data_rows = [
+                    ln
+                    for ln in block[1:]
+                    if ln.strip().startswith("|")
+                    and not re.match(r"^\s*\|?\s*:?-{2,}", ln.strip())
+                ]
+                if data_rows:
+                    return "\n".join(block).strip()
             i = j
             continue
         i += 1
@@ -439,14 +540,37 @@ def _engagement_rows_from_case_studies(draft: ProposalDraft) -> list[str]:
     return rows
 
 
+def _engagement_names_from_case_studies(draft: ProposalDraft) -> list[str]:
+    names: list[str] = []
+    for section in draft.sections:
+        sid = section.id or ""
+        title = (section.title or "").strip()
+        if not (
+            sid.startswith("section-3-")
+            or re.match(r"^\s*3\.\d+", title)
+        ):
+            continue
+        name = re.sub(r"^\s*\d+(?:\.\d+)*\s*[.:—–\-]\s*", "", title).strip()
+        if not name or len(name) < 4:
+            continue
+        if "overview" in name.casefold() or "our work" in name.casefold():
+            continue
+        names.append(name)
+        if len(names) >= 5:
+            break
+    return names
+
+
 def _references_tab_needs_table(content: str) -> bool:
-    body = (content or "").strip()
-    if not body:
+    """True when References lacks a usable contact/engagement markdown table."""
+    body = _strip_reference_layout_instructions(content or "")
+    if not body.strip():
         return True
     if _extract_markdown_table_block(body):
         return False
-    # Bare MANUAL FILL / short handoff with no table structure.
-    return len(re.findall(r"\b\w+\b", body)) < 80
+    # List-shaped or prose-only references still need a real table — word count
+    # must not suppress the rebuild (that left numbered lists + empty Contact:).
+    return True
 
 
 def ensure_references_tabs_have_tables(
@@ -455,8 +579,8 @@ def ensure_references_tabs_have_tables(
     """References / past-performance tabs must ship a contact table, not a lone flag.
 
     Prefer the drafted engagement table from a sibling References tab (e.g. Section D).
-    Otherwise build rows from Section 3 case studies with MANUAL FILL contact cells.
-    Never invent names, phones, or emails.
+    Otherwise convert list-form engagements, then Section 3 case studies, with
+    MANUAL FILL contact cells. Never invent names, phones, or emails.
     """
     logs: list[str] = []
     # Best sibling table (prefer longer).
@@ -475,6 +599,7 @@ def ensure_references_tabs_have_tables(
             donor_score = score
 
     case_rows = _engagement_rows_from_case_studies(draft)
+    case_names = _engagement_names_from_case_studies(draft)
     sections: list[ProposalSection] = []
     changed = False
     for section in draft.sections:
@@ -483,30 +608,59 @@ def ensure_references_tabs_have_tables(
         if "reference" not in title_cf and "past performance" not in title_cf:
             sections.append(section)
             continue
-        body = section.content or ""
+        raw_body = section.content or ""
+        body = _strip_reference_layout_instructions(raw_body)
         if not _references_tab_needs_table(body):
-            sections.append(section)
+            if body != raw_body:
+                sections.append(section.model_copy(update={"content": body + "\n"}))
+                logs.append(f"{title}: stripped leaked layout-instruction lines")
+                changed = True
+            else:
+                sections.append(section)
             continue
-        table = donor_table
-        source = "sibling References tab"
+
+        list_engagements = _engagements_from_list_body(body)
+        column_layout = _wants_column_per_reference(raw_body) or _wants_column_per_reference(
+            title
+        )
+        table: str | None = None
+        source = ""
+        if list_engagements:
+            if column_layout:
+                table = _build_column_per_reference_table(list_engagements)
+                source = "list engagements (column-per-reference)"
+            else:
+                table = _build_row_per_reference_table(list_engagements)
+                source = "list engagements"
+        if not table and donor_table:
+            table = donor_table
+            source = "sibling References tab"
         if not table and case_rows:
-            table = _DEFAULT_REF_TABLE_HEADER + "\n".join(case_rows)
-            source = "Section 3 engagements"
+            if column_layout:
+                table = _build_column_per_reference_table(case_names)
+                source = "Section 3 engagements (column-per-reference)"
+            else:
+                table = _DEFAULT_REF_TABLE_HEADER + "\n".join(case_rows)
+                source = "Section 3 engagements"
         if not table:
-            table = (
-                _DEFAULT_REF_TABLE_HEADER
-                + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
-                f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
-                f"{_REF_CONTACT_FILL} |\n"
-                + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
-                f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
-                f"{_REF_CONTACT_FILL} |\n"
-                + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
-                f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
-                f"{_REF_CONTACT_FILL} |"
-            )
-            source = "blank MANUAL FILL rows"
-        # Keep any existing non-meta lead sentences that aren't gap narration.
+            if column_layout:
+                table = _build_column_per_reference_table([])
+                source = "blank MANUAL FILL columns"
+            else:
+                table = (
+                    _DEFAULT_REF_TABLE_HEADER
+                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
+                    f"{_REF_CONTACT_FILL} |\n"
+                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
+                    f"{_REF_CONTACT_FILL} |\n"
+                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
+                    f"{_REF_CONTACT_FILL} |"
+                )
+                source = "blank MANUAL FILL rows"
+        # Keep short operational leads — drop list items (they become the table).
         lead_parts: list[str] = []
         for block in re.split(r"\n\s*\n", body):
             chunk = block.strip()
@@ -519,7 +673,21 @@ def ensure_references_tabs_have_tables(
             if chunk.startswith("#"):
                 lead_parts.append(chunk)
                 continue
-            # Short operational lead only — skip long apology leftovers.
+            # Skip numbered/bulleted engagement lists — folded into the table.
+            if _REF_LIST_ITEM_RE.search(chunk) and not chunk.startswith("#"):
+                list_lines = [
+                    ln
+                    for ln in chunk.splitlines()
+                    if ln.strip() and not _REF_LIST_ITEM_RE.match(ln)
+                    and not _FIELD_LABEL_ONLY_RE.match(ln.strip())
+                ]
+                if not list_lines:
+                    continue
+                chunk = "\n".join(list_lines).strip()
+                if not chunk:
+                    continue
+            if _FIELD_LABEL_ONLY_RE.match(chunk):
+                continue
             if len(re.findall(r"\b\w+\b", chunk)) <= 60:
                 lead_parts.append(chunk)
         parts = [f"## {title}"] if not any(p.startswith("#") for p in lead_parts) else []

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
+
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
   process.env.BACKEND_URL ||
@@ -11,46 +12,23 @@ export const runtime = "nodejs";
 
 export async function POST(
   request: Request,
-  { params }: { params: Promise<{ id: string; sectionId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id, sectionId } = await params;
-  let body: {
-    message?: string;
-    selectionStart?: number;
-    selectionEnd?: number;
-    selectionText?: string;
-    conversationHistory?: { role: string; content: string }[];
-    proposalWide?: boolean;
-    applyFix?: boolean;
-    improveSectionPinned?: boolean;
-    previewOnly?: boolean;
-  };
+  const { id } = await params;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ detail: "Invalid JSON body" }, { status: 400 });
   }
-  if (!body.message?.trim()) {
-    return NextResponse.json({ detail: "message is required" }, { status: 400 });
-  }
 
   try {
     const res = await longRunningFetch(
-      `${BACKEND_URL}/api/v1/rfps/${id}/proposal/sections/${sectionId}/improve`,
+      `${BACKEND_URL}/api/v1/rfps/${id}/proposal/confirm-preview`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: body.message,
-          selectionStart: body.selectionStart,
-          selectionEnd: body.selectionEnd,
-          selectionText: body.selectionText,
-          conversationHistory: body.conversationHistory,
-          proposalWide: body.proposalWide === true,
-          applyFix: body.applyFix === true,
-          improveSectionPinned: body.improveSectionPinned === true,
-          previewOnly: body.previewOnly !== false,
-        }),
+        body: JSON.stringify(body),
         timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }
     );
@@ -73,7 +51,7 @@ export async function POST(
     return NextResponse.json(data, { status: res.status });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Section improve failed";
+      error instanceof Error ? error.message : "Confirm preview failed";
     return NextResponse.json({ detail: message }, { status: 502 });
   }
 }

@@ -161,10 +161,51 @@ class Rev6VoicePatternTests(unittest.TestCase):
         self.assertNotIn("worth naming", cleaned.casefold())
         self.assertIn("regional partnership", cleaned.casefold())
 
+    def test_not_x_but_y_keeps_affirmative(self) -> None:
+        raw = (
+            "not a single campaign, but a system that works the same way "
+            "every month for RTA."
+        )
+        cleaned, logs = scrub_rev6_voice_patterns(raw)
+        self.assertNotIn("not a single", cleaned.casefold())
+        self.assertNotIn(", but a", cleaned.casefold())
+        self.assertIn("system that works", cleaned.casefold())
+        self.assertTrue(any("not-X-but-Y" in line for line in logs))
+
+    def test_negation_sentence_pair_keeps_affirmative(self) -> None:
+        raw = (
+            "It isn't the reason to hire us. It's simply true that we show up. "
+            "She is not the person RTA emails about a schedule slip. "
+            "She is the person who steps in when the plan needs a reset."
+        )
+        cleaned, logs = scrub_rev6_voice_patterns(raw)
+        self.assertNotIn("isn't the reason", cleaned.casefold())
+        self.assertNotIn("is not the person rta emails", cleaned.casefold())
+        self.assertIn("simply true", cleaned.casefold())
+        self.assertIn("steps in when the plan", cleaned.casefold())
+        self.assertTrue(any("sentence pair" in line for line in logs))
+
     def test_tagline_exempt(self) -> None:
         raw = "We are more than your agency. We are your strongest advocate."
         cleaned, _ = scrub_rev6_voice_patterns(raw)
         self.assertIn("more than your agency", cleaned.casefold())
+
+    def test_negation_scrub_does_not_glue_words(self) -> None:
+        raw = (
+            "That's a deliberate bid decision not a filler it's the same feed slot "
+            "before it publishes."
+        )
+        cleaned, _ = scrub_rev6_voice_patterns(raw)
+        self.assertNotIn("decisionthe", cleaned.casefold())
+        self.assertNotIn("choiceust", cleaned.casefold())
+        # Affirmative remains readable with spaces intact.
+        self.assertRegex(cleaned.casefold(), r"decision\s")
+
+    def test_repairs_existing_word_glue(self) -> None:
+        raw = "That is a deliberate design choiceust timing before either gets buried."
+        cleaned, _ = scrub_rev6_voice_patterns(raw)
+        self.assertNotIn("choiceust", cleaned.casefold())
+        self.assertIn("choice just", cleaned.casefold())
 
     def test_chat_persist_voice_enforces_rev6_on_draft(self) -> None:
         draft = ProposalDraft(

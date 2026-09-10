@@ -167,6 +167,37 @@ describe("resolveSectionFromMention", () => {
     ).toBe(true);
   });
 
+  it("in-place person swap is not outline structure", () => {
+    expect(messageLooksOutlineStructure("Instead of Haley add Sonja")).toBe(false);
+    expect(messageLooksOutlineStructure("replace the primary contact with Ron")).toBe(
+      false
+    );
+  });
+
+  it("pinned Improve never says reviewing full proposal", () => {
+    expect(
+      chatBusyStatusLabel("Instead of Haley add Sonja", "Primary Contact Information", {
+        proposalWide: true,
+        referenceMode: "section",
+        sameSectionPinned: true,
+      })
+    ).toBe("Improving Primary Contact Information…");
+  });
+
+  it("pinned Improve with trailing ? still says Improving not Answering", () => {
+    expect(
+      chatBusyStatusLabel(
+        "Instead of Haley how about to add Sonja?",
+        "Primary Contact Information",
+        {
+          proposalWide: false,
+          referenceMode: "section",
+          sameSectionPinned: true,
+        }
+      )
+    ).toBe("Improving Primary Contact Information…");
+  });
+
   it("bio pin conflict only — not case-study keywords", () => {
     expect(
       pinnedSectionConflictsWithMessage(

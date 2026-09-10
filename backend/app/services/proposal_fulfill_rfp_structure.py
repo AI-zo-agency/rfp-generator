@@ -458,8 +458,14 @@ async def extract_rfp_submission_format_specs(
                         "from other parts of the RFP when they conflict.\n\n"
                         "Include EVERY row the format/layout / proposal-content section "
                         "requires the offeror to submit — narrative sections, signed forms, "
-                        "packet exhibits the offeror returns, attachments, and compliance "
-                        "statements — using the buyer's verbatim headings.\n"
+                        "packet exhibits the offeror returns, attachments, compliance "
+                        "statements, AND table-shaped deliverables (reference contact "
+                        "tables, pricing/rate schedules, submission checklists) — using "
+                        "the buyer's verbatim headings.\n"
+                        "When the RFP shows a TABLE the offeror must fill (references, "
+                        "pricing, checklist), emit ONE deliverable row for that table and "
+                        "put the column headers / row labels into requiredHeadings so the "
+                        "writer rebuilds the same table shape.\n"
                         "Do NOT emit rows for sample Professional Services Agreement / "
                         "exemplar contract / Exhibit B|C clause titles (Construction, "
                         "Captions, Severability, Governing Law, Entire Agreement, etc.). "
@@ -692,8 +698,14 @@ def outline_sections_from_rfp_specs(
     specs: list[RfpSectionSpec],
     *,
     section_factory: Any,
+    skip_static_dedupe: bool = False,
 ) -> list[Any]:
-    """Turn Align extract specs into Intelligence outline tabs — no extra LLM."""
+    """Turn Align extract specs into Intelligence outline tabs — no extra LLM.
+
+    When ``skip_static_dedupe`` is True (strict RFP outline mode), keep TOC
+    titles that normally duplicate Zo Sections 1–3 — the manuscript has no
+    static company block, so Firm Profile / Team Bios / etc. must remain tabs.
+    """
     from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
 
     sections: list[Any] = []
@@ -708,10 +720,12 @@ def outline_sections_from_rfp_specs(
         # True static identity / company-block wrap labels stay nested in 1.x —
         # do NOT skip every row the extract stamped satisfiedByStaticCompanyBlock
         # (over-eager stamps used to drop bare Insurance / late TOC rows).
-        if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+        if not skip_static_dedupe and is_duplicate_static_rfp_section(spec.rfp_title or ""):
             continue
-        if spec.satisfied_by_static_company_block and _title_is_company_block_wrap_label(
-            spec.rfp_title or ""
+        if (
+            not skip_static_dedupe
+            and spec.satisfied_by_static_company_block
+            and _title_is_company_block_wrap_label(spec.rfp_title or "")
         ):
             continue
         title = _clean_spec_title((spec.rfp_title or "").strip())
@@ -737,7 +751,10 @@ def outline_sections_from_rfp_specs(
                 ) or _clean_spec_title(str(heading or "").strip())
                 if (
                     not child_title
-                    or is_duplicate_static_rfp_section(child_title)
+                    or (
+                        not skip_static_dedupe
+                        and is_duplicate_static_rfp_section(child_title)
+                    )
                     or _spec_is_non_deliverable(RfpSectionSpec(rfp_title=child_title))
                 ):
                     continue
@@ -833,6 +850,7 @@ def align_outline_sections_to_rfp_specs(
     specs: list[RfpSectionSpec],
     *,
     section_factory: Any,
+    skip_static_dedupe: bool = False,
 ) -> tuple[list[Any], list[str]]:
     """Same stub + reorder + mandated titles as Align to RFP outline, on a plan outline.
 
@@ -840,6 +858,9 @@ def align_outline_sections_to_rfp_specs(
     duplicate RFP tabs. They are stripped before the outline is returned.
     Newly added tabs are protectFromCap so Phase 3 drafts them on generate
     instead of leaving empty Align stubs for a later button click.
+
+    When ``skip_static_dedupe`` is True, do not inject Zo static anchors —
+    company/team/work TOC rows must stay as real outline tabs.
     """
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
@@ -862,23 +883,31 @@ def align_outline_sections_to_rfp_specs(
         for section in sections
         if _outline_section_id(section)
     ]
-    anchors = [
-        ProposalSection(
-            id=section_id,
-            title=title,
-            source="template",
-            mode="pull",
-            status="generated",
-        )
-        for section_id, title in _INTELLIGENCE_STATIC_ANCHORS
-    ]
+    anchors = (
+        []
+        if skip_static_dedupe
+        else [
+            ProposalSection(
+                id=section_id,
+                title=title,
+                source="template",
+                mode="pull",
+                status="generated",
+            )
+            for section_id, title in _INTELLIGENCE_STATIC_ANCHORS
+        ]
+    )
     draft = ProposalDraft(
         rfpId="intelligence-outline",
         sections=anchors + dynamic,
         updatedAt=datetime.now(timezone.utc).isoformat(),
     )
-    draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
-    draft, order_logs = order_draft_to_rfp_sequence(draft, specs)
+    draft, stub_logs = ensure_missing_scored_section_stubs(
+        draft, specs, skip_static_dedupe=skip_static_dedupe
+    )
+    draft, order_logs = order_draft_to_rfp_sequence(
+        draft, specs, skip_static_dedupe=skip_static_dedupe
+    )
     draft, relabel_logs = apply_rfp_mandated_section_titles(draft, specs)
     logs = list(stub_logs) + list(order_logs) + list(relabel_logs)
 
@@ -970,16 +999,29 @@ def apply_rfp_mandated_section_titles(
             continue
         if current == target:
             continue
-        if outline_titles_near_duplicate(current, target):
+        # Instruction prose that *mentions* the form is a near-dup of the form
+        # name under Jaccard/containment — still must retitle the instruction
+        # into the deliverable heading (otherwise "If any exceptions… Statement
+        # of Compliance shall…" stays as the sidebar label forever).
+        current_is_instruction = title_is_rfp_instruction_not_deliverable(current)
+        if outline_titles_near_duplicate(current, target) and not current_is_instruction:
             continue
         # Prefer a short clean current label over a longer coerced target.
-        if len(current) <= 60 and len(target) > len(current) + 20:
+        if (
+            not current_is_instruction
+            and len(current) <= 60
+            and len(target) > len(current) + 20
+        ):
             continue
         aliases = list(spec.same_ask_as or [])
         alias_match = any(
             outline_titles_near_duplicate(alias, current) for alias in aliases
         )
-        if not spec.mandated_submission_format and not alias_match:
+        if (
+            not current_is_instruction
+            and not spec.mandated_submission_format
+            and not alias_match
+        ):
             continue
         idx = next(i for i, s in enumerate(sections) if s.id == section.id)
         sections[idx] = section.model_copy(update={"title": target})
@@ -1918,13 +1960,19 @@ def _title_is_company_block_wrap_label(title: str) -> bool:
     return any(p.search(raw) for p in _COMPANY_BLOCK_WRAP_TITLE_RES)
 
 
-def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> bool:
+def _spec_is_static_company_ask(
+    draft: ProposalDraft,
+    spec: RfpSectionSpec,
+    *,
+    skip_static_dedupe: bool = False,
+) -> bool:
     """TOC item already satisfied by Sections 1.1–1.5 / 2 / 3 — header wrap only.
 
     Principle (no per-RFP keyword deny-lists):
     - Transmittal / letter tabs are never wrap-only.
     - Titles owned by static Sections 1–3 (``is_duplicate_static_rfp_section``)
-      stay nested / skipped as duplicate essays.
+      stay nested / skipped as duplicate essays — unless ``skip_static_dedupe``
+      (strict RFP: those titles are real manuscript tabs).
     - Extractor ``satisfiedByStaticCompanyBlock`` alone is not enough — models
       over-mark late TOC rows (e.g. bare Insurance) as covered by 1.5. Trust the
       stamp only for true company-block wrap labels.
@@ -1932,6 +1980,8 @@ def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> b
       ("Insurance" → "1.5 Insurance Information"). That tab keeps its own slot
       and may cross-ref Section 1.x.
     """
+    if skip_static_dedupe:
+        return False
     title = spec.rfp_title or ""
     if _title_is_transmittal_deliverable(title):
         return False
@@ -1961,8 +2011,12 @@ def _dedupe_sections_by_id(sections: list[ProposalSection]) -> list[ProposalSect
 def drop_duplicate_company_identity_tabs(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
+    *,
+    skip_static_dedupe: bool = False,
 ) -> tuple[ProposalDraft, list[str]]:
     """Remove intelligence pointer/essay tabs that duplicate Sections 1.1–1.5."""
+    if skip_static_dedupe:
+        return draft, []
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
     from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
 
@@ -1970,7 +2024,8 @@ def drop_duplicate_company_identity_tabs(
     wrap_specs = [
         spec
         for spec in specs
-        if not _spec_is_rfp_title_noise(spec) and _spec_is_static_company_ask(draft, spec)
+        if not _spec_is_rfp_title_noise(spec)
+        and _spec_is_static_company_ask(draft, spec, skip_static_dedupe=False)
     ]
     drop_ids: set[str] = set()
     for section in draft.sections:
@@ -2500,6 +2555,8 @@ def scrub_non_deliverable_titles_from_research(
 def apply_rfp_toc_layout(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
+    *,
+    skip_static_dedupe: bool = False,
 ) -> tuple[ProposalDraft, list[str]]:
     """Order intelligence tabs + Company Background header. No prose rewrite."""
     logs: list[str] = []
@@ -2507,12 +2564,17 @@ def apply_rfp_toc_layout(
     logs.extend(split_logs)
     draft, junk_logs = drop_non_deliverable_rfp_sections(draft)
     logs.extend(junk_logs)
-    draft, drop_logs = drop_duplicate_company_identity_tabs(draft, specs)
+    draft, drop_logs = drop_duplicate_company_identity_tabs(
+        draft, specs, skip_static_dedupe=skip_static_dedupe
+    )
     logs.extend(drop_logs)
-    draft, order_logs = order_draft_to_rfp_sequence(draft, specs)
+    draft, order_logs = order_draft_to_rfp_sequence(
+        draft, specs, skip_static_dedupe=skip_static_dedupe
+    )
     logs.extend(order_logs)
-    draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
-    logs.extend(wrap_logs)
+    if not skip_static_dedupe:
+        draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
+        logs.extend(wrap_logs)
     draft, empty_logs = repair_empty_manuscript_sections(draft)
     logs.extend(empty_logs)
     draft, cover_fix_logs = repair_cover_letter_misused_as_company_header(draft)
@@ -2760,6 +2822,8 @@ def repair_pointer_only_rfp_sections(
 def order_draft_to_rfp_sequence(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
+    *,
+    skip_static_dedupe: bool = False,
 ) -> tuple[ProposalDraft, list[str]]:
     """Order intelligence / dynamic RFP tabs to the buyer's sequence.
 
@@ -2781,7 +2845,9 @@ def order_draft_to_rfp_sequence(
     for spec in specs:
         if _spec_is_non_deliverable(spec):
             continue
-        if _spec_is_static_company_ask(draft, spec):
+        if _spec_is_static_company_ask(
+            draft, spec, skip_static_dedupe=skip_static_dedupe
+        ):
             continue
         section = _match_section_for_spec(working, spec)
         if section is None or section.id in used:
@@ -2827,6 +2893,7 @@ def ensure_missing_scored_section_stubs(
     specs: list[RfpSectionSpec],
     *,
     skip_section_ids: set[str] | None = None,
+    skip_static_dedupe: bool = False,
 ) -> tuple[ProposalDraft, list[str]]:
     """Append VERIFY stubs for RFP-scored tabs that have no manuscript section.
 
@@ -2843,7 +2910,10 @@ def ensure_missing_scored_section_stubs(
 
     for spec in specs:
         if _spec_is_non_deliverable(spec):
-            continue
+            coerced = _coerce_non_deliverable_spec_to_deliverable(spec)
+            if coerced is None:
+                continue
+            spec = coerced
         # A packet list must never mint a tab of its own. Its headings are
         # already tabs (outline_sections_from_rfp_specs expands them), so
         # stubbing the wrapper too produced BOTH "4. Proposal Submission
@@ -2863,7 +2933,9 @@ def ensure_missing_scored_section_stubs(
         ):
             continue
         working = draft.model_copy(update={"sections": sections})
-        if _spec_is_static_company_ask(working, spec):
+        if _spec_is_static_company_ask(
+            working, spec, skip_static_dedupe=skip_static_dedupe
+        ):
             continue
         if _match_section_for_spec(working, spec):
             continue
@@ -2896,7 +2968,14 @@ def ensure_missing_scored_section_stubs(
             (s.id or "").startswith("section-2-bio-") for s in sections
         ):
             continue
-        sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
+        from app.services.proposal_outline_dedup import humanize_outline_title
+
+        stub_title = humanize_outline_title(spec.rfp_title or "") or (
+            spec.rfp_title or ""
+        ).strip()
+        if not stub_title or _title_is_non_deliverable(stub_title):
+            continue
+        sid = f"rfp-structure-{_slug_section_id(stub_title)}"
         # Never mint a -2 twin of an existing stub id — that produced duplicate
         # sidebar tabs with the same RFP title.
         if sid in existing_ids:
@@ -2908,15 +2987,15 @@ def ensure_missing_scored_section_stubs(
             sid = f"{sid}-{n}"
             # If an alternate id still collides on title meaning, skip entirely.
             if any(
-                outline_titles_near_duplicate(spec.rfp_title, s.title or "")
+                outline_titles_near_duplicate(stub_title, s.title or "")
                 for s in sections
             ):
                 continue
         heading_lines = "\n".join(f"- {h}" for h in (spec.required_headings or [])[:12])
         body_parts = [
-            f"## {spec.rfp_title}",
+            f"## {stub_title}",
             "",
-            f"[MANUAL FILL: Draft this RFP-required section — {spec.rfp_title}]",
+            f"[MANUAL FILL: Draft this RFP-required section — {stub_title}]",
             "",
         ]
         if heading_lines:
@@ -2928,7 +3007,7 @@ def ensure_missing_scored_section_stubs(
         sections.append(
             ProposalSection(
                 id=sid,
-                title=spec.rfp_title,
+                title=stub_title,
                 content="\n".join(body_parts).strip(),
                 status="generated",
                 source="generated",
@@ -2938,7 +3017,7 @@ def ensure_missing_scored_section_stubs(
             )
         )
         existing_ids.add(sid)
-        logs.append(f"RFP structure: added missing scored section stub “{spec.rfp_title}”")
+        logs.append(f"RFP structure: added missing scored section stub “{stub_title}”")
         changed = True
 
     if not changed:
@@ -3073,6 +3152,12 @@ async def apply_rfp_section_order_pass(
         logs.append("RFP order pass: no section specs extracted — layout skipped.")
         return draft, logs
 
+    strict = bool(
+        research
+        and str(getattr(research, "outline_mode", "") or "").strip().lower()
+        == "strict_rfp"
+    )
+
     criterion_specs = specs_from_scored_criteria(research)
     if criterion_specs:
         known = [s.rfp_title for s in specs]
@@ -3094,10 +3179,13 @@ async def apply_rfp_section_order_pass(
             draft,
             specs,
             skip_section_ids=skip_section_ids or set(),
+            skip_static_dedupe=strict,
         )
         logs.extend(stub_logs)
 
-    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    draft, layout_logs = apply_rfp_toc_layout(
+        draft, specs, skip_static_dedupe=strict
+    )
     logs.extend(layout_logs)
     return draft, logs
 
@@ -3153,12 +3241,22 @@ async def run_rfp_structure_alignment_pass(
             )
 
     # Recover tabs the outline lean-filter / Phase 3 skip dropped entirely.
+    strict = bool(
+        research
+        and str(getattr(research, "outline_mode", "") or "").strip().lower()
+        == "strict_rfp"
+    )
     draft, stub_logs = ensure_missing_scored_section_stubs(
-        draft, specs, skip_section_ids=skip_section_ids
+        draft,
+        specs,
+        skip_section_ids=skip_section_ids,
+        skip_static_dedupe=strict,
     )
     logs.extend(stub_logs)
 
-    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    draft, layout_logs = apply_rfp_toc_layout(
+        draft, specs, skip_static_dedupe=strict
+    )
     logs.extend(layout_logs)
 
     sections = list(draft.sections)
@@ -3170,7 +3268,7 @@ async def run_rfp_structure_alignment_pass(
             await on_progress(i + 1, len(specs), spec.rfp_title or "Missing Section Check")
         if _spec_is_non_deliverable(spec):
             continue
-        if _spec_is_static_company_ask(draft, spec):
+        if _spec_is_static_company_ask(draft, spec, skip_static_dedupe=strict):
             continue
         if not spec.required_headings and not spec.instructions:
             continue

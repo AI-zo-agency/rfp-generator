@@ -715,13 +715,18 @@ def _parse_base_term_years(*texts: str) -> int | None:
     return None
 
 
-def _count_option_years(*texts: str) -> int:
+def _option_year_numbers(*texts: str) -> list[int]:
     years: set[int] = set()
     for text in texts:
         if not text:
             continue
         for match in _OPTION_YEAR_RE.finditer(text):
             years.add(int(match.group(1)))
+    return sorted(y for y in years if y >= 1)
+
+
+def _count_option_years(*texts: str) -> int:
+    years = _option_year_numbers(*texts)
     return max(years) if years else 0
 
 
@@ -734,6 +739,79 @@ def _append_fee_structure_note(existing: str, note: str) -> str:
     if existing.strip():
         return f"{existing.strip()}\n\n{note}"
     return note
+
+
+def _is_option_year_line(item: BudgetLineItem) -> bool:
+    blob = " ".join(
+        part for part in (item.category, item.description, item.role_title or "") if part
+    ).casefold()
+    return "option year" in blob
+
+
+def align_held_flat_option_year_line_items(
+    line_items: list[BudgetLineItem],
+    *,
+    rfp_context: str = "",
+    option_term_notes: str = "",
+) -> list[BudgetLineItem]:
+    """When no escalation is stated, option-year fee totals must equal base-year agency fee.
+
+    Prevents Fee Detail rows like Option Year 2/3 at $189,255 while Year 1
+    recurring agency fee is $183,590 under a 'held flat' story.
+    """
+    if not line_items:
+        return line_items
+    context = "\n".join(part for part in (rfp_context, option_term_notes) if part)
+    if _parse_escalation_rate(context) is not None:
+        return line_items
+
+    option_idxs = [i for i, item in enumerate(line_items) if _is_option_year_line(item)]
+    if not option_idxs:
+        return line_items
+
+    base_items = [item for i, item in enumerate(line_items) if i not in set(option_idxs)]
+    _, base_fee, _ = split_line_item_totals(base_items)
+    if base_fee <= 0:
+        return line_items
+
+    # Group option-year rows by year number (0 = unlabeled option-year bucket).
+    groups: dict[int, list[int]] = {}
+    for idx in option_idxs:
+        blob = " ".join(
+            part
+            for part in (
+                line_items[idx].category,
+                line_items[idx].description,
+                line_items[idx].role_title or "",
+            )
+            if part
+        )
+        match = _OPTION_YEAR_RE.search(blob)
+        year = int(match.group(1)) if match else 0
+        groups.setdefault(year, []).append(idx)
+
+    out = list(line_items)
+    for idxs in groups.values():
+        year_total = round(sum(float(out[i].extended or 0) for i in idxs), 2)
+        if abs(year_total - base_fee) < 0.01:
+            continue
+        if len(idxs) == 1:
+            i = idxs[0]
+            out[i] = out[i].model_copy(
+                update={
+                    "extended": round(base_fee, 2),
+                    "rate": round(base_fee, 2),
+                    "quantity": 1.0,
+                }
+            )
+            continue
+        if year_total <= 0:
+            continue
+        scale = base_fee / year_total
+        for i in idxs:
+            amt = round(float(out[i].extended or 0) * scale, 2)
+            out[i] = out[i].model_copy(update={"extended": amt})
+    return out
 
 
 def rebuild_option_term_notes(
@@ -751,6 +829,13 @@ def rebuild_option_term_notes(
         return budget.option_term_notes
 
     agency_fee = float(budget.agency_fee_subtotal or base)
+    # Option-year rows must not inflate the "held flat" base — use Year 1 only.
+    non_option = [i for i in (budget.line_items or []) if not _is_option_year_line(i)]
+    if non_option:
+        _, year1_fee, _ = split_line_item_totals(non_option)
+        if year1_fee > 0:
+            agency_fee = float(year1_fee)
+            base = float(year1_fee)
     passthrough = float(budget.client_media_passthrough or 0)
     total_inv = budget.total_client_invoicing
     if total_inv is None and passthrough > 0:
@@ -761,7 +846,8 @@ def rebuild_option_term_notes(
     )
     escalation = _parse_escalation_rate(context_blob)
     base_years = _parse_base_term_years(context_blob) or 1
-    option_years = _count_option_years(context_blob)
+    option_year_nums = _option_year_numbers(context_blob)
+    option_years = len(option_year_nums)
 
     lines: list[str] = []
     if passthrough > 0:
@@ -776,9 +862,13 @@ def rebuild_option_term_notes(
             f"{_usd(passthrough)}."
         )
         if total_inv is not None and float(total_inv) > 0:
-            # Guard: never emit a sentence where fee and total are the same while media > 0.
+            annual = round(agency_fee + passthrough + float(budget.direct_expenses_total or 0), 2)
+            # Prefer annual base-year invoicing — never a multi-year rollup that
+            # folds Option Year rows into "annual client invoicing".
             if abs(float(total_inv) - agency_fee) < 0.01 and passthrough > 0.01:
-                total_inv = round(agency_fee + passthrough, 2)
+                total_inv = annual
+            elif option_year_nums and float(total_inv) > annual + 1.0:
+                total_inv = annual
             lines.append(
                 f"Total estimated annual client invoicing (media pass-through + agency fees): "
                 f"{_usd(float(total_inv))}."
@@ -792,24 +882,47 @@ def rebuild_option_term_notes(
     elif not lines:
         lines.append(f"Base-year agency revenue estimate: {_usd(base)}.")
 
-    if escalation is not None and option_years > 0:
+    if escalation is not None and option_year_nums:
         pct = escalation * 100
         prior = base
-        for year in range(1, option_years + 1):
+        for i, year in enumerate(option_year_nums):
             amount = round(prior * (1 + escalation), 2)
-            if year == 1:
+            if i == 0:
                 lines.append(
                     f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on base year "
                     f"— agency fee only, not pass-through)."
                 )
             else:
+                prev = option_year_nums[i - 1]
                 lines.append(
-                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on Option Year {year - 1} "
+                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on Option Year {prev} "
                     f"— agency fee only)."
                 )
             prior = amount
-    elif budget.option_term_notes.strip() and not _USD_IN_TEXT_RE.findall(budget.option_term_notes):
+    elif option_year_nums:
+        # Held flat = same agency fee as base year (never a different invented figure).
+        for year in option_year_nums:
+            lines.append(
+                f"Option Year {year}: {_usd(agency_fee)} "
+                f"(same scope as base year, pricing held flat — agency fee only)."
+            )
+    elif (budget.option_term_notes or "").strip() and not _USD_IN_TEXT_RE.findall(
+        budget.option_term_notes
+    ):
         lines.append(budget.option_term_notes.strip())
+
+    # Do not invent a bare "Base-year …" Option Terms block when the ledger had
+    # nothing to say (no option years, no pass-through narrative).
+    if not lines:
+        return ""
+    if (
+        not option_year_nums
+        and passthrough <= 0
+        and not (budget.option_term_notes or "").strip()
+        and len(lines) == 1
+        and lines[0].startswith("Base-year")
+    ):
+        return ""
 
     return "\n".join(lines).strip()
 
@@ -1161,6 +1274,13 @@ def reconcile_proposal_budget(
         flags.extend(total_notes)
 
     # Final snap: scaling can leave rate×qty ≠ extended by a few cents.
+    line_items = resync_line_items_rate_extended(line_items)
+    # After PM/cap mutations, re-align held-flat option years to the final Year 1 fee.
+    line_items = align_held_flat_option_year_line_items(
+        line_items,
+        rfp_context=rfp_context,
+        option_term_notes=budget.option_term_notes or "",
+    )
     line_items = resync_line_items_rate_extended(line_items)
 
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)

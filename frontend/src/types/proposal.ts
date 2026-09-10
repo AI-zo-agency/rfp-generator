@@ -184,9 +184,13 @@ export interface ProposalExecutionPlanSummary {
   };
 }
 
+export type OutlineMode = "zo_template" | "strict_rfp";
+
 export interface ProposalResearch {
   rfpId: string;
   rfpSections: RfpSectionMap[];
+  /** zo_template = Zo Sections 1–3 + RFP tabs; strict_rfp = RFP union only. */
+  outlineMode?: OutlineMode;
   evidenceCorpus: EvidenceItem[];
   retrievalRounds: number;
   coverageThreshold: number;

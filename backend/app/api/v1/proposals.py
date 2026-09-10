@@ -572,9 +572,18 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
     }
 
 
+class OutlineModeRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    outline_mode: str | None = Field(default=None, alias="outlineMode")
+
+
 @router.post("/{rfp_id}/proposal/restart-from-intelligence")
-async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
-    """Keep Sections 1–3; delete Intelligence / RFP tabs / budget / review so Phase 2 rebuilds clean."""
+async def restart_from_intelligence_endpoint(
+    rfp_id: str,
+    body: OutlineModeRequest | None = None,
+) -> dict[str, object]:
+    """Keep Sections 1–3 (unless strict_rfp); delete Intelligence / RFP tabs so Phase 2 rebuilds."""
     if not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -584,13 +593,19 @@ async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
         REASON_BEFORE_RESET,
         archive_filled_draft,
     )
-    from app.services.proposal_generator import _static_sections_from_draft
+    from app.services.proposal_generator import (
+        _normalize_outline_mode,
+        _static_sections_from_draft,
+    )
     from app.services.proposal_generation_cancel import clear_generation_cancel
     from app.services.proposal_repository import (
         aget_proposal_draft,
         asave_proposal_draft,
+        asave_research_cache,
     )
-    from app.models.proposal import ProposalDraft
+    from app.models.proposal import ProposalDraft, ProposalResearchCache
+
+    mode = _normalize_outline_mode(body.outline_mode if body else None)
 
     current = await aget_proposal_draft(rfp_id)
     try:
@@ -612,7 +627,7 @@ async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
             (s.page_limit for s in current.sections if s.page_limit),
             None,
         )
-    static = _static_sections_from_draft(current, page_limit)
+    static = _static_sections_from_draft(current, page_limit, outline_mode=mode)
     now = datetime.now(timezone.utc).isoformat()
     stripped = ProposalDraft(
         rfpId=rfp_id,
@@ -633,16 +648,33 @@ async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
         await adelete_research_cache(rfp_id)
     except Exception:
         pass
+    # Seed research with the chosen outline mode so Phase 2 inherits it.
+    seed = ProposalResearchCache(
+        rfpId=rfp_id,
+        outlineMode=mode,
+        updatedAt=now,
+    )
+    try:
+        await asave_research_cache(seed)
+    except Exception:
+        pass
     await clear_pipeline_checkpoint(rfp_id)
     clear_generation_cancel(rfp_id)
 
+    kept_msg = (
+        "Cleared Intelligence, RFP tabs, budget, and review. "
+        + (
+            "Strict RFP mode — Zo Sections 1–3 cleared. "
+            if mode == "strict_rfp"
+            else "Sections 1–3 kept. "
+        )
+        + "Ready to rebuild from Phase 2."
+    )
     return {
         "ok": True,
         "draft": slim_draft_for_api(stripped),
-        "message": (
-            "Cleared Intelligence, RFP tabs, budget, and review. "
-            "Sections 1–3 kept. Ready to rebuild from Phase 2."
-        ),
+        "outlineMode": mode,
+        "message": kept_msg,
     }
 
 
@@ -866,35 +898,51 @@ async def generate_sections_1_3_endpoint(
             "Company/Bios and only fill missing groups (e.g. Our Work)."
         ),
     ),
+    body: OutlineModeRequest | None = None,
 ) -> JSONResponse:
     """Start static Sections 1–3 in the background; poll GET /proposal for completion.
 
     force_regenerate=true (default): rebuild all of Sections 1–3.
     force_regenerate=false: keep complete Section 1/2/3 cards; only fill missing
     groups (used by Start from Case Studies after stripping Our Work only).
+    When outlineMode=strict_rfp, this is a no-op that clears Zo static tabs.
     """
+    mode = (body.outline_mode if body else None)
 
     async def work() -> None:
-        await generate_sections_1_3(rfp_id, force_regenerate=force_regenerate)
+        await generate_sections_1_3(
+            rfp_id,
+            force_regenerate=force_regenerate,
+            outline_mode=mode,
+        )
 
     return await _enqueue_pipeline_phase(
         rfp_id,
         "sections-1-3",
         work,
-        job_kwargs={"force_regenerate": force_regenerate},
+        job_kwargs={"force_regenerate": force_regenerate, "outline_mode": mode},
     )
 
 
 @router.post(
     "/{rfp_id}/proposal/phase-2-retrieval",
 )
-async def phase2_retrieval_endpoint(rfp_id: str) -> JSONResponse:
+async def phase2_retrieval_endpoint(
+    rfp_id: str,
+    body: OutlineModeRequest | None = None,
+) -> JSONResponse:
     """Start Phase 2 retrieval in the background; poll GET /proposal for completion."""
+    mode = body.outline_mode if body else None
 
     async def work() -> None:
-        await run_phase2_retrieval(rfp_id)
+        await run_phase2_retrieval(rfp_id, outline_mode=mode)
 
-    return await _enqueue_pipeline_phase(rfp_id, "phase-2", work)
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "phase-2",
+        work,
+        job_kwargs={"outline_mode": mode},
+    )
 
 
 @router.post(
@@ -1116,6 +1164,9 @@ async def improve_section_endpoint(
 
     prior_draft = await aget_proposal_draft(rfp_id)
     chat_run_id = str(uuid.uuid4())
+    # Preview-first: compute the revision but do not save until the user confirms
+    # in the Original vs Revised modal (unless they force applyFix without preview).
+    preview_only = bool(body.preview_only)
     try:
         with llm_call_context(rfp_id=rfp_id, run_id=chat_run_id, node_name="section_chat"):
             (
@@ -1139,6 +1190,21 @@ async def improve_section_endpoint(
                 proposal_wide=body.proposal_wide,
                 apply_fix=body.apply_fix,
                 improve_section_pinned=body.improve_section_pinned,
+                persist=not preview_only,
+            )
+        # Preview path skips persist guards — still apply consistency + Rev 6 so
+        # Original vs Revised shows cross-tab-aligned, branded prose for ANY ask.
+        if preview_only and draft_changed:
+            from app.services.proposal_section_editor import (
+                apply_chat_preview_quality_guards,
+            )
+
+            draft = apply_chat_preview_quality_guards(
+                draft, label="chat-preview"
+            )
+            section = next(
+                (s for s in draft.sections if s.id == section_id),
+                section,
             )
     except ProposalError as exc:
         # Policy / rewrite checks must recap in chat — never 422 the UI.
@@ -1155,7 +1221,8 @@ async def improve_section_endpoint(
                 "Selection edit did not change the excerpt" in note
                 or "reverse-engineer line items" in note.casefold()
             )
-            if skip_salvage:
+            if skip_salvage or preview_only:
+                # Preview mode must never auto-write salvage into the live draft.
                 draft = prior_draft
                 draft_changed = False
                 salvage_logs: list[str] = []
@@ -1190,6 +1257,7 @@ async def improve_section_endpoint(
                 draftChanged=draft_changed,
                 suggestedFix=None,
                 agentActivity=activity,
+                previewPending=False,
             )
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -1198,9 +1266,14 @@ async def improve_section_endpoint(
             research = await aget_research_cache(rfp_id) or ProposalResearchCache(
                 rfpId=rfp_id
             )
-            draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
-                rfp_id, prior_draft=prior_draft, research=research
-            )
+            if preview_only:
+                draft = prior_draft
+                draft_changed = False
+                salvage_logs: list[str] = []
+            else:
+                draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
+                    rfp_id, prior_draft=prior_draft, research=research
+                )
             section = _section_by_id(draft, section_id) or draft.sections[0]
             if draft_changed:
                 note = (
@@ -1231,6 +1304,7 @@ async def improve_section_endpoint(
                 draftChanged=draft_changed,
                 suggestedFix=None,
                 agentActivity=activity,
+                previewPending=False,
             )
         raise HTTPException(
             status_code=502,
@@ -1255,6 +1329,13 @@ async def improve_section_endpoint(
         user_message=body.message,
         apply_fix=body.apply_fix,
     )
+    preview_pending = bool(preview_only and draft_changed)
+    if preview_pending:
+        assistant_message = (
+            f"{assistant_message.rstrip()}\n\n"
+            "**Review the Original vs Revised panel — nothing is saved until you "
+            "click Apply changes.**"
+        )
     return ProposalSectionImproveResponse(
         section=section,
         draft=draft,
@@ -1263,6 +1344,71 @@ async def improve_section_endpoint(
         draftChanged=draft_changed,
         suggestedFix=suggested_payload,
         agentActivity=activity,
+        previewPending=preview_pending,
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/confirm-preview",
+    response_model=ProposalSectionImproveResponse,
+)
+async def confirm_chat_preview_endpoint(
+    rfp_id: str,
+    body: ProposalDraft,
+) -> ProposalSectionImproveResponse:
+    """Persist a previewed chat revision after the user confirms Original vs Revised."""
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        aget_research_cache,
+        asave_proposal_draft,
+    )
+    from app.services.proposal_zero_fabrication import (
+        apply_zero_fabrication_guards_before_persist,
+    )
+
+    prior = await aget_proposal_draft(rfp_id)
+    research = await aget_research_cache(rfp_id) or ProposalResearchCache(rfpId=rfp_id)
+    rfp_text = ""
+    try:
+        from app.services.proposal_common import load_rfp_for_proposal
+
+        rfp_text = load_rfp_for_proposal(rfp_id)[2] or ""
+    except Exception:  # noqa: BLE001
+        rfp_text = ""
+
+    working = body
+    if getattr(body, "rfp_id", None) and body.rfp_id != rfp_id:
+        working = body.model_copy(update={"rfp_id": rfp_id})
+    # Apply saves the already-reviewed preview draft. Do NOT re-run Rev6/consistency
+    # or forms/agentic LLM rewrites — those ran (or should have) on preview. Keep
+    # deterministic zero-fabrication + roster scrub only so Apply cannot invent facts.
+    guarded, _report = await apply_zero_fabrication_guards_before_persist(
+        working,
+        research=research,
+        budget=research.budget if research else None,
+        rfp_text=rfp_text,
+        label="chat-preview-confirm",
+        skip_llm_repairs=True,
+    )
+    await asave_proposal_draft(guarded)
+    focus = guarded.sections[0] if guarded.sections else None
+    if prior and prior.sections and guarded.sections:
+        before_map = {s.id: (s.content or "") for s in prior.sections}
+        for section in guarded.sections:
+            if before_map.get(section.id, "") != (section.content or ""):
+                focus = section
+                break
+    if focus is None:
+        raise HTTPException(status_code=400, detail="Draft has no sections.")
+    return ProposalSectionImproveResponse(
+        section=focus,
+        draft=guarded,
+        research=_slim_research(research) or research,
+        assistantMessage="Applied your confirmed revision to the manuscript.",
+        draftChanged=True,
+        suggestedFix=None,
+        agentActivity=None,
+        previewPending=False,
     )
 
 

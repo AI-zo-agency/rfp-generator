@@ -50,6 +50,18 @@ _ROLEISH_RE = re.compile(
 )
 
 
+# Floor roles from MasterTemplate / 04_Bio — used when Strict RFP has no Zo Section 2
+# so garbled titles (e.g. Oyetola as Account Manager) still get corrected on persist.
+_MASTERTEMPLATE_FLOOR_ROLES: dict[str, str] = {
+    "oyetola oyewunmi": "Operations Coordinator",
+    "haley neff": "Account Manager",
+    "timi oyewunmi": "Executive Assistant",
+    "rachel rice": "Development Coordinator",
+    "ella lindau": "Operations Director",
+    "sonja anderson": "Agency Director",
+}
+
+
 def canonical_roster_roles(draft: ProposalDraft) -> dict[str, str]:
     """Name (casefold) → canonical role. Section 2 engagement role wins over org chart."""
     from app.services.proposal_scan_fact_repairs import (
@@ -57,7 +69,8 @@ def canonical_roster_roles(draft: ProposalDraft) -> dict[str, str]:
         parse_org_chart_roles,
     )
 
-    roles = dict(parse_org_chart_roles(draft))
+    roles = dict(_MASTERTEMPLATE_FLOOR_ROLES)
+    roles.update(parse_org_chart_roles(draft))
     for name, role in _named_roster_from_section2(draft, roles):
         role_cf = (role or "").casefold()
         if not role or role_cf.startswith("assigned to this engagement"):
@@ -199,6 +212,10 @@ def align_staff_prose_roles_to_roster(
         rf"(?i)\b({name_alt})\b(?:'s|\u2019s)?\s+(?:as|is|serves\s+as)\s+"
         rf"(?:the\s+)?({roleish})",
     )
+    # "Name, Wrong Title," / "Name — Wrong Title" (staffing table prose).
+    comma_pattern = re.compile(
+        rf"(?i)\b({name_alt})\b\s*[,—–-]\s*(?:the\s+)?({roleish})\b",
+    )
 
     def _repl(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -214,7 +231,18 @@ def align_staff_prose_roles_to_roster(
             return f"{name} is {canonical}"
         return f"{name} as {canonical}"
 
+    def _comma_repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        stated = match.group(2).strip()
+        canonical = roles.get(name.casefold(), "")
+        if not canonical or stated.casefold() == canonical.casefold():
+            return match.group(0)
+        logs.append(f"Prose role for {name}: '{stated}' → '{canonical}'")
+        sep = "," if "," in match.group(0) else " —"
+        return f"{name}{sep} {canonical}"
+
     text = pattern.sub(_repl, text)
+    text = comma_pattern.sub(_comma_repl, text)
     return text, logs
 
 

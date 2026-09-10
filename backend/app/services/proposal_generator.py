@@ -797,11 +797,23 @@ def _merge_sections_into_draft(
     return merged
 
 
+def _normalize_outline_mode(raw: str | None) -> str:
+    mode = (raw or "zo_template").strip().lower()
+    return mode if mode in {"zo_template", "strict_rfp"} else "zo_template"
+
+
 def _static_sections_from_draft(
     draft: ProposalDraft | None,
     page_limit: int | None,
+    *,
+    outline_mode: str = "zo_template",
 ) -> list[ProposalSection]:
-    """Always keep zö static Sections 1–3 (company subsections, team bios, our work examples) at the front."""
+    """Always keep zö static Sections 1–3 (company subsections, team bios, our work examples) at the front.
+
+    In ``strict_rfp`` mode return an empty list — the manuscript has no Zo shell.
+    """
+    if _normalize_outline_mode(outline_mode) == "strict_rfp":
+        return []
     defaults = _default_sections(page_limit)
     if not draft:
         return [s for s in defaults if s.id.startswith(("section-1-", "section-2-", "section-3-"))]
@@ -1361,20 +1373,34 @@ def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]
     return load_rfp_for_proposal(rfp_id)
 
 
-async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
+async def run_phase2_retrieval(
+    rfp_id: str,
+    *,
+    outline_mode: str | None = None,
+) -> ProposalResearchCache:
     """Phase 2: Proposal Intelligence Layer → plan + optional shared evidence corpus."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
     with pipeline_phase("phase-2", rfp_id=rfp_id):
-        return await _run_phase2_retrieval_inner(rfp_id)
+        return await _run_phase2_retrieval_inner(rfp_id, outline_mode=outline_mode)
 
 
-async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
+async def _run_phase2_retrieval_inner(
+    rfp_id: str,
+    *,
+    outline_mode: str | None = None,
+) -> ProposalResearchCache:
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
     prior_research = await aget_research_cache(rfp_id)
 
-    logger.info("Phase 2 intelligence starting for %s", rfp_id)
+    mode = _normalize_outline_mode(
+        outline_mode
+        if outline_mode is not None
+        else (prior_research.outline_mode if prior_research else None)
+    )
+
+    logger.info("Phase 2 intelligence starting for %s outline_mode=%s", rfp_id, mode)
     from app.services.proposal_generation_cancel import check_generation_cancelled
     from app.services.rfp_page_limit import remember_resolved_page_limit
 
@@ -1400,6 +1426,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
                 rfp_location=rfp.location or None,
                 rfp_context=rfp_context,
                 page_limit=resolved_page_limit or rfp.page_limit,
+                outline_mode=mode,
             )
         except IntelligenceError as exc:
             step_trace(
@@ -1494,6 +1521,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
     research = ProposalResearchCache(
         rfpId=rfp.id,
         rfpSections=rfp_sections,
+        outlineMode=mode,
         requirementLedger=requirement_ledger,
         questions=prior_research.questions if prior_research else [],
         brandVoice=prior_research.brand_voice if prior_research else None,
@@ -1575,9 +1603,78 @@ async def generate_sections_1_3(
     *,
     force_regenerate: bool = False,
     regenerate_section_2_only: bool = False,
+    outline_mode: str | None = None,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
+
+    prior = await aget_research_cache(rfp_id)
+    mode = _normalize_outline_mode(
+        outline_mode if outline_mode is not None else (prior.outline_mode if prior else None)
+    )
+    if mode == "strict_rfp":
+        logger.info(
+            "Skipping Sections 1–3 generation for %s (outline_mode=strict_rfp)",
+            rfp_id,
+        )
+        from datetime import datetime, timezone
+
+        from app.models.proposal import ProposalBrandVoice
+
+        now = datetime.now(timezone.utc).isoformat()
+        existing = await aget_proposal_draft(rfp_id)
+        # Drop Zo template shells (1–3 identity + legacy 4/5 placeholders).
+        # Strict mode manuscript is RFP tabs only.
+        kept = [
+            s
+            for s in (existing.sections if existing else [])
+            if not (
+                s.id.startswith(
+                    (
+                        "section-1-",
+                        "section-2-",
+                        "section-3-",
+                        "section-4-",
+                        "section-5-",
+                    )
+                )
+                or _is_legacy_monolith_section_id(s.id)
+            )
+        ]
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=kept,
+            updatedAt=now,
+            generatedAt=existing.generated_at if existing else None,
+            provider=existing.provider if existing else None,
+            snapshots=existing.snapshots if existing else [],
+            selectedKeyPersonas=(
+                list(existing.selected_key_personas)
+                if existing and existing.selected_key_personas is not None
+                else None
+            ),
+        )
+        await asave_proposal_draft(draft)
+        research = prior or ProposalResearchCache(
+            rfpId=rfp_id,
+            outlineMode=mode,
+            updatedAt=now,
+        )
+        # Always stamp strict mode so checkpoint completion does not treat the
+        # cleared Zo shell as a failed Sections 1–3 run.
+        if research.outline_mode != mode:
+            research = research.model_copy(
+                update={"outline_mode": mode, "updated_at": now}
+            )
+            await asave_research_cache(research)
+        elif prior is None:
+            await asave_research_cache(research)
+        brand = (
+            research.brand_voice
+            if research and research.brand_voice
+            else ProposalBrandVoice()
+        )
+        return draft, brand, research
 
     with pipeline_phase(
         "sections-1-3",
@@ -2232,6 +2329,7 @@ async def _run_phase3_drafting_inner(
         list(research.rfp_sections),
         rfp_context=rfp_context or rfp_source_text or "",
         drop_generic_filler=False,
+        skip_static_dedupe=_normalize_outline_mode(research.outline_mode) == "strict_rfp",
     )
     if lean_dropped:
         logger.info(
@@ -2244,8 +2342,15 @@ async def _run_phase3_drafting_inner(
         await asave_research_cache(research)
 
     existing = await aget_proposal_draft(rfp_id)
-    static_sections = _static_sections_from_draft(existing, rfp.page_limit)
-    if not any(section.content.strip() for section in static_sections):
+    static_sections = _static_sections_from_draft(
+        existing,
+        rfp.page_limit,
+        outline_mode=research.outline_mode,
+    )
+    if (
+        _normalize_outline_mode(research.outline_mode) != "strict_rfp"
+        and not any(section.content.strip() for section in static_sections)
+    ):
         logger.info(
             "Phase 3 for %s: static Sections 1–3 empty — run Generate Sections 1–3 or Full Proposal first",
             rfp_id,
@@ -2268,6 +2373,8 @@ async def _run_phase3_drafting_inner(
         research.rfp_sections,
         existing_by_id,
         static_section_text=_zo_sections_context(static_sections),
+        skip_static_dedupe=_normalize_outline_mode(research.outline_mode)
+        == "strict_rfp",
     )
 
     logger.info(
@@ -2346,6 +2453,8 @@ async def _run_phase3_drafting_inner(
             evidence_corpus=research.evidence_corpus,
             brand_voice=research.brand_voice,
             zo_template_sections=static_sections,
+            skip_static_dedupe=_normalize_outline_mode(research.outline_mode)
+            == "strict_rfp",
             writing_avoidances=research.writing_avoidances,
             loss_lessons=research.loss_lessons,
             proof_points=research.proof_points,
@@ -2435,10 +2544,15 @@ async def _run_phase3_drafting_inner(
         provider=provider,
     )
     toc_logs: list[str] = []
+    strict = _normalize_outline_mode(research.outline_mode) == "strict_rfp"
     if specs:
-        draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
+        draft, stub_logs = ensure_missing_scored_section_stubs(
+            draft, specs, skip_static_dedupe=strict
+        )
         toc_logs.extend(stub_logs)
-    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    draft, layout_logs = apply_rfp_toc_layout(
+        draft, specs, skip_static_dedupe=strict
+    )
     toc_logs.extend(layout_logs)
     try:
         from app.services.proposal_fulfill_rfp_structure import clean_sidebar_titles_via_llm
@@ -3773,6 +3887,8 @@ async def run_phase4_finalize_gaps(
 
 async def generate_full_proposal(
     rfp_id: str,
+    *,
+    outline_mode: str | None = None,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
     """Full pipeline: Sections 1–3 → Phase 2 → Phase 3 draft → Budget → Senior editor."""
     if not llm.is_configured():
@@ -3809,8 +3925,11 @@ async def generate_full_proposal(
             getattr(app_settings, "persist_phase2_evidence_corpus", False)
         ),
     ):
-        _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
-        await run_phase2_retrieval(rfp_id)
+        mode = _normalize_outline_mode(outline_mode)
+        _draft, brand_voice, _research = await generate_sections_1_3(
+            rfp_id, outline_mode=mode
+        )
+        await run_phase2_retrieval(rfp_id, outline_mode=mode)
 
         if app_settings.budget_before_drafting:
             logger.info(

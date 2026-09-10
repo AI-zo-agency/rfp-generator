@@ -7,7 +7,10 @@ import re
 from typing import Any
 
 from app.services import llm
-from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+from app.services.evidence_trust.personnel_grounding import (
+    VERIFIED_NAME_CORRECTIONS,
+    is_retired_team_member,
+)
 from app.services.company_qualification.schemas import (
     ProposalContext,
     RequiredTeamRole,
@@ -16,12 +19,6 @@ from app.services.company_qualification.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-VERIFIED_NAME_CORRECTIONS = {
-    "ron corner": "Ron Comer",
-    "dyetola doyewunmi": "Oyetola Oyewunmi",
-    "shawn dicrisio": "Shawn DiCriscio",
-}
 
 MIN_FIT_SCORE = 0.55
 MAX_TEAM_SIZE = 5

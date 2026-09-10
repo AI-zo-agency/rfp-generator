@@ -196,3 +196,49 @@ class TestReviewFixAntiEcho:
         )
         assert "INTERESTING PROPOSAL ANSWER" in zone_a or "interesting proposal" in zone_a.casefold()
         assert "rev 6" in zone_a.casefold() or "ANTI-RFP-ECHO" in zone_a
+
+    def test_cover_letter_register_uses_won_form_models(self) -> None:
+        block = format_brand_voice_block({"tone": "direct"}, register="cover_letter")
+        lower = block.casefold()
+        assert "cover letter" in lower or "signed passage" in lower
+        assert "06_won" in lower or "won-proposal" in lower or "won proposal" in lower
+        assert "form" in lower or "structure" in lower
+
+        _, _, zone_c = _build_draft_prompt_zones(
+            batch=[{"id": "cover", "title": "Cover Letter"}],
+            batch_payload=[
+                {
+                    "sectionId": "cover",
+                    "title": "Cover Letter",
+                    "register": "cover_letter",
+                    "requirements": [],
+                    "zoMode": "write",
+                    "wordTarget": 400,
+                    "uncoveredRequirements": [],
+                    "evidence": "[E1] 06_WON_Sample.pdf\nDear Selection Committee…",
+                    "planContext": "",
+                    "evidencePolicy": "retrieve_then_write",
+                    "evidencePolicyReason": "cover_letter_won_exemplars",
+                }
+            ],
+            state={
+                "rfp_client": "RTA",
+                "rfp_sector": "transit",
+                "rfp_location": "",
+                "rfp_title": "Mobility Outreach",
+                "brand_voice": {},
+                "zo_sections_context": "",
+                "drafted_sections": [],
+                "rfp_sections": [],
+                "writing_avoidances": [],
+                "loss_lessons": [],
+                "proof_points": [],
+            },
+        )
+        assert "COVER LETTER" in zone_c
+        assert "WON EXEMPLAR" in zone_c or "06_WON" in zone_c
+
+    def test_draft_batch_cover_letter_rule_mentions_won_form(self) -> None:
+        lower = DRAFT_BATCH_PROMPT.casefold()
+        assert "cover letter" in lower
+        assert "06_won" in lower or "won cover" in lower or "form / structure" in lower
