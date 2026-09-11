@@ -33,22 +33,54 @@ def _tw_name_key(name: str | None) -> str:
     return normalize_name(name or "")
 
 
+def _missing_qb(client: dict[str, Any]) -> bool:
+    return not (client.get("qb_customer_ids") or [])
+
+
+def _missing_tw(client: dict[str, Any]) -> bool:
+    return not (client.get("teamwork_company_ids") or []) and not (
+        client.get("teamwork_company_names") or []
+    )
+
+
+def _needs_link_fill(client: dict[str, Any]) -> bool:
+    """Unmatched/suggested, or confirmed but missing a TW or QB side."""
+    if client.get("is_internal"):
+        return False
+    if client.get("link_confidence") != "confirmed":
+        return True
+    return _missing_qb(client) or _missing_tw(client)
+
+
+def _exact_match_names(client: dict[str, Any]) -> set[str]:
+    """Names exact-match may use. Confirmed rows may also match attached TW/QB labels."""
+    names = {normalize_name(str(client.get("client_name") or ""))}
+    if client.get("link_confidence") == "confirmed":
+        for raw in list(client.get("teamwork_company_names") or []) + list(
+            client.get("qb_customer_names") or []
+        ):
+            key = normalize_name(str(raw))
+            if key:
+                names.add(key)
+    return {name for name in names if name}
+
+
 def apply_exact_links(
     clients: list[dict[str, Any]],
     qb: list[dict[str, Any]],
     tw: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return exact normalized-name updates without mutating source rows."""
-    eligible = [
-        client
-        for client in clients
-        if client.get("link_confidence") != "confirmed"
-        and not client.get("is_internal")
-    ]
-    normalized_by_client = {
-        str(client["id"]): normalize_name(str(client.get("client_name") or ""))
-        for client in eligible
+    """Return exact normalized-name updates without mutating source rows.
+
+    Confirmed rows that already have both sides are left alone. Confirmed rows
+    missing QB or TW may still receive the missing side (merge, never wipe).
+    Unmatched/suggested rows still relink from scratch when an exact hit exists.
+    """
+    eligible = [client for client in clients if _needs_link_fill(client)]
+    match_names_by_client = {
+        str(client["id"]): _exact_match_names(client) for client in eligible
     }
+    # QB ids already on a confirmed row stay reserved — never steal them.
     confirmed_qb_ids = {
         str(qbo_id)
         for client in clients
@@ -66,8 +98,8 @@ def apply_exact_links(
         qb_by_id.setdefault(qbo_id, customer)
         matching_clients_by_qb.setdefault(qbo_id, set()).update(
             client_id
-            for client_id, client_name in normalized_by_client.items()
-            if normalized_name == client_name
+            for client_id, names in match_names_by_client.items()
+            if normalized_name in names
         )
 
     exact_qb_by_client: dict[str, dict[str, dict[str, Any]]] = {}
@@ -84,38 +116,61 @@ def apply_exact_links(
         client_id = str(client["id"])
         if client_id in ambiguous_client_ids:
             continue
-        normalized = normalized_by_client[client_id]
-        qb_matches = exact_qb_by_client.get(client_id, {})
-        tw_matches = [
-            company
-            for company in tw
-            if normalize_name(str(company.get("name") or "")) == normalized
-        ]
+        names = match_names_by_client[client_id]
+        confirmed = client.get("link_confidence") == "confirmed"
+        # Confirmed half-maps: only fill the missing side. Never pile on extra QB ids.
+        # Unmatched/suggested: full exact relink (may replace prior suggestions).
+        want_qb = _missing_qb(client) if confirmed else True
+        want_tw = _missing_tw(client) if confirmed else True
+        qb_matches = exact_qb_by_client.get(client_id, {}) if want_qb else {}
+        tw_matches = (
+            [
+                company
+                for company in tw
+                if normalize_name(str(company.get("name") or "")) in names
+            ]
+            if want_tw
+            else []
+        )
         exact_qb = list(qb_matches.values()) if len(qb_matches) == 1 else []
         if not exact_qb and not tw_matches:
             continue
 
+        # Suggested/unmatched: replace with the exact entities. Confirmed: merge.
+        base_qb_ids = list(client.get("qb_customer_ids") or []) if confirmed else []
+        base_qb_names = list(client.get("qb_customer_names") or []) if confirmed else []
+        base_tw_ids = list(client.get("teamwork_company_ids") or []) if confirmed else []
+        base_tw_names = (
+            list(client.get("teamwork_company_names") or []) if confirmed else []
+        )
         update = {
             "id": client["id"],
             "qb_customer_ids": _merge(
-                [],
+                base_qb_ids,
                 [str(row["qbo_id"]) for row in exact_qb],
             ),
             "qb_customer_names": _merge(
-                [],
+                base_qb_names,
                 [row.get("display_name") for row in exact_qb],
             ),
             "teamwork_company_ids": _merge(
-                [],
+                base_tw_ids,
                 [row.get("id") for row in tw_matches],
             ),
             "teamwork_company_names": _merge(
-                [],
+                base_tw_names,
                 [row.get("name") for row in tw_matches],
             ),
             "link_confidence": "confirmed",
             "link_reason": "exact normalized name",
         }
+        if confirmed and (
+            update["qb_customer_ids"] == base_qb_ids
+            and update["qb_customer_names"] == base_qb_names
+            and update["teamwork_company_ids"] == base_tw_ids
+            and update["teamwork_company_names"] == base_tw_names
+        ):
+            continue
         updates.append(update)
     return updates
 
@@ -126,13 +181,15 @@ def apply_llm_suggestions(
     valid_qb_ids: set[str],
     valid_tw_ids: set[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Validate an LLM proposal and return suggestion-only updates."""
+    """Validate an LLM proposal and return suggestion updates.
+
+    Confirmed half-maps may receive missing-side IDs and stay confirmed.
+    Unmatched/suggested rows stay suggestion-confidence.
+    """
     eligible = {
         str(row.get("id")): row
         for row in clients
-        if row.get("id") is not None
-        and row.get("link_confidence") != "confirmed"
-        and not row.get("is_internal")
+        if row.get("id") is not None and _needs_link_fill(row)
     }
     valid_qb = {str(value) for value in valid_qb_ids}
     valid_tw = (
@@ -157,14 +214,25 @@ def apply_llm_suggestions(
         qb_id = str(raw_qb_id) if raw_qb_id is not None else None
         if qb_id is not None and qb_id not in valid_qb:
             continue
+        # Confirmed rows that already have QB must not gain extra QB via AI.
+        if qb_id is not None and client.get("link_confidence") == "confirmed":
+            if not _missing_qb(client):
+                qb_id = None
 
         raw_tw_id = match.get("teamwork_company_id")
         tw_id = valid_tw.get(str(raw_tw_id)) if raw_tw_id is not None else None
         if raw_tw_id is not None and tw_id is None:
             continue
+        if (
+            tw_id is not None
+            and client.get("link_confidence") == "confirmed"
+            and not _missing_tw(client)
+        ):
+            tw_id = None
         if qb_id is None and tw_id is None:
             continue
 
+        confirmed = client.get("link_confidence") == "confirmed"
         update = pending.setdefault(
             client_id,
             {
@@ -177,7 +245,7 @@ def apply_llm_suggestions(
                 "teamwork_company_names": list(
                     client.get("teamwork_company_names") or []
                 ),
-                "link_confidence": "suggested",
+                "link_confidence": "confirmed" if confirmed else "suggested",
                 "link_reason": "",
             },
         )
@@ -343,12 +411,8 @@ async def run_link(*, include_ai: bool = True) -> dict[str, int]:
         return counts
 
     clients = repo.list_client_map()
-    leftovers = [
-        row
-        for row in clients
-        if row.get("link_confidence") in {"unmatched", "suggested", None}
-        and not row.get("is_internal")
-    ]
+    # Include confirmed half-maps so AI can fill the missing TW/QB side.
+    leftovers = [row for row in clients if _needs_link_fill(row)]
     used_qb_ids = {
         str(qbo_id)
         for row in clients
@@ -407,10 +471,22 @@ async def run_link(*, include_ai: bool = True) -> dict[str, int]:
                 '"qb_customer_id":"...","qb_customer_name":"...",'
                 '"teamwork_company_id":null,"reason":"..."}]}. '
                 "Use only IDs supplied below. Never invent IDs. Skip uncertain, "
-                "many-to-many, or ambiguous matches."
+                "many-to-many, or ambiguous matches. Confirmed clients may already "
+                "have one side — only attach the missing QuickBooks or Teamwork side."
             ),
         },
-        {"role": "user", "content": json.dumps(prompt)},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    **prompt,
+                    "note": (
+                        "clients listed may be unmatched or confirmed-but-incomplete; "
+                        "prefer exact/near-name matches onto the missing side only."
+                    ),
+                }
+            ),
+        },
     ]
     try:
         proposal, provider = await chat_json(

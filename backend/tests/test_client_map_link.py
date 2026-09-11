@@ -190,7 +190,7 @@ def test_llm_suggestion_with_unknown_qb_id_is_dropped():
     ) == []
 
 
-def test_llm_suggestion_for_confirmed_row_is_dropped():
+def test_llm_suggestion_for_complete_confirmed_row_is_dropped():
     proposal = {
         "matches": [
             {
@@ -203,10 +203,68 @@ def test_llm_suggestion_for_confirmed_row_is_dropped():
     }
 
     assert apply_llm_suggestions(
-        [_client(link_confidence="confirmed")],
+        [
+            _client(
+                link_confidence="confirmed",
+                qb_customer_ids=["9"],
+                qb_customer_names=["Torrent Laboratories"],
+                teamwork_company_ids=[1],
+                teamwork_company_names=["Torrent Laboratories"],
+            )
+        ],
         proposal,
         valid_qb_ids={"55"},
     ) == []
+
+
+def test_exact_fills_missing_qb_on_confirmed_half_map():
+    clients = [
+        _client(
+            tag_code="BOC",
+            client_name="Back Office Connection",
+            teamwork_company_ids=[1518711],
+            teamwork_company_names=["Back Office Connection"],
+            link_confidence="confirmed",
+            link_reason="exact normalized name",
+        )
+    ]
+    qb = [{"qbo_id": "100000001", "display_name": "Back Office Connection"}]
+
+    updates = apply_exact_links(clients, qb, [])
+
+    assert len(updates) == 1
+    assert updates[0]["qb_customer_ids"] == ["100000001"]
+    assert updates[0]["teamwork_company_ids"] == [1518711]
+    assert updates[0]["link_confidence"] == "confirmed"
+
+
+def test_llm_fills_missing_qb_on_confirmed_keeps_confirmed():
+    proposal = {
+        "matches": [
+            {
+                "client_map_id": "1",
+                "qb_customer_id": "77",
+                "qb_customer_name": "Mt. View Heating",
+                "reason": "abbreviation of Mountain View Heating",
+            }
+        ]
+    }
+    clients = [
+        _client(
+            tag_code="MVH",
+            client_name="Mountain View Heating",
+            teamwork_company_ids=[9],
+            teamwork_company_names=["Mountain View Heating"],
+            link_confidence="confirmed",
+            link_reason="exact normalized name",
+        )
+    ]
+
+    updates = apply_llm_suggestions(clients, proposal, valid_qb_ids={"77"})
+
+    assert updates[0]["link_confidence"] == "confirmed"
+    assert updates[0]["qb_customer_ids"] == ["77"]
+    assert updates[0]["teamwork_company_ids"] == [9]
 
 
 def test_run_link_persists_exact_updates(monkeypatch):
