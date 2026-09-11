@@ -87,19 +87,56 @@
 
 .qb-ai-drawer {
   --qb-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --qb-ai-drawer-width: 480px;
   position: fixed;
   top: 0;
   right: 0;
   z-index: 41;
   display: flex;
   flex-direction: column;
-  width: min(480px, 100vw);
+  width: min(var(--qb-ai-drawer-width), 100vw);
   height: 100dvh;
   background: linear-gradient(var(--zo-surface), var(--zo-surface)), var(--zo-bg, #fff);
   border-left: 1px solid var(--zo-border);
   box-shadow: -18px 0 48px -24px color-mix(in srgb, var(--zo-text) 40%, transparent);
   animation: qb-ai-slide 260ms var(--qb-ease);
   font-variant-numeric: tabular-nums;
+}
+
+.qb-ai-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  width: 10px;
+  height: 100%;
+  margin-left: -5px;
+  cursor: col-resize;
+  touch-action: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.qb-ai-resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 3px;
+  height: 48px;
+  margin-top: -24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zo-border) 80%, var(--zo-text));
+  opacity: 0.55;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.qb-ai-resize:hover::after,
+.qb-ai-resize:focus-visible::after,
+.qb-ai-drawer[data-resizing="true"] .qb-ai-resize::after {
+  opacity: 1;
+  background: var(--zo-teal, #0d9488);
 }
 
 @keyframes qb-ai-slide {
@@ -261,6 +298,52 @@
   font-size: 16px;
   line-height: 1.65;
   color: var(--zo-text-secondary);
+}
+
+.qb-ai-brief .qb-ai-md-p,
+.qb-note-detail .qb-ai-md-p,
+.qb-ai-msg .qb-ai-md-p {
+  margin: 0 0 0.65em;
+}
+
+.qb-ai-brief .qb-ai-md-p:last-child,
+.qb-note-detail .qb-ai-md-p:last-child,
+.qb-ai-msg .qb-ai-md-p:last-child {
+  margin-bottom: 0;
+}
+
+.qb-ai-md-list {
+  margin: 0.35em 0 0.65em;
+  padding-left: 1.35em;
+  list-style: disc;
+  list-style-position: outside;
+}
+
+.qb-ai-md-list > li {
+  display: list-item;
+  margin: 0;
+  padding-left: 0.15em;
+}
+
+.qb-ai-md-list > li + li {
+  margin-top: 0.55em;
+}
+
+.qb-ai-md-list:last-child {
+  margin-bottom: 0;
+}
+
+.qb-ai-brief strong,
+.qb-note-detail strong,
+.qb-ai-msg strong {
+  font-weight: 650;
+  color: var(--zo-text);
+}
+
+.qb-ai-brief em,
+.qb-note-detail em,
+.qb-ai-msg em {
+  font-style: italic;
 }
 
 .qb-ai-empty {

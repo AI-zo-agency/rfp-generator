@@ -33,6 +33,7 @@ from app.financial.agency_insights import generate_and_store as generate_agency_
 from app.financial.agency_insights import store_snapshot as store_agency_snapshot
 from app.financial.agency_week import brief_week_for, iso, prior_week_bounds, today_pt, week_bounds
 from app.financial import agency_chat
+from app.financial.insight_prose import BRIEF_FORMAT
 from app.financial.client_map import ClientMatch, resolve_project
 from app.financial.client_map_repository import (
     delete_client_map,
@@ -2326,9 +2327,10 @@ async def generate_ai_financial_insights(
     )
 
     # ── Build AI prompt ───────────────────────────────────────────────────────
-    system_prompt = """You are a senior operations and margin advisor for ZÖ Agency, a creative video production agency.
+    system_prompt = f"""You are a senior operations and margin advisor for ZÖ Agency, a creative video production agency.
 You read iWorker contractor timesheets the way an agency owner does: who worked, on what deliverables, versus capacity, and where margin is leaking.
-Always respond with ONLY valid JSON — no markdown, no prose, no code fences."""
+Respond with ONLY valid JSON — no prose outside JSON, no code fences.
+Inside string values, {BRIEF_FORMAT}"""
 
     user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership brief a business owner can act on today.
 
@@ -2367,7 +2369,7 @@ OVER-SCOPE ITEMS THIS PERIOD (Round 3+ revisions that exceed retainer):
 
 Generate a JSON response with EXACTLY this structure:
 {{
-  "leadership_brief_text": "<2-3 sentences: who worked how much vs target, top deliverables, spend/scope headline>",
+  "leadership_brief_text": "<compact markdown brief: who worked how much vs target, top deliverables, spend/scope headline — bullets + **bold** figures>",
   "top_3_risks": [
     "<risk 1 — name contractor, hours/spend, deliverable if known>",
     "<risk 2>",

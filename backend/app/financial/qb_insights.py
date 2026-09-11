@@ -29,6 +29,7 @@ from app.financial.figure_guard import (
     check_quantities,
     evidence_numbers,
 )
+from app.financial.insight_prose import BRIEF_FORMAT, NOTE_FORMAT
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows, row_ids
 from app.financial.qb_position import position
 from app.financial.qb_signals import derive_signals, derived_figures
@@ -46,8 +47,8 @@ _TEMPERATURE = 0.3
 
 _SYSTEM = (
     "You are the financial controller for a creative agency, writing a short "
-    "morning note for the owner. Plain sentences, no jargon, no metric names, "
-    "no bullet lists inside the brief.\n\n"
+    "morning note for the owner. No jargon, no metric names.\n\n"
+    f"{BRIEF_FORMAT}\n\n"
     # The reader is a US business reading US books. The model mirrors the
     # register of its own instructions, so this file is written in US English
     # too — a "characterise" here came back as "favour" in a live brief.
@@ -130,12 +131,13 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "Here is tonight's QuickBooks position.\n\n"
         f"{json.dumps(evidence, indent=2)}\n\n"
         "Write two things.\n\n"
-        "1. `brief`: four or five sentences. Connect the signals to each other "
-        "rather than restating them one by one — say what the combination means "
-        "for the week ahead.\n"
-        "2. `notes`: an object keyed by row id, one or two sentences each. Do "
+        "1. `brief`: compact markdown (bullets + bold). Connect the signals to "
+        "each other rather than restating them one by one — say what the "
+        "combination means for the week ahead.\n"
+        "2. `notes`: an object keyed by row id. Do "
         "not describe the row — the reader can see it. Say what follows from "
         "it: what it means for the business, and what to do about it. "
+        f"{NOTE_FORMAT} "
         '"Largest untagged cost bucket" describes; "until this is assigned, '
         "client profitability is guesswork and you may be underpricing the "
         'work" is worth reading. Where you name the dollars at stake, copy '

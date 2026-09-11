@@ -24,6 +24,7 @@ from app.financial.figure_guard import (
     check_quantities,
     evidence_numbers,
 )
+from app.financial.insight_prose import CHAT_FORMAT
 from app.financial.qb_insights import _SYSTEM, build_evidence
 from app.services.llm import LlmError, chat_text
 
@@ -55,7 +56,7 @@ BUDGET_REPLY = (
 
 _CHAT_RULES = (
     "\n\nYou are answering the owner's question about this position, not writing "
-    "the morning note. Two to four sentences, no headings and no lists.\n\n"
+    f"the morning note. {CHAT_FORMAT}\n\n"
     "The evidence below is everything you know. When it does not contain the "
     "answer, say so in one sentence and name the report that would have it — "
     "do not reason toward a number you were not given. Every rule above about "

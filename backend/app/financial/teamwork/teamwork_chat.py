@@ -11,6 +11,7 @@ from typing import Any
 from app.core.config import settings
 from app.financial import financial_llm_cost
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
+from app.financial.insight_prose import CHAT_FORMAT
 from app.financial.teamwork.teamwork_insights import _SYSTEM, _prohibited_claim, build_evidence
 from app.services.llm import LlmError, chat_text
 
@@ -37,9 +38,10 @@ _FORECAST_QUESTION = re.compile(
     r"future\s+(?:workload|capacity|hours?|work)|will\s+(?:we|the\s+team))\b",
     re.IGNORECASE,
 )
+
 _CHAT_RULES = (
     "\n\nYou answer an owner's question about current delivery work, not a daily brief. "
-    "Use two to four sentences with no heading or list. Name the project, task, and "
+    f"{CHAT_FORMAT} Name the project, task, and "
     "owner from the evidence when you recommend an action. The supplied evidence is "
     "everything you know. Reuse supplied figures exactly or omit them; never calculate, "
     "round, approximate, or invent quantities. Do not claim cash, revenue, payroll, "

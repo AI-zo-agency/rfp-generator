@@ -194,6 +194,17 @@ def test_evidence_numbers_walks_nested_lists_and_dicts():
     assert evidence_numbers({"a": [{"b": [7]}]}) == {7.0}
 
 
-def test_a_rounded_restatement_of_a_real_figure_is_still_rejected():
-    # "$288k" is the right magnitude and still forbidden: rule 1 says verbatim.
-    assert check_quantities("$288k is unclassified.", evidence_numbers(_evidence()))
+def test_a_faithful_scaled_abbreviation_of_a_real_figure_passes():
+    # Evidence amount rounds to the written coefficient at that precision.
+    # Treating k/m forms as exact dollars (±$0.50) was the staging outage:
+    # "$1.63M" for $1,630,713 killed every Agency weekly brief.
+    allowed = evidence_numbers(_evidence())
+    assert check_quantities("$288k is unclassified.", allowed) is None
+    assert check_quantities("Carryover sits at $1.63M.", {1_630_713.0}) is None
+
+
+def test_a_scaled_abbreviation_at_the_wrong_place_is_rejected():
+    # Must not license a coefficient the evidence does not round to.
+    assert check_quantities("$500k is unclassified.", evidence_numbers(_evidence()))
+    assert check_quantities("Carryover sits at $5M.", {1_630_713.0})
+    assert check_quantities("Carryover sits at $1.50M.", {1_630_713.0})

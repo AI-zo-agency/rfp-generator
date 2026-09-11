@@ -11,6 +11,7 @@ from typing import Any
 
 from app.financial.ai_insights_repository import upsert_insight
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
+from app.financial.insight_prose import BRIEF_FORMAT, NOTE_FORMAT
 from app.financial.teamwork.teamwork_capacity import capacity_history_state, capacity_signals
 from app.services.llm import chat_json_soft, resolve_llm_model
 
@@ -40,7 +41,7 @@ _HIRING_CLAIM = re.compile(r"\b(?:hire|hiring|recruit|recruiting)\b", re.IGNOREC
 
 _SYSTEM = (
     "You write a delivery brief for a creative agency owner from Teamwork "
-    "operational evidence. Every sentence names a project, task, person, or "
+    "operational evidence. Every point names a project, task, person, or "
     "milestone from the evidence and says what to do with it. Generic advice "
     "such as confirm a plan or review ownership is not useful unless it names "
     "where. Teamwork is not a financial system: never claim cash, revenue, "
@@ -48,7 +49,8 @@ _SYSTEM = (
     "effort estimates, or unobserved capacity. Reuse supplied figures exactly "
     "or omit them; never calculate, round, approximate, or invent quantities. "
     "Only annotate the supplied signal ids. Names come from the evidence; never "
-    "invent a person, project, or task that is not in it."
+    "invent a person, project, or task that is not in it.\n\n"
+    f"{BRIEF_FORMAT}"
 )
 
 
@@ -374,11 +376,11 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     user = (
         f"Here is today's Teamwork delivery evidence:\n\n{json.dumps(evidence, indent=2)}\n\n"
         "Write JSON exactly shaped as {\"notes\": {\"<id>\": \"...\"}, \"brief\": \"...\"}. "
-        "Write notes first. Each note is two or three sentences: where (project and task "
+        "Write notes first. Each note: where (project and task "
         "or milestone names copied from the evidence), who if an owner is listed, and what "
-        "to do next. The brief is three or four sentences naming the hottest projects and "
-        "the first actions. Lists under named are samples of the hottest items, not "
-        "exhaustive — do not imply they are the complete set. "
+        f"to do next. {NOTE_FORMAT} The brief is compact markdown naming the hottest "
+        "projects and the first actions. Lists under named are samples of the hottest "
+        "items, not exhaustive — do not imply they are the complete set. "
         f"Notes may use only these signal ids: {sorted(_known_ids(evidence))}. "
         f"{history_instruction}"
     )

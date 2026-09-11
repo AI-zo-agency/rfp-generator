@@ -7,7 +7,8 @@ times", and $1,200 of aged receivables became "the bulk of" the book. A guard
 built on ``\\d`` would have passed all three and bought nothing but confidence.
 
 So quantities come out of the prose in verbal form as well as digit form, and
-get compared against every number present in the evidence.
+get compared against every number present in the evidence. Scaled digit forms
+($1.63M, $288k) match when the evidence rounds to that written coefficient.
 
 What this cannot do, written down here rather than discovered later:
 
@@ -84,8 +85,16 @@ _SHARE_RE = re.compile(r"\d+\s*%|\bpercent\b", re.IGNORECASE)
 # the raw value it was formatted from. Verbalisation is approximate by nature,
 # so a word-resolved value gets far more room — but 750,000 against a real
 # 288,199 clears no sane tolerance.
+#
+# Scaled digit forms ($1.63M, $288k) are rounded by definition. Matching them
+# with ±$0.50 killed staging weekly briefs; a scaled form matches when the
+# evidence amount rounds to the written coefficient at that same precision.
 _DIGIT_TOLERANCE = 0.5
 _VERBAL_TOLERANCE = 0.15
+
+# Quantity: surface, absolute value, verbal?, scaled form (coeff, scale, decimals).
+ScaledForm = tuple[float, float, int]
+Quantity = tuple[str, float, bool, ScaledForm | None]
 
 
 def _eval_run(words: list[str]) -> float:
@@ -105,21 +114,29 @@ def _eval_run(words: list[str]) -> float:
     return total + current
 
 
-def _digit_quantities(text: str) -> list[tuple[str, float, bool]]:
-    out: list[tuple[str, float, bool]] = []
+def _scaled_matches(coeff: float, known: float, scale: float, decimals: int) -> bool:
+    """True when `known` rounds to the written scaled coefficient at that precision."""
+    return round(known / scale, decimals) == round(coeff, decimals)
+
+
+def _digit_quantities(text: str) -> list[Quantity]:
+    out: list[Quantity] = []
     for match in _DIGIT_RE.finditer(text):
         raw, suffix = match.group(1), (match.group(2) or "").lower()
         try:
-            value = float(raw.replace(",", ""))
+            coeff = float(raw.replace(",", ""))
         except ValueError:  # pragma: no cover — the pattern cannot produce this
             continue
-        out.append((match.group(0).strip(), value * _DIGIT_SUFFIXES.get(suffix, 1), False))
+        scale = _DIGIT_SUFFIXES.get(suffix, 1)
+        decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
+        scaled: ScaledForm | None = (coeff, scale, decimals) if scale > 1 else None
+        out.append((match.group(0).strip(), coeff * scale, False, scaled))
     return out
 
 
-def _verbal_quantities(text: str) -> list[tuple[str, float, bool]]:
+def _verbal_quantities(text: str) -> list[Quantity]:
     tokens = [(m.group(0).lower(), m.start(), m.end()) for m in _WORD_RE.finditer(text)]
-    out: list[tuple[str, float, bool]] = []
+    out: list[Quantity] = []
     index, count = 0, len(tokens)
 
     while index < count:
@@ -161,13 +178,13 @@ def _verbal_quantities(text: str) -> list[tuple[str, float, bool]]:
             preceding = tokens[back][0]
 
         if has_scale or following in _UNIT_WORDS or preceding in _HEDGES:
-            out.append((text[tokens[start][1]:tokens[index - 1][2]], value, True))
+            out.append((text[tokens[start][1]:tokens[index - 1][2]], value, True, None))
 
     return out
 
 
-def parse_quantities(text: str) -> list[tuple[str, float, bool]]:
-    """Every quantity in `text` as (surface_text, value, was_verbal)."""
+def parse_quantities(text: str) -> list[Quantity]:
+    """Every quantity in `text` as (surface, value, was_verbal, scaled_form)."""
     return _digit_quantities(text) + _verbal_quantities(text)
 
 
@@ -181,9 +198,9 @@ def evidence_numbers(evidence: Any) -> set[float]:
         if isinstance(node, (int, float)):
             allowed.add(float(node))
         elif isinstance(node, str):
-            for _, value, _ in _digit_quantities(node):
+            for _, value, _, _ in _digit_quantities(node):
                 allowed.add(value)
-            for _, value, _ in _verbal_quantities(node):
+            for _, value, _, _ in _verbal_quantities(node):
                 allowed.add(value)
         elif isinstance(node, dict):
             for value in node.values():
@@ -196,8 +213,18 @@ def evidence_numbers(evidence: Any) -> set[float]:
     return allowed
 
 
-def _supported(value: float, allowed: set[float], verbal: bool) -> bool:
+def _supported(
+    value: float,
+    allowed: set[float],
+    verbal: bool,
+    scaled: ScaledForm | None = None,
+) -> bool:
     for known in allowed:
+        if scaled is not None:
+            coeff, scale, decimals = scaled
+            if _scaled_matches(coeff, known, scale, decimals):
+                return True
+            continue
         if verbal:
             room = _VERBAL_TOLERANCE * max(abs(known), abs(value), 1.0)
         else:
@@ -209,11 +236,10 @@ def _supported(value: float, allowed: set[float], verbal: bool) -> bool:
 
 def check_quantities(text: str, allowed: set[float]) -> str | None:
     """Return the first quantity in `text` that traces to nothing in `allowed`."""
-    for surface, value, verbal in parse_quantities(text):
-        if not _supported(value, allowed, verbal):
+    for surface, value, verbal, scaled in parse_quantities(text):
+        if not _supported(value, allowed, verbal, scaled):
             return surface
     return None
-
 
 def check_magnitude_claims(text: str) -> str | None:
     """Return the first "the bulk of"-style claim made without a stated share.

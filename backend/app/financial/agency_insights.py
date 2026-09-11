@@ -21,6 +21,7 @@ from app.financial.agency_week import (
 )
 from app.financial.ai_insights_repository import upsert_insight
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
+from app.financial.insight_prose import BRIEF_FORMAT, NOTE_FORMAT
 from app.services.llm import chat_json_soft, resolve_llm_model
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,8 @@ _TEMPERATURE = 0.3
 
 _SYSTEM = (
     "You write a weekly Agency brief for an owner who joins Teamwork delivery, "
-    "QuickBooks money, and client-map relationships. Plain US English sentences, "
-    "no bullet lists inside the brief.\n\n"
+    "QuickBooks money, and client-map relationships.\n\n"
+    f"{BRIEF_FORMAT}\n\n"
     "Agency is the join layer — do not restate full QuickBooks AR chase lists or "
     "Teamwork task inventories. Focus on carryover, mapping gaps, reconciliation, "
     "and what still needs an owner.\n\n"
@@ -147,10 +148,10 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         f"Here is Agency evidence for weekly insights ({period}).\n\n"
         f"{json.dumps(evidence, indent=2)}\n\n"
         "Write two things.\n\n"
-        f"1. `brief`: four or five sentences. {bootstrap_note} "
+        f"1. `brief`: compact markdown (bullets + bold). {bootstrap_note} "
         "Name specific clients or projects from the evidence.\n"
-        "2. `notes`: an object keyed by signal id with one or two sentences each — "
-        "consequence and action, not a restatement of the headline. Use only these ids "
+        "2. `notes`: an object keyed by signal id — consequence and action, not a "
+        f"restatement of the headline. {NOTE_FORMAT} Use only these ids "
         f"and omit rows you cannot add to: {ids}\n\n"
         'Reply with JSON shaped exactly: {"brief": "...", "notes": {"<id>": "..."}}'
     )

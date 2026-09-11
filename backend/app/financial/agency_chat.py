@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.financial import financial_llm_cost
 from app.financial.agency_insights import _SYSTEM, build_evidence
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
+from app.financial.insight_prose import CHAT_FORMAT
 from app.services.llm import LlmError, chat_text
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ BUDGET_REPLY = "This conversation has reached its spending limit. Start a new on
 
 _CHAT_RULES = (
     "\n\nYou answer an owner's question about the Agency join layer, not a daily brief. "
-    "Use two to four sentences with no heading or list. The evidence is everything you "
+    f"{CHAT_FORMAT} The evidence is everything you "
     "know. Reuse supplied figures exactly or omit them. Never claim payment was collected, "
     "never invent team members or past deliveries, and never restate full QuickBooks or "
     "Teamwork dashboards."

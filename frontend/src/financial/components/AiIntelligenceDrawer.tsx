@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   ArrowRight,
   ArrowUp,
@@ -14,7 +14,32 @@ import { motion } from "motion/react";
 import type { NoteBadge } from "../lib/qb-note-badges";
 import type { QbChat } from "../lib/use-qb-chat";
 import type { NoteCard, QbInsights } from "../lib/use-qb-insights";
+import { InsightMarkdown } from "./InsightMarkdown";
 import "./AiIntelligenceDrawer.css";
+
+const WIDTH_KEY = "zo_ai_drawer_width";
+const MIN_WIDTH = 360;
+const MAX_WIDTH = 920;
+const DEFAULT_WIDTH = 480;
+
+function clampDrawerWidth(px: number): number {
+  const cap =
+    typeof window !== "undefined"
+      ? Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, window.innerWidth - 40))
+      : MAX_WIDTH;
+  return Math.round(Math.min(cap, Math.max(MIN_WIDTH, px)));
+}
+
+function readStoredWidth(): number {
+  try {
+    const raw = localStorage.getItem(WIDTH_KEY);
+    const n = raw == null ? Number.NaN : Number(raw);
+    if (Number.isFinite(n)) return clampDrawerWidth(n);
+  } catch {
+    /* private mode */
+  }
+  return DEFAULT_WIDTH;
+}
 
 /**
  * The per-source wording. Everything else in this drawer — filters, cards,
@@ -81,8 +106,25 @@ export function AiIntelligenceDrawer({
   const [filter, setFilter] = useState<NoteBadge | null>(null);
   const [pinned, setPinned] = useState<NoteCard | null>(null);
   const [draft, setDraft] = useState("");
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const [widthReady, setWidthReady] = useState(false);
+  const [resizing, setResizing] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const feedEnd = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setWidth(readStoredWidth());
+    setWidthReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!widthReady) return;
+    try {
+      localStorage.setItem(WIDTH_KEY, String(width));
+    } catch {
+      /* ignore */
+    }
+  }, [width, widthReady]);
 
   // Escape closes from anywhere in the drawer, including the composer.
   useEffect(() => {
@@ -97,6 +139,30 @@ export function AiIntelligenceDrawer({
   useEffect(() => {
     if (open) composer.current?.focus();
   }, [open]);
+
+  const startResize = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    setResizing(true);
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (ev: PointerEvent) => {
+      setWidth(clampDrawerWidth(startW + (startX - ev.clientX)));
+    };
+    const onUp = () => {
+      setResizing(false);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   useEffect(() => {
     if (chat.turns.length) feedEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -135,11 +201,20 @@ export function AiIntelligenceDrawer({
         role="dialog"
         aria-modal="true"
         aria-label="AI Intelligence"
+        data-resizing={resizing || undefined}
+        style={{ ["--qb-ai-drawer-width" as string]: `${width}px` }}
         initial={{ x: "100%", opacity: 0.6 }}
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: "100%", opacity: 0.6 }}
         transition={{ type: "spring", stiffness: 320, damping: 34 }}
       >
+        <button
+          type="button"
+          className="qb-ai-resize"
+          aria-label="Resize AI Intelligence panel"
+          title="Drag to resize"
+          onPointerDown={startResize}
+        />
         <header className="qb-ai-head">
           <span className="qb-ai-mark" aria-hidden>
             <Sparkles size={15} strokeWidth={2.25} />
@@ -217,7 +292,7 @@ export function AiIntelligenceDrawer({
           {error ? <p className="qb-ai-error">{error}</p> : null}
 
           {data?.brief ? (
-            <p className="qb-ai-brief">{data.brief}</p>
+            <InsightMarkdown className="qb-ai-brief" text={data.brief} />
           ) : loaded ? (
             <p className="qb-ai-empty">
               {periodLabel
@@ -256,7 +331,9 @@ export function AiIntelligenceDrawer({
                       ) : null}
                     </span>
                     <p className="qb-note-headline">{card.headline}</p>
-                    {card.detail ? <p className="qb-note-detail">{card.detail}</p> : null}
+                    {card.detail ? (
+                      <InsightMarkdown className="qb-note-detail" text={card.detail} />
+                    ) : null}
                     {card.goTo ? (
                       <span
                         className="qb-note-go"
@@ -296,14 +373,13 @@ export function AiIntelligenceDrawer({
           {chat.turns.length || chat.busy ? (
             <div className="qb-ai-turns">
               {chat.turns.map((turn) => (
-                <p
+                <InsightMarkdown
                   key={turn.id}
                   className="qb-ai-msg"
                   data-role={turn.role}
                   data-guarded={turn.guarded || undefined}
-                >
-                  {turn.content}
-                </p>
+                  text={turn.content}
+                />
               ))}
               {chat.busy ? (
                 <span className="qb-ai-thinking" role="status">
