@@ -101,6 +101,14 @@ class LocalNamedEditTests(unittest.TestCase):
         self.assertEqual(edit.kind, "add_named")
         self.assertEqual(edit.target, "Letitia Hopper")
 
+    def test_compound_add_after_other_instruction_is_not_local(self) -> None:
+        """Trailing 'add Sonja' after a rewrite ask must not force a staff splice."""
+        edit = _understand_local_edit(
+            "Can we improve this cover letter sounding more exciting\n"
+            "and at last add Sonja not zo agency"
+        )
+        self.assertIsNone(edit)
+
     def test_last_remove_instruction_wins_after_pasted_excerpt(self) -> None:
         pasted = (
             "We commit to measurable performance indicators that align "

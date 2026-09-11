@@ -113,6 +113,31 @@ class ZeroFabricationGuardTests(unittest.TestCase):
         self.assertIn("Marcelle Benevides", body)
         self.assertTrue(any("roster" in line.casefold() for line in report.logs))
 
+    def test_checklist_cannot_claim_missing_sidebar_tab(self) -> None:
+        """Generate / Complete Scan / chat persist all run ZF — Location ∉ sidebar → No."""
+        draft = ProposalDraft(
+            rfpId="rfp-test",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="check",
+                    title="Submittal Checklist",
+                    content=(
+                        "| Submittal Item | Included | Location |\n"
+                        "| --- | --- | --- |\n"
+                        "| Cover Letter | Yes | Cover Letter tab |\n"
+                        "| Executive Summary | Yes | Executive Summary tab |\n"
+                    ),
+                ),
+                ProposalSection(id="cover", title="Cover Letter", content="Dear client."),
+            ],
+        )
+        updated, report = apply_zero_fabrication_guards(draft, label="generate")
+        body = next(s.content or "" for s in updated.sections if s.id == "check")
+        self.assertIn("Executive Summary | No |", body)
+        self.assertIn("MANUAL FILL", body)
+        self.assertTrue(any("cross-ref" in line for line in report.logs))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1237,14 +1237,21 @@ def refuse_noncompliant_budget_edit(
     *,
     prior_text: str = "",
     budget: ProposalBudget | None = None,
+    section: ProposalSection | None = None,
 ) -> str | None:
-    """Return a user-facing refusal when option C blocks the edit."""
+    """Return a user-facing refusal when option C blocks the edit.
+
+    Fee-ledger invent checks apply only on Cost/Pricing tabs. Narrative tabs
+    (Executive Summary sponsorship tiers, etc.) must not be blocked by Stage 3.5.
+    """
     if user_asked_reverse_engineered_total(user_message):
         return (
             "That request would reverse-engineer line items to hit a target total. "
             "Per the pricing playbook, each line must trace to the Pricing Guide — "
             "adjust tier or scope instead, or ask Sonja to review a flagged out-of-guide item."
         )
+    if section is not None and not section_is_budget_related(section):
+        return None
     if not (new_text or "").strip():
         return None
     prior_amts = dollar_amount_tokens(prior_text)

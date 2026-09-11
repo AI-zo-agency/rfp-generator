@@ -18,7 +18,10 @@ interface SectionRevisionCompareProps {
   awaitingConfirm?: boolean;
   onConfirmApply?: () => void | Promise<void>;
   confirmBusy?: boolean;
-  onDismiss: () => void;
+  /** Close the drawer without discarding a pending Apply. */
+  onClose: () => void;
+  /** Discard a pending preview (removes Apply). Required when awaitingConfirm. */
+  onDiscard?: () => void;
 }
 
 const THEME_OPTIONS: { id: RevisionCompareTheme; label: string }[] = [
@@ -43,7 +46,8 @@ export function SectionRevisionCompare({
   awaitingConfirm = false,
   onConfirmApply,
   confirmBusy = false,
-  onDismiss,
+  onClose,
+  onDiscard,
 }: SectionRevisionCompareProps) {
   const [theme, setTheme] = useState<RevisionCompareTheme>("warm");
   const [selectedHunk, setSelectedHunk] = useState(0);
@@ -84,7 +88,8 @@ export function SectionRevisionCompare({
           </p>
           {awaitingConfirm ? (
             <p className="proposal-revision-request-inline text-amber-800">
-              Nothing is saved until you click Apply changes.
+              Nothing is saved until you click Apply changes. Closing this panel
+              keeps the preview — reopen with View changes on this section.
             </p>
           ) : null}
           {instruction ? (
@@ -107,7 +112,7 @@ export function SectionRevisionCompare({
           {awaitingConfirm ? (
             <button
               type="button"
-              onClick={onDismiss}
+              onClick={onDiscard ?? onClose}
               disabled={confirmBusy}
               className="zo-btn secondary !py-1.5 !px-2.5 !text-xs"
             >
@@ -139,9 +144,22 @@ export function SectionRevisionCompare({
           </div>
           <button
             type="button"
-            onClick={onDismiss}
+            onClick={() => {
+              // Pending Apply: close only — reopen via View changes. Applied history: X clears it.
+              if (awaitingConfirm) onClose();
+              else (onDiscard ?? onClose)();
+            }}
             className="proposal-revision-dismiss"
-            aria-label="Dismiss changes"
+            aria-label={
+              awaitingConfirm
+                ? "Close comparison — Apply stays under View changes"
+                : "Dismiss changes"
+            }
+            title={
+              awaitingConfirm
+                ? "Close — reopen anytime with View changes on this section"
+                : "Dismiss"
+            }
           >
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />

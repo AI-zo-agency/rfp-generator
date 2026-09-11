@@ -91,6 +91,45 @@ class BudgetFreeformIntentTests(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("45000", msg or "")
 
+    def test_refuse_skips_non_budget_sections(self) -> None:
+        """Exec Summary / voice edits must not be blocked by the Cost fee ledger."""
+        prior = "Stewardship for Gilroy — keep the foundation intact."
+        new = (
+            prior
+            + " Modernize sponsorship collateral so a $2,500 tier and a "
+            "$25,000+ tier read clearly."
+        )
+        exec_sum = ProposalSection(
+            id="section-1",
+            title="Executive Summary",
+            content=prior,
+            status="generated",
+        )
+        self.assertIsNone(
+            refuse_noncompliant_budget_edit(
+                "Make it bit descriptive more with zo agency voice",
+                new,
+                prior_text=prior,
+                budget=_budget(),
+                section=exec_sum,
+            )
+        )
+        cost = ProposalSection(
+            id="section-cost",
+            title="Cost Proposal",
+            content=prior,
+            status="generated",
+        )
+        self.assertIsNotNone(
+            refuse_noncompliant_budget_edit(
+                "improve writing",
+                new,
+                prior_text=prior,
+                budget=_budget(),
+                section=cost,
+            )
+        )
+
     def test_postprocess_drops_mix_table(self) -> None:
         body = (
             "### Investment Framing\n\n"

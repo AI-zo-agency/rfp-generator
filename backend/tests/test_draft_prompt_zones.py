@@ -114,6 +114,22 @@ class TestZoneAStability:
         assert "ZO CONTEXT BODY" in zone_a
         assert "ALREADY WRITTEN" in zone_a
 
+    def test_lists_live_sidebar_titles_for_checklist_locations(self) -> None:
+        zone_a, _, _ = _build_draft_prompt_zones(
+            batch=_batch("3.4", title="Submittal Checklist"),
+            batch_payload=[_payload("3.4", title="Submittal Checklist")],
+            state=_state(
+                rfp_sections=[
+                    {"id": "c", "title": "Cover Letter"},
+                    {"id": "p", "title": "Pricing"},
+                ]
+            ),
+        )
+        assert "LIVE SIDEBAR TITLES" in zone_a
+        assert "Cover Letter" in zone_a
+        assert "Pricing" in zone_a
+        assert "never invent a Location" in zone_a
+
 
 class TestZoneBAppendOnly:
     def test_grows_by_appending_so_the_earlier_copy_stays_a_prefix(self) -> None:

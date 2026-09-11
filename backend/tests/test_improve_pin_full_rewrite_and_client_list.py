@@ -116,6 +116,19 @@ class ImprovePinFullRewriteTests(unittest.TestCase):
             )
         )
 
+    def test_near_full_planned_span_never_collapses(self) -> None:
+        body = "A" * 200
+        self.assertFalse(
+            should_collapse_edit_scope_to_selection(
+                improve_section_pinned=False,
+                user_message="make this more exciting and close with Sonja",
+                section_content=body,
+                planned_span_count=1,
+                selection_start=0,
+                selection_end=len(body),
+            )
+        )
+
     def test_improve_pin_multi_patch_does_not_collapse_to_selection(self) -> None:
         # Multi-patch stays on the multi-patch path (selection_mode must stay false).
         self.assertFalse(

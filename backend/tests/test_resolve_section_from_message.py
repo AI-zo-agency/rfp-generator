@@ -1,4 +1,4 @@
-"""Section chat must find the named section from the user ask before patching."""
+"""Section chat: sync resolve uses outline title/mark only; LLM owns smart rematch."""
 
 from __future__ import annotations
 
@@ -44,11 +44,12 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         assert hit is not None
         self.assertEqual(hit.id, "rfp-sec-2")
 
-    def test_fuzzy_title_tokens(self) -> None:
+    def test_fuzzy_title_tokens_need_full_phrase(self) -> None:
+        """Ampersand titles match when the normalized phrase is in the ask."""
         self.draft.sections[0] = _sec("rfp-sec-2", "2 — Past Performance & References")
         hit = _resolve_section_from_message(
             self.draft,
-            "clean past performance references — drop irrelevant ones",
+            "clean past performance and references — drop irrelevant ones",
             "rfp-sec-3",
         )
         self.assertIsNotNone(hit)
@@ -63,8 +64,8 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         assert hit is not None
         self.assertEqual(hit.id, "rfp-sec-3")
 
-    def test_umatilla_not_hijacked_by_incidental_references_mention(self) -> None:
-        """'before the References fix' must not steal the Umatilla case study."""
+    def test_incidental_client_name_stays_on_open_tab(self) -> None:
+        """Nicknames without a full outline title phrase stay put — LLM rematches."""
         self.draft.sections = [
             _sec("s1", "1. Cover Letter"),
             _sec("s2", "2. Who We Are"),
@@ -77,15 +78,14 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         ask = (
             "1. Section 11 (Umatilla case study) still misrepresents what the "
             "engagement actually was. I flagged this before the References fix, "
-            "and it hasn't been addressed. The verified source file is entirely "
-            "about the Rock the Locks Festival. Needs a rewrite."
+            "and it hasn't been addressed. Needs a rewrite."
         )
         hit = _resolve_section_from_message(self.draft, ask, "rfp-ref-21")
         self.assertIsNotNone(hit)
         assert hit is not None
-        self.assertEqual(hit.id, "section-3-work-umatilla")
+        self.assertEqual(hit.id, "rfp-ref-21")
 
-    def test_intentional_references_fix_still_resolves(self) -> None:
+    def test_intentional_mark_cite_resolves(self) -> None:
         self.draft.sections = [
             _sec("s1", "1. Cover Letter"),
             _sec("rfp-ref-21", "21. References — Current Clients"),
@@ -117,7 +117,6 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         self.assertEqual(hit.id, "compliance")
 
     def test_rfp_fit_eval_stays_on_open_tab_not_umatilla_our_work(self) -> None:
-        """Tourism examples tab: 'is Umatilla best for this RFP?' must not jump to 3.1."""
         self.draft.sections = [
             _sec(
                 "section-3-work-umatilla",
@@ -134,7 +133,8 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         assert hit is not None
         self.assertEqual(hit.id, "rfp-tourism-sm")
 
-    def test_explicit_rewrite_still_targets_umatilla_our_work(self) -> None:
+    def test_short_nickname_rewrite_stays_on_open_without_llm(self) -> None:
+        """Sync path cannot invent rematches from nicknames — open tab wins."""
         self.draft.sections = [
             _sec(
                 "section-3-work-umatilla",
@@ -143,6 +143,20 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
             _sec("rfp-tourism-sm", "Tourism Social Media Examples"),
         ]
         ask = "rewrite the Umatilla case study with KB evidence"
+        hit = _resolve_section_from_message(self.draft, ask, "rfp-tourism-sm")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.id, "rfp-tourism-sm")
+
+    def test_full_outline_name_rematches(self) -> None:
+        self.draft.sections = [
+            _sec(
+                "section-3-work-umatilla",
+                "3.1 — City of Umatilla Digital Campaign",
+            ),
+            _sec("rfp-tourism-sm", "Tourism Social Media Examples"),
+        ]
+        ask = "rewrite City of Umatilla Digital Campaign with KB evidence"
         hit = _resolve_section_from_message(self.draft, ask, "rfp-tourism-sm")
         self.assertIsNotNone(hit)
         assert hit is not None
@@ -162,7 +176,6 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
 
     def test_compliance_with_budgets_word_is_not_cost_section(self) -> None:
         from app.services.proposal_budget_playbook import section_is_budget_related
-        from app.models.proposal import ProposalSection
 
         compliance = ProposalSection(
             id="c",

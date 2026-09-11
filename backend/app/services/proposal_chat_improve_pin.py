@@ -126,18 +126,29 @@ def should_collapse_edit_scope_to_selection(
     user_message: str,
     section_content: str,
     planned_span_count: int,
+    selection_start: int | None = None,
+    selection_end: int | None = None,
 ) -> bool:
     """Whether a single edit-scope patch may become selection_mode.
 
     Improve full section never collapses to a selection splice — that path cannot
-    insert missing headings (I.2 Active Client List) and previously failed with
-    DRAFT UNCHANGED. Multi-patch (span_count > 1) stays on the multi-patch path.
+    insert missing headings and previously failed with DRAFT UNCHANGED.
+    Near-full planned spans also stay on full rewrite (any section) — splicing most
+    of a tab through selection regression rejects legitimate rewrites.
+    Multi-patch (span_count > 1) stays on the multi-patch path.
     """
     if planned_span_count != 1:
         return False
     if improve_section_pinned:
         return False
     if user_asks_thorough_section_repair(user_message):
+        return False
+    if (
+        selection_start is not None
+        and selection_end is not None
+        and section_content
+        and (selection_end - selection_start) / max(len(section_content), 1) >= 0.5
+    ):
         return False
     return True
 
