@@ -6,6 +6,11 @@
   color: var(--zo-text);
 }
 
+.proposal-workspace-chrome {
+  container-type: inline-size;
+  container-name: proposal-chrome;
+}
+
 .proposal-status-strip {
   display: grid;
   grid-template-columns: 1fr;
@@ -16,14 +21,6 @@
   overflow: hidden;
 }
 
-@media (min-width: 960px) {
-  .proposal-status-strip {
-    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.2fr) minmax(0, 1.25fr) minmax(0, 1fr);
-    margin-left: 1rem;
-    margin-right: 1rem;
-  }
-}
-
 .proposal-status-cell {
   display: flex;
   align-items: flex-start;
@@ -32,7 +29,36 @@
   padding: 0.95rem 1rem 1rem;
 }
 
-@media (min-width: 960px) {
+/* Card width — not viewport. A 960px window with page chrome is too
+   narrow for four cells, which clipped Download Word and the generating
+   action during Phase 3. */
+@container proposal-chrome (min-width: 700px) {
+  .proposal-status-strip {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    margin-left: 1rem;
+    margin-right: 1rem;
+  }
+
+  .proposal-status-cell:nth-child(odd) {
+    border-right: 1px solid rgba(17, 24, 39, 0.08);
+  }
+
+  .proposal-status-cell:nth-child(-n + 2) {
+    border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+  }
+}
+
+@container proposal-chrome (min-width: 1180px) {
+  .proposal-status-strip {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.2fr) minmax(0, 1.25fr) minmax(0, 1fr);
+  }
+
+  .proposal-status-cell:nth-child(odd),
+  .proposal-status-cell:nth-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 0;
+  }
+
   .proposal-status-cell + .proposal-status-cell {
     border-left: 1px solid rgba(17, 24, 39, 0.08);
   }
@@ -65,6 +91,7 @@
   font-weight: 700;
   line-height: 1.25;
   color: #111827;
+  overflow-wrap: anywhere;
 }
 
 .proposal-status-card-meta {
@@ -158,7 +185,7 @@
 .proposal-status-download {
   display: inline-flex;
   width: 100%;
-  max-width: 15.5rem;
+  max-width: min(15.5rem, 100%);
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
@@ -325,20 +352,25 @@
   justify-content: flex-end;
 }
 
+.proposal-tab-actions-toolbar {
+  flex: 1 1 16rem;
+}
+
 .proposal-editor-pane .proposal-editor-chrome-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
+  justify-content: space-between;
+  gap: 0.45rem 0.75rem;
 }
 
 .proposal-editor-chrome-lead {
   display: flex;
   min-width: 0;
-  flex: 1 1 auto;
-  flex-wrap: nowrap;
+  flex: 1 1 12rem;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.35rem 0.75rem;
 }
 
 .proposal-editor-chrome-index {
@@ -380,7 +412,7 @@
 }
 
 .proposal-editor-chrome-words {
-  justify-self: center;
+  justify-self: start;
   margin-left: 0;
   flex-shrink: 0;
   font-size: 0.75rem;
@@ -392,23 +424,11 @@
 .proposal-editor-chrome-actions {
   display: flex;
   justify-self: end;
-  flex-shrink: 0;
-  flex-wrap: nowrap;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
-  margin-left: 0;
-}
-
-@media (max-width: 720px) {
-  .proposal-editor-pane .proposal-editor-chrome-row {
-    grid-template-columns: 1fr;
-    justify-items: start;
-  }
-
-  .proposal-editor-chrome-words,
-  .proposal-editor-chrome-actions {
-    justify-self: start;
-  }
+  margin-left: auto;
 }
 
 .proposal-ralph-mobile-close {
@@ -568,4 +588,77 @@
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
+}
+
+/* Laptop + sidebar is often 960–1100px of workspace, not a phone.
+   Keep sections + workflow on screen there (same as the wide layout).
+   Slide-overs stay below 960px. */
+@container proposal-workspace (min-width: 960px) {
+  .proposal-mobile-panel-toggle {
+    display: none !important;
+  }
+
+  .proposal-outline-layout {
+    grid-template-columns: minmax(12rem, 14.5rem) minmax(0, 1fr) minmax(14.5rem, 18rem) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    gap: 0.65rem;
+    padding: 0.5rem;
+    position: relative;
+  }
+
+  .proposal-outline-layout .proposal-section-list,
+  .proposal-outline-layout .proposal-assistant-pane {
+    position: static !important;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    z-index: auto;
+    width: auto;
+    max-height: none;
+    min-height: 0;
+    transform: none !important;
+    box-shadow: none;
+  }
+
+  .proposal-outline-layout .proposal-section-list {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .proposal-outline-layout .proposal-editor-pane {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .proposal-outline-layout .proposal-assistant-pane {
+    grid-column: 3;
+    grid-row: 1;
+    min-height: 0;
+    background: #fff;
+  }
+
+  .proposal-mobile-panel-scrim,
+  .proposal-mobile-panel-scrim.is-open {
+    display: none;
+  }
+
+  .proposal-workflow-layout {
+    grid-template-columns: minmax(12rem, 14.5rem) minmax(0, 1fr) minmax(15rem, 19rem);
+    gap: 0.65rem;
+    padding: 0.5rem;
+  }
+
+  .proposal-workflow-layout > .proposal-workflow-rail {
+    display: flex;
+    grid-column: 3;
+  }
+}
+
+@container proposal-workspace (min-width: 1100px) {
+  .proposal-outline-layout {
+    grid-template-columns: minmax(13rem, 15.5rem) minmax(0, 1fr) minmax(15rem, 20rem) !important;
+    gap: 0.75rem;
+    padding: 0.65rem;
+  }
 }

@@ -3710,7 +3710,7 @@ function ProposalDraftWorkspaceInner({
           <h2 className="proposal-workspace-heading min-w-0 flex-1 truncate">
             {rfp.title}
           </h2>
-          {activeTab !== "content" ? (
+          {activeTab !== "content" && activeTab !== "outline" ? (
             <button
               type="button"
               className="proposal-read-whole-btn"
@@ -4048,7 +4048,7 @@ function ProposalDraftWorkspaceInner({
             </button>
             {/* Narrow workspace only (see globals.css .proposal-mobile-panel-toggle) —
                 the section list and Ask Ralph become slide-over panels below
-                1100px, opened from here instead of squeezing beside the editor.
+                960px, opened from here instead of squeezing beside the editor.
                 Hidden once that panel is already open — a button that opens
                 something already open has nothing left to do. */}
             {!mobileSectionsOpen ? (
@@ -4499,14 +4499,16 @@ function ProposalDraftWorkspaceInner({
               <>
                 <div className="proposal-editor-chrome">
                   <div className="proposal-editor-chrome-row">
-                    <span className="proposal-editor-chrome-index">
-                      {manuscriptIndexById.get(selectedSection.id) != null
-                        ? `Section ${manuscriptIndexById.get(selectedSection.id)} of ${manuscriptProgress.total}`
-                        : "Section"}
-                    </span>
-                    <span className="proposal-editor-chrome-words">
-                      Word count {countWords(selectedSection.content).toLocaleString()}
-                    </span>
+                    <div className="proposal-editor-chrome-lead">
+                      <span className="proposal-editor-chrome-index">
+                        {manuscriptIndexById.get(selectedSection.id) != null
+                          ? `Section ${manuscriptIndexById.get(selectedSection.id)} of ${manuscriptProgress.total}`
+                          : "Section"}
+                      </span>
+                      <span className="proposal-editor-chrome-words">
+                        Word count {countWords(selectedSection.content).toLocaleString()}
+                      </span>
+                    </div>
                     <div className="proposal-editor-chrome-actions">
                       <button
                         type="button"
