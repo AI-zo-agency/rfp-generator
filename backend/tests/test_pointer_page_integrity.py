@@ -271,7 +271,36 @@ class PointerPageIntegrityTests(unittest.TestCase):
         self.assertNotIn("§3 (Our Work)", rewritten)
         self.assertIn("MANUAL FILL", rewritten)
 
-    def test_apply_integrity_inserts_and_strips_editor_notes(self) -> None:
+    def test_submittal_checklist_clears_missing_executive_summary_tab(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-uta",
+            updatedAt="2026-09-11T00:00:00Z",
+            sections=[
+                _sec(
+                    "check",
+                    "3.4 Submittal Checklist",
+                    (
+                        "| Submittal Item | Included | Location |\n"
+                        "| --- | --- | --- |\n"
+                        "| Cover Letter | Yes | Cover Letter tab |\n"
+                        "| Executive Summary | Yes | Executive Summary tab |\n"
+                        "| Pricing | Yes | Pricing tab |\n"
+                    ),
+                ),
+                _sec("cover", "2. Cover letter", "Dear UT."),
+                _sec("price", "Pricing", "Fees."),
+            ],
+        )
+        out, n, logs = rewrite_cross_ref_addressed_in_table(
+            draft.sections[0].content or "", draft, self_section_id="check"
+        )
+        self.assertGreaterEqual(n, 1)
+        self.assertIn("Executive Summary | No |", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertTrue(
+            any("missing tab" in line and "Executive Summary" in line for line in logs)
+        )
+
         draft = self._draft()
         out, logs = apply_pointer_page_integrity(draft, source_section_id="tech")
         tech = next(s for s in out.sections if s.id == "tech")

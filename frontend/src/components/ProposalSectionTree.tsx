@@ -112,6 +112,7 @@ function SectionRow({
   highlighted,
   flagCount,
   hasRevision,
+  awaitingConfirmRevision = false,
   canDelete,
   canDrag,
   listLabel,
@@ -131,6 +132,7 @@ function SectionRow({
   highlighted: boolean;
   flagCount: number;
   hasRevision: boolean;
+  awaitingConfirmRevision?: boolean;
   canDelete: boolean;
   canDrag: boolean;
   listLabel: string;
@@ -157,7 +159,9 @@ function SectionRow({
     draftHint,
     flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
     hasRevision
-      ? "Section updated — double-click title area in review for changes"
+      ? awaitingConfirmRevision
+        ? "Pending Apply — double-click to view changes and Apply"
+        : "Section updated — double-click title area in review for changes"
       : "",
     canDrag ? "Drag this row to reorder" : "",
   ]
@@ -346,6 +350,9 @@ function SectionGroup({
               highlighted={highlightedSectionId === section.id}
               flagCount={sectionManualFillCount(section.id, manualFillFlags)}
               hasRevision={Boolean(sectionRevisions[section.id])}
+              awaitingConfirmRevision={Boolean(
+                sectionRevisions[section.id]?.awaitingConfirm
+              )}
               canDelete={canDelete}
               canDrag={canDrag}
               listLabel={sectionListLabel(section, rfpTabNumberById)}
@@ -491,6 +498,9 @@ export function ProposalSectionTree({
             highlighted={highlightedSectionId === node.section.id}
             flagCount={sectionManualFillCount(node.section.id, manualFillFlags)}
             hasRevision={Boolean(sectionRevisions[node.section.id])}
+            awaitingConfirmRevision={Boolean(
+              sectionRevisions[node.section.id]?.awaitingConfirm
+            )}
             canDelete={canDelete}
             canDrag={canDrag}
             listLabel={sectionListLabel(node.section, rfpTabNumberById)}

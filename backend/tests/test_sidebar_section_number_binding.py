@@ -75,6 +75,8 @@ class SidebarSectionBindingTests(unittest.TestCase):
             "Sidebar 19/20 — 19. Understanding of Island County and Tourism Context",
             digest,
         )
+        self.assertIn("Status:", digest)
+        self.assertIn("EXISTS in the proposal only if it appears as a sidebar title", digest)
 
 
 class SidebarSectionAdvisoryPromptTests(unittest.IsolatedAsyncioTestCase):

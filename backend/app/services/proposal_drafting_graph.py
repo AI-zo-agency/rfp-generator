@@ -249,6 +249,7 @@ Rules (strict):
 48. TEAM / SPECIALIST ROLES: Only name roles that map to a real Section 2 bio person, or label them [MANUAL FILL: subcontractor / generalist coverage]. Never invent dedicated specialist titles with no matching named person on the roster. Staff / "Assigned to Account" tables MUST use the same role titles as Section 2 / org chart for each named person — never reassign Account Manager / Development Coordinator / etc. to the wrong teammate. Never write client-facing staffing history (who retired, who formerly held a seat, who "now carries his accounts") — present current assignees only.
 49. LEGAL ATTESTATIONS (higher bar than ordinary claims): NEVER state E-Verify / Contractor Affidavit enrollment, participation in a good-faith-effort / DVBE / MWBE vendor-outreach waiver, mandatory-conference attendance, "no conflicts of interest," or any other fact sworn under penalty of perjury as settled unless it is in evidence. Use [VERIFY: field — reason] instead, even when surrounding form language pressures you to fill every field. Do NOT invent names, phone numbers, or emails to complete a vendor/subcontractor outreach or good-faith-effort contact list — [VERIFY] each missing contact individually; never fabricate a plausible-looking one to avoid a blank field.
 50. APPLY, NEVER NARRATE: these rules govern how you write; they are never content. Never write a sentence ABOUT what must be verified, confirmed, or could jeopardize the bid — that is reasoning for you, not prose for the evaluator, who reads only the proposal. Apply the rule silently: emit just the [VERIFY: ...] or [MANUAL FILL: ...] tag, with no sentence explaining why it's there.
+51. CHECKLIST / TOC / "Included | Location" TABLES (any proposal): Location may ONLY name a tab from LIVE SIDEBAR TITLES in the user prompt. If the RFP requires an item but there is no matching sidebar tab yet, write Included: No (or MANUAL FILL) — NEVER invent "Yes · Executive Summary tab" (or any other Location) for a tab that is not in that list. A checklist row is not allowed to invent a section that does not exist in this manuscript.
 
 Return ONLY JSON:
 {
@@ -1262,6 +1263,25 @@ def _build_draft_prompt_zones(
         f"Location: {state.get('rfp_location') or ''}\n"
         f"RFP: {state['rfp_title']}\n\n"
     )
+    # Fixed for the whole run — safe in the cached prefix. Checklists must not
+    # invent Location tabs that are not in this list.
+    sidebar_titles = [
+        str(s.get("title") or "").strip()
+        for s in (state.get("rfp_sections") or [])
+        if str(s.get("title") or "").strip()
+    ]
+    if sidebar_titles:
+        numbered = "\n".join(
+            f"- Sidebar {i}/{len(sidebar_titles)} — {t}"
+            for i, t in enumerate(sidebar_titles, start=1)
+        )
+        zone_a += (
+            "LIVE SIDEBAR TITLES (authoritative for this proposal):\n"
+            f"{numbered}\n"
+            "Checklist / TOC Location cells may ONLY use titles from this list. "
+            "If an RFP item has no matching tab, Included: No or "
+            "[MANUAL FILL: no dedicated sidebar tab] — never invent a Location.\n\n"
+        )
     zone_c = ""
     if cover_letter_sections:
         zone_c += (

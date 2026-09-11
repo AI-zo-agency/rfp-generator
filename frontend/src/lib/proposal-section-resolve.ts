@@ -52,74 +52,19 @@ export function messagePrimaryEditTargetsSection(
   const title = section.title || "";
   if (!text || !title.trim()) return false;
 
-  const core = sectionTitleCore(title);
-  const full = normalizeTitlePhrase(title);
-  const mentions = messageMentionsSectionTitle(text, title);
-
   // Destination / inventory language — stay on the Improve-pinned tab.
   const destinationOnly =
     /(?:already\s+exists?(?:\s+in\s+full)?\s+in|in\s+full\s+in|move\s+(?:\w+\s+){0,8}into|paste\s+into|pull\s+.{0,80}\s+into|fix\s+the\s+blank\s+row\s+in|duplicate\s+of|broken\s+duplicate\s+of|addressed\s+in|cross-?reference)/i.test(
       text
-    ) &&
-    !/\b(?:fix|edit|rewrite|update|patch|improve|clean|revise)\s+(?:the\s+)?(?:§\s*|sec(?:tion)?\.?\s*)?\d+\b/i.test(
-      text
     );
-
-  if (destinationOnly && !/\b(?:fix|edit|rewrite|clean|improve)\s+(?:the\s+)?[A-Z]/i.test(text)) {
-    // Still allow "Clean the Past Performance…" below; block Orland-style
-    // "already exists in §21 / move into §21" inventory asks.
+  if (destinationOnly && !messageMentionsSectionTitle(text, title)) {
+    return false;
   }
 
-  if (mentions && core.length >= 4) {
-    const needle = (full.length >= 8 ? full : normalizeTitlePhrase(core)).slice(
-      0,
-      64
-    );
-    const esc = escapeRegExp(needle);
-    if (
-      new RegExp(
-        `\\b(?:fix|edit|rewrite|update|patch|improve|clean|revise|scrub)\\s+(?:the\\s+)?${esc}`,
-        "i"
-      ).test(text)
-    ) {
-      return true;
-    }
-    if (
-      new RegExp(`\\b${esc}\\s+section\\b`, "i").test(text) &&
-      /\b(?:fix|edit|rewrite|update|patch|improve|clean|revise|scrub)\b/i.test(text)
-    ) {
-      return true;
-    }
-  }
-
-  const markNum = title.match(/^(\d+)\s*[.:—–\-)]/);
-  if (markNum) {
-    const n = markNum[1];
-    if (
-      new RegExp(
-        `\\b(?:fix|edit|rewrite|update|patch|improve|clean|revise)\\s+(?:the\\s+)?(?:§\\s*|sec(?:tion)?\\.?\\s*)${n}\\b`,
-        "i"
-      ).test(text)
-    ) {
-      return true;
-    }
-  }
-
-  // Case-study / client rewrite while a different tab is pinned.
-  const clientBlob = `${sectionPersonName(title)} ${title}`.toLowerCase();
-  const clientNeedles = (
-    clientBlob.match(
-      /\b(?:umatilla|rock the locks|carbondale|maricopa|deschutes|medford|santa clara)\b/g
-    ) || []
-  ).filter((n) => text.toLowerCase().includes(n));
-  if (
-    clientNeedles.length > 0 &&
-    /\b(?:rewrite|fix|edit|update|revise|replace|address(?:ed)?)\b/i.test(text) &&
-    !/(?:already\s+exists?|in\s+full\s+in|move\s+(?:\w+\s+){0,8}into)/i.test(text)
-  ) {
-    return true;
-  }
-
+  // Outline title phrase or sidebar mark cite — no verb/keyword synonym tables.
+  if (messageMentionsSectionTitle(text, title)) return true;
+  const markMatch = title.trim().match(/^(\d+)\s*[.:—–\-)]/);
+  if (markMatch?.[1] && messageCitesOutlineMark(text, markMatch[1])) return true;
   return false;
 }
 
@@ -182,11 +127,11 @@ export function messageTargetsUniqueTopic(
   const text = message || "";
   if (!new RegExp(`\\b${topic}\\b`, "i").test(text)) return false;
 
-  // Stronger competing targets win — do not hijack to References/Pricing.
+  // Case-study / cover-letter asks must not hijack to References/Pricing unless
+  // the topic itself is the primary edit target.
   if (
-    /\b(?:umatilla|rock\s+the\s+locks|case\s+stud(?:y|ies)|cover\s+letter)\b/i.test(
-      text
-    )
+    /\bcase\s+stud(?:y|ies)\b/i.test(text) ||
+    /\bcover\s+letter\b/i.test(text)
   ) {
     const topicIsPrimary = new RegExp(
       `(?:fix|edit|rewrite|update|patch|fill|improve)\\s+(?:the\\s+)?${topic}\\b|` +
@@ -418,8 +363,8 @@ function significantTitleTokens(title: string): string[] {
 }
 
 /**
- * True when the user message clearly refers to this section by title
- * (full, core after number, contiguous title head, or enough title tokens).
+ * Outline title phrase in the ask — multi-word / long contiguous phrases only.
+ * Short nicknames do not rematch (backend LLM primarySectionId owns those).
  */
 export function messageMentionsSectionTitle(
   message: string,
@@ -428,27 +373,15 @@ export function messageMentionsSectionTitle(
   const lower = normalizeTitlePhrase(message);
   if (!lower || !title.trim()) return false;
   const full = normalizeTitlePhrase(title);
-  if (full.length >= 4 && lower.includes(full)) return true;
+  if (full.length >= 12 && lower.includes(full)) return true;
   const core = normalizeTitlePhrase(sectionTitleCore(title));
-  if (core.length >= 4 && lower.includes(core)) return true;
+  if (core.length >= 10 && lower.includes(core)) return true;
+  const name = normalizeTitlePhrase(sectionPersonName(title));
+  if (name.length >= 12 && lower.includes(name)) return true;
+  // Clarify paste: first ~4 significant tokens as a head phrase.
   const tokens = significantTitleTokens(title);
-  if (tokens.length === 0) return false;
-  if (tokens.length === 1 && tokens[0].length >= 8 && lower.includes(tokens[0])) {
-    return true;
-  }
-  // Long titles (Compliance — SOW, Timelines, Budgets…) must not require EVERY
-  // token — pasted clarify replies usually only repeat the head phrase.
   const head = tokens.slice(0, Math.min(4, tokens.length)).join(" ");
   if (head.length >= 12 && lower.includes(head)) return true;
-  const hits = tokens.filter((t) => lower.includes(t));
-  if (hits.length >= 2 && tokens.every((t) => lower.includes(t))) return true;
-  if (hits.length >= 3) return true;
-  if (
-    hits.length >= 2 &&
-    hits.length >= Math.ceil(tokens.length * 0.5)
-  ) {
-    return true;
-  }
   return false;
 }
 
@@ -526,6 +459,34 @@ function escapeRegExp(text: string): string {
  * Incidental mentions (Umatilla cited in an RFP examples section, cross-refs like
  * "See 3.1") must NOT hijack away from the open tab.
  */
+function messageCitesOutlineMark(message: string, mark: string): boolean {
+  if (!mark || !(message || "").trim()) return false;
+  const low = message.toLowerCase();
+  const prefixes = [
+    "§",
+    "§ ",
+    "section ",
+    "sec ",
+    "sec. ",
+    "fix ",
+    "edit ",
+    "rewrite ",
+  ];
+  for (const prefix of prefixes) {
+    const needle = `${prefix}${mark}`;
+    let start = 0;
+    while (start <= low.length) {
+      const idx = low.indexOf(needle, start);
+      if (idx < 0) break;
+      const end = idx + needle.length;
+      // Do not treat "section 1" as a hit inside "section 11".
+      if (end >= low.length || !/\d/.test(low[end] || "")) return true;
+      start = end;
+    }
+  }
+  return false;
+}
+
 export function messageExplicitlyTargetsRemoteSection(
   message: string,
   remote: OutlineSection,
@@ -534,96 +495,10 @@ export function messageExplicitlyTargetsRemoteSection(
   if (!viewing || remote.id === viewing.id) return true;
   const text = (message || "").trim();
   if (!text) return false;
-
   const title = remote.title || "";
   if (messageMentionsSectionTitle(text, title)) return true;
-
-  const markNum = title.match(/^(\d+)\s*[.:—–\-)]/);
-  if (markNum) {
-    const n = markNum[1];
-    if (new RegExp(`(?:§|sec(?:tion)?\\.?)\\s*${n}\\b`, "i").test(text)) return true;
-    if (
-      new RegExp(
-        `\\b(?:fix|edit|rewrite|update|patch|improve)\\s+(?:§\\s*)?${n}\\b`,
-        "i"
-      ).test(text)
-    ) {
-      return true;
-    }
-  }
-
-  const dotted = title.match(/^(\d+\.\d+)/);
-  if (dotted) {
-    const num = escapeRegExp(dotted[1]);
-    if (
-      new RegExp(
-        `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)\\b[^.]{0,100}\\b${num}\\b`,
-        "i"
-      ).test(text)
-    ) {
-      return true;
-    }
-    if (new RegExp(`\\bsection\\s+${num}\\b`, "i").test(text)) return true;
-  }
-
-  const name = sectionPersonName(title);
-  if (name.length >= 4) {
-    const first = name.split(/\s+/)[0] || name;
-    const namePat = escapeRegExp(name);
-    const firstPat = escapeRegExp(first);
-    if (
-      new RegExp(
-        `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove|swap\\s+out|instead\\s+of)\\s+(?:the\\s+)?(?:${namePat}|${firstPat})`,
-        "i"
-      ).test(text)
-    ) {
-      return true;
-    }
-    if (new RegExp(`\\b${namePat}\\s+(?:bio|resume|case\\s*study)\\b`, "i").test(text)) {
-      return true;
-    }
-  }
-
-  const core = sectionTitleCore(title).toLowerCase();
-  if (isOurWorkSection(remote)) {
-    if (/\b(?:our\s+work|case\s+study\s+tab)\b/i.test(text)) return true;
-    const lower = text.toLowerCase();
-    for (const needle of [
-      "umatilla",
-      "rock the locks",
-      "carbondale",
-      "maricopa",
-      "deschutes",
-    ]) {
-      if (!core.includes(needle) && !name.toLowerCase().includes(needle)) continue;
-      if (!lower.includes(needle)) continue;
-      if (/\b(?:needs|need)\s+(?:a\s+)?rewrite\b/i.test(text)) return true;
-      if (
-        /\b(?:misrepresent|addressed|hasn't been addressed|flagged)\b/i.test(text)
-      ) {
-        return true;
-      }
-      if (
-        /\bcase\s+stud/i.test(text) &&
-        !/\b(?:in\s+this|this)\s+case\s+stud/i.test(text)
-      ) {
-        return true;
-      }
-      if (
-        new RegExp(
-          `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)\\s+(?:the\\s+)?(?:${needle.replace(/\s+/g, "\\s+")}|case\\s+study)`,
-          "i"
-        ).test(text)
-      ) {
-        return true;
-      }
-    }
-  }
-
-  if (isBioSection(remote) && messageTargetsBios(text)) {
-    if (/\b(?:team\s+bio|bio\s+tab|resume)\b/i.test(text)) return true;
-  }
-
+  const markMatch = title.trim().match(/^(\d+)\s*[.:—–\-)]/);
+  if (markMatch?.[1] && messageCitesOutlineMark(text, markMatch[1])) return true;
   return false;
 }
 
@@ -688,11 +563,17 @@ export function chatBusyStatusLabel(
   if (/apply these fixes|patch-wise across|across the proposal/i.test(trimmed)) {
     return "Applying patch-wise fixes across the proposal…";
   }
-  // Improve pin: prefer Improving/Editing over "Answering" (trailing ? on edit asks).
+  // Improve pin: prefer Improving/Editing over "Answering" only for non-questions.
   if (options?.sameSectionPinned && options.referenceMode === "selection") {
+    if (messageLooksChatQuestion(trimmed)) {
+      return `Answering about ${title}…`;
+    }
     return `Editing excerpt in ${title}…`;
   }
   if (options?.sameSectionPinned && options.referenceMode === "section") {
+    if (messageLooksChatQuestion(trimmed)) {
+      return `Answering about ${title}…`;
+    }
     return `Improving ${title}…`;
   }
   if (messageLooksChatQuestion(trimmed)) {
@@ -1053,32 +934,38 @@ export function resolveChatTarget(
     };
   }
   if (titleHits.length > 1) {
-    // Prefer unique topic headword when several long titles share tokens.
-    const byTopic = resolveSectionByUniqueTopic(sections, text);
-    if (byTopic && titleHits.some((s) => s.id === byTopic.id)) {
+    // Prefer the tab the user is editing — not incidental title mentions or
+    // static topic keyword preference.
+    const primary = titleHits.filter((s) =>
+      messagePrimaryEditTargetsSection(text, s)
+    );
+    if (primary.length === 1) {
       return {
         kind: "resolved",
-        section: byTopic,
+        section: primary[0],
         confidence: "high",
-        reason: "title-topic",
+        reason: "title-primary",
       };
     }
-    const ranked = [...titleHits].sort(
-      (a, b) =>
-        sectionTitleCore(b.title || "").length -
-        sectionTitleCore(a.title || "").length
-    );
-    const top = ranked[0];
-    const topLen = sectionTitleCore(top.title || "").length;
-    const tied = ranked.filter(
-      (s) => sectionTitleCore(s.title || "").length === topLen
-    );
-    if (tied.length === 1) {
+    if (primary.length > 1) {
+      const rankedPrimary = [...primary].sort(
+        (a, b) =>
+          sectionTitleCore(b.title || "").length -
+          sectionTitleCore(a.title || "").length
+      );
       return {
         kind: "resolved",
-        section: top,
+        section: rankedPrimary[0],
         confidence: "high",
-        reason: "title",
+        reason: "title-primary",
+      };
+    }
+    if (viewing && titleHits.some((s) => s.id === viewing.id)) {
+      return {
+        kind: "resolved",
+        section: viewing,
+        confidence: "medium",
+        reason: "title-viewing",
       };
     }
     return {
@@ -1099,38 +986,8 @@ export function resolveChatTarget(
     };
   }
 
-  // Client / case-study name (Umatilla, Rock the Locks) BEFORE unique-topic —
-  // only when explicitly targeted — incidental mentions stay on the open tab.
-  const clientNeedles = [
-    ...new Set([
-      ...(lower.match(
-        /\b(?:umatilla|rock the locks|carbondale|maricopa|deschutes)\b/g
-      ) || []),
-      ...((text.match(
-        /\bcity of [A-Za-z]+(?:\s+[A-Za-z]+){0,2}\b/gi
-      ) || []) as string[]).map((n) => n.toLowerCase()),
-    ]),
-  ];
-  if (clientNeedles.length > 0) {
-    const clientHits = sections.filter((section) => {
-      const core = sectionTitleCore(section.title || "").toLowerCase();
-      const name = sectionPersonName(section.title || "").toLowerCase();
-      const blob = `${core} ${name}`;
-      return clientNeedles.some((n) => blob.includes(n));
-    });
-    const uniqueClient = [...new Map(clientHits.map((s) => [s.id, s])).values()];
-    if (
-      uniqueClient.length === 1 &&
-      mayRouteToRemoteSection(text, uniqueClient[0], viewing)
-    ) {
-      return {
-        kind: "resolved",
-        section: uniqueClient[0],
-        confidence: "high",
-        reason: "client-name",
-      };
-    }
-  }
+  // Client / case-study name in a title is handled by messageMentionsSectionTitle
+  // (distinctive ≥8 title tokens) — no hardcoded client keyword list.
 
   // "section 15" / "section 15 of 18" = manuscript ordinal — before topic/history.
   const byOrdinal = resolveSectionByOrdinal(sections, text);
@@ -1143,9 +1000,15 @@ export function resolveChatTarget(
     };
   }
 
-  // Unique "References" / "Pricing" tab — only when intentionally targeted.
+  // Unique "References" / "Pricing" tab — only when intentionally targeted, and
+  // never over the open tab unless the message primary-edits that remote tab.
   const byTopic = resolveSectionByUniqueTopic(sections, text);
-  if (byTopic) {
+  if (
+    byTopic &&
+    (!viewing ||
+      byTopic.id === viewing.id ||
+      mayRouteToRemoteSection(text, byTopic, viewing))
+  ) {
     return {
       kind: "resolved",
       section: byTopic,
@@ -1161,7 +1024,10 @@ export function resolveChatTarget(
     /^(?:apply|do\s+it|yes|ok|please|go\s+ahead)\b/i.test(text);
   const latestNamesSection =
     /(?:§|sec(?:tion)?\.?)\s*\d+\b/i.test(text) ||
-    /\b(?:umatilla|rock\s+the\s+locks|case\s+stud|references?)\b/i.test(text);
+    /\b\d+\.\d+\b/.test(text) ||
+    /\b(?:fix|edit|rewrite|update|patch|fill|improve|scrub|clean|revise)\b/i.test(
+      text
+    );
   const thisMeansOpenTab =
     Boolean(viewing) &&
     /\b(?:is\s+this|this\s+(?:accurate|correct|right|complete|enough)|cross[\s-]?verify\s+(?:this|it))\b/i.test(

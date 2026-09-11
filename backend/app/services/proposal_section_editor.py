@@ -168,6 +168,12 @@ Rules:
     that happens to be numbered the same. When an AUTHORITATIVE TARGET TAB is
     provided, answer ONLY about that tab's title + Open-tab draft. Never describe
     a different sidebar section.
+3b. CRITICAL — "do we have X / anywhere in the proposal / is there an X section":
+    the SIDEBAR OUTLINE (titles + drafted/empty status) is the source of truth.
+    A checklist, TOC, or cross-ref row that says "Included: Yes · Location: X tab"
+    is NOT proof that X exists. If no sidebar title matches X, answer **No** and
+    say the open tab's checklist is wrong / points at a missing tab. Never treat
+    the open-tab checklist as the whole proposal.
 4. If the user asks whether something meets the RFP, cite specific RFP asks and gaps.
    Quote exact clause wording when provided in BUDGET / COST EXCERPT or HARD FLAGS.
    Never invent section titles. Independent mandatory asks stay independent — fee-method
@@ -2234,23 +2240,33 @@ def _manuscript_digest(
 ) -> str:
     """Compact full-proposal context for chat (TOC + section snippets).
 
-    Each heading includes Sidebar N/total so "section 11" maps to the proposal
+    Each heading includes Sidebar N/total so "section N" maps to the proposal
     outline — not an RFP document section with the same number.
+
+    titles_only includes drafted/empty status so "do we have X anywhere?" can be
+    answered from the real sidebar, not from a checklist cross-ref that invents a tab.
     """
     total = len(draft.sections)
     lines: list[str] = [
         "FULL PROPOSAL MANUSCRIPT (every section — use this for whole-proposal answers).\n"
-        "Sidebar N/total is the proposal outline index the user means by 'section N'."
+        "Sidebar N/total is the proposal outline index the user means by 'section N'.\n"
+        "A topic EXISTS in the proposal only if it appears as a sidebar title below. "
+        "Checklist/TOC rows that claim 'Location: Foo tab' do NOT create Foo when Foo "
+        "is missing from this list — report that as a checklist error."
     ]
     used = 0
     for index, section in enumerate(draft.sections):
         title = section.title or section.id
         heading = f"Sidebar {index + 1}/{total} — {title}"
         body = (section.content or "").strip()
-        if titles_only or not body:
-            block = f"\n### {heading}\n" + (
-                "(empty)\n" if not body and not titles_only else ""
+        words = word_count(body) if body else 0
+        if titles_only:
+            status = (
+                "empty — not drafted" if words == 0 else f"drafted ({words} words)"
             )
+            block = f"\n### {heading}\nStatus: {status}\n"
+        elif not body:
+            block = f"\n### {heading}\n(empty)\n"
         else:
             cap = 2_400 if total <= 12 else 1_400
             snippet = body[:cap] + ("…" if len(body) > cap else "")
@@ -2474,46 +2490,91 @@ _TITLE_STOPWORDS = frozenset(
 )
 
 
-def _message_mentions_section_title(message: str, title: str) -> bool:
+def _outline_title_phrase_in_message(message: str, title: str) -> bool:
+    """True when a real outline title phrase appears in the ask (no verb keyword lists).
+
+    Uses contiguous multi-word / long phrases from the manuscript sidebar title only.
+    Short single tokens (e.g. a client nickname) do not rematch — the LLM
+    ``primarySectionId`` owns those cases.
+    """
     lower = _normalize_title_phrase(message)
     if not lower or not (title or "").strip():
         return False
     full = _normalize_title_phrase(title)
-    if len(full) >= 4 and full in lower:
+    if len(full) >= 12 and full in lower:
         return True
     core = _normalize_title_phrase(_section_title_core(title))
-    if len(core) >= 4 and core in lower:
+    if len(core) >= 10 and core in lower:
         return True
-    tokens = [
-        t
-        for t in core.split()
-        if len(t) >= 4 and t not in _TITLE_STOPWORDS
-    ]
-    if not tokens:
-        return False
-    if len(tokens) == 1 and len(tokens[0]) >= 8 and tokens[0] in lower:
-        return True
-    # Long titles must not require every token — clarify replies often paste the head.
-    head = " ".join(tokens[: min(4, len(tokens))])
-    if len(head) >= 12 and head in lower:
-        return True
-    hits = [t for t in tokens if t in lower]
-    if len(hits) >= 2 and all(t in lower for t in tokens):
-        return True
-    if len(hits) >= 3:
-        return True
-    if len(hits) >= 2 and len(hits) >= (len(tokens) + 1) // 2:
+    name = ""
+    raw = (title or "").strip()
+    if "—" in raw:
+        name = raw.split("—", 1)[-1].strip()
+    elif "–" in raw:
+        name = raw.split("–", 1)[-1].strip()
+    name_n = _normalize_title_phrase(name)
+    if len(name_n) >= 12 and name_n in lower:
         return True
     return False
+
+
+def _outline_mark_number(title: str) -> str | None:
+    """Leading sidebar mark digits from a title ('21. References' → '21')."""
+    i = 0
+    raw = (title or "").lstrip()
+    while i < len(raw) and raw[i].isdigit():
+        i += 1
+    if i == 0:
+        return None
+    if i < len(raw) and raw[i] in ".:—–-) \t":
+        return raw[:i]
+    if i < len(raw) and raw[i].isspace():
+        return raw[:i]
+    return None
+
+
+def _message_cites_outline_mark(message: str, mark: str) -> bool:
+    """Plain string cite of a sidebar mark — no verb synonym tables."""
+    if not mark or not (message or "").strip():
+        return False
+    low = (message or "").casefold()
+    for prefix in (
+        "§",
+        "§ ",
+        "section ",
+        "sec ",
+        "sec. ",
+        "fix ",
+        "edit ",
+        "rewrite ",
+    ):
+        needle = f"{prefix}{mark}"
+        start = 0
+        while True:
+            idx = low.find(needle, start)
+            if idx < 0:
+                break
+            end = idx + len(needle)
+            # Do not treat "section 1" as a hit inside "section 11".
+            if end >= len(low) or not low[end].isdigit():
+                return True
+            start = end
+    return False
+
+
+def _message_mentions_section_title(message: str, title: str) -> bool:
+    """Title presence for clarify / history — outline phrases only, no verb lists."""
+    return _outline_title_phrase_in_message(message, title)
 
 
 def _is_our_work_section(section: ProposalSection | None) -> bool:
     if section is None:
         return False
-    return (
-        (section.id.startswith("section-3-work-") and section.id != "section-3-work-placeholder")
-        or bool(re.search(r"(?i)\bcase\s*stud(?:y|ies)\b", section.title or ""))
-    )
+    sid = section.id or ""
+    if sid.startswith("section-3-work-") and sid != "section-3-work-placeholder":
+        return True
+    title_l = (section.title or "").casefold()
+    return "case stud" in title_l
 
 
 def _message_explicitly_targets_remote_section(
@@ -2521,107 +2582,18 @@ def _message_explicitly_targets_remote_section(
     remote: ProposalSection,
     default: ProposalSection | None,
 ) -> bool:
-    """True when the user clearly wants `remote`, not the API-bound open tab."""
+    """True when the ask names this outline tab (title phrase or mark), not verbs."""
     if default is None or remote.id == default.id:
         return True
     message = (text or "").strip()
     if not message:
         return False
-
     title = remote.title or ""
-    if _message_mentions_section_title(message, title):
+    if _outline_title_phrase_in_message(message, title):
         return True
-
-    mark = re.match(r"^\s*(\d+)\s*[.:—–\-\)]", title, re.I)
-    if mark:
-        n = mark.group(1)
-        if re.search(rf"(?:§|sec(?:tion)?\.?)\s*{re.escape(n)}\b", message, re.I):
-            return True
-        if re.search(
-            rf"\b(?:fix|edit|rewrite|update|patch|improve)\s+(?:§\s*)?{re.escape(n)}\b",
-            message,
-            re.I,
-        ):
-            return True
-
-    dotted = re.match(r"^\s*(\d+\.\d+)", title)
-    if dotted:
-        num = re.escape(dotted.group(1))
-        if re.search(
-            rf"\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)\b"
-            rf"[^.]{{0,100}}\b{num}\b",
-            message,
-            re.I,
-        ):
-            return True
-        if re.search(rf"\bsection\s+{num}\b", message, re.I):
-            return True
-
-    name = ""
-    if "—" in title:
-        name = title.split("—", 1)[-1].strip()
-    elif "–" in title:
-        name = title.split("–", 1)[-1].strip()
-    name = re.sub(r"^\d+\.\d+\s*[—\-–:]\s*", "", name).strip()
-    if len(name) >= 4:
-        first = name.split()[0]
-        if re.search(
-            rf"\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove|"
-            rf"swap\s+out|instead\s+of)\s+(?:the\s+)?(?:{re.escape(name)}|{re.escape(first)})",
-            message,
-            re.I,
-        ):
-            return True
-        if re.search(
-            rf"\b{re.escape(name)}\s+(?:bio|resume|case\s*study)\b",
-            message,
-            re.I,
-        ):
-            return True
-
-    core = _section_title_core(title).casefold()
-    if _is_our_work_section(remote):
-        if re.search(r"\b(?:our\s+work|case\s+study\s+tab)\b", message, re.I):
-            return True
-        lower = message.casefold()
-        for needle in (
-            "umatilla",
-            "rock the locks",
-            "carbondale",
-            "maricopa",
-            "deschutes",
-        ):
-            if needle not in core and needle not in name.casefold():
-                continue
-            if needle not in lower:
-                continue
-            if re.search(r"\b(?:needs|need)\s+(?:a\s+)?rewrite\b", message, re.I):
-                return True
-            if re.search(
-                r"\b(?:misrepresent|addressed|hasn't been addressed|flagged)\b",
-                message,
-                re.I,
-            ):
-                return True
-            if re.search(r"\bcase\s+stud", message, re.I) and not re.search(
-                r"\b(?:in\s+this|this)\s+case\s+stud", message, re.I
-            ):
-                return True
-            needle_pat = needle.replace(" ", r"\s+")
-            if re.search(
-                rf"\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)"
-                rf"\s+(?:the\s+)?(?:{needle_pat}|case\s+study)\b",
-                message,
-                re.I,
-            ):
-                return True
-
-    if remote.id.startswith("section-2-bio-") and re.search(
-        r"\b(?:bio|bios|resume|team\s*bios?)\b", message, re.I
-    ):
-        if re.search(r"\b(?:team\s+bio|bio\s+tab|resume)\b", message, re.I):
-            return True
-
+    mark = _outline_mark_number(title)
+    if mark and _message_cites_outline_mark(message, mark):
+        return True
     return False
 
 
@@ -2630,197 +2602,39 @@ def _resolve_section_from_message(
     user_message: str,
     default_section_id: str,
 ) -> ProposalSection | None:
+    """Sync fallback only: outline title/mark in the message, else stay on open tab.
+
+    Smart rematches (nicknames, voice asks, fee-adjacent prose) belong to the LLM
+    ``primarySectionId`` — never a verb/keyword regex table.
+    """
     default = _find_draft_section(draft, default_section_id)
-    text = user_message.strip()
+    text = (user_message or "").strip()
     if not text:
         return default
-    lower = text.casefold()
-    ranked = sorted(
-        draft.sections,
-        key=lambda s: len(s.title or ""),
-        reverse=True,
-    )
-    title_hits = [
-        s for s in ranked if _message_mentions_section_title(text, s.title or "")
+
+    phrase_hits = [
+        s
+        for s in draft.sections
+        if _outline_title_phrase_in_message(text, s.title or "")
     ]
-    if len(title_hits) == 1:
-        return title_hits[0]
-    if len(title_hits) > 1:
-        # Prefer unique "References"/"Pricing" topic among hits.
-        for topic in ("references", "reference", "pricing", "budget", "insurance"):
-            if not re.search(rf"\b{topic}\b", text, re.I):
-                continue
-            topic_hits = [
-                s
-                for s in title_hits
-                if topic in (s.title or "").casefold()
-            ]
-            if len(topic_hits) == 1:
-                return topic_hits[0]
-        title_hits.sort(
-            key=lambda s: len(_section_title_core(s.title or "")),
+    if len(phrase_hits) == 1:
+        return phrase_hits[0]
+    if len(phrase_hits) > 1:
+        phrase_hits.sort(
+            key=lambda s: len(_normalize_title_phrase(_section_title_core(s.title or ""))),
             reverse=True,
         )
-        top = title_hits[0]
-        top_len = len(_section_title_core(top.title or ""))
-        tied = [
-            s
-            for s in title_hits
-            if len(_section_title_core(s.title or "")) == top_len
-        ]
-        return tied[0] if len(tied) == 1 else title_hits[0]
+        return phrase_hits[0]
 
-    # §21 / "Fix 21" → title starting with 21. (sidebar mark, not ordinal)
-    mark = re.search(
-        r"(?:§|sec(?:tion)?\.?)\s*(\d+)\b(?!\s*\.\d)"
-        r"|\b(?:fix|edit|rewrite|update|patch)\s+(?:§\s*)?(\d+)\b",
-        text,
-        re.I,
-    )
-    if mark:
-        n = mark.group(1) or mark.group(2)
-        mark_hits = [
-            s
-            for s in draft.sections
-            if re.match(rf"^\s*{re.escape(n)}\s*[.:—–\-\)]", s.title or "", re.I)
-            or re.match(rf"^\s*{re.escape(n)}\s+", s.title or "", re.I)
-        ]
-        if len(mark_hits) == 1:
-            return mark_hits[0]
-        if len(mark_hits) > 1:
-            for s in mark_hits:
-                if any(
-                    tok in lower
-                    for tok in re.findall(r"[a-z]{4,}", (s.title or "").casefold())
-                ):
-                    return s
-            return mark_hits[0]
-
-    # Client / project name in title (Umatilla) — only when explicitly targeted.
-    client_needles = re.findall(
-        r"\b(?:umatilla|rock\s+the\s+locks|carbondale|maricopa|deschutes|"
-        r"city\s+of\s+[a-z]+(?:\s+[a-z]+){0,2})\b",
-        lower,
-    )
-    if client_needles:
-        client_hits: list[ProposalSection] = []
-        for section in draft.sections:
-            blob = (section.title or "").casefold()
-            if any(n.replace("  ", " ") in blob for n in client_needles):
-                client_hits.append(section)
-        if len(client_hits) == 1 and _message_explicitly_targets_remote_section(
-            text, client_hits[0], default
-        ):
-            return client_hits[0]
-
-    named_hits: list[ProposalSection] = []
-    for section in ranked:
-        title = (section.title or "").strip()
-        if "—" in title:
-            name = title.split("—", 1)[-1].strip()
-        elif "–" in title:
-            name = title.split("–", 1)[-1].strip()
-        else:
-            name = ""
-        name = re.sub(r"^\d+\.\d+\s*[—\-–:]\s*", "", name).strip()
-        if len(name) >= 4 and name.casefold() in lower:
-            named_hits.append(section)
-    if len(named_hits) == 1 and _message_explicitly_targets_remote_section(
-        text, named_hits[0], default
-    ):
-        return named_hits[0]
-    if len(named_hits) > 1:
-        instead = re.search(
-            r"\b(?:instead\s+of|replace|remove|swap\s+out)\s+([^,.]+?)(?:\s+bio|\s+resume|\s+with|\s+for|$)",
-            text,
-            re.I,
-        )
-        if instead:
-            needle = instead.group(1).strip().casefold()
-            for section in named_hits:
-                title = section.title or ""
-                name = title.split("—", 1)[-1].strip() if "—" in title else title
-                if needle and needle in name.casefold():
-                    return section
-        return named_hits[0]
-
-    num_match = re.search(
-        r"\b(?:section\s*)?(\d+\.\d+)\b",
-        lower,
-    )
-    if num_match:
-        num = num_match.group(1)
-        for section in draft.sections:
-            t = (section.title or "").casefold()
-            if t.startswith(f"{num} ") or t.startswith(num):
-                if _message_explicitly_targets_remote_section(text, section, default):
-                    return section
-                break
-
-    # UI "Section 15 of 18" → 1-based index in sidebar order (not dotted 3.1 titles).
-    ordinal = re.search(r"\bsection\s+(\d+)\b(?:\s+of\s+\d+)?(?!\s*\.\d)", lower)
-    if ordinal:
-        n = int(ordinal.group(1))
-        if 1 <= n <= len(draft.sections):
-            return draft.sections[n - 1]
-
-    # Unique topic tab — only when intentionally targeted (not "before the References fix").
-    for topic in (
-        "references",
-        "reference",
-        "pricing",
-        "budget",
-        "insurance",
-        "subcontractor",
-    ):
-        if not _message_targets_unique_topic(text, topic):
-            continue
-        topic_hits = [
-            s for s in draft.sections if topic in (s.title or "").casefold()
-        ]
-        if len(topic_hits) == 1:
-            return topic_hits[0]
-
-    if re.search(r"\b(bio|bios|resume|resumes|team\s*bios?|team\s*member)\b", text, re.I):
-        from app.services.proposal_capability_bio_grounding import (
-            is_personnel_bio_section,
-        )
-
-        if user_points_at_open_section(text) or (
-            default and is_personnel_bio_section(default)
-        ):
-            return default
-        bios = [
-            s
-            for s in draft.sections
-            if s.id.startswith("section-2-bio-") and s.id != "section-2-bio-placeholder"
-        ]
-        if bios:
-            if default and any(b.id == default.id for b in bios):
-                return default
-            return bios[-1]
-
-    # Only remap to Cost Proposal for *global* rebuild asks — not "here fill budget
-    # part" on a case study that itself has a budget VERIFY table.
-    if user_asks_global_cost_rebuild(text) and not user_points_at_open_section(text):
-        budget_secs = [s for s in draft.sections if section_is_budget_related(s)]
-        if budget_secs:
-            budget_secs.sort(
-                key=lambda s: budget_section_score(s.title or ""),
-                reverse=True,
-            )
-            best = budget_secs[0]
-            if not default or not section_is_budget_related(default):
-                return best
-
-    # Cross-tab: user quotes or paraphrases a claim that lives in another section.
-    content_hit = _resolve_section_by_content_needle(draft, text, default_section_id)
-    if content_hit is not None and (
-        default is None
-        or content_hit.id == default.id
-        or _message_explicitly_targets_remote_section(text, content_hit, default)
-    ):
-        return content_hit
+    mark_hits: list[ProposalSection] = []
+    for section in draft.sections:
+        mark = _outline_mark_number(section.title or "")
+        if mark and _message_cites_outline_mark(text, mark):
+            mark_hits.append(section)
+    if len(mark_hits) == 1:
+        return mark_hits[0]
+    if len(mark_hits) > 1:
+        return default
 
     return default
 
@@ -2856,10 +2670,8 @@ def _history_may_override_open_tab(user_message: str) -> bool:
         r"(?is)^(?:apply|do\s+it|yes|ok|please|go\s+ahead)\b", text
     ):
         return False
-    if re.search(
-        r"(?i)(?:§|sec(?:tion)?\.?)\s*\d+\b|\b(?:umatilla|rock\s+the\s+locks|case\s+stud|references?)\b",
-        text,
-    ):
+    # Already names a sidebar mark / dotted id — don't inherit history target.
+    if re.search(r"(?i)(?:§|sec(?:tion)?\.?)\s*\d+\b|\b\d+\.\d+\b", text):
         return False
     return True
 
@@ -2871,18 +2683,6 @@ def _message_targets_unique_topic(text: str, topic: str) -> bool:
     # "implement budget table here" must stay on the open tab — never steal to Cost.
     if topic in ("budget", "pricing", "cost") and user_points_at_open_section(text):
         return False
-    if re.search(
-        r"(?i)\b(?:umatilla|rock\s+the\s+locks|case\s+stud(?:y|ies)|cover\s+letter)\b",
-        text,
-    ):
-        topic_primary = re.search(
-            rf"(?i)(?:fix|edit|rewrite|update|patch|fill|improve)\s+(?:the\s+)?{re.escape(topic)}\b|"
-            rf"\b{re.escape(topic)}\s+(?:section|tab|contacts?|integrity)\b|"
-            rf"(?:§|sec(?:tion)?\.?)\s*\d+[^\n]{{0,40}}\b{re.escape(topic)}\b",
-            text,
-        )
-        if not topic_primary:
-            return False
     if topic in ("references", "reference"):
         return bool(
             re.search(
@@ -2898,15 +2698,18 @@ def _message_targets_unique_topic(text: str, topic: str) -> bool:
 
 
 def _message_has_explicit_section_target(user_message: str) -> bool:
-    """Latest message already names a section / client / case study — don't use history."""
+    """Latest message already names a section — don't inherit history target."""
     text = user_message or ""
     if re.search(
-        r"(?i)(?:§|sec(?:tion)?\.?)\s*\d+\b|"
-        r"\b(?:umatilla|rock\s+the\s+locks|carbondale|maricopa|"
-        r"oregon\s+employment|cover\s+letter|case\s+stud)\b|"
-        r"\breferences?\b",
+        r"(?i)(?:§|sec(?:tion)?\.?)\s*\d+\b|\b\d+\.\d+\b",
         text,
     ):
+        return True
+    # Any real edit ask owns targeting via title resolve — not prior-turn history.
+    if re.search(
+        r"(?i)\b(?:fix|edit|rewrite|update|patch|fill|improve|scrub|clean|revise)\b",
+        text,
+    ) and re.search(r"[a-z]{5,}", text, re.I):
         return True
     return False
 
@@ -3025,11 +2828,13 @@ EDIT_SCOPE_PLAN_PROMPT = """You plan how to apply a user's edit to ONE proposal 
 Scan the ENTIRE Current section content. Identify EVERY passage that the user's ask
 requires changing — not just the first match.
 
-Default: surgical PATCH(es). Choose full_rewrite ONLY when the user clearly wants the
-whole section regenerated or the change cannot be localized.
+Default: surgical PATCH(es). Choose full_rewrite when the change cannot be localized
+to a short span — including voice/tone/energy rewrites, closer/signature changes, or
+any ask that effectively regenerates most of the open tab. There is no special-case
+section type: apply the same judgment to every tab.
 
-NEVER choose full_rewrite for voice / tone / brand-voice / "align with zö voice" asks.
-Those are style passes — keep structure, tables, and length; scrub banned patterns only.
+Prefer patch for a single named sentence, table cell, or short passage. Prefer
+full_rewrite when the user wants the whole open tab rewritten or improved end-to-end.
 
 NEVER choose full_rewrite when the user asks to ADD / CREATE a new sidebar section or tab
 (alongside existing content). Those are structural adds handled elsewhere — not rewrites
@@ -3095,19 +2900,15 @@ Rules:
    labeled form/table (Name/Title/Phone/Email) + narrative must stay coherent: mode MUST be
    full_rewrite. kbQueries for B's profile — never invent; missing fields → MANUAL FILL /
    VERIFY only — never leave A's leftover values on B.
-9. UNIVERSAL CROSS-SECTION (every ask, every section type): When OTHER SECTIONS digest is
-   provided, ALWAYS scan it before planning. If THIS edit would make any shared agency fact
-   disagree with another tab (legal name, address, email, phone, primary/authorized contact,
-   signer, team size, named personnel, certs, insurance, registration, budget totals/ceilings,
-   phase fees, case-study claims, coverage statuses, etc.), emit siblingEdits for those tabs.
-   Empty siblingEdits when nothing conflicts. NEVER invent siblingEdits for unrelated forms
-   (e.g. Environmental Purchasing) when the user only asked to improve THIS open tab and no
-   shared fact changed. Improve-pin / open-tab-only asks: prefer siblingEdits=[] unless a
-   real same-fact contradiction would remain.
+9. OPEN TAB ONLY: siblingEdits MUST be [] for Improve-pin / open-tab / single-section
+   asks. Other tabs are READ-ONLY context for planning — never schedule rewrites of
+   unrelated forms. Only emit siblingEdits when the user clearly asked for a multi-tab
+   change OR a shared fact edit would leave an unavoidable contradiction (rare).
 10. RFP REQUIREMENTS: When RFP CONTEXT is provided, each editorInstruction (and full_rewrite
-   understoodAsk) MUST require covering the scored / demanded asks for THIS section without
-   RFP-echo (answer what we will do/prove; do not paraphrase the buyer). Do not drop a
-   required form field, eval criterion, or demanded subsection to polish tone.
+   understoodAsk) MUST first check demanded / scored asks for THIS section, then apply the
+   user ask without dropping coverage. Answer what we will do/prove; do not paraphrase the
+   buyer (anti-RFP-echo). Do not drop a required form field, eval criterion, or demanded
+   subsection to polish tone.
 11. REV 6 / zö BRANDING (every editorInstruction): Require first-person we/our in narrative
    tabs; company name "zö agency"; no em dashes; no negation-contrast (rather than / instead
    of / "X, not Y" / not just); no significance-closes; no "worth noting/naming"; no empty
@@ -3772,14 +3573,23 @@ async def _section_chat_advisory_reply(
     excerpt_block = f"\n\nHighlighted excerpt:\n\"{excerpt[:2000]}\"\n" if excerpt else ""
 
     # "section N about?" must not be answered from RFP clause numbering — pin the
-    # resolved sidebar tab and keep RFP/manuscript noise short.
+    # resolved sidebar tab. All other advisory uses the full outline as truth so a
+    # checklist Location row cannot invent a missing sidebar tab.
     sidebar_number_ask = _message_names_sidebar_section_number(user_message)
     target_binding = ""
     if draft is not None:
-        target_binding = _advisory_target_binding(draft, section)
-        if sidebar_number_ask or _is_informational_only_ask(user_message):
+        if sidebar_number_ask:
+            target_binding = _advisory_target_binding(draft, section)
             manuscript_digest = _manuscript_digest(
                 draft, max_chars=8_000, titles_only=True
+            )
+        else:
+            target_binding = (
+                f"Open tab (orientation only): {section.title}\n"
+                "For questions about what exists anywhere in the proposal, the "
+                "SIDEBAR OUTLINE / manuscript digest is authoritative. A checklist "
+                "or TOC Location that names a tab missing from the outline is wrong "
+                "— answer No and say that row is incorrect.\n"
             )
 
     # "Can you verify this?" needs the knowledge base. Without retrieval the model
@@ -4006,7 +3816,8 @@ async def _section_chat_advisory_reply(
         f"Open-tab draft (THIS is what 'section N' refers to when a target is bound):\n"
         f"{(section.content or '')[:6000]}"
     )
-    if sidebar_number_ask or target_binding:
+    if sidebar_number_ask:
+        # Numbered "section N" asks: pin the resolved sidebar tab first.
         prompt = (
             f"RFP: {rfp.title} — {rfp.client}\n\n"
             f"{target_binding}\n"
@@ -4023,21 +3834,22 @@ async def _section_chat_advisory_reply(
             f"{history_block}"
         )
     else:
+        # Default advisory: manuscript/outline first — open tab is orientation only.
         prompt = (
             f"RFP: {rfp.title} — {rfp.client}\n\n"
-            f"RFP context (rescan):\n{packed_rfp}\n"
-            f"{cost_compliance_block}"
-            f"{requirements_block}\n\n"
+            f"{target_binding}\n"
             f"{manuscript_digest}\n\n"
-            f"{guide_block}"
-            f"{target_binding}"
+            f"User message:\n{user_message.strip()}\n\n"
             f"Currently open tab (orientation only — NOT the full proposal):\n"
             f"{section.title}\n\n"
             f"{open_tab_block}"
-            f"{excerpt_block}"
+            f"{excerpt_block}\n\n"
+            f"RFP context (rescan):\n{packed_rfp}\n"
+            f"{cost_compliance_block}"
+            f"{requirements_block}\n"
+            f"{guide_block}"
             f"{kb_block}"
-            f"{history_block}\n\n"
-            f"User message:\n{user_message.strip()}"
+            f"{history_block}"
         )
     system_prompt = SECTION_CHAT_ADVISORY_PROMPT
     if should_apply_budget_playbook(section, user_message):
@@ -4148,6 +3960,19 @@ Rules:
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
 
+OPEN TAB ONLY (hard):
+- Change ONLY this section's prose. Other sidebar tabs are READ-ONLY context.
+- Never paste, regenerate, or "also update" another tab's body in your JSON content.
+- Match shared agency facts already stated elsewhere; if unknown, [MANUAL FILL] / [VERIFY]
+  — do not invent a conflicting value for another tab.
+
+RFP ALIGNMENT (hard):
+- Read the RFP excerpt + COVERAGE CHECKLIST / RFP GAPS for THIS section before editing.
+- Apply the user ask only in ways that still cover demanded / scored asks for this tab.
+- If a requested wording would violate or drop an RFP demand for this section, keep the
+  RFP-aligned substance (or VERIFY) and satisfy the ask without inventing facts.
+- ANTI-RFP-ECHO: proposal answers only — never paraphrase buyer requirements into the body.
+
 Rules:
 1. Directly address the user's edit request.
 2. Use ONLY facts from the evidence corpus. If PACKED KB / 04_Bio is provided, every
@@ -4220,6 +4045,15 @@ SELECTION_EDIT_PROMPT = """You revise ONE selected excerpt inside a zö agency p
 
 The user highlighted a span of text. You receive the FULL section for context (voice, headings, flow).
 Return ONLY the replacement text for that span — not the full section.
+
+OPEN TAB + EXCERPT ONLY (hard):
+- Change ONLY the selected span in THIS section. Other sidebar tabs are READ-ONLY.
+- Never rewrite another tab or expand the replacement into a full-section dump.
+
+RFP ALIGNMENT (hard):
+- When RFP CONTEXT / coverage notes are present, keep this span compliant with demanded
+  asks for THIS section. If the user ask would break RFP coverage, keep RFP-aligned
+  substance (or VERIFY) and still honor the ask without inventing facts.
 
 Rules:
 1. Change ONLY what the user asked for in the selected excerpt — but if OTHER SECTIONS or
@@ -4365,9 +4199,10 @@ Return ONLY JSON:
 
 _search_semaphore = asyncio.Semaphore(4)
 
-_NEAR_FULL_SELECTION_RATIO = 0.85
+_NEAR_FULL_SELECTION_RATIO = 0.5
 _MIN_EXCERPT_WORDS_FOR_REGRESSION_GUARD = 40
-_MAX_EXCERPT_WORD_LOSS_RATIO = 0.12
+# Allow legitimate tighten/voice rewrites; still reject near-wipes below.
+_MAX_EXCERPT_WORD_LOSS_RATIO = 0.40
 
 
 def _gap_fields_from_text(text: str) -> list[str]:
@@ -4483,7 +4318,12 @@ def _clean_local_edit_body(body: str) -> str:
 
 
 def _understand_local_edit(user_message: str) -> LocalChatEdit | None:
-    """Parse add/remove of a named person or of this highlight — meaning, not keywords."""
+    """Parse add/remove of a named person or of this highlight.
+
+    Local staff add/remove only when that instruction is the *sole* ask. A compound
+    message (other prose before the add/remove line) is a normal section edit for
+    any tab — never hijack it into a selection splice.
+    """
     text = (user_message or "").strip()
     if not text:
         return None
@@ -4499,7 +4339,17 @@ def _understand_local_edit(user_message: str) -> LocalChatEdit | None:
             last = (match.start(), "add", match.group("body"))
     if last is None:
         return None
-    _, kind, raw_body = last
+    match_start, kind, raw_body = last
+    # Compound ask: non-empty content before the matched line → full-tab path.
+    # Exception: remove after a pasted excerpt (long/multi-line prefix).
+    prefix = text[:match_start]
+    prior_lines = [ln.strip() for ln in prefix.splitlines() if ln.strip()]
+    if prior_lines and kind == "add":
+        return None
+    if prior_lines and kind == "remove":
+        pasted_like = sum(len(ln) for ln in prior_lines) >= 80 or len(prior_lines) >= 2
+        if not pasted_like:
+            return None
     body = _clean_local_edit_body(raw_body)
     if kind == "remove":
         if not body or _LOCAL_DEMONSTRATIVE_RE.match(body):
@@ -5104,12 +4954,27 @@ def _selection_covers_most_of_section(content: str, start: int, end: int) -> boo
     return (end - start) / max(len(content), 1) >= _NEAR_FULL_SELECTION_RATIO
 
 
+def _selection_too_large_for_splice(content: str, start: int, end: int) -> bool:
+    """True when a highlight is large enough that a splice is the wrong tool.
+
+    Universal for every section — large excerpts must use full-tab rewrite so
+    voice/closer/rewrite asks never die as DRAFT UNCHANGED selection regressions.
+    """
+    if not content or start < 0 or end <= start or end > len(content):
+        return False
+    if _selection_covers_most_of_section(content, start, end):
+        return True
+    excerpt = content[start:end]
+    return word_count(excerpt) >= 80 and (end - start) / max(len(content), 1) >= 0.35
+
+
 def _selection_replacement_regressed(
     excerpt: str,
     replacement: str,
     *,
     allow_remove: bool = False,
     allow_verify_fill: bool = False,
+    near_full_section: bool = False,
 ) -> bool:
     if allow_remove:
         return False
@@ -5131,7 +4996,10 @@ def _selection_replacement_regressed(
     replacement_words = word_count(replacement)
     if excerpt_words < _MIN_EXCERPT_WORDS_FOR_REGRESSION_GUARD:
         return replacement_words < max(8, int(excerpt_words * 0.65))
-    min_words = int(excerpt_words * (1 - _MAX_EXCERPT_WORD_LOSS_RATIO))
+    # Near-full / large-span rewrites may legitimately tighten prose. Still reject
+    # near-empty replacements that would wipe the tab.
+    loss_ratio = 0.45 if near_full_section else _MAX_EXCERPT_WORD_LOSS_RATIO
+    min_words = int(excerpt_words * (1 - loss_ratio))
     return replacement_words < min_words
 
 
@@ -6425,8 +6293,11 @@ async def _improve_section_selection(
         raise last_mfill_error
 
     refusal = refuse_noncompliant_budget_edit(
-        ask_for_compliance, replacement, prior_text=excerpt,
+        ask_for_compliance,
+        replacement,
+        prior_text=excerpt,
         budget=research.budget if research else None,
+        section=section,
     )
     if refusal:
         raise ProposalError(refusal, status_code=422)
@@ -6435,11 +6306,15 @@ async def _improve_section_selection(
     if blob_for_facts.strip() and VERIFY_TAG_RE.search(replacement):
         replacement, kb_fills = _replace_verify_tags_from_blob(replacement, blob_for_facts)
 
+    near_full = _selection_covers_most_of_section(
+        content, selection_start, selection_end
+    )
     if _selection_replacement_regressed(
         excerpt,
         replacement,
         allow_remove=allow_remove,
         allow_verify_fill=allow_verify_fill,
+        near_full_section=near_full,
     ):
         # Last chance: if LLM truncated a VERIFY fill, try deterministic fill on excerpt.
         if allow_verify_fill and blob_for_facts.strip() and VERIFY_TAG_RE.search(excerpt):
@@ -6451,19 +6326,20 @@ async def _improve_section_selection(
                 filled_excerpt,
                 allow_remove=False,
                 allow_verify_fill=True,
+                near_full_section=near_full,
             ):
                 replacement = filled_excerpt
                 kb_fills = max(kb_fills, fill_n)
             else:
                 raise ProposalError(
                     "Selection edit would remove too much content — rejected to protect the section. "
-                    "Try selecting only the passage with [VERIFY] tags, or ask to fill a specific gap.",
+                    "Pin Improve on the open tab and ask again, or select a smaller passage.",
                     status_code=422,
                 )
         else:
             raise ProposalError(
                 "Selection edit would remove too much content — rejected to protect the section. "
-                "Try selecting only the passage with [VERIFY] tags, or ask to fill a specific gap.",
+                "Pin Improve on the open tab and ask again, or select a smaller passage.",
                 status_code=422,
             )
     if replacement.strip() == excerpt.strip() and kb_fills == 0 and not allow_remove:
@@ -6876,12 +6752,17 @@ async def _redraft_rfp_section(
         dedup_rules = format_anti_duplication_rules()
         prior_block = format_prior_sections_block(prior_secs, exclude_ids={section.id})
         consistency_pin = (
-            "CROSS-SECTION FACT CONSISTENCY (hard): Match legal name, contact, "
-            "team size, certifications, insurance, registration, budget totals, "
-            "and named personnel already stated in OTHER SECTIONS / companyfacts. "
-            "Never invent a conflicting value. Prefer [MANUAL FILL] / [VERIFY] over "
-            "contradicting another tab. Do not dump another tab's full content here — "
-            "only keep facts consistent.\n"
+            "OPEN TAB ONLY (hard): Edit ONLY this section "
+            f"({section.title}). Other sections below are READ-ONLY — use them to "
+            "match shared facts; never rewrite another tab's body in your JSON content.\n"
+            "RFP ALIGNMENT (hard): Check the RFP excerpt + COVERAGE CHECKLIST / GAPS for "
+            "THIS section before applying the user ask. Keep demanded / scored coverage. "
+            "If the ask would break RFP alignment for this tab, keep RFP-aligned substance "
+            "(or VERIFY) and still satisfy the ask without inventing facts.\n"
+            "CROSS-SECTION FACT CONSISTENCY: Match legal name, contact, team size, "
+            "certifications, insurance, registration, budget totals, and named personnel "
+            "already stated in OTHER SECTIONS / companyfacts. Prefer [MANUAL FILL] / "
+            "[VERIFY] over contradicting another tab.\n"
         )
         print(
             f"[chat-rewrite] other sections in context: {len(prior_secs)} "
@@ -6965,6 +6846,7 @@ async def _redraft_rfp_section(
             content,
             prior_text=original_content,
             budget=research.budget if research else None,
+            section=section,
         )
         if refusal:
             raise ProposalError(refusal, status_code=422)
@@ -7003,6 +6885,7 @@ async def _redraft_rfp_section(
                 content,
                 prior_text=original_content,
                 budget=research.budget if research else None,
+                section=section,
             )
             if refusal:
                 raise ProposalError(refusal, status_code=422)
@@ -9596,6 +9479,30 @@ async def improve_proposal_section(
         selection_end = None
         selection_text = None
 
+    # Universal: a large highlight is a full-tab rewrite, never a selection splice
+    # (selection regression was returning DRAFT UNCHANGED for legitimate asks).
+    if (
+        selection_mode
+        and selection_start is not None
+        and selection_end is not None
+    ):
+        focus_body = next(
+            (s.content or "" for s in draft.sections if s.id == section_id),
+            "",
+        )
+        if _selection_too_large_for_splice(
+            focus_body, selection_start, selection_end
+        ):
+            logger.info(
+                "Large selection — full section edit (not selection splice) for %s / %s",
+                rfp_id,
+                section_id,
+            )
+            selection_mode = False
+            selection_start = None
+            selection_end = None
+            selection_text = None
+
     from app.services.proposal_chat_ops import chat_ask_is_proposal_wide
 
     # Improve pin / "this section" binds the open tab. Don't dump the whole
@@ -9968,21 +9875,28 @@ async def improve_proposal_section(
             )
 
         # For multi_patch, do NOT remap to one named section — the plan spans many.
-        # For single_edit / default, named titles + LLM primary beat the open tab.
-        # Exception: "… here / this section" stays on the open tab (budget table insert).
-        stay_on_open = user_points_at_open_section(raw_user_message)
-        if chat_intent != "multi_patch" and not stay_on_open and not apply_fix and not improve_section_pinned:
+        # Smart rematch = LLM primarySectionId. Sync title/mark fallback is mechanical
+        # outline phrases only (no verb/keyword regex tables).
+        stay_on_open = (
+            user_points_at_open_section(raw_user_message) or improve_section_pinned
+        )
+        if chat_intent != "multi_patch" and not stay_on_open and not apply_fix:
             primary = intent_info.get("primarySectionId")
-            default_sec = _find_draft_section(draft, section_id)
             if isinstance(primary, str) and primary.strip():
                 hit = _find_draft_section(draft, primary.strip())
-                if hit is not None and _message_explicitly_targets_remote_section(
-                    raw_user_message, hit, default_sec
-                ):
+                if hit is not None:
+                    if hit.id != section_id:
+                        logger.info(
+                            "Chat target from LLM primarySectionId %s → %s (%s)",
+                            section_id,
+                            hit.id,
+                            hit.title,
+                        )
                     section_id = hit.id
-            section_id = _remap_chat_section_if_explicit(
-                draft, raw_user_message, section_id
-            )
+            else:
+                section_id = _remap_chat_section_if_explicit(
+                    draft, raw_user_message, section_id
+                )
             from_hist = _resolve_section_from_conversation_history(
                 draft,
                 conversation_history,
@@ -10384,10 +10298,12 @@ async def improve_proposal_section(
                 if forced is not None:
                     return forced
 
-            if structure_plan.edit_section_id:
+            if structure_plan.edit_section_id and not improve_section_pinned:
                 section_id = structure_plan.edit_section_id
 
-            stay_on_open = user_points_at_open_section(raw_user_message)
+            stay_on_open = (
+                user_points_at_open_section(raw_user_message) or improve_section_pinned
+            )
             if not stay_on_open and not apply_fix:
                 section_id = _remap_chat_section_if_explicit(
                     draft, raw_user_message, section_id
@@ -11503,16 +11419,37 @@ async def improve_proposal_section(
                             user_message=latest_user_ask,
                             section_content=section.content or "",
                             planned_span_count=1,
+                            selection_start=planned_spans[0][0],
+                            selection_end=planned_spans[0][1],
                         )
                     ):
                         selection_start, selection_end, only = planned_spans[0]
-                        selection_text = (section.content or "")[
-                            selection_start:selection_end
-                        ]
-                        selection_mode = True
-                        user_message = only.editor_instruction
+                        if _selection_too_large_for_splice(
+                            section.content or "", selection_start, selection_end
+                        ):
+                            planned_spans = None
+                            scope_plan = EditScopePlan(
+                                understood_ask=scope_plan.understood_ask
+                                or latest_user_ask.strip(),
+                                mode="full_rewrite",
+                                patches=[],
+                                kb_queries=list(scope_plan.kb_queries or []),
+                                sibling_edits=list(scope_plan.sibling_edits or []),
+                            )
+                            logger.info(
+                                "Large planned patch → full_rewrite for %s / %s",
+                                rfp_id,
+                                section_id,
+                            )
+                        else:
+                            selection_text = (section.content or "")[
+                                selection_start:selection_end
+                            ]
+                            selection_mode = True
+                            user_message = only.editor_instruction
                     elif planned_spans and len(planned_spans) == 1:
-                        # Improve pin + non-collapsible single patch → full rewrite.
+                        # Single non-collapsible patch (Improve pin, near-full, etc.)
+                        # → full rewrite for any section.
                         planned_spans = None
                         scope_plan = EditScopePlan(
                             understood_ask=scope_plan.understood_ask
@@ -11755,6 +11692,7 @@ async def improve_proposal_section(
         provider = _provider_name()
         total_kb_fills = 0
         applied = 0
+        multi_patch_escalate = False
         # End→start so earlier char offsets stay valid after each splice.
         for start, end, patch in sorted(planned_spans, key=lambda t: t[0], reverse=True):
             content_now = working_section.content or ""
@@ -11767,29 +11705,56 @@ async def improve_proposal_section(
                 )
                 continue
             sel_text = content_now[start:end]
-            working_section, provider, kb_fills = await _improve_section_selection(
-                section=working_section,
-                rfp=rfp,
-                rfp_context=rfp_context,
-                user_message=patch.editor_instruction,
-                selection_start=start,
-                selection_end=end,
-                selection_text=sel_text,
-                brand_voice=brand_voice_dict,
-                kb_zo_voice=kb_zo_voice,
-                evidence=[],
-                kb_block=kb_block,
-                fact_blob=fact_blob,
-                avoidance_block="",
-                research=research,
-                compliance_user_message=latest_user_ask,
-                lean=True,
-                manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
-            )
+            try:
+                working_section, provider, kb_fills = await _improve_section_selection(
+                    section=working_section,
+                    rfp=rfp,
+                    rfp_context=rfp_context,
+                    user_message=patch.editor_instruction,
+                    selection_start=start,
+                    selection_end=end,
+                    selection_text=sel_text,
+                    brand_voice=brand_voice_dict,
+                    kb_zo_voice=kb_zo_voice,
+                    evidence=[],
+                    kb_block=kb_block,
+                    fact_blob=fact_blob,
+                    avoidance_block="",
+                    research=research,
+                    compliance_user_message=latest_user_ask,
+                    lean=True,
+                    manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
+                )
+            except ProposalError as patch_exc:
+                note = str(patch_exc)
+                if (
+                    "remove too much content" in note
+                    or "did not change the excerpt" in note
+                    or "did not return replacement text" in note
+                ):
+                    logger.info(
+                        "Multi-patch splice failed for %s / %s — full rewrite: %s",
+                        rfp_id,
+                        section_id,
+                        note[:160],
+                    )
+                    multi_patch_escalate = True
+                    break
+                raise
             total_kb_fills += kb_fills
             applied += 1
-
-        if applied == 0:
+        if multi_patch_escalate:
+            planned_spans = None
+            selection_mode = False
+            user_message = latest_user_ask
+            scope_plan = EditScopePlan(
+                understood_ask=latest_user_ask.strip(),
+                mode="full_rewrite",
+                patches=[],
+                kb_queries=list(scope_plan.kb_queries if scope_plan else []),
+                sibling_edits=[],
+            )
+        elif applied == 0:
             logger.info(
                 "Multi-patch plan produced no applied edits for %s — falling through",
                 section_id,
@@ -12111,119 +12076,172 @@ async def improve_proposal_section(
                         True,
                     )
 
-        updated_section, provider, kb_fills = await _improve_section_selection(
-            section=section,
-            rfp=rfp,
-            rfp_context=rfp_context,
-            user_message=editor_instruction,
-            selection_start=selection_start,
-            selection_end=selection_end,
-            selection_text=selection_text,
-            brand_voice=brand_voice_dict,
-            kb_zo_voice=kb_zo_voice,
-            evidence=evidence,
-            kb_block=kb_block,
-            fact_blob=fact_blob,
-            avoidance_block=avoidance_block,
-            working_excerpt=working_excerpt if pre_fills > 0 else None,
-            research=research,
-            compliance_user_message=latest_user_ask,
-            lean=lean_patch,
-            manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
-        )
-        if research is None:
-            research = ProposalResearchCache(
-                rfpId=rfp_id,
-                updatedAt=datetime.now(timezone.utc).isoformat(),
-                provider=provider,
-            )
-        else:
-            research = research.model_copy(update={"provider": provider})
-
-        merged_sections = [
-            updated_section if s.id == section_id else s for s in draft.sections
-        ]
-        now = datetime.now(timezone.utc).isoformat()
-        updated_draft = draft.model_copy(
-            update={
-                "sections": merged_sections,
-                "updated_at": now,
-                "provider": provider,
-            }
-        )
-        if persist:
-            updated_draft = await _persist_section_improve_draft(
-                updated_draft,
-                research,
-                section_title=section.title,
-            )
-
-        before_words = word_count(before_section.content or "")
-        after_words = word_count(updated_section.content or "")
-        # Report the change at the SELECTION level, not the whole section — a
-        # section-level "692 → 725 words" reads as if the whole tab was rewritten
-        # when only the highlighted span changed. Compute the excerpt delta from
-        # the section length change (the splice preserves everything else).
-        before_excerpt = (before_section.content or "")[selection_start:selection_end]
-        len_delta = len(updated_section.content or "") - len(before_section.content or "")
-        after_excerpt = (updated_section.content or "")[
-            selection_start : selection_end + len_delta
-        ]
-        excerpt_before_words = word_count(before_excerpt)
-        excerpt_after_words = word_count(after_excerpt)
-        assistant_message = (
-            f"Revised only your selected excerpt in **{section.title}** "
-            f"({excerpt_before_words} → {excerpt_after_words} words in that span). "
-            f"The rest of the section is unchanged."
-        )
-        if kb_fills > 0:
-            assistant_message = (
-                f"Filled **{kb_fills}** verified fact(s) in your selected excerpt in "
-                f"**{section.title}** ({excerpt_before_words} → {excerpt_after_words} "
-                f"words in that span). The rest of the section is unchanged."
-            )
-        if scope_plan and scope_plan.sibling_edits:
-            updated_draft, sibling_titles = await _apply_sibling_section_edits(
-                draft=updated_draft,
-                open_section_id=section_id,
-                sibling_edits=list(scope_plan.sibling_edits),
+        try:
+            updated_section, provider, kb_fills = await _improve_section_selection(
+                section=section,
                 rfp=rfp,
                 rfp_context=rfp_context,
-                brand_voice_dict=brand_voice_dict,
+                user_message=editor_instruction,
+                selection_start=selection_start,
+                selection_end=selection_end,
+                selection_text=selection_text,
+                brand_voice=brand_voice_dict,
                 kb_zo_voice=kb_zo_voice,
-                research=research,
+                evidence=evidence,
                 kb_block=kb_block,
                 fact_blob=fact_blob,
-                user_ask=latest_user_ask,
-                manuscript_digest=_manuscript_digest(updated_draft, max_chars=10_000),
+                avoidance_block=avoidance_block,
+                working_excerpt=working_excerpt if pre_fills > 0 else None,
+                research=research,
+                compliance_user_message=latest_user_ask,
+                lean=lean_patch,
+                manuscript_digest=_manuscript_digest(draft, max_chars=10_000),
             )
-            updated_section = (
-                _find_draft_section(updated_draft, section_id) or updated_section
-            )
-            if sibling_titles:
-                assistant_message += (
-                    " Also aligned **"
-                    + "**, **".join(sibling_titles[:6])
-                    + "** so the same fact does not contradict elsewhere."
+        except ProposalError as sel_exc:
+            note = str(sel_exc)
+            # Never leave the user with DRAFT UNCHANGED for a blocked splice —
+            # fall through to full-tab rewrite (any section).
+            if (
+                "remove too much content" in note
+                or "did not change the excerpt" in note
+                or "did not return replacement text" in note
+            ):
+                logger.info(
+                    "Selection splice failed for %s / %s — escalating to full rewrite: %s",
+                    rfp_id,
+                    section_id,
+                    note[:160],
                 )
-                if persist:
-                    updated_draft = await _persist_section_improve_draft(
-                        updated_draft,
-                        research,
-                        section_title=section.title,
+                selection_mode = False
+                selection_start = None
+                selection_end = None
+                selection_text = None
+                user_message = latest_user_ask
+                planned_spans = None
+                scope_plan = EditScopePlan(
+                    understood_ask=latest_user_ask.strip(),
+                    mode="full_rewrite",
+                    patches=[],
+                    kb_queries=list(scope_plan.kb_queries if scope_plan else [])
+                    or list(kb_queries or []),
+                    sibling_edits=[],
+                )
+            else:
+                raise
+        else:
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            else:
+                research = research.model_copy(update={"provider": provider})
+
+            merged_sections = [
+                updated_section if s.id == section_id else s for s in draft.sections
+            ]
+            now = datetime.now(timezone.utc).isoformat()
+            updated_draft = draft.model_copy(
+                update={
+                    "sections": merged_sections,
+                    "updated_at": now,
+                    "provider": provider,
+                }
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                )
+
+            before_words = word_count(before_section.content or "")
+            after_words = word_count(updated_section.content or "")
+            # Report the change at the SELECTION level, not the whole section — a
+            # section-level "692 → 725 words" reads as if the whole tab was rewritten
+            # when only the highlighted span changed. Compute the excerpt delta from
+            # the section length change (the splice preserves everything else).
+            before_excerpt = (before_section.content or "")[
+                selection_start:selection_end
+            ]
+            len_delta = len(updated_section.content or "") - len(
+                before_section.content or ""
+            )
+            after_excerpt = (updated_section.content or "")[
+                selection_start : selection_end + len_delta
+            ]
+            excerpt_before_words = word_count(before_excerpt)
+            excerpt_after_words = word_count(after_excerpt)
+            assistant_message = (
+                f"Revised only your selected excerpt in **{section.title}** "
+                f"({excerpt_before_words} → {excerpt_after_words} words in that span). "
+                f"The rest of the section is unchanged."
+            )
+            if kb_fills > 0:
+                assistant_message = (
+                    f"Filled **{kb_fills}** verified fact(s) in your selected excerpt in "
+                    f"**{section.title}** ({excerpt_before_words} → {excerpt_after_words} "
+                    f"words in that span). The rest of the section is unchanged."
+                )
+            if scope_plan and scope_plan.sibling_edits:
+                updated_draft, sibling_titles = await _apply_sibling_section_edits(
+                    draft=updated_draft,
+                    open_section_id=section_id,
+                    sibling_edits=list(scope_plan.sibling_edits),
+                    rfp=rfp,
+                    rfp_context=rfp_context,
+                    brand_voice_dict=brand_voice_dict,
+                    kb_zo_voice=kb_zo_voice,
+                    research=research,
+                    kb_block=kb_block,
+                    fact_blob=fact_blob,
+                    user_ask=latest_user_ask,
+                    manuscript_digest=_manuscript_digest(
+                        updated_draft, max_chars=10_000
+                    ),
+                )
+                updated_section = (
+                    _find_draft_section(updated_draft, section_id) or updated_section
+                )
+                if sibling_titles:
+                    assistant_message += (
+                        " Also aligned **"
+                        + "**, **".join(sibling_titles[:6])
+                        + "** so the same fact does not contradict elsewhere."
                     )
-                    updated_section = (
-                        _find_draft_section(updated_draft, section_id)
-                        or updated_section
-                    )
-        logger.info(
-            "Section selection edit complete for %s / %s (%d → %d words)",
-            rfp_id,
-            section_id,
-            before_words,
-            after_words,
-        )
-        return _improve_outcome(updated_section, updated_draft, research, provider, assistant_message, True)
+                    if persist:
+                        updated_draft = await _persist_section_improve_draft(
+                            updated_draft,
+                            research,
+                            section_title=section.title,
+                        )
+                        updated_section = (
+                            _find_draft_section(updated_draft, section_id)
+                            or updated_section
+                        )
+            logger.info(
+                "Section selection edit complete for %s / %s (%d → %d words)",
+                rfp_id,
+                section_id,
+                before_words,
+                after_words,
+            )
+            return _improve_outcome(
+                updated_section,
+                updated_draft,
+                research,
+                provider,
+                assistant_message,
+                True,
+            )
+
+        if selection_mode:
+            # Unreachable when escalate cleared selection_mode; keep for safety.
+            raise ProposalError(
+                "Selection edit failed without a full-rewrite fallback.",
+                status_code=422,
+            )
 
     logger.info(
         "Section improve for %s / %s: static=%s message=%r",

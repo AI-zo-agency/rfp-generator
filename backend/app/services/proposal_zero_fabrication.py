@@ -114,6 +114,8 @@ def apply_zero_fabrication_guards(
 
         draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
         for line in ptr_logs:
+            # Checklist Location → missing sidebar tab is the same family of
+            # cross-ref integrity (generate, Complete Scan, chat persist).
             report.logs.append(f"{label}: cross-ref — {line}")
     except Exception as exc:  # noqa: BLE001
         report.logs.append(f"{label}: cross-ref integrity skipped ({exc})")

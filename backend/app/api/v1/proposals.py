@@ -1221,7 +1221,10 @@ async def improve_section_endpoint(
             # manuscript-wide ZF / agentic QC salvage on unrelated tabs.
             skip_salvage = (
                 "Selection edit did not change the excerpt" in note
+                or "Selection edit would remove too much content" in note
                 or "reverse-engineer line items" in note.casefold()
+                or "will not invent fees" in note.casefold()
+                or "introduce dollar amounts that are not in the current" in note.casefold()
             )
             if skip_salvage or preview_only:
                 # Preview mode must never auto-write salvage into the live draft.

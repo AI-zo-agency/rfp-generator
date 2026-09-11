@@ -4539,6 +4539,18 @@ function ProposalDraftWorkspaceInner({
                         </svg>
                         Improve
                       </button>
+                      {sectionRevisions[selectedSection.id]?.awaitingConfirm &&
+                      revisionDrawerSectionId !== selectedSection.id ? (
+                        <button
+                          type="button"
+                          className="proposal-revision-reopen-btn"
+                          onClick={() =>
+                            setRevisionDrawerSectionId(selectedSection.id)
+                          }
+                        >
+                          View changes · Apply pending
+                        </button>
+                      ) : null}
                       <ProposalTabMoreMenu
                         disabled={anyPipelineRunning}
                         items={[
@@ -4546,7 +4558,10 @@ function ProposalDraftWorkspaceInner({
                             ? [
                                 {
                                   id: "revision",
-                                  label: "View what changed",
+                                  label: sectionRevisions[selectedSection.id]
+                                    ?.awaitingConfirm
+                                    ? "View changes · Apply pending"
+                                    : "View what changed",
                                   onClick: () =>
                                     setRevisionDrawerSectionId(selectedSection.id),
                                 },
@@ -5477,7 +5492,11 @@ function ProposalDraftWorkspaceInner({
               <button
                 type="button"
                 className="proposal-revision-drawer-backdrop"
-                aria-label="Close revision summary"
+                aria-label={
+                  activeRevision.awaitingConfirm
+                    ? "Close revision panel — Apply stays under View changes"
+                    : "Close revision summary"
+                }
                 onClick={() => setRevisionDrawerSectionId(null)}
               />
               <div
@@ -5558,7 +5577,10 @@ function ProposalDraftWorkspaceInner({
                     }));
                     setRevisionDrawerSectionId(null);
                   }}
-                  onDismiss={() => dismissSectionRevision(revisionDrawerSectionId)}
+                  onClose={() => setRevisionDrawerSectionId(null)}
+                  onDiscard={() =>
+                    dismissSectionRevision(revisionDrawerSectionId)
+                  }
                 />
               </div>
             </>,

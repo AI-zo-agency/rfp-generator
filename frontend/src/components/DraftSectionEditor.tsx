@@ -322,7 +322,9 @@ export function DraftSectionEditor({
                   onClick={() => onRevisionDrawerOpenChange?.(true)}
                   className="proposal-revision-reopen-btn"
                 >
-                  View what changed
+                  {storedRevision.awaitingConfirm
+                    ? "View changes · Apply pending"
+                    : "View what changed"}
                 </button>
               ) : null}
               <CapabilityHoverTip id="improveSection" side="bottom">

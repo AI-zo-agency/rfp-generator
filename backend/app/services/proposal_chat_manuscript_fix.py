@@ -243,7 +243,15 @@ async def _classify_chat_edit_intent_once(
                         "Never choose single_edit merely because a tab is open/focused when "
                         "the ask is about the whole proposal, missing sections, or gaps.\n"
                         "For multi_patch and whole-proposal advisory, primarySectionId may "
-                        "be null.\n\n"
+                        "be null.\n"
+                        "primarySectionId rules (meaning, not keywords):\n"
+                        "- If Pinned/focus is set and the ask is about that tab's prose "
+                        "(voice, tone, descriptive rewrite, tighten, expand) keep that id.\n"
+                        "- Never switch to Cost/Pricing just because the open tab mentions "
+                        "dollar amounts, sponsorship tiers, or the word budget.\n"
+                        "- Only set a different outline id when the user clearly names or "
+                        "describes another sidebar tab as the thing to change.\n"
+                        "- Prefer the focused id when unsure.\n\n"
                         "Return JSON:\n"
                         '{"intent":"advisory|single_edit|multi_patch|structure|none",'
                         '"primarySectionId":"id or null","reason":"short"}'

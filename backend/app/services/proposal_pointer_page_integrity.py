@@ -42,7 +42,7 @@ def _pipe_cells(line: str) -> list[str]:
 
 
 def _is_cross_ref_location_header(line: str) -> bool:
-    """True for Addressed-In / Where-to-Find / Required-Component location tables.
+    """True for Addressed-In / Where-to-Find / Submittal checklist Location tables.
 
     Structural header check only — no topic synonym tables.
     """
@@ -51,21 +51,25 @@ def _is_cross_ref_location_header(line: str) -> bool:
     cells = [c.casefold() for c in _pipe_cells(line)]
     if len(cells) < 2:
         return False
-    left, right = cells[0], cells[1]
-    left_ok = (
-        "requirement" in left
-        or "component" in left
-        or left.startswith("required")
-        or "submission" in left
+    has_item = any(
+        "requirement" in c
+        or "component" in c
+        or "submittal" in c
+        or "submission" in c
+        or c == "item"
+        or c.endswith(" item")
+        or c.startswith("required")
+        for c in cells
     )
-    right_ok = (
-        "addressed" in right
-        or "where to find" in right
-        or "location" in right
-        or right.startswith("see")
-        or "find it" in right
+    has_location = any(
+        "location" in c
+        or "addressed" in c
+        or "where to find" in c
+        or c.startswith("see")
+        or "find it" in c
+        for c in cells
     )
-    return left_ok and right_ok
+    return has_item and has_location
 
 
 @dataclass(frozen=True)
@@ -396,6 +400,49 @@ def rewrite_prose_section_citations_in_draft(
     return draft.model_copy(update={"sections": sections}), logs
 
 
+def _header_location_column(header_line: str) -> tuple[int, int | None]:
+    """Return (location_col_idx, included_col_idx_or_None) for a cross-ref header."""
+    cells = [c.casefold() for c in _pipe_cells(header_line)]
+    loc_idx = 1 if len(cells) >= 2 else 0
+    incl_idx: int | None = None
+    for i, c in enumerate(cells):
+        if (
+            "location" in c
+            or "addressed" in c
+            or "where to find" in c
+            or "find it" in c
+        ):
+            loc_idx = i
+        if "included" in c or c in {"yes/no", "y/n", "status"}:
+            incl_idx = i
+    return loc_idx, incl_idx
+
+
+def _location_names_missing_sidebar_tab(location: str, draft: ProposalDraft) -> bool:
+    """True when a Location cell names a tab that is not in the live sidebar."""
+    text = (location or "").strip()
+    if not text or text.casefold() in {"n/a", "na", "—", "-", "tbd"}:
+        return False
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    topic = re.sub(r"(?i)\s+tabs?\s*$", "", text).strip()
+    topic = re.sub(r"(?i)^\s*(?:see|see\s+the)\s+", "", topic).strip()
+    paren = re.search(r"\(([^)]{2,120})\)", topic)
+    if paren:
+        topic = paren.group(1).strip()
+        topic = re.sub(r"(?i)\s+tabs?\s*$", "", topic).strip()
+    if len(topic) < 3:
+        return False
+    for section in draft.sections:
+        title = section.title or ""
+        if outline_titles_near_duplicate(topic, title):
+            return False
+        bare = re.sub(r"^\s*\d+(?:\.\d+)*\s*[.:—–\-)]\s*", "", title).strip()
+        if bare and outline_titles_near_duplicate(topic, bare):
+            return False
+    return True
+
+
 def _rewrite_one_cross_ref_table(
     lines: list[str],
     header_idx: int,
@@ -407,6 +454,7 @@ def _rewrite_one_cross_ref_table(
 
     Returns ``(changed_count, unresolved_logs)``. Mutates ``lines`` in place.
     """
+    loc_idx, incl_idx = _header_location_column(lines[header_idx])
     row_start = header_idx + 1
     if row_start < len(lines) and _TABLE_SEP_RE.match(lines[row_start].rstrip("\n")):
         row_start += 1
@@ -419,33 +467,51 @@ def _rewrite_one_cross_ref_table(
         if not _TABLE_ROW_RE.match(stripped):
             break
         cells = [c.strip() for c in stripped.strip().strip("|").split("|")]
-        if len(cells) < 2:
+        if len(cells) <= loc_idx:
             continue
-        requirement, addressed = cells[0], cells[1]
+        requirement, addressed = cells[0], cells[loc_idx]
         if not requirement or requirement.casefold() in {
             "rfp requirement",
             "requirement",
             "required component",
             "component",
+            "submittal item",
+            "item",
         }:
             continue
-        # Keep multi-target static refs that already cite 1.1 / 1.3 accurately.
         if re.search(r"\b1\.\d+\b", addressed) and "who we are" in addressed.casefold():
             continue
         if re.search(r"(?i)section\s+iii\b|references?\s+form", addressed):
             continue
-        # Already a live § mark that exists in the TOC — leave alone.
+        # Submittal checklist (has Included col): Location must name a live tab.
+        # Classic Addressed-In tables keep the remap path below.
+        if incl_idx is not None and _location_names_missing_sidebar_tab(
+            addressed, draft
+        ):
+            cells[loc_idx] = (
+                "[MANUAL FILL: no dedicated sidebar tab — map to a live section "
+                "or add the missing tab]"
+            )
+            if incl_idx is not None and incl_idx < len(cells):
+                incl = cells[incl_idx].casefold()
+                if incl in {"yes", "y", "included", "✓", "✔"} or "yes" in incl:
+                    cells[incl_idx] = "No"
+            newline = "\n" if raw.endswith("\n") else ""
+            lines[i] = "| " + " | ".join(cells) + " |" + newline
+            changed += 1
+            unresolved.append(
+                f"checklist Location cleared (missing tab): {requirement[:100].strip()}"
+            )
+            continue
         live_mark = re.search(r"§\s*(\d+(?:\.\d+)?)", addressed)
         if live_mark and _find_section_by_mark(draft, live_mark.group(1)):
-            # Still fix wrong parenthetical labels that invent missing tabs.
             if _addressed_cites_missing_tab(addressed, draft):
-                pass  # fall through to remap
+                pass
             else:
                 continue
         entry = resolve_addressed_in_target(
             draft, requirement, self_section_id=self_section_id
         )
-        # Also try resolving from the parenthetical topic in the cell itself.
         if entry is None:
             paren = re.search(r"\(([^)]{3,140})\)", addressed or "")
             if paren:
@@ -453,11 +519,10 @@ def _rewrite_one_cross_ref_table(
                     draft, paren.group(1), self_section_id=self_section_id
                 )
         if entry is None:
-            # Phantom Section-N (Schedule tab) with no live match — do not ship.
             if _addressed_cites_missing_tab(addressed, draft) or re.search(
                 r"(?i)(?:§\s*|section\s+)\d+", addressed or ""
             ):
-                cells[1] = (
+                cells[loc_idx] = (
                     "[MANUAL FILL: map this requirement to a live proposal tab — "
                     "cited section does not exist in this manuscript]"
                 )
@@ -476,7 +541,7 @@ def _rewrite_one_cross_ref_table(
         if new_cell.casefold() in addressed.casefold() and f"§{entry.mark}" in addressed:
             if not _addressed_cites_missing_tab(addressed, draft):
                 continue
-        cells[1] = new_cell
+        cells[loc_idx] = new_cell
         newline = "\n" if raw.endswith("\n") else ""
         lines[i] = "| " + " | ".join(cells) + " |" + newline
         changed += 1
