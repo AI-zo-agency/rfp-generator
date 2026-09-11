@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowRight,
   ArrowUp,
@@ -185,7 +186,9 @@ export function AiIntelligenceDrawer({
     if (draft.trim() && !chat.busy) ask(draft);
   };
 
-  return (
+  // Portal to body so viewport `position: fixed` is not trapped by GSAP/transform
+  // ancestors (QuickBooks marks qb-ledger as data-fin="panel" and animates it).
+  return createPortal(
     <>
       <motion.button
         type="button"
@@ -448,6 +451,7 @@ export function AiIntelligenceDrawer({
         </div>
         ) : null}
       </motion.aside>
-    </>
+    </>,
+    document.body,
   );
 }
