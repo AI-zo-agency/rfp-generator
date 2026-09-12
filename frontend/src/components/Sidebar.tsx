@@ -16,7 +16,7 @@ const workspaceNav = [
   { href: "/rfps", label: "RFPs", Icon: IconRfp, prefetch: false },
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
-  { href: "/analytics", label: "Analytics", Icon: IconAnalytics },
+  { href: "/analytics", label: "Analytics", Icon: IconAnalytics, prefetch: false },
 ];
 
 interface SidebarProps {
