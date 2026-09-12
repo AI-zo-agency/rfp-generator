@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 _RFP_COST_CACHE_TTL_S = 2.0
 _rfp_cost_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+_GLOBAL_SUMMARY_CACHE_TTL_S = 60.0
+_global_summary_cache: tuple[float, dict[str, Any]] | None = None
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS llm_call_log (
     id TEXT PRIMARY KEY,
@@ -413,7 +416,17 @@ def get_run_total_cost_usd(run_id: str) -> float:
 
 
 def get_global_cost_summary() -> dict[str, Any]:
-    """Aggregate LLM spend across all proposals and pipeline stages."""
+    """Aggregate LLM spend across all proposals and pipeline stages.
+
+    Cached ~60s — a cold Supabase page-scan of the full ledger can take
+    minutes on Railway and used to block the Analytics page entirely.
+    """
+    global _global_summary_cache
+    if _global_summary_cache is not None:
+        cached_at, cached = _global_summary_cache
+        if time.monotonic() - cached_at < _GLOBAL_SUMMARY_CACHE_TTL_S:
+            return dict(cached)
+
     try:
         ensure_llm_call_log_table()
         if _use_supabase():
@@ -536,7 +549,7 @@ def get_global_cost_summary() -> dict[str, Any]:
     for bucket in unknown_dates:
         bucket["cost_usd"] = round(float(bucket["cost_usd"]), 6)
 
-    return {
+    summary = {
         "total_cost_usd": round(total_cost, 6),
         "total_input_tokens": total_in,
         "total_output_tokens": total_out,
@@ -557,6 +570,8 @@ def get_global_cost_summary() -> dict[str, Any]:
         "by_model": models,
         "monthly_budget": _attach_monthly_budget(),
     }
+    _global_summary_cache = (time.monotonic(), summary)
+    return dict(summary)
 
 
 def _attach_monthly_budget() -> dict[str, Any]:
@@ -666,12 +681,12 @@ def _fetch_supabase_all() -> list[dict[str, Any]]:
     offset = 0
     page = 1000
     while True:
+        # No ORDER BY — Analytics only aggregates; sorting every page is waste.
         result = (
             client.table("llm_call_log")
             .select(
                 "run_id,rfp_id,node_name,model,cost_usd,input_tokens,output_tokens,created_at"
             )
-            .order("created_at")
             .range(offset, offset + page - 1)
             .execute()
         )

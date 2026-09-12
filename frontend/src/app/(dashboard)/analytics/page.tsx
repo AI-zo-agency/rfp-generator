@@ -1,12 +1,12 @@
+import { AnalyticsLlmCostSection } from "@/components/AnalyticsLlmCostSection";
 import { DashboardHeader } from "@/components/DashboardHeader";
-import { LlmCostPanel } from "@/components/LlmCostPanel";
 import { StatCard } from "@/components/StatCard";
 import { formatCurrency } from "@/lib/format";
-import { getLlmCostSummary } from "@/lib/llm-cost-service";
 import { getDashboardData } from "@/lib/rfp-service";
 
 export default async function AnalyticsPage() {
-  const [{ stats }, llmCost] = await Promise.all([getDashboardData(), getLlmCostSummary()]);
+  // Stats only — LLM cost rollup is client-fetched so navigation stays instant.
+  const { stats } = await getDashboardData();
 
   return (
     <div className="space-y-12">
@@ -55,17 +55,7 @@ export default async function AnalyticsPage() {
         />
       </div>
 
-      {llmCost ? (
-        <LlmCostPanel summary={llmCost} />
-      ) : (
-        <div className="zo-card p-10">
-          <h2 className="font-heading text-2xl font-bold">LLM cost tracking</h2>
-          <p className="mt-3 max-w-xl text-base leading-relaxed text-zo-text-secondary">
-            Cost data is unavailable — start the backend and generate or scan a proposal to
-            begin recording usage.
-          </p>
-        </div>
-      )}
+      <AnalyticsLlmCostSection />
     </div>
   );
 }
