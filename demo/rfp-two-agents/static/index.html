@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RFP two-agent demo</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --border: #2c3845;
+      --text: #e7ecef;
+      --muted: #8b9aab;
+      --accent: #3d9bfd;
+      --ok: #3ecf8e;
+      --fs-xs: 0.75rem;
+      --fs-sm: 0.95rem;
+      --fs-md: 1.2rem;
+      --fs-lg: 1.75rem;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: var(--fs-sm)/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 1rem;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -0.02em; }
+    header .meta { color: var(--muted); font-size: var(--fs-xs); }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      min-height: calc(100vh - 64px);
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .col {
+      padding: 1.25rem 1.35rem;
+      border-right: 1px solid var(--border);
+    }
+    .col:last-child { border-right: none; }
+    h2 {
+      margin: 0 0 0.75rem;
+      font-size: var(--fs-md);
+      font-weight: 650;
+      letter-spacing: -0.015em;
+    }
+    label { display: block; color: var(--muted); font-size: var(--fs-xs); margin: 0.7rem 0 0.3rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    input, textarea {
+      width: 100%;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+      font: inherit;
+      font-size: var(--fs-sm);
+    }
+    textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-xs); }
+    textarea.prompt { min-height: 220px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.95rem; }
+    button {
+      background: var(--accent);
+      color: #041018;
+      border: none;
+      border-radius: 6px;
+      padding: 0.6rem 1rem;
+      font-size: var(--fs-sm);
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+    button.ok { background: var(--ok); }
+    .cost {
+      margin-top: 0.85rem;
+      padding: 0.75rem 0.85rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: var(--fs-sm);
+    }
+    .cost strong { color: var(--ok); font-size: var(--fs-md); }
+    .status { color: var(--muted); margin-top: 0.55rem; min-height: 1.25em; font-size: var(--fs-sm); }
+    .status.err { color: #ff7b72; }
+    pre {
+      margin: 0.85rem 0 0;
+      padding: 0.85rem;
+      background: #0a0e12;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: auto;
+      max-height: 48vh;
+      font-size: var(--fs-xs);
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    details { margin-top: 0.85rem; }
+    summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
+    .hint { margin: 0 0 0.65rem; color: var(--muted); font-size: var(--fs-xs); }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: var(--fs-xs);
+      color: var(--muted);
+    }
+    .badge.on { border-color: var(--ok); color: var(--ok); }
+    .view-toggle {
+      display: inline-flex;
+      gap: 0;
+      margin: 0.75rem 0 0.35rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .view-toggle button {
+      border-radius: 0;
+      background: var(--panel);
+      color: var(--muted);
+      border: none;
+      border-right: 1px solid var(--border);
+      padding: 0.35rem 0.75rem;
+      font-size: var(--fs-xs);
+      font-weight: 600;
+    }
+    .view-toggle button:last-child { border-right: none; }
+    .view-toggle button.active {
+      background: var(--accent);
+      color: #041018;
+    }
+    .readable {
+      margin: 0.5rem 0 0;
+      padding: 0.85rem 1rem;
+      background: #0a0e12;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: auto;
+      max-height: 48vh;
+      font-size: var(--fs-sm);
+      line-height: 1.55;
+    }
+    .readable h3 {
+      margin: 1rem 0 0.4rem;
+      font-size: var(--fs-md);
+      color: var(--text);
+    }
+    .readable h3:first-child { margin-top: 0; }
+    .readable h4 {
+      margin: 0.75rem 0 0.3rem;
+      font-size: var(--fs-sm);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 650;
+    }
+    .readable ul { margin: 0.25rem 0 0.5rem 1.1rem; padding: 0; }
+    .readable li { margin: 0.2rem 0; }
+    .readable p { margin: 0.25rem 0 0.5rem; color: var(--text); }
+    .readable .meta-line { color: var(--muted); font-size: var(--fs-xs); }
+    .readable strong { color: var(--ok); font-weight: 650; }
+
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RFP two-agent demo</h1>
+    <span class="meta" id="health">checking…</span>
+    <span class="badge" id="sessBadge">no session</span>
+  </header>
+  <main>
+    <section class="col">
+      <h2>1 · Opportunity extract</h2>
+      <div class="row">
+        <div>
+          <label>Title</label>
+          <input id="title" value="Demo RFP" />
+        </div>
+        <div>
+          <label>Client</label>
+          <input id="client" placeholder="Buyer name" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Sector</label>
+          <input id="sector" placeholder="e.g. Municipal tourism" />
+        </div>
+        <div>
+          <label>Location</label>
+          <input id="location" />
+        </div>
+      </div>
+      <label>RFP PDF</label>
+      <input type="file" id="file" accept=".pdf,application/pdf" required />
+      <details>
+        <summary>Edit Agent 1 system prompt (saved to disk)</summary>
+        <textarea class="prompt" id="prompt1"></textarea>
+        <div class="actions">
+          <button type="button" class="secondary" id="saveP1">Save prompt 1</button>
+        </div>
+      </details>
+      <div class="actions">
+        <button type="button" id="run1">Run Agent 1</button>
+        <button type="button" class="ok" id="approve" disabled>Approve → unlock Agent 2</button>
+      </div>
+      <div class="status" id="status1"></div>
+      <div class="cost" id="cost1">Cost: —</div>
+      <pre id="tools1" style="max-height:12vh">(pipeline trace)</pre>
+      <details open>
+        <summary>Provenance (source-backed fields)</summary>
+        <pre id="prov1" style="max-height:18vh">(provenance)</pre>
+      </details>
+      <div class="view-toggle" role="group" aria-label="Agent 1 output view">
+        <button type="button" class="active" data-view="readable" data-target="1">Readable</button>
+        <button type="button" data-view="json" data-target="1">JSON</button>
+      </div>
+      <div id="out1Readable" class="readable">(Agent 1 output)</div>
+      <pre id="out1" hidden>(Agent 1 JSON)</pre>
+    </section>
+
+    <section class="col">
+      <h2>2 · Strategy + delivery</h2>
+      <p class="hint">
+        Uses Agent 1 plan + real Supermemory KB (won patterns, methodology, pricing…).
+      </p>
+      <details>
+        <summary>Edit Agent 2 system prompt (saved to disk)</summary>
+        <textarea class="prompt" id="prompt2"></textarea>
+        <div class="actions">
+          <button type="button" class="secondary" id="saveP2">Save prompt 2</button>
+        </div>
+      </details>
+      <div class="actions">
+        <button type="button" id="run2" disabled>Run Agent 2</button>
+        <button type="button" class="secondary" id="refreshCost">Refresh cost</button>
+      </div>
+      <div class="status" id="status2"></div>
+      <div class="cost" id="cost2">Cost: —</div>
+      <div class="view-toggle" role="group" aria-label="Agent 2 output view">
+        <button type="button" class="active" data-view="readable" data-target="2">Readable</button>
+        <button type="button" data-view="json" data-target="2">JSON</button>
+      </div>
+      <div id="out2Readable" class="readable">(Agent 2 output)</div>
+      <pre id="out2" hidden>(Agent 2 JSON)</pre>
+    </section>
+  </main>
+
+  <script>
+    let demoId = null;
+    let approved = false;
+    let lastOut1 = null;
+    let lastOut2 = null;
+    let view1 = "readable";
+    let view2 = "readable";
+
+    const $ = (id) => document.getElementById(id);
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function listHtml(items) {
+      const arr = Array.isArray(items) ? items.filter((x) => x != null && String(x).trim()) : [];
+      if (!arr.length) return "<p class='meta-line'>None listed</p>";
+      return "<ul>" + arr.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul>";
+    }
+
+    function kv(label, value) {
+      if (value == null || value === "") return "";
+      return "<p><strong>" + esc(label) + ":</strong> " + esc(value) + "</p>";
+    }
+
+    function opportunityToReadable(o) {
+      if (!o || typeof o !== "object") return "<p class='meta-line'>No output yet</p>";
+      const u = o.understanding || {};
+      const budget = u.budgetIntel || {};
+      const timeline = u.timelineIntel || {};
+      const scope = o.scope || {};
+      const compliance = o.compliance || {};
+      const evaluation = o.evaluation || {};
+      const success = o.successCriteria || {};
+      const items = Array.isArray(compliance.items) ? compliance.items : [];
+      const criteria = Array.isArray(evaluation.criteria) ? evaluation.criteria : [];
+      const successItems = Array.isArray(success.items) ? success.items : [];
+
+      let html = "";
+      html += "<h3>Understanding</h3>";
+      html += kv("Client", u.client);
+      html += kv("Industry", u.industry);
+      html += kv("Organization", u.orgType);
+      html += kv("Project type", u.projectType);
+      html += kv("Complexity", u.complexity);
+      html += "<h4>Services</h4>" + listHtml(u.services);
+      html += "<h4>Business goals</h4>" + listHtml(u.businessGoals);
+      html += "<h4>Pain points</h4>" + listHtml(u.painPoints);
+      html += "<h4>Desired outcomes</h4>" + listHtml(u.desiredOutcomes);
+      html += "<h4>Budget</h4>";
+      html += kv("Ceiling", budget.ceiling);
+      html += kv("Pricing model", budget.pricingModelHint);
+      html += kv("Contract type", budget.contractType);
+      if (budget.notes) html += "<p>" + esc(budget.notes) + "</p>";
+      html += "<h4>Timeline</h4>";
+      html += kv("Project start", timeline.projectStart);
+      html += kv("Completion", timeline.completion);
+      html += kv("Go-live", timeline.goLive);
+      html += listHtml(timeline.milestones);
+      if (timeline.notes) html += "<p>" + esc(timeline.notes) + "</p>";
+
+      html += "<h3>Scope</h3>";
+      html += "<h4>Mandatory</h4>" + listHtml(scope.mandatory);
+      html += "<h4>Optional</h4>" + listHtml(scope.optional);
+      html += "<h4>Future phases</h4>" + listHtml(scope.futurePhases);
+      html += "<h4>Out of scope</h4>" + listHtml(scope.outOfScope);
+      html += "<h4>Dependencies</h4>" + listHtml(scope.dependencies);
+      if (scope.notes) html += "<p><strong>Notes:</strong> " + esc(scope.notes) + "</p>";
+
+      html += "<h3>Compliance checklist (" + items.length + ")</h3>";
+      if (!items.length) html += "<p class='meta-line'>No items</p>";
+      items.forEach((it, i) => {
+        const mand = it.mandatory ? "Required" : "Conditional / optional";
+        html += "<h4>" + esc(it.id || ("item-" + (i + 1))) + " · " + esc(mand) + "</h4>";
+        html += "<p>" + esc(it.requirement || "") + "</p>";
+        html += kv("Source", it.sourceRef);
+        html += kv("Target section", it.targetSection);
+        html += kv("Evidence", it.evidenceNeeded);
+        html += kv("Owner", it.owner);
+      });
+
+      html += "<h3>Evaluation</h3>";
+      html += kv("Scored response form", evaluation.scoredResponseForm === true ? "Yes" : evaluation.scoredResponseForm === false ? "No" : evaluation.scoredResponseForm);
+      html += kv("Total points", evaluation.totalPoints);
+      html += kv("Char limit", evaluation.responseCharLimit);
+      html += kv("Writing style", evaluation.writingStyle);
+      html += "<h4>Emphasis</h4>" + listHtml(evaluation.emphasis);
+      if (!criteria.length) {
+        html += "<p class='meta-line'>No scored criteria extracted (or none published)</p>";
+      } else {
+        criteria.forEach((c) => {
+          html += "<h4>" + esc(c.name || c.itemCode || "Criterion");
+          if (c.weight != null) html += " · " + esc(c.weight) + " pts";
+          html += "</h4>";
+          const sub = Array.isArray(c.items) ? c.items : [];
+          if (sub.length) {
+            html += "<ul>" + sub.map((s) =>
+              "<li><strong>" + esc(s.itemCode || "") + "</strong> " + esc(s.ask || "") +
+              (s.weight != null ? " <span class='meta-line'>(" + esc(s.weight) + ")</span>" : "") +
+              "</li>"
+            ).join("") + "</ul>";
+          }
+        });
+      }
+
+      html += "<h3>Success themes</h3>";
+      if (!successItems.length) html += "<p class='meta-line'>None</p>";
+      successItems.forEach((s) => {
+        html += "<p><strong>" + esc(s.criterion || "") + "</strong>";
+        if (s.recurringTheme) html += " <span class='meta-line'>(recurring)</span>";
+        html += "</p>";
+        if (s.why) html += "<p class='meta-line'>" + esc(s.why) + "</p>";
+      });
+      return html;
+    }
+
+    function agent2ToReadable(o) {
+      if (!o || typeof o !== "object") return "<p class='meta-line'>No output yet</p>";
+      const s = o.strategy || {};
+      const d = o.delivery || {};
+      const pattern = d.deliveryPattern || {};
+      const model = d.deliveryModel || {};
+      const method = d.methodology || {};
+      const budget = d.budget || {};
+      let html = "<h3>Strategy</h3>";
+      html += kv("Winning theme", s.winningTheme);
+      html += kv("Core message", s.coreMessage);
+      html += kv("Tone", s.tone);
+      html += kv("Why us", s.whyUs);
+      html += kv("Proof strategy", s.proofStrategy);
+      html += kv("Competitive position", s.competitivePosition);
+      if (s.executiveNarrative) html += "<p>" + esc(s.executiveNarrative) + "</p>";
+      html += "<h4>Differentiators</h4>" + listHtml(s.differentiators);
+      html += "<h4>Trust builders</h4>" + listHtml(s.trustBuilders);
+      html += "<h4>Key messages</h4>" + listHtml(s.keyMessages);
+      html += "<h4>Evaluator concerns</h4>" + listHtml(s.primaryEvaluatorConcerns);
+      html += "<h3>Delivery</h3>";
+      html += kv("Model", model.type);
+      html += kv("Governance", model.governance);
+      html += kv("Cadence", model.cadence);
+      html += kv("Staffing shape", pattern.staffingShape);
+      html += kv("Phase shape", pattern.phaseShape);
+      html += "<h4>Patterns observed</h4>" + listHtml(pattern.patternsObserved);
+      const phases = Array.isArray(method.phases) ? method.phases : [];
+      html += "<h4>Methodology phases</h4>";
+      if (!phases.length) html += "<p class='meta-line'>None</p>";
+      phases.forEach((ph) => {
+        html += "<p><strong>" + esc(ph.name || "") + "</strong></p>" + listHtml(ph.activities);
+      });
+      html += "<h4>Budget approach</h4>";
+      html += kv("Strategy", budget.pricingStrategy);
+      html += kv("Model", budget.pricingModel);
+      html += kv("Ceiling", budget.ceiling);
+      return html;
+    }
+
+    function renderOut1() {
+      if (!lastOut1) return;
+      $("out1").textContent = JSON.stringify(lastOut1, null, 2);
+      $("out1Readable").innerHTML = opportunityToReadable(lastOut1);
+      const showMd = view1 === "readable";
+      $("out1Readable").hidden = !showMd;
+      $("out1").hidden = showMd;
+    }
+
+    function renderOut2() {
+      if (!lastOut2) return;
+      $("out2").textContent = JSON.stringify(lastOut2, null, 2);
+      $("out2Readable").innerHTML = agent2ToReadable(lastOut2);
+      const showMd = view2 === "readable";
+      $("out2Readable").hidden = !showMd;
+      $("out2").hidden = showMd;
+    }
+
+    document.querySelectorAll(".view-toggle button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = btn.getAttribute("data-target");
+        const mode = btn.getAttribute("data-view");
+        btn.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        if (target === "1") { view1 = mode; renderOut1(); }
+        else { view2 = mode; renderOut2(); }
+      });
+    });
+
+    function fmtCost(cost) {
+      if (!cost) return "Cost: —";
+      const total = Number(cost.total_cost_usd || 0);
+      const nodes = (cost.by_node || [])
+        .map((n) => `${n.node_name || n.node || "?"}: $${Number(n.cost_usd || 0).toFixed(4)}`)
+        .join(" · ");
+      return `<strong>$${total.toFixed(4)}</strong> total`
+        + (nodes ? `<br/><span style="color:var(--muted);font-size:var(--fs-xs)">${nodes}</span>` : "")
+        + `<br/><span style="color:var(--muted);font-size:var(--fs-xs)">${cost.call_count || 0} calls · `
+        + `${cost.total_input_tokens || 0} in / ${cost.total_output_tokens || 0} out</span>`;
+    }
+
+    function setSession() {
+      const el = $("sessBadge");
+      if (!demoId) {
+        el.textContent = "no session";
+        el.classList.remove("on");
+        return;
+      }
+      el.textContent = demoId + (approved ? " · approved" : " · awaiting approve");
+      el.classList.toggle("on", approved);
+      $("approve").disabled = !demoId || approved;
+      $("run2").disabled = !demoId || !approved;
+    }
+
+    async function loadHealth() {
+      try {
+        const h = await fetch("/api/health").then((r) => r.json());
+        $("health").textContent =
+          `model ${h.model || "?"} · OpenRouter ${h.openrouter_configured ? "✓" : "✗"} · KB ${h.supermemory_configured ? "✓" : "✗"}`;
+      } catch (e) {
+        $("health").textContent = "server offline";
+      }
+    }
+
+    async function loadPrompts() {
+      const p = await fetch("/api/prompts").then((r) => r.json());
+      $("prompt1").value = p.agent1 || "";
+      $("prompt2").value = p.agent2 || "";
+    }
+
+    $("saveP1").onclick = async () => {
+      await fetch("/api/prompts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent1: $("prompt1").value }),
+      });
+      $("status1").textContent = "Prompt 1 saved — next Run uses it.";
+    };
+
+    $("saveP2").onclick = async () => {
+      await fetch("/api/prompts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent2: $("prompt2").value }),
+      });
+      $("status2").textContent = "Prompt 2 saved — next Run uses it.";
+    };
+
+    $("run1").onclick = async () => {
+      $("status1").textContent = "Running Agent 1 (evidence pack → one Sonnet)…";
+      $("status1").classList.remove("err");
+      $("run1").disabled = true;
+      approved = false;
+      try {
+        const f = $("file").files[0];
+        if (!f) throw new Error("Upload an RFP PDF first");
+        if (!/\.pdf$/i.test(f.name)) throw new Error("PDF only");
+        const fd = new FormData();
+        fd.append("title", $("title").value);
+        fd.append("client", $("client").value);
+        fd.append("sector", $("sector").value);
+        fd.append("location", $("location").value);
+        fd.append("file", f);
+        const res = await fetch("/api/agent1", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        demoId = data.demo_id;
+        lastOut1 = data.output || {};
+        renderOut1();
+        $("tools1").textContent = (data.toolTrace || []).join("\n") || "(no tools)";
+        $("prov1").textContent = JSON.stringify(data.provenance || [], null, 2);
+        $("cost1").innerHTML = fmtCost(data.cost);
+        $("status1").textContent = "Done (budget A1). Review Readable/JSON, then Approve.";
+        setSession();
+      } catch (e) {
+        $("status1").textContent = String(e.message || e);
+        $("status1").classList.add("err");
+      } finally {
+        $("run1").disabled = false;
+      }
+    };
+
+    $("approve").onclick = async () => {
+      if (!demoId) return;
+      const res = await fetch("/api/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ demo_id: demoId, approved: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        $("status1").textContent = data.detail || "approve failed";
+        $("status1").classList.add("err");
+        return;
+      }
+      approved = true;
+      $("status1").textContent = "Approved — Agent 2 unlocked.";
+      setSession();
+    };
+
+    $("run2").onclick = async () => {
+      if (!demoId || !approved) return;
+      $("status2").textContent = "Running Agent 2 (KB retrieval + LLM)…";
+      $("status2").classList.remove("err");
+      $("run2").disabled = true;
+      try {
+        const res = await fetch("/api/agent2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ demo_id: demoId, approved: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        lastOut2 = data.output || {};
+        renderOut2();
+        $("cost2").innerHTML = fmtCost(data.cost);
+        $("cost1").innerHTML = fmtCost(data.cost);
+        $("status2").textContent = "Done.";
+      } catch (e) {
+        $("status2").textContent = String(e.message || e);
+        $("status2").classList.add("err");
+      } finally {
+        $("run2").disabled = !approved;
+      }
+    };
+
+    $("refreshCost").onclick = async () => {
+      if (!demoId) return;
+      const cost = await fetch(`/api/cost/${demoId}`).then((r) => r.json());
+      $("cost1").innerHTML = fmtCost(cost);
+      $("cost2").innerHTML = fmtCost(cost);
+    };
+
+    loadHealth();
+    loadPrompts();
+    setSession();
+  </script>
+</body>
+</html>
