@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type MonthlyBudget = {
@@ -9,6 +8,8 @@ type MonthlyBudget = {
   spentUsd: number;
   remainingUsd: number;
   blocked: boolean;
+  proposalSpentUsd: number;
+  financialSpentUsd: number;
 };
 
 function fmtUsd(n: number): string {
@@ -21,8 +22,8 @@ function fmtUsd(n: number): string {
 }
 
 /**
- * Compact spent / monthly cap for the top navbar.
- * Polls lightly so it stays current while generate/scan/chat run.
+ * Navbar spend meter: total vs cap + Proposals / Finance split.
+ * Sized to match header controls — readable at a glance.
  */
 export function MonthlyAiBudgetBadge() {
   const [budget, setBudget] = useState<MonthlyBudget | null>(null);
@@ -49,6 +50,8 @@ export function MonthlyAiBudgetBadge() {
           spentUsd: Number(data.spent_usd ?? 0),
           remainingUsd: Number(data.remaining_usd ?? 0),
           blocked: Boolean(data.blocked),
+          proposalSpentUsd: Number(data.proposal_spent_usd ?? 0),
+          financialSpentUsd: Number(data.financial_spent_usd ?? 0),
         });
       } catch {
         /* keep last known */
@@ -68,9 +71,8 @@ export function MonthlyAiBudgetBadge() {
   const usedPct = Math.min(100, Math.round((budget.spentUsd / budget.limitUsd) * 100));
 
   return (
-    <Link
-      href="/analytics"
-      className="hidden items-center gap-2.5 rounded-full border px-3 py-1.5 no-underline transition-colors hover:bg-black/[0.03] sm:inline-flex"
+    <div
+      className="hidden items-center gap-3 rounded-2xl border px-4 py-2.5 md:inline-flex"
       style={{
         borderColor: budget.blocked
           ? "color-mix(in srgb, var(--zo-orange) 55%, var(--zo-border))"
@@ -81,28 +83,52 @@ export function MonthlyAiBudgetBadge() {
           ? "Monthly AI budget reached — all AI paused until next UTC month"
           : `${fmtUsd(budget.remainingUsd)} remaining this month`
       }
-      aria-label={`AI spend ${fmtUsd(budget.spentUsd)} of ${fmtUsd(budget.limitUsd)} monthly limit`}
+      aria-label={`AI ${fmtUsd(budget.spentUsd)} of ${fmtUsd(budget.limitUsd)}. Proposals ${fmtUsd(budget.proposalSpentUsd)}. Finance ${fmtUsd(budget.financialSpentUsd)}.`}
     >
-      <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zo-text-secondary">
-        AI
-      </span>
-      <span className="text-xs font-semibold tabular-nums text-foreground">
-        {fmtUsd(budget.spentUsd)}
-        <span className="font-medium text-zo-text-secondary"> / {fmtUsd(budget.limitUsd)}</span>
-      </span>
-      <span
-        className="h-1.5 w-14 overflow-hidden rounded-full"
-        style={{ background: "var(--zo-surface-secondary, #eceae4)" }}
-        aria-hidden
-      >
+      <div className="flex flex-col gap-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-zo-text-secondary">
+            AI
+          </span>
+          <span className="text-base font-semibold tabular-nums leading-none text-foreground">
+            {fmtUsd(budget.spentUsd)}
+            <span className="text-sm font-medium text-zo-text-secondary">
+              {" "}
+              / {fmtUsd(budget.limitUsd)}
+            </span>
+          </span>
+        </div>
         <span
-          className="block h-full rounded-full"
-          style={{
-            width: `${usedPct}%`,
-            background: budget.blocked ? "var(--zo-orange)" : "var(--zo-teal, #0d9488)",
-          }}
-        />
-      </span>
-    </Link>
+          className="h-2 w-full min-w-[7.5rem] overflow-hidden rounded-full"
+          style={{ background: "var(--zo-surface-secondary, #eceae4)" }}
+          aria-hidden
+        >
+          <span
+            className="block h-full rounded-full"
+            style={{
+              width: `${usedPct}%`,
+              background: budget.blocked ? "var(--zo-orange)" : "var(--zo-teal, #0d9488)",
+            }}
+          />
+        </span>
+      </div>
+
+      <span className="h-8 w-px shrink-0 bg-[var(--zo-border,#e5e2da)]" aria-hidden />
+
+      <div className="flex flex-col gap-0.5 text-sm leading-tight">
+        <span className="tabular-nums text-zo-text-secondary">
+          Proposals{" "}
+          <span className="font-semibold text-foreground">
+            {fmtUsd(budget.proposalSpentUsd)}
+          </span>
+        </span>
+        <span className="tabular-nums text-zo-text-secondary">
+          Finance{" "}
+          <span className="font-semibold text-foreground">
+            {fmtUsd(budget.financialSpentUsd)}
+          </span>
+        </span>
+      </div>
+    </div>
   );
 }
