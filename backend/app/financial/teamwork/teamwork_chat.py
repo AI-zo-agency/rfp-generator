@@ -152,6 +152,16 @@ async def answer(
     if _needs_forecast_inputs(question):
         return _envelope(FORECAST_UNAVAILABLE_REPLY, thread_id=thread_id)
 
+    from app.services.llm import LlmError
+    from app.services.monthly_llm_budget import enforce_monthly_llm_budget
+
+    try:
+        enforce_monthly_llm_budget()
+    except LlmError as exc:
+        if exc.status_code == 429:
+            return _envelope(str(exc), thread_id=thread_id, capped=True)
+        raise
+
     cap = float(settings.financial_chat_max_cost_usd or 0)
     if cap > 0 and financial_llm_cost.thread_total_usd(thread_id) >= cap:
         return _envelope(BUDGET_REPLY, thread_id=thread_id, capped=True)

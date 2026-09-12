@@ -96,6 +96,18 @@ def _resolve_run_cost_cap_usd(node_name: str | None) -> float:
     return 0.0
 
 
+def _enforce_monthly_llm_budget() -> None:
+    """Org-wide monthly hard cap (proposals + finance). Always on when configured."""
+    try:
+        from app.services.monthly_llm_budget import enforce_monthly_llm_budget
+
+        enforce_monthly_llm_budget()
+    except LlmError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("monthly LLM budget check failed: %s", str(exc)[:200])
+
+
 def _enforce_run_cost_cap(node_name: str | None, run_id: str | None) -> None:
     """Hard stop when the current run already exceeded the configured budget."""
     cap = _resolve_run_cost_cap_usd(node_name)
@@ -142,6 +154,8 @@ _FINANCIAL_LLM_NODES = frozenset(
         "qb_insights",
         "qb_chat.answer",
         "teamwork_chat.answer",
+        "agency_chat.answer",
+        "agency_insights",
         "financial.ai_insights",
         "client_map.link",
         "qb_forecast_cash",
@@ -989,7 +1003,12 @@ def _record_successful_call(
     rfp_id: str | None,
     run_id: str | None,
 ) -> None:
-    """Persist cost/token row — never raises."""
+    """Persist cost/token row — never raises.
+
+    Financial workspace nodes are diverted to ``financial_llm_calls`` so they
+    never appear as proposal spend (empty rfp_id in llm_call_log). Paths that
+    pass an explicit ``cost_sink`` to ``chat_text`` never reach this helper.
+    """
     try:
         from app.core.step_debug_logger import (
             get_pipeline_rfp_id,
@@ -1037,6 +1056,42 @@ def _record_successful_call(
                 cache_read_input_tokens=cache_read,
                 cache_ttl_1h=settings.llm_cache_ttl_1h,
             )
+
+        # Finance must not pollute the proposal ledger / Analytics "Proposals" split.
+        if _is_financial_node(resolved_node) or _is_financial_node(node_name):
+            import uuid
+
+            from app.financial import financial_llm_cost
+
+            financial_llm_cost.record_call(
+                thread_id=f"job:{resolved_node or node_name or 'financial'}",
+                turn_id=uuid.uuid4().hex,
+                node_name=str(resolved_node or node_name or "financial"),
+                model=model,
+                tier=tier,
+                provider=provider,
+                usage={
+                    "prompt_tokens": inp,
+                    "completion_tokens": out,
+                    "cache_creation_input_tokens": cache_write,
+                    "cache_read_input_tokens": cache_read,
+                    "estimated": estimated,
+                },
+                latency_ms=latency_ms,
+                cache_ttl_1h=settings.llm_cache_ttl_1h,
+            )
+            logger.info(
+                "LLM cost (financial ledger): node=%s model=%s in=%d out=%d "
+                "cost_usd=%.6f latency_ms=%d",
+                resolved_node,
+                model,
+                inp,
+                out,
+                cost,
+                latency_ms,
+            )
+            return
+
         record_llm_call(
             run_id=resolved_run,
             rfp_id=resolved_rfp,
@@ -1162,6 +1217,7 @@ async def chat_json(
     if node_name is None:
         node_name = _resolved_node or None
     openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
+    _enforce_monthly_llm_budget()
     _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
@@ -1627,6 +1683,8 @@ async def chat_text(
     # and must not inherit one. _resolve_run_cost_cap_usd reads the pipeline
     # phase off a contextvar, so without this guard a financial call made while
     # a proposal is in flight could pick up that proposal's cap.
+    # Monthly org cap still applies — finance and proposals share one $N/mo pool.
+    _enforce_monthly_llm_budget()
     if cost_sink is None:
         _enforce_run_cost_cap(node_name, run_id)
 

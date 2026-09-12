@@ -105,6 +105,9 @@ def test_thread_total_sums_only_this_thread(ledger):
 
 def _call_chat_text(monkeypatch, **kwargs):
     monkeypatch.setattr(llm.settings, "gemini_api_key", "AIzaSyRealLookingKey123456")
+    monkeypatch.setattr(llm.settings, "llm_prefer_openrouter", False)
+    monkeypatch.setattr(llm.settings, "llm_prefer_fireworks", False)
+    monkeypatch.setattr(llm, "_enforce_monthly_llm_budget", lambda: None)
     with patch.object(
         llm, "_post_gemini_chat",
         AsyncMock(return_value=("hello", {"prompt_tokens": 10, "completion_tokens": 2})),

@@ -230,6 +230,13 @@ class Settings(BaseSettings):
     financial_chat_max_cost_usd: float = 0.50
     financial_chat_turn_max_cost_usd: float = 0.15
 
+    # Hard org-wide monthly LLM cap (USD). Sums llm_call_log + financial_llm_calls
+    # for the current UTC calendar month, but only rows after
+    # monthly_llm_budget_epoch (fresh counter from deploy). 0 disables.
+    monthly_llm_budget_usd: float = 20.0
+    # ISO-8601 UTC. Spend before this timestamp does not count toward the cap.
+    monthly_llm_budget_epoch: str = "2026-09-12T05:00:00+00:00"
+
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"

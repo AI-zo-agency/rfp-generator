@@ -32,6 +32,19 @@ export interface LlmCostUnknownBreakdown {
   byDate: LlmCostUnknownRow[];
 }
 
+export interface LlmMonthlyBudget {
+  enabled: boolean;
+  limitUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  blocked: boolean;
+  proposalSpentUsd: number;
+  financialSpentUsd: number;
+  periodStart: string;
+  periodEnd: string;
+  timezone: string;
+}
+
 export interface LlmCostSummary {
   totalCostUsd: number;
   totalInputTokens: number;
@@ -45,6 +58,7 @@ export interface LlmCostSummary {
   byProposal: LlmCostProposalRow[];
   byNode: LlmCostStageRow[];
   byModel: LlmCostModelRow[];
+  monthlyBudget: LlmMonthlyBudget | null;
 }
 
 export interface LlmCostRunRow {
@@ -159,6 +173,22 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
       return null;
     }
     const unknownBreakdown = asRecord(data.unknown_breakdown);
+    const monthlyRaw = asRecord(data.monthly_budget);
+    const monthlyBudget: LlmMonthlyBudget | null =
+      Object.keys(monthlyRaw).length === 0
+        ? null
+        : {
+            enabled: Boolean(monthlyRaw.enabled),
+            limitUsd: Number(monthlyRaw.limit_usd ?? 0),
+            spentUsd: Number(monthlyRaw.spent_usd ?? 0),
+            remainingUsd: Number(monthlyRaw.remaining_usd ?? 0),
+            blocked: Boolean(monthlyRaw.blocked),
+            proposalSpentUsd: Number(monthlyRaw.proposal_spent_usd ?? 0),
+            financialSpentUsd: Number(monthlyRaw.financial_spent_usd ?? 0),
+            periodStart: asString(monthlyRaw.period_start),
+            periodEnd: asString(monthlyRaw.period_end),
+            timezone: asString(monthlyRaw.timezone, "UTC"),
+          };
     return {
       totalCostUsd: Number(data.total_cost_usd ?? 0),
       totalInputTokens: Number(data.total_input_tokens ?? 0),
@@ -185,6 +215,7 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
       byModel: asUnknownList(data.by_model).map((r) =>
         mapModel(r as Record<string, unknown>),
       ),
+      monthlyBudget,
     };
   } catch (error) {
     console.warn("[llm-cost] summary unavailable:", error);

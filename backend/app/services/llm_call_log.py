@@ -435,6 +435,7 @@ def get_global_cost_summary() -> dict[str, Any]:
             "unknown_node_cost_usd": 0.0,
             "unknown_node_calls": 0,
             "unknown_breakdown": {"by_model": [], "by_date": []},
+            "monthly_budget": _attach_monthly_budget(),
             "error": str(exc)[:200],
         }
 
@@ -554,7 +555,27 @@ def get_global_cost_summary() -> dict[str, Any]:
         "by_proposal": proposals,
         "by_node": nodes,
         "by_model": models,
+        "monthly_budget": _attach_monthly_budget(),
     }
+
+
+def _attach_monthly_budget() -> dict[str, Any]:
+    try:
+        from app.services.monthly_llm_budget import get_monthly_budget_status
+
+        return get_monthly_budget_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("monthly_budget attach failed: %s", str(exc)[:200])
+        return {
+            "enabled": False,
+            "limit_usd": 0.0,
+            "spent_usd": 0.0,
+            "remaining_usd": 0.0,
+            "blocked": False,
+            "proposal_spent_usd": 0.0,
+            "financial_spent_usd": 0.0,
+            "error": str(exc)[:200],
+        }
 
 
 def _fetch_sqlite_by_rfp(rfp_ids: list[str]) -> list[dict[str, Any]]:

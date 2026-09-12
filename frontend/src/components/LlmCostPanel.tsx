@@ -21,9 +21,59 @@ export function LlmCostPanel({ summary }: { summary: LlmCostSummary }) {
   const topStages = summary.byNode.slice(0, 12);
   const unknownModels = summary.unknownBreakdown.byModel.slice(0, 8);
   const unknownDates = summary.unknownBreakdown.byDate.slice(0, 8);
+  const budget = summary.monthlyBudget;
+  const usedPct =
+    budget && budget.enabled && budget.limitUsd > 0
+      ? Math.min(100, Math.round((budget.spentUsd / budget.limitUsd) * 100))
+      : 0;
 
   return (
     <div className="space-y-8">
+      {budget?.enabled ? (
+        <div
+          className={`zo-card p-6 ${
+            budget.blocked ? "border border-zo-orange" : ""
+          }`}
+        >
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="text-sm text-zo-text-secondary">
+                Monthly AI budget ({budget.timezone})
+              </p>
+              <p className="mt-2 font-heading text-3xl font-bold">
+                {fmtUsd(budget.spentUsd)}
+                <span className="ml-2 text-lg font-medium text-zo-text-secondary">
+                  / {fmtUsd(budget.limitUsd)}
+                </span>
+              </p>
+              <p className="mt-1 text-sm text-zo-text-secondary">
+                {budget.blocked
+                  ? "Hard capped — all AI features paused until next UTC month"
+                  : `${fmtUsd(budget.remainingUsd)} remaining this month`}
+              </p>
+            </div>
+            <div className="text-right text-sm text-zo-text-secondary">
+              <p>Proposals · {fmtUsd(budget.proposalSpentUsd)}</p>
+              <p>Finance · {fmtUsd(budget.financialSpentUsd)}</p>
+              <p className="mt-1 text-xs">
+                Counts spend after deploy epoch · resets {budget.periodEnd.slice(0, 10)}
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 h-2 overflow-hidden rounded-full bg-zo-surface-secondary">
+            <div
+              className="h-full"
+              style={{
+                width: `${usedPct}%`,
+                background: budget.blocked
+                  ? "var(--zo-orange)"
+                  : "var(--zo-teal)",
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
         <div className="zo-card p-6">
           <p className="text-sm text-zo-text-secondary">Total LLM spend</p>

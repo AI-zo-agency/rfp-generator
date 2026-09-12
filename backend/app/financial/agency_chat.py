@@ -142,6 +142,16 @@ async def answer(
     if len(cleaned) > MAX_QUESTION_CHARS:
         cleaned = cleaned[:MAX_QUESTION_CHARS]
 
+    from app.services.llm import LlmError
+    from app.services.monthly_llm_budget import enforce_monthly_llm_budget
+
+    try:
+        enforce_monthly_llm_budget()
+    except LlmError as exc:
+        if exc.status_code == 429:
+            return _envelope(str(exc), thread_id=thread_id, capped=True)
+        raise
+
     cap = settings.financial_chat_max_cost_usd
     if cap > 0 and financial_llm_cost.thread_total_usd(thread_id) >= cap:
         return _envelope(BUDGET_REPLY, thread_id=thread_id, capped=True)

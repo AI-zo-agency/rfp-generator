@@ -1516,6 +1516,9 @@ def agency_ai_insights_snapshot(request: Request):
 def agency_ai_insights_generate(request: Request):
     if not _cron_authorized(request.headers.get("X-Cron-Secret")):
         raise HTTPException(status_code=401, detail="Invalid cron secret")
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+
+    raise_http_if_monthly_budget_blocked()
     overview = build_agency_overview()
     brief_start, _, _ = brief_week_for()
     row = None
@@ -2218,6 +2221,9 @@ async def generate_ai_financial_insights(
     Uses the financial OpenRouter key/model when configured
     (OPENROUTER_API_KEY_FINANCIAL / OPENROUTER_MODEL_FINANCIAL).
     """
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+
+    raise_http_if_monthly_budget_blocked()
     model_used = resolve_llm_model("light", node_name="financial.ai_insights")
 
     logger.info(

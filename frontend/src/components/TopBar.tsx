@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { MonthlyAiBudgetBadge } from "./MonthlyAiBudgetBadge";
 import { IconSwitch } from "./ui/icons";
 
 interface TopBarProps {
@@ -37,6 +38,7 @@ export function TopBar({ collapsed, onToggleSidebar }: TopBarProps) {
       </div>
 
       <div className="flex items-center gap-2 md:gap-3">
+        <MonthlyAiBudgetBadge />
         <Link
           href="/choose"
           className="zo-btn secondary !py-3"

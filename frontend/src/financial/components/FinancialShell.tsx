@@ -8,6 +8,7 @@ import gsap from "gsap";
 import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
 import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
+import { MonthlyAiBudgetBadge } from "@/components/MonthlyAiBudgetBadge";
 import { IconSwitch } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
 import { prefersReducedMotion } from "../lib/fin-motion";
@@ -70,6 +71,7 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-2 md:gap-3" data-fin-shell>
+          <MonthlyAiBudgetBadge />
           <Link href="/choose" className="zo-btn secondary !py-3" aria-label="Switch workspace">
             <IconSwitch className="h-4 w-4" />
             <span className="hidden sm:inline">Switch Workspace</span>

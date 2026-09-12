@@ -36,6 +36,14 @@ def llm_cost_summary() -> dict[str, Any]:
     return _attach_titles(get_global_cost_summary())
 
 
+@router.get("/monthly-budget")
+def llm_monthly_budget() -> dict[str, Any]:
+    """Lightweight org-wide monthly spend vs hard cap (navbar / guards)."""
+    from app.services.monthly_llm_budget import get_monthly_budget_status
+
+    return get_monthly_budget_status()
+
+
 @router.get("/rfps/{rfp_id}")
 def llm_cost_for_rfp(rfp_id: str) -> dict[str, Any]:
     """LLM spend for one RFP across all generate / scan / chat runs."""

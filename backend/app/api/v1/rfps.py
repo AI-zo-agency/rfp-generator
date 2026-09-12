@@ -340,7 +340,10 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     asyncio locally without Redis — instead of a second, separate in-memory
     dict that could get orphaned on a restart.
     """
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
     from app.services.proposal_job_runner import get_proposal_job, start_proposal_job
+
+    raise_http_if_monthly_budget_blocked()
 
     rfp = get_rfp(rfp_id)
     if not rfp:

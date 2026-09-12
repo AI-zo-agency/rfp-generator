@@ -98,6 +98,9 @@ async def _enqueue_pipeline_phase(
     holding the per-rfp job lock (the 409 other-operations-blocked behavior)
     indefinitely.
     """
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+
+    raise_http_if_monthly_budget_blocked()
     try:
         existing = await get_proposal_job(rfp_id)
         if existing and existing.status == "running":
@@ -823,6 +826,9 @@ async def clear_proposal_stop_flag_endpoint(rfp_id: str) -> dict[str, bool]:
 @router.post("/{rfp_id}/proposal/generate", response_model=ProposalGenerateResponse)
 async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate full proposal: static Sections 1–3 + RFP-mapped sections from evidence."""
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+
+    raise_http_if_monthly_budget_blocked()
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:
@@ -846,6 +852,9 @@ async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
 )
 async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Same as POST /generate — static Sections 1–3 then RFP-varying sections."""
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+
+    raise_http_if_monthly_budget_blocked()
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:
@@ -1156,7 +1165,10 @@ async def improve_section_endpoint(
     body: SectionImproveRequest,
 ) -> ProposalSectionImproveResponse:
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
     from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
+
+    raise_http_if_monthly_budget_blocked()
 
     import uuid
 
