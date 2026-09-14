@@ -80,6 +80,13 @@ def enforce_llm_call_guards() -> None:
         get_llm_user_email,
     )
 
+    if bool(getattr(settings, "llm_kill_switch", False)):
+        logger.error("LLM kill switch ON — refusing provider call")
+        raise LlmError(
+            "LLM kill switch is ON — all AI provider calls are blocked.",
+            status_code=403,
+        )
+
     rfp_id = get_llm_rfp_id()
     node_name = get_llm_node_name()
     user_email = get_llm_user_email()

@@ -1,19 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-type BudgetSnapshot = {
-  enabled: boolean;
-  limitUsd: number;
-  spentUsd: number;
-  remainingUsd: number;
-  blocked: boolean;
-  proposalSpentUsd: number;
-  financialSpentUsd: number;
-  weekSpentUsd: number;
-  weekProposalSpentUsd: number;
-  weekFinancialSpentUsd: number;
-};
+import { useMonthlyAiBudget } from "@/lib/use-monthly-ai-budget";
 
 function fmtUsd(n: number): string {
   return new Intl.NumberFormat("en-US", {
@@ -24,59 +11,12 @@ function fmtUsd(n: number): string {
   }).format(n);
 }
 
-function useAiBudget(): BudgetSnapshot | null {
-  const [budget, setBudget] = useState<BudgetSnapshot | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const res = await fetch("/api/llm-cost/monthly-budget", {
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as Record<string, unknown>;
-        if (cancelled) return;
-        if (!data || data.enabled === false) {
-          setBudget(null);
-          return;
-        }
-        setBudget({
-          enabled: Boolean(data.enabled),
-          limitUsd: Number(data.limit_usd ?? 0),
-          spentUsd: Number(data.spent_usd ?? 0),
-          remainingUsd: Number(data.remaining_usd ?? 0),
-          blocked: Boolean(data.blocked),
-          proposalSpentUsd: Number(data.proposal_spent_usd ?? 0),
-          financialSpentUsd: Number(data.financial_spent_usd ?? 0),
-          weekSpentUsd: Number(data.week_spent_usd ?? 0),
-          weekProposalSpentUsd: Number(data.week_proposal_spent_usd ?? 0),
-          weekFinancialSpentUsd: Number(data.week_financial_spent_usd ?? 0),
-        });
-      } catch {
-        /* keep last known */
-      }
-    }
-
-    void load();
-    const id = window.setInterval(load, 30_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  return budget;
-}
-
 /**
  * Left-sidebar monthly + weekly AI spend (Proposals / Finance split).
  * Per-person breakdown lives on Analytics.
  */
 export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
-  const budget = useAiBudget();
+  const budget = useMonthlyAiBudget();
   if (!budget?.enabled || budget.limitUsd <= 0) return null;
 
   const monthPct = Math.min(100, Math.round((budget.spentUsd / budget.limitUsd) * 100));

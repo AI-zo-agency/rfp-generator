@@ -21,7 +21,9 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_CACHE_TTL_S = 15.0
+# UI polls every ~2 min; keep server cache long enough that concurrent
+# TopBar/Sidebar/Analytics hits don't each re-scan Supabase.
+_CACHE_TTL_S = 60.0
 _status_cache: tuple[float, dict[str, Any]] | None = None
 
 

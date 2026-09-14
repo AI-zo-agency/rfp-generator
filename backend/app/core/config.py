@@ -237,6 +237,10 @@ class Settings(BaseSettings):
     # ISO-8601 UTC. Spend before this timestamp does not count toward the cap.
     monthly_llm_budget_epoch: str = "2026-09-12T05:00:00+00:00"
 
+    # Emergency: block ALL provider LLM calls (proposals + finance).
+    # Set true to stop spend immediately; flip false when the burner is gone.
+    llm_kill_switch: bool = False
+
     # Refuse provider calls for demo-/fixture-/rfp-test* ids (shared-ledger burn).
     llm_block_ephemeral_rfp_ids: bool = True
     # Proposal LLM must have X-User-Email / Celery user_email context.
