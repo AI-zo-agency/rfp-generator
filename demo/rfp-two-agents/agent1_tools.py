@@ -480,18 +480,31 @@ def _parse_tool_args(raw: Any) -> dict[str, Any]:
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
+    parsed: dict[str, Any] | None = None
     try:
-        return llm._parse_json_response(text)  # noqa: SLF001 — demo reuse
+        parsed = llm._parse_json_response(text)  # noqa: SLF001 — demo reuse
     except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
+        parsed = None
+    if parsed is None:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                obj = json.loads(match.group(0))
+                parsed = obj if isinstance(obj, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+    if not parsed:
         return None
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        return None
+    # Classification salvage can return {industry, servicesRequested} and must not
+    # be treated as opportunity JSON (leads to missing client/projectType → 502).
+    if "understanding" not in parsed and "compliance" not in parsed and "scope" not in parsed:
+        if "industry" in parsed or "servicesRequested" in parsed or "buyerType" in parsed:
+            logger.warning(
+                "Rejected non-opportunity JSON keys=%s",
+                sorted(parsed.keys())[:12],
+            )
+            return None
+    return parsed
 
 
 async def _openrouter_tools_round(

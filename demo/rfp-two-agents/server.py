@@ -206,8 +206,10 @@ async def agent1(
             )
             plan = await apply_opportunity_to_plan(plan=plan, raw=opportunity)
     except IntelligenceError as exc:
+        logger.error("Agent 1 intelligence error: %s", exc)
         raise HTTPException(502, str(exc)) from exc
     except LlmError as exc:
+        logger.error("Agent 1 LLM error: %s", exc)
         raise HTTPException(502, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Agent 1 failed")

@@ -125,6 +125,24 @@ Please clarify what improvements you would like:
         self.assertEqual(parsed["deliveryModel"]["type"], "Hybrid")
         self.assertNotIn("budgetFormat", parsed)  # must stay nested, not top-level wipe
 
+    def test_classification_salvage_skips_truncated_opportunity_json(self) -> None:
+        """Truncated opportunity JSON mentions industry but must not become a
+        classification stub — that wiped Agent 1 and caused missing client 502s."""
+        from app.services.llm import _salvage_classification_payload
+
+        raw = '''{
+  "understanding": {
+    "client": "County of Example",
+    "industry": "Public Sector",
+    "projectType": "Website
+'''
+        self.assertIsNone(_salvage_classification_payload(raw))
+        # Truncation closer may still recover a partial object — that's fine as
+        # long as it isn't replaced by {industry, servicesRequested} only.
+        parsed = _parse_json_response(raw)
+        self.assertIn("understanding", parsed)
+        self.assertNotIn("servicesRequested", parsed)
+
 
 if __name__ == "__main__":
     unittest.main()

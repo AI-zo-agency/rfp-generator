@@ -2045,6 +2045,19 @@ def _salvage_manuscript_locks_payload(text: str) -> dict[str, Any] | None:
 
 def _salvage_classification_payload(text: str) -> dict[str, Any] | None:
     """Recover ProposalContext-style fields when classification JSON truncates."""
+    # Opportunity / strategy payloads also mention "industry" — never hijack them.
+    if any(
+        marker in text
+        for marker in (
+            '"understanding"',
+            '"compliance"',
+            '"successCriteria"',
+            '"deliveryPattern"',
+            '"winningTheme"',
+            '"scope"',
+        )
+    ):
+        return None
     if '"industry"' not in text and '"servicesRequested"' not in text:
         return None
     payload: dict[str, Any] = {}
