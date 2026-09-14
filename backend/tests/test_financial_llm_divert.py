@@ -57,10 +57,9 @@ def test_monthly_budget_split_counts_misfiled_financial_nodes_as_finance(monkeyp
     )
     monkeypatch.setattr(
         budget,
-        "_sum_llm_call_log_split",
-        lambda *_a: (1.0, 0.0138),  # proposal, misfiled financial
+        "_period_spend",
+        lambda *_a: (1.0, 0.5138, 1.5138),
     )
-    monkeypatch.setattr(budget, "_sum_financial_llm_calls_usd", lambda *_a: 0.5)
     budget.clear_monthly_budget_cache()
 
     status = budget.get_monthly_budget_status(use_cache=False)

@@ -6,6 +6,7 @@ import type {
   PreSubmitReview,
   PreSubmitAutoFixReport,
 } from "@/types/proposal";
+import { withAuthUserEmail } from "@/lib/auth-user-email";
 
 interface ApiProposalSection {
   id: string;
@@ -552,10 +553,10 @@ async function startProposalPhaseJob(
   throwIfAborted(signal);
   const init: RequestInit = {
     method: "POST",
-    headers: {
+    headers: withAuthUserEmail({
       Accept: "application/json",
       ...(options?.body ? { "Content-Type": "application/json" } : {}),
-    },
+    }),
     cache: "no-store",
     body: options?.body,
   };
@@ -938,13 +939,17 @@ async function fetchWithTimeout(
   init?: RequestInit,
   timeoutMs = PROPOSAL_FETCH_TIMEOUT_MS
 ): Promise<Response> {
+  const withEmail: RequestInit = {
+    ...init,
+    headers: withAuthUserEmail(init?.headers),
+  };
   if (!timeoutMs || timeoutMs <= 0) {
-    return fetch(input, init);
+    return fetch(input, withEmail);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, { ...withEmail, signal: controller.signal });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new DOMException("Request timed out", "AbortError");
@@ -2645,7 +2650,7 @@ export async function improveProposalSection(
     `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: withAuthUserEmail({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         message,
         ...(options?.selection

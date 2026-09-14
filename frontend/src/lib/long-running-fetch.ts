@@ -42,7 +42,7 @@ export async function longRunningFetch(
   init?: LongRunningFetchInit
 ): Promise<Response> {
   const timeoutMs = resolveTimeoutMs(init?.timeoutMs);
-  const { timeoutMs: _omit, signal, ...rest } = init ?? {};
+  const { timeoutMs: _omit, signal, headers: initHeaders, ...rest } = init ?? {};
 
   const abortSignal =
     signal ??
@@ -50,8 +50,29 @@ export async function longRunningFetch(
       ? AbortSignal.timeout(timeoutMs)
       : undefined);
 
+  // Forward browser X-User-Email (set by client) → FastAPI for spend attribution.
+  let emailHeaders: Record<string, string> = {};
+  try {
+    const { headers: nextHeaders } = await import("next/headers");
+    const h = await nextHeaders();
+    const email = (h.get("x-user-email") || "").trim().toLowerCase();
+    if (email.includes("@")) {
+      emailHeaders = { "X-User-Email": email.slice(0, 320) };
+    }
+  } catch {
+    /* not in a Next.js request context */
+  }
+
+  const mergedHeaders = {
+    ...emailHeaders,
+    ...(initHeaders
+      ? Object.fromEntries(new Headers(initHeaders).entries())
+      : {}),
+  };
+
   const res = await undiciFetch(input, {
     ...(rest as UndiciRequestInit),
+    headers: mergedHeaders,
     ...(abortSignal ? { signal: abortSignal } : {}),
     dispatcher: DISPATCHER,
   });

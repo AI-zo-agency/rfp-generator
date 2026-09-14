@@ -10,15 +10,19 @@ export const runtime = "nodejs";
 
 /** Start Go/No-Go in the background — returns immediately (status: running). */
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const email = (request.headers.get("x-user-email") || "").trim().toLowerCase();
 
   try {
     const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/analyze`, {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(email.includes("@") ? { "X-User-Email": email.slice(0, 320) } : {}),
+      },
       cache: "no-store",
     });
 

@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_CACHE_TTL_S = 2.0
+_CACHE_TTL_S = 15.0
 _status_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -60,8 +60,37 @@ def _month_window(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _week_window(now: datetime) -> tuple[datetime, datetime]:
+    """UTC ISO week (Mon 00:00 → next Mon) containing ``now``."""
+    day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    start = day - timedelta(days=day.weekday())  # Monday
+    end = start + timedelta(days=7)
+    return start, end
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _clip_start(window_start: datetime, epoch: datetime | None) -> datetime:
+    if epoch is not None and epoch > window_start:
+        return epoch
+    return window_start
+
+
+def _period_spend(
+    start: datetime,
+    end: datetime,
+) -> tuple[float, float, float, list[dict[str, Any]]]:
+    """Return (proposal_usd, financial_usd, total_usd, proposal_by_user)."""
+    start_s, end_s = _iso(start), _iso(end)
+    proposal_only, misfiled_financial, by_user = _sum_llm_call_log_split(
+        start_s, end_s
+    )
+    financial_table = float(_sum_financial_llm_calls_usd(start_s, end_s))
+    proposal = float(proposal_only)
+    financial = float(financial_table) + float(misfiled_financial)
+    return proposal, financial, proposal + financial, by_user
 
 
 def _sum_supabase_table(
@@ -103,11 +132,22 @@ def _is_financial_node_name(node_name: str) -> bool:
         return False
 
 
-def _sum_llm_call_log_split(start_iso: str, end_iso: str) -> tuple[float, float]:
-    """Split proposal ledger into (proposal_usd, misfiled_financial_usd).
+def _by_user_rows(totals: dict[str, float]) -> list[dict[str, Any]]:
+    return [
+        {"email": email, "proposal_spent_usd": cost}
+        for email, cost in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+        if cost > 0
+    ]
+
+
+def _sum_llm_call_log_split(
+    start_iso: str, end_iso: str
+) -> tuple[float, float, list[dict[str, Any]]]:
+    """Split proposal ledger into (proposal_usd, misfiled_financial_usd, by_user).
 
     Older financial ``chat_json`` calls wrote into ``llm_call_log``. Those rows
     still count toward the monthly cap but must show under Finance, not Proposals.
+    Proposal rows are also grouped by ``user_email`` in the same scan.
     """
     from app.services import supabase_db as sb
     from app.services.llm_call_log import ensure_llm_call_log_table
@@ -116,21 +156,37 @@ def _sum_llm_call_log_split(start_iso: str, end_iso: str) -> tuple[float, float]
     ensure_llm_call_log_table()
     proposal = 0.0
     financial = 0.0
+    by_email: dict[str, float] = {}
+
+    def _add_user(email: str, cost: float) -> None:
+        key = (email or "").strip().lower() or "(unattributed)"
+        by_email[key] = round(float(by_email.get(key) or 0) + float(cost), 6)
+
     if sb.use_supabase_db():
         from app.services.supabase_db import _get_client
 
         client = _get_client()
         offset = 0
         page = 1000
+        select_cols = "cost_usd,node_name,user_email"
         while True:
-            result = (
-                client.table("llm_call_log")
-                .select("cost_usd,node_name")
-                .gte("created_at", start_iso)
-                .lt("created_at", end_iso)
-                .range(offset, offset + page - 1)
-                .execute()
-            )
+            try:
+                result = (
+                    client.table("llm_call_log")
+                    .select(select_cols)
+                    .gte("created_at", start_iso)
+                    .lt("created_at", end_iso)
+                    .range(offset, offset + page - 1)
+                    .execute()
+                )
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                if select_cols != "cost_usd,node_name" and (
+                    "user_email" in message or "PGRST204" in message
+                ):
+                    select_cols = "cost_usd,node_name"
+                    continue
+                raise
             batch = result.data or []
             if not batch:
                 break
@@ -141,32 +197,54 @@ def _sum_llm_call_log_split(start_iso: str, end_iso: str) -> tuple[float, float]
                     financial += cost
                 else:
                     proposal += cost
+                    _add_user(str(row.get("user_email") or ""), cost)
             if len(batch) < page:
                 break
             offset += page
-        return proposal, financial
+        return proposal, financial, _by_user_rows(by_email)
 
     with _connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT cost_usd, node_name
-            FROM llm_call_log
-            WHERE created_at >= ? AND created_at < ?
-            """,
-            (start_iso, end_iso),
-        ).fetchall()
-        for cost_usd, node_name in rows:
-            cost = float(cost_usd or 0)
-            if _is_financial_node_name(str(node_name or "")):
-                financial += cost
-            else:
-                proposal += cost
-    return proposal, financial
+        cols = {
+            str(r[1]) for r in conn.execute("PRAGMA table_info(llm_call_log)").fetchall()
+        }
+        if "user_email" in cols:
+            rows = conn.execute(
+                """
+                SELECT cost_usd, node_name, user_email
+                FROM llm_call_log
+                WHERE created_at >= ? AND created_at < ?
+                """,
+                (start_iso, end_iso),
+            ).fetchall()
+            for cost_usd, node_name, user_email in rows:
+                cost = float(cost_usd or 0)
+                if _is_financial_node_name(str(node_name or "")):
+                    financial += cost
+                else:
+                    proposal += cost
+                    _add_user(str(user_email or ""), cost)
+        else:
+            rows = conn.execute(
+                """
+                SELECT cost_usd, node_name
+                FROM llm_call_log
+                WHERE created_at >= ? AND created_at < ?
+                """,
+                (start_iso, end_iso),
+            ).fetchall()
+            for cost_usd, node_name in rows:
+                cost = float(cost_usd or 0)
+                if _is_financial_node_name(str(node_name or "")):
+                    financial += cost
+                else:
+                    proposal += cost
+                    _add_user("", cost)
+    return proposal, financial, _by_user_rows(by_email)
 
 
 def _sum_llm_call_log_usd(start_iso: str, end_iso: str) -> float:
     """Total USD in llm_call_log (proposal + any misfiled financial rows)."""
-    proposal, financial = _sum_llm_call_log_split(start_iso, end_iso)
+    proposal, financial, _by_user = _sum_llm_call_log_split(start_iso, end_iso)
     return proposal + financial
 
 
@@ -196,16 +274,19 @@ def _sum_financial_llm_calls_usd(start_iso: str, end_iso: str) -> float:
 
 
 def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
-    """Return spent / limit / remaining for the current UTC month (post-epoch)."""
+    """Return spent / limit / remaining for the current UTC month (post-epoch).
+
+    Also includes current UTC ISO-week spend for the sidebar meter.
+    """
     global _status_cache
     limit = float(getattr(settings, "monthly_llm_budget_usd", 0.0) or 0.0)
     enabled = limit > 0
     now = _utcnow()
     month_start, month_end = _month_window(now)
+    week_start, week_end = _week_window(now)
     epoch = _parse_epoch(str(getattr(settings, "monthly_llm_budget_epoch", "") or ""))
-    window_start = month_start
-    if epoch is not None and epoch > window_start:
-        window_start = epoch
+    window_start = _clip_start(month_start, epoch)
+    week_window_start = _clip_start(week_start, epoch)
 
     if use_cache and _status_cache is not None:
         cached_at, cached = _status_cache
@@ -214,14 +295,20 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
 
     proposal = 0.0
     financial = 0.0
+    week_proposal = 0.0
+    week_financial = 0.0
+    week_spent = 0.0
+    by_user: list[dict[str, Any]] = []
+    week_by_user: list[dict[str, Any]] = []
     read_error: str | None = None
     if enabled:
         try:
-            start_s, end_s = _iso(window_start), _iso(month_end)
-            proposal_only, misfiled_financial = _sum_llm_call_log_split(start_s, end_s)
-            financial_table = float(_sum_financial_llm_calls_usd(start_s, end_s))
-            proposal = float(proposal_only)
-            financial = float(financial_table) + float(misfiled_financial)
+            proposal, financial, _total, by_user = _period_spend(
+                window_start, month_end
+            )
+            week_proposal, week_financial, week_spent, week_by_user = _period_spend(
+                week_window_start, week_end
+            )
         except Exception as exc:  # noqa: BLE001
             # Stricter: cannot read ledger → treat as blocked.
             read_error = str(exc)[:200]
@@ -239,8 +326,15 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
         "blocked": blocked,
         "proposal_spent_usd": round(proposal, 6) if enabled else 0.0,
         "financial_spent_usd": round(financial, 6) if enabled else 0.0,
+        "proposal_by_user": by_user if enabled else [],
+        "week_proposal_by_user": week_by_user if enabled else [],
         "period_start": _iso(window_start),
         "period_end": _iso(month_end),
+        "week_spent_usd": round(week_spent, 6) if enabled else 0.0,
+        "week_proposal_spent_usd": round(week_proposal, 6) if enabled else 0.0,
+        "week_financial_spent_usd": round(week_financial, 6) if enabled else 0.0,
+        "week_period_start": _iso(week_window_start),
+        "week_period_end": _iso(week_end),
         "epoch": _iso(epoch) if epoch else "",
         "timezone": "UTC",
         "read_error": read_error,

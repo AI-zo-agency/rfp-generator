@@ -1,4 +1,4 @@
-"""Contextvars for LLM call instrumentation (rfp_id / run_id / node_name).
+"""Contextvars for LLM call instrumentation (rfp_id / run_id / node_name / user_email).
 
 Graph wrappers and generate_full_proposal set these so chat_json/chat_text
 can log without requiring every agent call site to pass IDs.
@@ -13,6 +13,15 @@ from typing import Iterator
 _llm_node_name: ContextVar[str] = ContextVar("llm_node_name", default="")
 _llm_rfp_id: ContextVar[str] = ContextVar("llm_rfp_id", default="")
 _llm_run_id: ContextVar[str] = ContextVar("llm_run_id", default="")
+_llm_user_email: ContextVar[str] = ContextVar("llm_user_email", default="")
+
+
+def normalize_user_email(raw: str | None) -> str:
+    """Lowercase trimmed email; empty if missing/invalid shape."""
+    email = (raw or "").strip().lower()
+    if not email or "@" not in email:
+        return ""
+    return email[:320]
 
 
 def get_llm_node_name() -> str:
@@ -25,6 +34,10 @@ def get_llm_rfp_id() -> str:
 
 def get_llm_run_id() -> str:
     return _llm_run_id.get() or ""
+
+
+def get_llm_user_email() -> str:
+    return _llm_user_email.get() or ""
 
 
 def set_llm_node_name(name: str) -> Token[str]:
@@ -51,12 +64,21 @@ def reset_llm_run_id(token: Token[str]) -> None:
     _llm_run_id.reset(token)
 
 
+def set_llm_user_email(email: str) -> Token[str]:
+    return _llm_user_email.set(normalize_user_email(email))
+
+
+def reset_llm_user_email(token: Token[str]) -> None:
+    _llm_user_email.reset(token)
+
+
 @contextmanager
 def llm_call_context(
     *,
     rfp_id: str | None = None,
     run_id: str | None = None,
     node_name: str | None = None,
+    user_email: str | None = None,
 ) -> Iterator[None]:
     """Temporarily set instrumentation context for nested LLM calls."""
     tokens: list[tuple[str, Token[str]]] = []
@@ -66,6 +88,8 @@ def llm_call_context(
         tokens.append(("run", set_llm_run_id(run_id)))
     if node_name is not None:
         tokens.append(("node", set_llm_node_name(node_name)))
+    if user_email is not None:
+        tokens.append(("email", set_llm_user_email(user_email)))
     try:
         yield
     finally:
@@ -74,5 +98,7 @@ def llm_call_context(
                 reset_llm_rfp_id(token)
             elif kind == "run":
                 reset_llm_run_id(token)
-            else:
+            elif kind == "node":
                 reset_llm_node_name(token)
+            else:
+                reset_llm_user_email(token)

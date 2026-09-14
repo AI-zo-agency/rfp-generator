@@ -32,8 +32,30 @@ def _attach_titles(summary: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/summary")
 def llm_cost_summary() -> dict[str, Any]:
-    """Total LLM spend, per-proposal and per-pipeline-stage breakdown."""
-    return _attach_titles(get_global_cost_summary())
+    """All-time LLM spend rollup — temporarily disabled for Analytics.
+
+    Re-enable by restoring ``return _attach_titles(get_global_cost_summary())``.
+    Monthly meter + by-email live on ``GET /monthly-budget`` instead.
+    """
+    # return _attach_titles(get_global_cost_summary())
+    from app.services.monthly_llm_budget import get_monthly_budget_status
+
+    return {
+        "total_cost_usd": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "call_count": 0,
+        "proposal_count": 0,
+        "unattributed_cost_usd": 0,
+        "unknown_node_cost_usd": 0,
+        "unknown_node_calls": 0,
+        "unknown_breakdown": {"by_model": [], "by_date": []},
+        "by_proposal": [],
+        "by_node": [],
+        "by_model": [],
+        "monthly_budget": get_monthly_budget_status(),
+        "all_time_summary_disabled": True,
+    }
 
 
 @router.get("/monthly-budget")

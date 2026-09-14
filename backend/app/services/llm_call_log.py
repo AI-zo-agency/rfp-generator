@@ -35,10 +35,12 @@ CREATE TABLE IF NOT EXISTS llm_call_log (
     cost_usd REAL NOT NULL DEFAULT 0,
     latency_ms INTEGER NOT NULL DEFAULT 0,
     tokens_estimated INTEGER NOT NULL DEFAULT 0,
+    user_email TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log (run_id);
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_rfp_id ON llm_call_log (rfp_id);
+CREATE INDEX IF NOT EXISTS idx_llm_call_log_user_email ON llm_call_log (user_email);
 """
 
 # Columns added after the table shipped. CREATE TABLE IF NOT EXISTS will not add
@@ -46,6 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_call_log_rfp_id ON llm_call_log (rfp_id);
 _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("cache_creation_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("cache_read_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("user_email", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -90,9 +93,12 @@ def record_llm_call(
     tokens_estimated: bool = False,
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
+    user_email: str = "",
 ) -> None:
     """Insert one instrumentation row. Never raises — observability must not break generation."""
     try:
+        from app.services.llm_call_context import normalize_user_email
+
         ensure_llm_call_log_table()
         row = {
             "id": str(uuid.uuid4()),
@@ -109,6 +115,7 @@ def record_llm_call(
             "cost_usd": float(cost_usd),
             "latency_ms": max(0, int(latency_ms)),
             "tokens_estimated": 1 if tokens_estimated else 0,
+            "user_email": normalize_user_email(user_email),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         if _use_supabase():
@@ -130,12 +137,12 @@ def _insert_sqlite(row: dict[str, Any]) -> None:
                 id, run_id, rfp_id, node_name, model, tier, provider,
                 input_tokens, output_tokens, cache_creation_input_tokens,
                 cache_read_input_tokens, cost_usd, latency_ms,
-                tokens_estimated, created_at
+                tokens_estimated, user_email, created_at
             ) VALUES (
                 :id, :run_id, :rfp_id, :node_name, :model, :tier, :provider,
                 :input_tokens, :output_tokens, :cache_creation_input_tokens,
                 :cache_read_input_tokens, :cost_usd, :latency_ms,
-                :tokens_estimated, :created_at
+                :tokens_estimated, :user_email, :created_at
             )
             """,
             row,
@@ -157,20 +164,29 @@ def _insert_supabase(row: dict[str, Any]) -> None:
         message = str(exc)
         logger.warning("llm_call_log supabase insert failed: %s", message[:240])
         # Backward-compatible fallback for older Supabase schema caches/tables
-        # that do not yet have cache token columns.
+        # that do not yet have cache token / user_email columns.
         if (
             "cache_creation_input_tokens" not in message
             and "cache_read_input_tokens" not in message
+            and "user_email" not in message
             and "PGRST204" not in message
             and "Could not find" not in message
         ):
             raise
 
-    legacy_payload = {
-        k: v
-        for k, v in payload.items()
-        if k not in {"cache_creation_input_tokens", "cache_read_input_tokens"}
+    drop_keys = {
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "user_email",
     }
+    if "user_email" not in message and "Could not find" not in message:
+        # Prefer dropping only cache columns when that was the failure mode.
+        if "cache_creation_input_tokens" in message or "cache_read_input_tokens" in message:
+            drop_keys = {
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            }
+    legacy_payload = {k: v for k, v in payload.items() if k not in drop_keys}
     client.table("llm_call_log").insert(legacy_payload).execute()
 
 

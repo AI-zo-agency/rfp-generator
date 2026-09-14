@@ -102,6 +102,17 @@ async def _enqueue_pipeline_phase(
 
     raise_http_if_monthly_budget_blocked()
     try:
+        from app.services.llm_call_guards import is_blocked_rfp_id
+
+        if is_blocked_rfp_id(rfp_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"LLM pipeline blocked for ephemeral/test RFP id {rfp_id!r}. "
+                    "demo-/fixture-/rfp-test* cannot spend AI budget."
+                ),
+            )
+
         existing = await get_proposal_job(rfp_id)
         if existing and existing.status == "running":
             if existing.job_type == phase:
@@ -144,6 +155,7 @@ async def _enqueue_pipeline_phase(
 
         from app.services.proposal_generation_cancel import clear_generation_cancel
         from app.services.proposal_pipeline_checkpoint import record_phase_started
+        from app.services.llm_call_context import get_llm_user_email
 
         # A prior Stop leaves an in-memory cancel flag. Starting a new job is an
         # explicit "run again" — drop the stale flag or the first cancelled-check
@@ -158,13 +170,24 @@ async def _enqueue_pipeline_phase(
         from app.services.llm_call_context import llm_call_context
 
         run_id = str(uuid.uuid4())
+        # Stamp email into Celery kwargs so worker process can attribute spend
+        # after the HTTP request (and its middleware context) is gone.
+        celery_kwargs = dict(job_kwargs or {})
+        email = get_llm_user_email()
+        if email and not celery_kwargs.get("user_email"):
+            celery_kwargs["user_email"] = email
 
         async def _run() -> Any:
             import asyncio
 
             try:
                 async with pipeline_phase(rfp_id, phase):
-                    with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+                    with llm_call_context(
+                        rfp_id=rfp_id,
+                        run_id=run_id,
+                        node_name=phase,
+                        user_email=email or None,
+                    ):
                         if timeout_sec is not None:
                             return await asyncio.wait_for(work(), timeout=timeout_sec)
                         return await work()
@@ -187,7 +210,7 @@ async def _enqueue_pipeline_phase(
         def _celery_dispatch() -> Any:
             from app.celery_app import run_pipeline_phase_task
 
-            return run_pipeline_phase_task.delay(rfp_id, phase, job_kwargs or {})
+            return run_pipeline_phase_task.delay(rfp_id, phase, celery_kwargs)
 
         record = await start_proposal_job(
             rfp_id, phase, _run, celery_dispatch=_celery_dispatch

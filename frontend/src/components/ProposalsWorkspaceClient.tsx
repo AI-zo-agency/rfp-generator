@@ -8,7 +8,7 @@ import { ProposalsWorkspaceSkeleton } from "@/components/loading/ProposalsWorksp
 import type { ProposalDraftSummary } from "@/lib/proposal-draft-progress";
 import type { RfpRecord } from "@/types/rfp";
 
-const GO_RFP_FETCH_TIMEOUT_MS = 0; // 0 = wait; no artificial abort
+const GO_RFP_FETCH_TIMEOUT_MS = 45_000;
 
 function filterGoRfps(all: RfpRecord[]): RfpRecord[] {
   return all.filter(
