@@ -515,8 +515,11 @@ async def _openrouter_tools_round(
     tools: list[dict[str, Any]] | None,
     max_tokens: int,
     node_name: str,
-) -> dict[str, Any]:
-    """One OpenRouter chat turn; may include tool_calls."""
+    reasoning_effort: str = "medium",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One OpenRouter chat turn; may include tool_calls. Returns (message, meta)."""
+    from app.services.llm import _claude_adaptive_reasoning_body
+
     url = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
     body: dict[str, Any] = {
         "model": model,
@@ -525,12 +528,16 @@ async def _openrouter_tools_round(
     }
     model_l = model.lower()
     if "anthropic" in model_l or "claude" in model_l:
-        body["reasoning"] = {"effort": "medium"}
+        # exclude=True required — otherwise Sonnet 5 burns max_tokens on thinking
+        # and returns empty content → "opportunity_extract returned no JSON".
+        body["reasoning"] = _claude_adaptive_reasoning_body(reasoning_effort)
     else:
         body["temperature"] = 0.1
     if tools is not None:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    else:
+        body["response_format"] = {"type": "json_object"}
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -539,7 +546,7 @@ async def _openrouter_tools_round(
         "X-Title": "zo-rfp-two-agents-demo",
     }
     started = time.perf_counter()
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         resp = await client.post(url, headers=headers, json=body)
     latency_ms = int((time.perf_counter() - started) * 1000)
     if resp.status_code >= 400:
@@ -549,7 +556,6 @@ async def _openrouter_tools_round(
         )
     data = resp.json()
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    # Cost logging — same ledger as production
     try:
         cost = float(usage.get("cost") or 0) if usage.get("cost") is not None else None
     except (TypeError, ValueError):
@@ -579,8 +585,42 @@ async def _openrouter_tools_round(
     choices = data.get("choices") or []
     if not choices:
         raise LlmError("OpenRouter returned no choices")
-    message = choices[0].get("message") or {}
-    return message if isinstance(message, dict) else {}
+    choice0 = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice0.get("message") or {}
+    if not isinstance(message, dict):
+        message = {}
+    finish_reason = choice0.get("finish_reason") or choice0.get("native_finish_reason")
+    reasoning_tokens = int(
+        usage.get("reasoning_tokens")
+        or (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        or 0
+    )
+    meta = {
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "reasoning_tokens": reasoning_tokens,
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+    }
+    logger.info(
+        "OpenRouter %s finish=%s prompt=%s completion=%s reasoning=%s",
+        node_name,
+        finish_reason,
+        meta["prompt_tokens"],
+        meta["completion_tokens"],
+        reasoning_tokens,
+    )
+    return message, meta
+
+
+def _message_text(msg: dict[str, Any]) -> str:
+    content = msg.get("content") or ""
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text") or "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
 
 
 def normalize_provenance(entries: Any) -> list[dict[str, Any]]:
@@ -896,9 +936,13 @@ async def _single_json_call(
     doc: "RfpDoc | None" = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """One Sonnet extraction; optional capped tool rounds (default 0)."""
+    from app.services.llm import _usage_reasoning_exhausted_output
+
     trace: list[str] = []
     msgs = list(messages)
     rounds = max(1, max_tool_rounds + 1)
+    last_diag = ""
+    reasoning_effort = "medium"
     for round_i in range(rounds):
         use_tools = tools if (tools and round_i < max_tool_rounds) else None
         if tools and round_i == max_tool_rounds and max_tool_rounds > 0:
@@ -908,21 +952,17 @@ async def _single_json_call(
                     "content": "No more tools. Return final opportunity JSON only.",
                 }
             )
-        msg = await _openrouter_tools_round(
+        msg, meta = await _openrouter_tools_round(
             messages=msgs,
             model=model,
             api_key=api_key,
             tools=use_tools,
             max_tokens=max_tokens,
             node_name=node_name,
+            reasoning_effort=reasoning_effort,
         )
         tool_calls = msg.get("tool_calls") or []
-        content = msg.get("content") or ""
-        if isinstance(content, list):
-            content = "".join(
-                str(part.get("text") or "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
+        content = _message_text(msg)
         if tool_calls and doc is not None and use_tools:
             msgs.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
             for call in tool_calls:
@@ -939,12 +979,39 @@ async def _single_json_call(
                     }
                 )
             continue
-        parsed = _extract_json_object(str(content or ""))
+        parsed = _extract_json_object(content)
         if parsed:
             return parsed, trace
-        msgs.append({"role": "assistant", "content": str(content or "")})
-        msgs.append({"role": "user", "content": "Return ONLY valid opportunity JSON."})
-    raise IntelligenceError(f"{node_name} returned no JSON")
+
+        finish = meta.get("finish_reason")
+        last_diag = (
+            f"chars={len(content)} finish={finish} "
+            f"completion={meta.get('completion_tokens')} "
+            f"reasoning={meta.get('reasoning_tokens')} "
+            f"preview={content[:180]!r}"
+        )
+        logger.warning("opportunity JSON missing round=%s %s", round_i, last_diag)
+        trace.append(f"json_miss:{last_diag[:200]}")
+
+        # Thinking ate the budget → lower effort (higher max_tokens just buys more thinking).
+        if (not content.strip()) or _usage_reasoning_exhausted_output(meta.get("usage")):
+            reasoning_effort = "low"
+            tools = None
+            max_tool_rounds = 0
+            trace.append("retry:reasoning_effort=low")
+
+        msgs.append({"role": "assistant", "content": content or "(empty)"})
+        msgs.append(
+            {
+                "role": "user",
+                "content": (
+                    "Return ONLY valid opportunity JSON with top-level keys "
+                    "understanding, compliance, scope, evaluation, successCriteria, provenance. "
+                    "No markdown, no preamble."
+                ),
+            }
+        )
+    raise IntelligenceError(f"{node_name} returned no JSON ({last_diag})")
 
 
 def _targeted_repair_instruction(triggers: list[str], pack: dict[str, Any]) -> str:
@@ -1218,7 +1285,7 @@ async def _qa_patch_pass(
                 ),
             },
         ]
-        msg = await _openrouter_tools_round(
+        msg, _meta = await _openrouter_tools_round(
             messages=messages,
             model=model,
             api_key=api_key,
@@ -1226,13 +1293,8 @@ async def _qa_patch_pass(
             max_tokens=4096,
             node_name=node_name,
         )
-        content = msg.get("content") or ""
-        if isinstance(content, list):
-            content = "".join(
-                str(part.get("text") or "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
-        qa = _extract_json_object(str(content)) or {}
+        content = _message_text(msg)
+        qa = _extract_json_object(content) or {}
         patches = qa.get("patches") if isinstance(qa.get("patches"), list) else []
         out = json.loads(json.dumps(payload))  # deep copy
         for patch in patches[:25]:
