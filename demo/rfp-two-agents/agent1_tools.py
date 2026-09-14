@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -54,6 +55,11 @@ _SECTION_SELECTORS: list[tuple[str, list[str]]] = [
     ("pricing", ["payment schedule", "compensation", "pricing", "cost proposal", "fee schedule", "budget"]),
     ("contract_term", ["term of agreement", "contract term", "period of performance", "agreement term"]),
     ("insurance", ["insurance requirements", "insurance", "indemnification", "exhibit b"]),
+    ("purpose_background", ["purpose", "background", "introduction", "project overview"]),
+    ("goals_objectives", ["goals", "objectives", "desired results"]),
+    ("draft_agreement", ["draft agreement", "sample agreement", "general provisions"]),
+    ("post_award", ["upon award", "if selected", "successful offeror", "post-award"]),
+    ("references", ["references", "professional references", "project examples"]),
 ]
 
 _OBLIGATION_VERBS = (
@@ -263,6 +269,7 @@ OPPORTUNITY_SCHEMA: dict[str, Any] = {
         "scope",
         "evaluation",
         "successCriteria",
+        "provenance",
     ],
     "properties": {
         "understanding": {
@@ -280,6 +287,7 @@ OPPORTUNITY_SCHEMA: dict[str, Any] = {
                 "complexity",
                 "budgetIntel",
                 "timelineIntel",
+                "contractStructure",
                 "confidence",
                 "memoryFacts",
             ],
@@ -295,6 +303,7 @@ OPPORTUNITY_SCHEMA: dict[str, Any] = {
                 "complexity": {"type": "string"},
                 "budgetIntel": {"type": "object"},
                 "timelineIntel": {"type": "object"},
+                "contractStructure": {"type": "string"},
                 "confidence": {"type": "number"},
                 "memoryFacts": {"type": "object"},
             },
@@ -332,6 +341,7 @@ OPPORTUNITY_SCHEMA: dict[str, Any] = {
         },
         "evaluation": {"type": "object"},
         "successCriteria": {"type": "object"},
+        "provenance": {"type": "array"},
     },
 }
 
@@ -378,15 +388,23 @@ def validate_opportunity_json(raw: dict[str, Any]) -> tuple[dict[str, Any], list
                 understanding[req] = {}
             elif req == "confidence":
                 understanding[req] = 0.0
+            elif req == "contractStructure":
+                understanding[req] = ""
             else:
                 understanding[req] = ""
-            errors.append(f"filled missing understanding.{req}")
+            errors.append(f"missing_required:understanding.{req}")
     mf = understanding.get("memoryFacts")
     if not isinstance(mf, dict):
         mf = {}
         understanding["memoryFacts"] = mf
-    mf.setdefault("clientName", understanding.get("client") or "")
-    mf.setdefault("organizationType", understanding.get("orgType") or "")
+    if not str(mf.get("clientName") or "").strip():
+        mf["clientName"] = str(understanding.get("client") or "").strip()
+    if not str(mf.get("organizationType") or "").strip():
+        mf["organizationType"] = str(understanding.get("orgType") or "").strip()
+    if not mf.get("clientName"):
+        errors.append("hard:memoryFacts.clientName empty")
+    if not mf.get("organizationType"):
+        errors.append("hard:memoryFacts.organizationType empty")
 
     scope = cleaned.get("scope")
     if not isinstance(scope, dict):
@@ -397,6 +415,7 @@ def validate_opportunity_json(raw: dict[str, Any]) -> tuple[dict[str, Any], list
             scope[req] = []
     if "notes" not in scope or scope.get("notes") is None:
         scope["notes"] = ""
+        errors.append("hard:scope.notes missing")
     # Drop unknown scope keys except notes + known
     s_allowed = {
         "mandatory",
@@ -438,6 +457,11 @@ def validate_opportunity_json(raw: dict[str, Any]) -> tuple[dict[str, Any], list
 
     cleaned.setdefault("evaluation", {})
     cleaned.setdefault("successCriteria", {"items": [], "confidence": 0.0})
+    prov = cleaned.get("provenance")
+    if not isinstance(prov, list):
+        cleaned["provenance"] = []
+        if prov is not None:
+            errors.append("provenance must be array")
     return cleaned, errors
 
 
@@ -669,7 +693,127 @@ def build_evidence_pack(doc: "RfpDoc") -> dict[str, Any]:
         if len(dm) >= 40:
             break
     pack["dateMoneyHits"] = dm[:40]
+
+    from section_classifier import (
+        build_bounded_sections,
+        classify_document_sections,
+        section_text_for_type,
+    )
+
+    classification = classify_document_sections(doc)
+    bounded = build_bounded_sections(doc)
+    pack["sectionClassification"] = classification
+    pack["boundedSections"] = bounded
+    pack["templatePages"] = classification.get("templatePages") or []
+
+    # Override keyword-snippet sections with heading-bounded text when available
+    _BOUNDED_MAP = {
+        "scope_of_work": "statement_of_work",
+        "submittal_items": "submittal_items",
+        "evaluation": "evaluation",
+        "pricing": "pricing",
+        "references": "references",
+    }
+    for pack_key, bkey in _BOUNDED_MAP.items():
+        bsec = bounded.get(bkey) or {}
+        if isinstance(bsec, dict) and bsec.get("found") and bsec.get("text"):
+            pack["sections"][pack_key] = {
+                "found": True,
+                "anchorPage": bsec.get("anchorPage"),
+                "score": 10.0,
+                "text": str(bsec["text"])[:_EVIDENCE_SECTION_CHARS],
+                "heading": bsec.get("heading"),
+                "bounded": True,
+            }
+
+    sow_bounded = bounded.get("statement_of_work") or {}
+    sow_text = str(sow_bounded.get("text") or "") or section_text_for_type(
+        doc, classification, "statement_of_work", char_cap=8000, bounded=bounded
+    )
+    if sow_text:
+        pack["sowExcerpt"] = sow_text[:12_000]
+        pack["sowBoundedText"] = sow_text[:28_000]
+    sow_verbs = (
+        "shall ",
+        "must ",
+        "will ",
+        "is responsible",
+        "required to",
+        "contractor shall",
+        "consultant shall",
+    )
+    sow_hits: list[dict[str, Any]] = []
+    sow_start = int(sow_bounded.get("anchorPage") or 1) if sow_bounded.get("found") else 1
+    sow_end = min(doc.page_count, sow_start + 35)
+    for page_no, page in enumerate(doc.pages, start=1):
+        if page_no < sow_start or page_no > sow_end:
+            continue
+        low = (page or "").casefold()
+        if not sow_text and "statement of work" not in low:
+            continue
+        for sent in re.split(r"(?<=[.:;])\s+|\n+", page or ""):
+            s = sent.strip()
+            if len(s) < 20:
+                continue
+            sl = s.casefold()
+            if any(v in sl for v in sow_verbs) or "as needed" in sl or "up to " in sl:
+                sow_hits.append({"page": page_no, "text": s[:500]})
+            if len(sow_hits) >= 120:
+                break
+        if len(sow_hits) >= 120:
+            break
+    pack["sowCandidates"] = sow_hits[:120]
+    pack["pages"] = doc.pages  # internal — for reporting-note scan; stripped before Sonnet payload
     return pack
+
+
+def merge_langextract_into_pack(pack: dict[str, Any], harvest: dict[str, Any]) -> None:
+    """Prefer LangExtract hits for obligation/scoring/scope recall."""
+    pack["langextract"] = harvest
+    stats = harvest.get("stats") or {}
+    if stats.get("error"):
+        pack.setdefault("missingSections", [])
+        if "langextract_error" not in pack["missingSections"]:
+            pack["missingSections"].append(f"langextract_error:{stats['error'][:80]}")
+
+    lx_obl = [
+        {
+            "page": h.get("page"),
+            "text": h.get("sourceText") or h.get("text"),
+            "terms": ["langextract"],
+            "class": h.get("class"),
+            "attributes": h.get("attributes"),
+        }
+        for h in (harvest.get("complianceHits") or [])
+        if isinstance(h, dict)
+    ]
+    if lx_obl:
+        seen = {str(c.get("text") or "")[:120] for c in pack.get("obligationCandidates") or []}
+        merged = list(pack.get("obligationCandidates") or [])
+        for row in lx_obl:
+            key = str(row.get("text") or "")[:120]
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(row)
+        pack["obligationCandidates"] = merged[:120]
+
+    if harvest.get("evaluationHits"):
+        pack["scoringHits"] = [
+            {
+                "page": h.get("page"),
+                "text": h.get("sourceText") or h.get("text"),
+                "terms": [h.get("class") or "evaluation"],
+            }
+            for h in harvest.get("evaluationHits") or []
+            if isinstance(h, dict)
+        ] + (pack.get("scoringHits") or [])[:10]
+        pack["explicitScoringLikely"] = any(
+            h.get("class") in ("scoring_criterion", "total_points")
+            for h in harvest.get("evaluationHits") or []
+            if isinstance(h, dict)
+        )
+
+    pack["scopeCandidates"] = harvest.get("scopeHits") or []
 
 
 def repair_triggers(cleaned: dict[str, Any], pack: dict[str, Any], schema_errs: list[str]) -> list[str]:
@@ -681,6 +825,8 @@ def repair_triggers(cleaned: dict[str, Any], pack: dict[str, Any], schema_errs: 
     items = compliance.get("items") if isinstance(compliance.get("items"), list) else []
     if not items:
         reasons.append("no_compliance_items")
+    elif len(items) < 25 and len(pack.get("obligationCandidates") or []) > 40:
+        reasons.append("compliance_retention_suspect")
     u = cleaned.get("understanding") if isinstance(cleaned.get("understanding"), dict) else {}
     try:
         conf = float(u.get("confidence") or compliance.get("confidence") or 0)
@@ -710,44 +856,19 @@ def repair_triggers(cleaned: dict[str, Any], pack: dict[str, Any], schema_errs: 
     return reasons
 
 
-def provenance_from_pack(pack: dict[str, Any], cleaned: dict[str, Any]) -> list[dict[str, Any]]:
-    """Deterministic provenance seeds from obligation candidates + sections."""
-    rows: list[dict[str, Any]] = []
-    items = ((cleaned.get("compliance") or {}).get("items") or []) if isinstance(cleaned.get("compliance"), dict) else []
-    cands = pack.get("obligationCandidates") or []
-    for i, item in enumerate(items[:60]):
-        if not isinstance(item, dict):
-            continue
-        req = str(item.get("requirement") or "")
-        req_l = req.casefold()
-        matched = None
-        for c in cands:
-            t = str(c.get("text") or "")
-            if len(t) > 20 and (t.casefold()[:80] in req_l or req_l[:80] in t.casefold()):
-                matched = c
-                break
-        if matched:
-            rows.append(
-                {
-                    "path": f"/compliance/items/{i}",
-                    "value": req[:300],
-                    "sourcePage": matched.get("page"),
-                    "sourceSection": "",
-                    "sourceText": str(matched.get("text") or "")[:500],
-                }
+def _pack_for_llm(pack: dict[str, Any]) -> dict[str, Any]:
+    """Evidence pack for Sonnet — omit internal full-page arrays."""
+    slim = {k: v for k, v in pack.items() if k not in ("pages",)}
+    if "boundedSections" in slim:
+        slim["boundedSections"] = {
+            k: {kk: vv for kk, vv in (v or {}).items() if kk != "text"} | (
+                {"textPreview": str((v or {}).get("text") or "")[:4000]}
+                if isinstance(v, dict) and v.get("text")
+                else {}
             )
-    for key, sec in (pack.get("sections") or {}).items():
-        if isinstance(sec, dict) and sec.get("found") and sec.get("text"):
-            rows.append(
-                {
-                    "path": f"/evidence/sections/{key}",
-                    "value": key,
-                    "sourcePage": sec.get("anchorPage"),
-                    "sourceSection": key,
-                    "sourceText": str(sec.get("text") or "")[:240],
-                }
-            )
-    return normalize_provenance(rows)
+            for k, v in (slim.get("boundedSections") or {}).items()
+        }
+    return slim
 
 
 async def _single_json_call(
@@ -813,6 +934,50 @@ async def _single_json_call(
     raise IntelligenceError(f"{node_name} returned no JSON")
 
 
+def _targeted_repair_instruction(triggers: list[str], pack: dict[str, Any]) -> str:
+    parts = ["Repair ONLY the issues listed — return FULL opportunity JSON (same schema)."]
+    if "thin_scope_vs_sow_section" in triggers:
+        parts.append(
+            "Expand scope.mandatory/optional/dependencies from sowExcerpt and scopeCandidates. "
+            "Do not drop qualifiers (at least, up to, annually)."
+        )
+    if "aggregated_compliance_items" in triggers:
+        parts.append(
+            "Split bundled compliance requirements into independently answerable items "
+            "(references, submittal forms, project examples)."
+        )
+    if "missing_provenance" in triggers:
+        parts.append("Add provenance rows with verbatim sourceText for major fields.")
+    if "missing_pain_points" in triggers:
+        parts.append(
+            "Populate understanding.painPoints from purpose/background/SOW — not from draft agreement boilerplate."
+        )
+    if "qualifier_preservation" in triggers:
+        parts.append("Restore exact numeric/temporal qualifiers from evidence; do not normalize.")
+    if "scoring_claimed_without_evidence" in triggers:
+        parts.append("Set scoredResponseForm=false, criteria=[], totalPoints=null.")
+    if any("retention" in t or "anchor" in t for t in triggers):
+        parts.append(
+            "COMPLIANCE RETENTION: Include EVERY submittal/required-form obligation from "
+            "obligationCandidates and langextract complianceHits. One item per independently "
+            "answerable requirement (PC600, PC601, PC610, PC620, references, staffing, payment "
+            "schedule, draft agreement, exceptions). Do not stop at ~18 items."
+        )
+    if any(t.startswith("hard:") for t in triggers):
+        parts.append(
+            "HARD SCHEMA: populate understanding.memoryFacts, contractStructure, "
+            "timelineIntel.questionsDue, timelineIntel.quotesDue, scope.notes (string)."
+        )
+    if pack.get("sowBoundedText"):
+        parts.append(f"SOW BOUNDED:\n{str(pack['sowBoundedText'])[:14000]}")
+    elif pack.get("sowExcerpt"):
+        parts.append(f"SOW EXCERPT:\n{str(pack['sowExcerpt'])[:12000]}")
+    sub = (pack.get("sections") or {}).get("submittal_items") or {}
+    if sub.get("text"):
+        parts.append(f"SUBMITTAL ITEMS:\n{str(sub['text'])[:10000]}")
+    return "\n".join(parts)
+
+
 async def extract_opportunity_with_tools(
     *,
     doc: RfpDoc,
@@ -820,27 +985,41 @@ async def extract_opportunity_with_tools(
     rfp_meta: dict[str, str],
     node_name: str = "opportunity_extract",
 ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
-    """Budget A1: evidence pack → ONE Sonnet call → conditional repair (demo only)."""
+    """Stage 1 classify → LangExtract harvest → Sonnet normalize → deterministic validators."""
+    from final_provenance import build_final_provenance
+    from langextract_harvest import run_langextract_harvest
+    from opportunity_validators import apply_deterministic_pipeline, validator_repair_triggers
+
     api_key = (settings.openrouter_api_key or "").strip()
     if not api_key:
         raise IntelligenceError("OPENROUTER_API_KEY missing")
     model = resolve_llm_model("heavy", node_name=node_name)
 
     pack = build_evidence_pack(doc)
+    try:
+        harvest = await asyncio.to_thread(run_langextract_harvest, doc)
+        merge_langextract_into_pack(pack, harvest)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LangExtract harvest skipped: %s", exc)
+        pack["langextract"] = {"stats": {"error": str(exc)[:200], "grounded": 0}}
+
     trace: list[str] = [
         f"evidence_pack:pages={pack['pageCount']}",
         f"sections_found={sum(1 for s in pack['sections'].values() if s.get('found'))}",
         f"obligation_candidates={len(pack['obligationCandidates'])}",
+        f"scope_candidates={len(pack.get('scopeCandidates') or [])}",
+        f"lx_grounded={(pack.get('langextract') or {}).get('stats', {}).get('grounded')}",
         f"scoring_hits={len(pack['scoringHits'])}",
         f"missing={pack['missingSections']}",
     ]
-    logger.info("A1 evidence pack ready %s", trace[:4])
+    logger.info("A1 evidence pack ready %s", trace[:5])
 
     user_content = (
         f"RFP meta: {json.dumps(rfp_meta)}\n\n"
         "EVIDENCE PACK (use this first — do not re-read the whole RFP):\n"
-        f"{json.dumps(pack, indent=2)[:55000]}\n\n"
-        "Extract the full opportunity JSON now. Tools only if a required field "
+        f"{json.dumps(_pack_for_llm(pack), indent=2)[:55000]}\n\n"
+        "Extract the full opportunity JSON now. You MUST represent LangExtract compliance "
+        "candidates in compliance.items (no silent drops). Tools only if a required field "
         "cannot be filled from this pack."
     )
     messages = [
@@ -854,28 +1033,50 @@ async def extract_opportunity_with_tools(
         model=model,
         api_key=api_key,
         node_name=node_name,
-        max_tokens=12288,
+        max_tokens=16384,
         tools=TOOL_DEFS,
         max_tool_rounds=2,
         doc=doc,
     )
     trace.extend(t1)
 
-    provenance = normalize_provenance(raw.pop("provenance", None))
+    model_prov = normalize_provenance(raw.pop("provenance", None))
     cleaned, errs = validate_opportunity_json(raw)
     for e in errs:
         trace.append(f"schema:{e}")
 
+    cleaned["_pack_sow_hits"] = pack.get("scopeCandidates") or pack.get("sowCandidates")
+    cleaned, det_fixes, det_warnings = apply_deterministic_pipeline(
+        cleaned, pack, provenance=model_prov, skip_provenance=True, doc=doc
+    )
+    rs = cleaned.pop("_retention_stats", None)
+    if rs:
+        trace.append(
+            f"compliance_retention:{rs.get('retentionRate')} "
+            f"items={len((cleaned.get('compliance') or {}).get('items') or [])} "
+            f"merged={rs.get('mergedIntoSonnet')} scope_class={rs.get('classifiedAsScope')}"
+        )
+    ledger = pack.get("_candidateDisposition") or {}
+    if ledger.get("stats"):
+        trace.append(f"disposition_stats:{ledger.get('stats')}")
+    for f in det_fixes[:30]:
+        trace.append(f"deterministic:{f}")
+    for w in det_warnings[:15]:
+        trace.append(f"validator_warn:{w}")
+
     triggers = repair_triggers(cleaned, pack, errs)
+    triggers.extend(validator_repair_triggers(cleaned, pack, det_warnings))
+    triggers = list(dict.fromkeys(triggers))
     if triggers:
         trace.append(f"repair_triggers:{triggers}")
+        snapshot = json.loads(json.dumps(cleaned))  # deep copy before repair
         repair_user = (
-            "Repair the opportunity JSON for these issues only: "
-            f"{triggers}\n\n"
-            f"Current JSON:\n{json.dumps(cleaned)[:20000]}\n\n"
-            f"Evidence pack (abbreviated):\n{json.dumps(pack)[:20000]}\n\n"
-            "Return the FULL corrected opportunity JSON (same schema). "
-            "Use at most 2 targeted tool calls if needed."
+            _targeted_repair_instruction(triggers, pack)
+            + f"\n\nIssues: {triggers}\n\n"
+            f"Current JSON:\n{json.dumps({k: v for k, v in cleaned.items() if k != 'provenance'})[:20000]}\n\n"
+            f"Evidence pack (abbreviated):\n{json.dumps({k: pack[k] for k in pack if k not in ('sections', 'pages', '_candidateDisposition')})[:20000]}\n\n"
+            "Use at most 2 targeted tool calls if needed. Do NOT shrink successCriteria, "
+            "compliance, or evaluation.emphasis if already populated."
         )
         repaired, t2 = await _single_json_call(
             messages=[
@@ -891,26 +1092,37 @@ async def extract_opportunity_with_tools(
             doc=doc,
         )
         trace.extend(t2)
-        provenance.extend(normalize_provenance(repaired.pop("provenance", None)))
+        model_prov.extend(normalize_provenance(repaired.pop("provenance", None)))
         cleaned, errs2 = validate_opportunity_json(repaired)
         for e in errs2:
             trace.append(f"schema_after_repair:{e}")
+        from opportunity_validators import accept_repair_if_improved
+
+        cleaned, reject_notes = accept_repair_if_improved(snapshot, cleaned)
+        for n in reject_notes:
+            trace.append(n)
+        cleaned, det_fixes2, det_warnings2 = apply_deterministic_pipeline(
+            cleaned, pack, skip_provenance=True, doc=doc
+        )
+        det_warnings.extend(det_warnings2)
+        for f in det_fixes2[:20]:
+            trace.append(f"deterministic_after_repair:{f}")
     else:
         trace.append("repair:skipped")
 
-    # Merge deterministic provenance with model provenance
-    provenance = normalize_provenance(provenance + provenance_from_pack(pack, cleaned))
-    # Dedupe by path
-    seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
-    for row in provenance:
-        key = str(row.get("path"))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
+    cleaned, _, _ = apply_deterministic_pipeline(cleaned, pack, skip_provenance=True, doc=doc)
+    cleaned.pop("_retention_stats", None)
+    cleaned.pop("_pack_sow_hits", None)
+    deduped = build_final_provenance(cleaned, pack)
+    # Never fall back to model provenance that may self-quote
     trace.append(f"provenance_count:{len(deduped)}")
-    return cleaned, trace, deduped
+    comp = cleaned.get("compliance") if isinstance(cleaned.get("compliance"), dict) else {}
+    comp.pop("dispositionLedger", None)
+    out = dict(cleaned)
+    out.pop("_retention_stats", None)
+    out["provenance"] = deduped
+    # Internal disposition available in toolTrace only
+    return out, trace, deduped
 
 
 
@@ -1035,14 +1247,17 @@ async def apply_opportunity_to_plan(
     for key in UNDERSTANDING_FORBIDDEN_KEYS:
         understanding_raw.pop(key, None)
     memory_facts = (
-        understanding_raw.pop("memoryFacts", None)
-        or understanding_raw.pop("memory_facts", None)
+        understanding_raw.get("memoryFacts")
+        or understanding_raw.get("memory_facts")
         or {}
     )
-    scope_notes = ""
+    if isinstance(memory_facts, dict) and memory_facts:
+        understanding_raw["memoryFacts"] = {
+            str(k): str(v) for k, v in memory_facts.items() if v is not None
+        }
+
     scope_raw = _as_dict(raw, "scope")
-    if isinstance(scope_raw, dict):
-        scope_notes = str(scope_raw.pop("notes", "") or "")
+    scope_notes = str(scope_raw.get("notes") or "") if isinstance(scope_raw, dict) else ""
 
     try:
         understanding = OpportunityUnderstanding.model_validate(understanding_raw)
@@ -1052,13 +1267,6 @@ async def apply_opportunity_to_plan(
     understanding.confidence = clamp_confidence(understanding.confidence)
     if not understanding.client or not understanding.project_type:
         raise IntelligenceError("Opportunity extract missing client or projectType")
-
-    # Park scope.notes where production schema has no field
-    if scope_notes:
-        notes = understanding.timeline_intel.notes or ""
-        tag = f"[scope.notes] {scope_notes}"
-        if tag not in notes:
-            understanding.timeline_intel.notes = (notes + "\n" + tag).strip()
 
     plan.opportunity.understanding = understanding
     plan = set_provider(plan, provider)
@@ -1084,9 +1292,6 @@ async def apply_opportunity_to_plan(
     )
     # Re-inject scope without notes for pydantic
     apply_raw = dict(raw)
-    if isinstance(apply_raw.get("scope"), dict):
-        apply_raw["scope"] = {
-            k: v for k, v in apply_raw["scope"].items() if k != "notes"
-        }
+    apply_raw.pop("provenance", None)
     plan = _apply_opportunity_slices(plan, apply_raw, provider)
     return plan

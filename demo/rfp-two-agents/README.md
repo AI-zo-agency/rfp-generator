@@ -36,23 +36,39 @@ You do **not** need the main Next.js frontend or the normal `uvicorn app.main` A
 
 Edit in the UI (Save prompt) or in the editor — each Run reloads from disk.
 
-## Agent 1 pipeline (demo only) — budget A1 (~$0.50 target)
+## Agent 1 pipeline (demo only)
 
 Does not modify production `merged_passes`.
 
 ```
-PDF → cheap evidence pack (sections + shall/must harvest + scoring/date scan)
-    → ONE Sonnet extraction (tools only if gaps, max ~2)
-    → schema validate (free)
-    → repair Sonnet call ONLY if triggers fire
+PDF → RfpDoc
+    → Stage 1: section classification (section_classifier.py)
+    → Stage 2: evidence pack + LangExtract harvest (Flash, 4 passes: compliance/eval/facts/SOW)
+    → Stage 3: ONE Sonnet normalize + gap fill (tools max ~2)
+    → schema validate + deterministic validators (opportunity_validators.py)
+    → targeted Sonnet repair ONLY when triggers fire
+    → provenance merge (model + pack + LangExtract)
 ```
 
 | Piece | Role |
 |-------|------|
-| `prompts/agent1_opportunity_system.txt` | Variation A1 — evidence-first, tools only when needed |
-| `agent1_tools.py` | `build_evidence_pack`, single extract, conditional repair, provenance |
+| `langextract_harvest.py` | High-recall grounded extraction via OpenRouter Flash |
+| `section_classifier.py` | Section types + template-page detection |
+| `opportunity_validators.py` | Post-award/conditional mandatory, scoring guard, complexity rubric, contradictions |
+| `agent1_tools.py` | Orchestration, repair triggers, apply to plan |
+| `prompts/agent1_opportunity_system.txt` | Normalizer prompt (not a summarizer) |
 
-Repair triggers: schema issues, no compliance items, low confidence, scoring without evidence, mandatory/optional overlap, long RFP, etc.
+Optional deps: `pip install -r requirements.txt` (langextract) into repo `.venv`.
+
+### Regression (County RFQ 13180)
+
+No PDF is committed. Point at your local copy:
+
+```bash
+export RFP_FIXTURE_PDF=/path/to/RFQ13180.pdf
+../../.venv/bin/python run_fixture_compare.py
+../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+```
 
 | Agent 2 | Still production `run_strategy_delivery` + real Supermemory |
 

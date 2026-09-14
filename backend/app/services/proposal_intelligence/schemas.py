@@ -85,6 +85,12 @@ class BudgetIntel(BaseModel):
     ceiling: str | None = None
     pricing_model_hint: str | None = Field(default=None, alias="pricingModelHint")
     contract_type: str | None = Field(default=None, alias="contractType")
+    disclosed_budget: str | None = Field(default=None, alias="disclosedBudget")
+    maximum_agreement_amount: str | None = Field(default=None, alias="maximumAgreementAmount")
+    base_pricing_model: str | None = Field(default=None, alias="basePricingModel")
+    task_order_pricing_models: list[str] = Field(
+        default_factory=list, alias="taskOrderPricingModels"
+    )
     notes: str = ""
 
 
@@ -94,6 +100,10 @@ class TimelineIntel(BaseModel):
     project_start: str | None = Field(default=None, alias="projectStart")
     completion: str | None = None
     go_live: str | None = Field(default=None, alias="goLive")
+    questions_due: str | None = Field(default=None, alias="questionsDue")
+    quotes_due: str | None = Field(default=None, alias="quotesDue")
+    initial_term_start: str | None = Field(default=None, alias="initialTermStart")
+    option_periods: str | None = Field(default=None, alias="optionPeriods")
     milestones: list[str] = Field(default_factory=list)
     notes: str = ""
 
@@ -110,8 +120,10 @@ class OpportunityUnderstanding(BaseModel):
     pain_points: list[str] = Field(default_factory=list, alias="painPoints")
     desired_outcomes: list[str] = Field(default_factory=list, alias="desiredOutcomes")
     complexity: str = ""
+    contract_structure: str = Field(default="", alias="contractStructure")
     budget_intel: BudgetIntel = Field(default_factory=BudgetIntel, alias="budgetIntel")
     timeline_intel: TimelineIntel = Field(default_factory=TimelineIntel, alias="timelineIntel")
+    memory_facts: dict[str, str] = Field(default_factory=dict, alias="memoryFacts")
     confidence: float = 0.0
 
 
@@ -143,6 +155,7 @@ class ScopeAnalysis(BaseModel):
     future_phases: list[str] = Field(default_factory=list, alias="futurePhases")
     out_of_scope: list[str] = Field(default_factory=list, alias="outOfScope")
     dependencies: list[str] = Field(default_factory=list)
+    notes: str = ""
     confidence: float = 0.0
 
 

@@ -29,6 +29,28 @@ class OpportunityAgentTests(unittest.TestCase):
         self.assertEqual(u.client, "City of Test")
         self.assertEqual(u.org_type, "Municipality")
 
+    def test_understanding_extended_intel_fields(self) -> None:
+        u = OpportunityUnderstanding.model_validate(
+            {
+                "client": "County",
+                "projectType": "Outreach",
+                "contractStructure": "Initial term + four option years",
+                "memoryFacts": {"clientName": "County", "organizationType": "County"},
+                "timelineIntel": {
+                    "questionsDue": "September 21, 2026",
+                    "quotesDue": "October 30, 2026",
+                    "initialTermStart": "July 1, 2027",
+                },
+                "budgetIntel": {
+                    "basePricingModel": "Hourly unit rates with annual NTE totals",
+                    "disclosedBudget": None,
+                },
+            }
+        )
+        self.assertEqual(u.contract_structure, "Initial term + four option years")
+        self.assertEqual(u.memory_facts["clientName"], "County")
+        self.assertEqual(u.timeline_intel.questions_due, "September 21, 2026")
+
     def test_strategy_includes_extended_fields(self) -> None:
         s = OpportunityStrategy.model_validate(
             {

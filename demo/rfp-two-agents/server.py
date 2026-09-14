@@ -113,12 +113,20 @@ async def health() -> dict[str, Any]:
         label = "Claude Sonnet 5"
     elif "sonnet" in heavy.lower():
         label = heavy.split("/")[-1].replace("-", " ").title()
+    lx_model = "google/gemini-2.5-flash"
+    try:
+        from langextract_harvest import langextract_model_id
+
+        lx_model = langextract_model_id()
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "ok": True,
         "openrouter_configured": bool(settings.openrouter_api_key),
         "supermemory_configured": bool(settings.supermemory_api_key),
         "model": label,
         "model_id": heavy,
+        "langextract_model": lx_model,
         "openrouter_model": settings.openrouter_model,
         "llm_heavy_model": settings.llm_heavy_model or "",
         "env_file": str(BACKEND_ROOT / ".env"),

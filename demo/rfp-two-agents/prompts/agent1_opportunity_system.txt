@@ -8,9 +8,19 @@ This is NOT a general RFP summary.
 
 Return JSON only.
 
-Use the supplied evidence first.
+Use the supplied evidence first (sectionClassification, sowExcerpt, scopeCandidates,
+obligationCandidates, langextract hits).
 Use retrieval tools ONLY when a required field cannot be reliably determined from the supplied evidence.
 Do not search the RFP again for information already supported by the evidence.
+
+SECTION PRIORITY (do not let draft agreement boilerplate override RFQ-specific sections):
+- Understanding: purpose_background / goals_objectives / statement_of_work BEFORE draft_agreement.
+- Bidder compliance: submittal_items / required_forms / submission_instructions BEFORE draft_agreement.
+- Scope: statement_of_work / attachments BEFORE draft_agreement template language.
+- Budget: pricing / payment schedule BEFORE generic compensation templates.
+- Evaluation: evaluation section only (+ clearly linked evaluation language).
+Ignore template placeholders ([# ...], _____, $######, "include this paragraph if") unless
+activated by RFQ-specific instructions.
 
 PRIORITIES
 
@@ -46,8 +56,11 @@ Extract:
 - timeline
 
 Do not treat contract start = go-live unless explicitly stated.
+Do not derive business goals or painPoints from generic draft agreement language.
+Populate painPoints when Purpose/Background/SOW state regulatory, awareness, behavior-change,
+or operational problems.
 
-Populate memoryFacts:
+Populate memoryFacts (required — validation fails if missing):
 {
   "clientName": "...",
   "organizationType": "..."
@@ -82,8 +95,17 @@ and state the condition explicitly in the requirement.
 
 Separate bidder-response requirements from post-award obligations using targetSection and owner.
 
-Use obligationCandidates from the evidence pack as a recall aid — classify/normalize them;
-do not drop real candidates without reason; you may add obligations the pack missed if evidence supports them.
+POST-AWARD in compliance.items: mandatory MUST be false (W-9 after selection, insurance after award,
+monthly status reports during performance). These may ALSO appear in scope.mandatory as performance
+obligations — do not confuse bidder-response mandatory with contract-performance mandatory.
+
+Owners: bidder | selectedBidder | contractor | county | subcontractor.
+Post-award targetSection must start with "Post-Award / ...".
+
+Use obligationCandidates and langextract.complianceHits as a recall aid — classify/normalize them.
+Every LangExtract compliance candidate MUST appear in compliance.items OR be explicitly reclassified
+with a recorded reason (never silent drop). Target full submittal/required-forms coverage, not a short summary list.
+You may add obligations the pack missed if evidence supports them.
 
 --------------------------------------------------
 EVALUATION
@@ -122,11 +144,17 @@ Never invent priorityRank.
 SCOPE
 --------------------------------------------------
 
+Exhaustively classify SOW/substantive attachments into scope (use sowExcerpt + scopeCandidates).
+
 mandatory:
-required performance obligations.
+required contract performance (shall/must/will/is responsible/required to).
 
 optional:
-as-needed, optional, at-request, may/could work.
+genuinely as-needed, at-request, may/could optional County services — NOT bidder delivery choices
+(e.g. subcontractor use is NOT scope.optional).
+
+dependencies:
+County approvals, COR, task orders, systems, inputs, coordination, permits, existing platforms.
 
 futurePhases:
 explicit option years or later phases.
@@ -144,6 +172,8 @@ or the nearest notes field.
 --------------------------------------------------
 SUCCESS CRITERIA
 --------------------------------------------------
+
+Each successCriteria item MUST use keys: criterion, why, recurringTheme (not "theme").
 
 Identify substantive recurring success themes using:
 - scope

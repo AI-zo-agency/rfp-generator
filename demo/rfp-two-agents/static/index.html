@@ -478,7 +478,7 @@
       try {
         const h = await fetch("/api/health").then((r) => r.json());
         $("health").textContent =
-          `model ${h.model || "?"} · OpenRouter ${h.openrouter_configured ? "✓" : "✗"} · KB ${h.supermemory_configured ? "✓" : "✗"}`;
+          `model ${h.model || "?"} · LX ${h.langextract_model || "?"} · OpenRouter ${h.openrouter_configured ? "✓" : "✗"} · KB ${h.supermemory_configured ? "✓" : "✗"}`;
       } catch (e) {
         $("health").textContent = "server offline";
       }
