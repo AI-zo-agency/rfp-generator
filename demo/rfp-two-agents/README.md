@@ -23,18 +23,22 @@ cd demo/rfp-two-agents
 
 Open **http://127.0.0.1:8765**
 
+Uvicorn **reload** watches `demo/rfp-two-agents` and `backend/app` — Python edits restart the process automatically (in-memory demo sessions clear on reload). Prompt / HTML edits do not need a process restart.
+
 You do **not** need the main Next.js frontend or the normal `uvicorn app.main` API.
 
 `app` is a symlink to `../../backend/app` (plus `pyrightconfig.json`) so `from app…` resolves in the IDE and at runtime.
 
 ## Live prompt edits
 
-| File | Agent |
+| Store | Agent |
 |------|--------|
-| `prompts/agent1_opportunity_system.txt` | Opportunity extract |
-| `prompts/agent2_strategy_delivery_system.txt` | Strategy + delivery |
+| Supabase `demo_rfp_agent_prompts` row `rfp-two-agents` (cols `agent1`, `agent2`) | Durable (deploy-safe) |
+| `prompts/agent1_opportunity_system.txt` / `agent2_…txt` | Disk fallback + local mirror |
 
-Edit in the UI (Save prompt) or in the editor — each Run reloads from disk.
+**One-time:** run migration `backend/supabase/migrations/20260914_demo_rfp_agent_prompts.sql` in the Supabase SQL editor. First read/save then seeds/updates that row from the disk files.
+
+Edit in the UI or editor — **Run auto-saves** the matching textarea. Each agent loads from Supabase when configured (else disk). No server restart for prompt text.
 
 ## Agent 1 pipeline (demo only)
 

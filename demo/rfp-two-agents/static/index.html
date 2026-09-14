@@ -478,7 +478,7 @@
       try {
         const h = await fetch("/api/health").then((r) => r.json());
         $("health").textContent =
-          `model ${h.model || "?"} · LX ${h.langextract_model || "?"} · OpenRouter ${h.openrouter_configured ? "✓" : "✗"} · KB ${h.supermemory_configured ? "✓" : "✗"}`;
+          `model ${h.model || "?"} · LX ${h.langextract_model || "?"} · prompts ${h.prompts_source || "?"} · OpenRouter ${h.openrouter_configured ? "✓" : "✗"} · KB ${h.supermemory_configured ? "✓" : "✗"}`;
       } catch (e) {
         $("health").textContent = "server offline";
       }
@@ -490,21 +490,29 @@
       $("prompt2").value = p.agent2 || "";
     }
 
-    $("saveP1").onclick = async () => {
-      await fetch("/api/prompts", {
+    async function persistPrompt(which) {
+      const body =
+        which === 1
+          ? { agent1: $("prompt1").value }
+          : { agent2: $("prompt2").value };
+      const res = await fetch("/api/prompts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent1: $("prompt1").value }),
+        body: JSON.stringify(body),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Failed to save prompt ${which}`);
+      }
+    }
+
+    $("saveP1").onclick = async () => {
+      await persistPrompt(1);
       $("status1").textContent = "Prompt 1 saved — next Run uses it.";
     };
 
     $("saveP2").onclick = async () => {
-      await fetch("/api/prompts", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent2: $("prompt2").value }),
-      });
+      await persistPrompt(2);
       $("status2").textContent = "Prompt 2 saved — next Run uses it.";
     };
 
@@ -514,6 +522,7 @@
       $("run1").disabled = true;
       approved = false;
       try {
+        await persistPrompt(1); // unsaved textarea edits apply on Run
         const f = $("file").files[0];
         if (!f) throw new Error("Upload an RFP PDF first");
         if (!/\.pdf$/i.test(f.name)) throw new Error("PDF only");
@@ -566,6 +575,7 @@
       $("status2").classList.remove("err");
       $("run2").disabled = true;
       try {
+        await persistPrompt(2); // unsaved textarea edits apply on Run
         const res = await fetch("/api/agent2", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

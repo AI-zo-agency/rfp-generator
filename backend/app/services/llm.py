@@ -2621,19 +2621,25 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
         raise LlmError(f"LLM returned invalid JSON: {raw[:200]}")
 
     parsed = _unwrap_nested_json(parsed)
+    # Only replace a successful parse when salvage recovers the *missing*
+    # top-level shape (sections / lineItems). Never clobber rich agent
+    # payloads (e.g. strategy_delivery) that happen to mention budgetFormat.
     if "sections" not in parsed and "lineItems" not in parsed:
         for salvager, label in (
             (_salvage_sections_payload, "section(s)"),
             (_salvage_budget_payload, "budget field(s)"),
         ):
             salvaged = salvager(text)
-            if salvaged:
-                count = len(salvaged.get("sections") or salvaged.get("lineItems") or [1])
-                logger.warning(
-                    "Salvaged %d %s after unwrap — missing expected keys",
-                    count,
-                    label,
-                )
-                return salvaged
+            if not salvaged:
+                continue
+            if "sections" not in salvaged and "lineItems" not in salvaged:
+                continue
+            count = len(salvaged.get("sections") or salvaged.get("lineItems") or [])
+            logger.warning(
+                "Salvaged %d %s after unwrap — missing expected keys",
+                count,
+                label,
+            )
+            return salvaged
 
     return parsed

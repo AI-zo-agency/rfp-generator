@@ -46,6 +46,12 @@ from agent1_tools import (  # noqa: E402
     apply_opportunity_to_plan,
     extract_opportunity_with_tools,
 )
+from prompt_store import (  # noqa: E402
+    load_all as _load_all_prompts,
+    load_prompt as _store_load_prompt,
+    save_prompts as _store_save_prompts,
+    supabase_configured as _prompts_supabase_configured,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rfp-two-agents-demo")
@@ -56,21 +62,18 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ponytail: in-memory sessions; restart clears demos. Persist if multi-user needed.
 _SESSIONS: dict[str, dict[str, Any]] = {}
 
-_PROMPT_FILES = {
-    "agent1": PROMPTS_DIR / "agent1_opportunity_system.txt",
-    "agent2": PROMPTS_DIR / "agent2_strategy_delivery_system.txt",
-}
-
 
 def _load_prompt(key: str) -> str:
-    path = _PROMPT_FILES[key]
-    if not path.is_file():
-        raise HTTPException(500, f"Missing prompt file: {path.name}")
-    return path.read_text(encoding="utf-8").strip()
+    try:
+        body, source = _store_load_prompt(key)
+    except FileNotFoundError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    logger.debug("Loaded prompt %s from %s (%d chars)", key, source, len(body))
+    return body
 
 
-def _apply_prompts_from_disk() -> None:
-    """Live-edit: re-read files each run so mid-call prompt tweaks apply."""
+def _apply_prompts() -> None:
+    """Re-read prompts (Supabase row or disk) so mid-call tweaks apply."""
     merged_passes._OPPORTUNITY_SYSTEM = _load_prompt("agent1")
     merged_passes._STRATEGY_DELIVERY_SYSTEM = _load_prompt("agent2")
 
@@ -120,10 +123,13 @@ async def health() -> dict[str, Any]:
         lx_model = langextract_model_id()
     except Exception:  # noqa: BLE001
         pass
+    prompts = _load_all_prompts()
     return {
         "ok": True,
         "openrouter_configured": bool(settings.openrouter_api_key),
         "supermemory_configured": bool(settings.supermemory_api_key),
+        "supabase_configured": _prompts_supabase_configured(),
+        "prompts_source": prompts.get("source") or "disk",
         "model": label,
         "model_id": heavy,
         "langextract_model": lx_model,
@@ -135,17 +141,28 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/prompts")
 async def get_prompts() -> dict[str, str]:
-    return {"agent1": _load_prompt("agent1"), "agent2": _load_prompt("agent2")}
+    data = _load_all_prompts()
+    return {
+        "agent1": data["agent1"],
+        "agent2": data["agent2"],
+        "source": data.get("source") or "disk",
+    }
 
 
 @app.put("/api/prompts")
 async def put_prompts(body: PromptUpdate) -> dict[str, str]:
-    if body.agent1 is not None:
-        _PROMPT_FILES["agent1"].write_text(body.agent1.strip() + "\n", encoding="utf-8")
-    if body.agent2 is not None:
-        _PROMPT_FILES["agent2"].write_text(body.agent2.strip() + "\n", encoding="utf-8")
-    logger.info("Prompts saved to disk (agent1=%s agent2=%s)", body.agent1 is not None, body.agent2 is not None)
-    return await get_prompts()
+    saved = _store_save_prompts(agent1=body.agent1, agent2=body.agent2)
+    logger.info(
+        "Prompts saved source=%s (agent1=%s agent2=%s)",
+        saved.get("source"),
+        body.agent1 is not None,
+        body.agent2 is not None,
+    )
+    return {
+        "agent1": saved["agent1"],
+        "agent2": saved["agent2"],
+        "source": saved.get("source") or "disk",
+    }
 
 
 @app.post("/api/agent1")
@@ -247,7 +264,7 @@ async def agent2(body: Agent2Body) -> dict[str, Any]:
 
     plan = ProposalExecutionPlan.model_validate(sess["plan"])
     meta = sess["rfp_meta"]
-    _apply_prompts_from_disk()
+    _apply_prompts()
     logger.info("Agent 2 start demo_id=%s", body.demo_id)
 
     try:
@@ -293,4 +310,13 @@ if __name__ == "__main__":
     print(f"RFP two-agent demo → http://127.0.0.1:{port}")
     print(f"Env: {BACKEND_ROOT / '.env'}")
     print(f"Prompts: {PROMPTS_DIR}")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    print("Reload: on (demo + backend/app). In-memory sessions clear on reload.")
+    # String import required for reload; watch demo tools + production modules.
+    uvicorn.run(
+        "server:app",
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+        reload=True,
+        reload_dirs=[str(DEMO_ROOT), str(BACKEND_ROOT / "app")],
+    )
