@@ -1064,24 +1064,53 @@ async def extract_opportunity_with_tools(
     system_prompt: str,
     rfp_meta: dict[str, str],
     node_name: str = "opportunity_extract",
+    on_progress: Any | None = None,
 ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
     """Stage 1 classify → LangExtract harvest → Sonnet normalize → deterministic validators."""
     from final_provenance import build_final_provenance
     from langextract_harvest import run_langextract_harvest
     from opportunity_validators import apply_deterministic_pipeline, validator_repair_triggers
 
+    async def _prog(step: str, label: str, status: str = "active", detail: str = "") -> None:
+        if not on_progress:
+            return
+        try:
+            if hasattr(on_progress, "emit"):
+                await on_progress.emit(step=step, label=label, status=status, detail=detail)
+            else:
+                maybe = on_progress(step=step, label=label, status=status, detail=detail)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+        except Exception:  # noqa: BLE001
+            pass
+
     api_key = (settings.openrouter_api_key or "").strip()
     if not api_key:
         raise IntelligenceError("OPENROUTER_API_KEY missing")
     model = resolve_llm_model("heavy", node_name=node_name)
 
+    await _prog("evidence_pack", "Build evidence pack", "active")
     pack = build_evidence_pack(doc)
+    await _prog(
+        "evidence_pack",
+        "Build evidence pack",
+        "done",
+        f"{pack.get('pageCount')} pages · {sum(1 for s in pack['sections'].values() if s.get('found'))} sections",
+    )
     try:
-        harvest = await asyncio.to_thread(run_langextract_harvest, doc)
+        lx_cb = on_progress.sync_callback() if hasattr(on_progress, "sync_callback") else None
+        harvest = await asyncio.to_thread(run_langextract_harvest, doc, lx_cb)
         merge_langextract_into_pack(pack, harvest)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LangExtract harvest skipped: %s", exc)
         pack["langextract"] = {"stats": {"error": str(exc)[:200], "grounded": 0}}
+        for sid, lab in (
+            ("lx_compliance", "LangExtract · compliance"),
+            ("lx_evaluation", "LangExtract · evaluation"),
+            ("lx_facts", "LangExtract · dates & money"),
+            ("lx_scope", "LangExtract · statement of work"),
+        ):
+            await _prog(sid, lab, "skipped", str(exc)[:80])
 
     trace: list[str] = [
         f"evidence_pack:pages={pack['pageCount']}",
@@ -1094,6 +1123,7 @@ async def extract_opportunity_with_tools(
     ]
     logger.info("A1 evidence pack ready %s", trace[:5])
 
+    await _prog("sonnet_normalize", "Sonnet · normalize opportunity", "active")
     user_content = (
         f"RFP meta: {json.dumps(rfp_meta)}\n\n"
         "EVIDENCE PACK (use this first — do not re-read the whole RFP):\n"
@@ -1119,7 +1149,9 @@ async def extract_opportunity_with_tools(
         doc=doc,
     )
     trace.extend(t1)
+    await _prog("sonnet_normalize", "Sonnet · normalize opportunity", "done")
 
+    await _prog("validators", "Deterministic validators", "active")
     model_prov = normalize_provenance(raw.pop("provenance", None))
     cleaned, errs = validate_opportunity_json(raw)
     for e in errs:
@@ -1147,8 +1179,10 @@ async def extract_opportunity_with_tools(
     triggers = repair_triggers(cleaned, pack, errs)
     triggers.extend(validator_repair_triggers(cleaned, pack, det_warnings))
     triggers = list(dict.fromkeys(triggers))
+    await _prog("validators", "Deterministic validators", "done", f"{len(det_fixes)} fixes")
     if triggers:
         trace.append(f"repair_triggers:{triggers}")
+        await _prog("repair", "Targeted repair (if needed)", "active", ", ".join(triggers[:4]))
         snapshot = json.loads(json.dumps(cleaned))  # deep copy before repair
         repair_user = (
             _targeted_repair_instruction(triggers, pack)
@@ -1189,11 +1223,17 @@ async def extract_opportunity_with_tools(
             trace.append(f"deterministic_after_repair:{f}")
     else:
         trace.append("repair:skipped")
+        await _prog("repair", "Targeted repair (if needed)", "skipped")
+
+    if triggers:
+        await _prog("repair", "Targeted repair (if needed)", "done")
 
     cleaned, _, _ = apply_deterministic_pipeline(cleaned, pack, skip_provenance=True, doc=doc)
     cleaned.pop("_retention_stats", None)
     cleaned.pop("_pack_sow_hits", None)
+    await _prog("provenance", "Ground provenance", "active")
     deduped = build_final_provenance(cleaned, pack)
+    await _prog("provenance", "Ground provenance", "done", f"{len(deduped)} rows")
     # Never fall back to model provenance that may self-quote
     trace.append(f"provenance_count:{len(deduped)}")
     comp = cleaned.get("compliance") if isinstance(cleaned.get("compliance"), dict) else {}

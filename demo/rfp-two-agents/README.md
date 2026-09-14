@@ -25,6 +25,8 @@ Open **http://127.0.0.1:8765**
 
 Uvicorn **reload** watches `demo/rfp-two-agents` and `backend/app` — Python edits restart the process automatically (in-memory demo sessions clear on reload). Prompt / HTML edits do not need a process restart.
 
+Agent runs stream **real step progress** over SSE (`text/event-stream`): LangExtract passes, Sonnet normalize, validators, repair, KB/strategy for Agent 2. The UI shows an execution-progress list + step count (not a fake percentage timer).
+
 You do **not** need the main Next.js frontend or the normal `uvicorn app.main` API.
 
 `app` is a symlink to `../../backend/app` (plus `pyrightconfig.json`) so `from app…` resolves in the IDE and at runtime.

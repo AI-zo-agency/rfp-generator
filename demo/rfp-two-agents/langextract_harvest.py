@@ -293,7 +293,10 @@ def _run_pass(
     return hits, dropped
 
 
-def run_langextract_harvest(doc: Any) -> dict[str, Any]:
+def run_langextract_harvest(
+    doc: Any,
+    on_progress: Any | None = None,
+) -> dict[str, Any]:
     """Sync harvest — call via asyncio.to_thread from the demo server."""
     empty = {
         "complianceHits": [],
@@ -384,7 +387,20 @@ def run_langextract_harvest(doc: Any) -> dict[str, Any]:
         ),
     ]
 
-    for name, prompt, examples in passes:
+    _lx_labels = {
+        "compliance": "LangExtract · compliance",
+        "evaluation": "LangExtract · evaluation",
+        "facts": "LangExtract · dates & money",
+        "scope": "LangExtract · statement of work",
+    }
+    for i, (name, prompt, examples) in enumerate(passes):
+        step_id = f"lx_{name}"
+        label = _lx_labels.get(name, f"LangExtract · {name}")
+        if on_progress:
+            try:
+                on_progress(step_id, label, "active", "", i, len(passes))
+            except Exception:  # noqa: BLE001
+                pass
         try:
             hits, dropped = _run_pass(
                 text=text,
@@ -409,9 +425,21 @@ def run_langextract_harvest(doc: Any) -> dict[str, Any]:
                 dropped,
                 model_id,
             )
+            if on_progress:
+                try:
+                    on_progress(
+                        step_id, label, "done", f"{len(hits)} grounded", i, len(passes)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("LangExtract pass %s failed: %s", name, exc)
             empty["stats"]["error"] = f"{name}:{str(exc)[:160]}"
+            if on_progress:
+                try:
+                    on_progress(step_id, label, "error", str(exc)[:120], i, len(passes))
+                except Exception:  # noqa: BLE001
+                    pass
 
     grounded = len(compliance) + len(evaluation) + len(facts) + len(scope)
     return {

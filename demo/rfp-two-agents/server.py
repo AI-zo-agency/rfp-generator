@@ -15,8 +15,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import asyncio
+import json
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -45,6 +48,13 @@ from agent1_tools import (  # noqa: E402
     RfpDoc,
     apply_opportunity_to_plan,
     extract_opportunity_with_tools,
+)
+from progress_bus import (  # noqa: E402
+    AGENT1_STEPS,
+    AGENT2_STEPS,
+    ProgressBus,
+    sse,
+    sse_comment,
 )
 from prompt_store import (  # noqa: E402
     load_all as _load_all_prompts,
@@ -165,6 +175,11 @@ async def put_prompts(body: PromptUpdate) -> dict[str, str]:
     }
 
 
+@app.get("/api/progress/catalog")
+async def progress_catalog() -> dict[str, Any]:
+    return {"agent1": AGENT1_STEPS, "agent2": AGENT2_STEPS}
+
+
 @app.post("/api/agent1")
 async def agent1(
     title: str = Form(default="Demo RFP"),
@@ -172,7 +187,8 @@ async def agent1(
     sector: str = Form(default=""),
     location: str = Form(default=""),
     file: UploadFile = File(...),
-) -> dict[str, Any]:
+    stream: str = Form(default="1"),
+) -> Any:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Upload an RFP PDF")
     raw = await file.read()
@@ -189,62 +205,139 @@ async def agent1(
         "sector": sector.strip(),
         "location": location.strip(),
     }
-    plan = ProposalExecutionPlan(rfpId=demo_id)
     system_prompt = _load_prompt("agent1")
-    logger.info(
-        "Agent 1 (budget A1) start demo_id=%s pages=%s",
-        demo_id,
-        doc.page_count,
-    )
+    want_stream = stream.strip().lower() not in {"0", "false", "no"}
 
-    try:
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        plan = ProposalExecutionPlan(rfpId=demo_id)
+        logger.info(
+            "Agent 1 (budget A1) start demo_id=%s pages=%s",
+            demo_id,
+            doc.page_count,
+        )
+        if bus:
+            await bus.emit(
+                step="parse_pdf",
+                label="Parse RFP PDF",
+                status="done",
+                detail=f"{doc.page_count} pages · {file.filename}",
+            )
         with llm_call_context(rfp_id=demo_id, run_id=run_id, node_name="opportunity_extract"):
             opportunity, tool_trace, provenance = await extract_opportunity_with_tools(
                 doc=doc,
                 system_prompt=system_prompt,
                 rfp_meta=meta,
+                on_progress=bus,
             )
+            if bus:
+                await bus.emit(
+                    step="apply_plan",
+                    label="Apply to execution plan",
+                    status="active",
+                )
             plan = await apply_opportunity_to_plan(plan=plan, raw=opportunity)
-    except IntelligenceError as exc:
-        logger.error("Agent 1 intelligence error: %s", exc)
-        raise HTTPException(502, str(exc)) from exc
-    except LlmError as exc:
-        logger.error("Agent 1 LLM error: %s", exc)
-        raise HTTPException(502, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Agent 1 failed")
-        raise HTTPException(502, f"Agent 1 failed: {exc}") from exc
+            if bus:
+                await bus.emit(
+                    step="apply_plan",
+                    label="Apply to execution plan",
+                    status="done",
+                )
+        plan_dump = plan.model_dump(by_alias=True)
+        out_opportunity = dict(opportunity)
+        _SESSIONS[demo_id] = {
+            "plan": plan_dump,
+            "rfp_text": doc.full_text(),
+            "rfp_meta": meta,
+            "agent1_approved": False,
+            "run_id": run_id,
+            "opportunity_raw": out_opportunity,
+            "tool_trace": tool_trace,
+            "provenance": provenance,
+        }
+        cost = _cost_for(demo_id)
+        logger.info(
+            "Agent 1 done demo_id=%s cost_usd=%s tools=%s provenance=%s",
+            demo_id,
+            cost.get("total_cost_usd"),
+            len(tool_trace),
+            len(provenance),
+        )
+        return {
+            "demo_id": demo_id,
+            "agent": "opportunity_extract",
+            "output": out_opportunity,
+            "provenance": provenance,
+            "plan": plan_dump,
+            "cost": cost,
+            "toolTrace": tool_trace,
+            "decisions": plan_dump.get("decisionLog") or plan_dump.get("decision_log") or [],
+        }
 
-    plan_dump = plan.model_dump(by_alias=True)
-    out_opportunity = dict(opportunity)
-    _SESSIONS[demo_id] = {
-        "plan": plan_dump,
-        "rfp_text": doc.full_text(),
-        "rfp_meta": meta,
-        "agent1_approved": False,
-        "run_id": run_id,
-        "opportunity_raw": out_opportunity,
-        "tool_trace": tool_trace,
-        "provenance": provenance,
-    }
-    cost = _cost_for(demo_id)
-    logger.info(
-        "Agent 1 done demo_id=%s cost_usd=%s tools=%s provenance=%s",
-        demo_id,
-        cost.get("total_cost_usd"),
-        len(tool_trace),
-        len(provenance),
+    if not want_stream:
+        try:
+            return await _run(None)
+        except IntelligenceError as exc:
+            logger.error("Agent 1 intelligence error: %s", exc)
+            raise HTTPException(502, str(exc)) from exc
+        except LlmError as exc:
+            logger.error("Agent 1 LLM error: %s", exc)
+            raise HTTPException(502, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Agent 1 failed")
+            raise HTTPException(502, f"Agent 1 failed: {exc}") from exc
+
+    bus = ProgressBus()
+
+    async def event_gen():
+        yield sse({"type": "hello", "agent": "agent1", "demo_id": demo_id, "steps": AGENT1_STEPS})
+
+        async def worker() -> None:
+            try:
+                result = await _run(bus)
+                await bus.result(result)
+            except IntelligenceError as exc:
+                logger.error("Agent 1 intelligence error: %s", exc)
+                await bus.error(str(exc))
+            except LlmError as exc:
+                logger.error("Agent 1 LLM error: %s", exc)
+                await bus.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Agent 1 failed")
+                await bus.error(f"Agent 1 failed: {exc}")
+            finally:
+                await bus.close()
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(bus.q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield sse_comment("heartbeat")
+                    if task.done():
+                        break
+                    continue
+                if item is None:
+                    break
+                yield sse(item)
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            yield sse({"type": "done"})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
-    return {
-        "demo_id": demo_id,
-        "agent": "opportunity_extract",
-        "output": out_opportunity,
-        "provenance": provenance,
-        "plan": plan_dump,
-        "cost": cost,
-        "toolTrace": tool_trace,
-        "decisions": plan_dump.get("decisionLog") or plan_dump.get("decision_log") or [],
-    }
 
 
 @app.post("/api/approve")
@@ -257,47 +350,128 @@ async def approve(body: Agent2Body) -> dict[str, Any]:
     return {"demo_id": body.demo_id, "approved": True}
 
 
+class Agent2StreamBody(Agent2Body):
+    stream: bool = True
+
+
 @app.post("/api/agent2")
-async def agent2(body: Agent2Body) -> dict[str, Any]:
+async def agent2(body: Agent2StreamBody) -> Any:
     sess = _session_or_404(body.demo_id)
     if not sess.get("agent1_approved") and not body.approved:
         raise HTTPException(400, "Approve Agent 1 output before running Agent 2")
     sess["agent1_approved"] = True
 
-    plan = ProposalExecutionPlan.model_validate(sess["plan"])
-    meta = sess["rfp_meta"]
-    _apply_prompts()
-    logger.info("Agent 2 start demo_id=%s", body.demo_id)
-
-    try:
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        plan = ProposalExecutionPlan.model_validate(sess["plan"])
+        meta = sess["rfp_meta"]
+        _apply_prompts()
+        logger.info("Agent 2 start demo_id=%s", body.demo_id)
+        if bus:
+            await bus.emit(step="load_prompt", label="Load strategy prompt", status="done")
+            await bus.emit(
+                step="kb_retrieve",
+                label="Supermemory KB retrieval",
+                status="active",
+                detail="won patterns · methodology · pricing · playbooks",
+            )
+            await bus.emit(
+                step="strategy_llm",
+                label="Sonnet · strategy & delivery",
+                status="active",
+            )
         with llm_call_context(
             rfp_id=body.demo_id,
             run_id=sess.get("run_id") or str(uuid.uuid4()),
             node_name="strategy_delivery",
         ):
             plan = await run_strategy_delivery(plan=plan, rfp_meta=meta)
-    except IntelligenceError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        if bus:
+            await bus.emit(step="kb_retrieve", label="Supermemory KB retrieval", status="done")
+            await bus.emit(step="strategy_llm", label="Sonnet · strategy & delivery", status="done")
+            await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="active")
+        plan_dump = plan.model_dump(by_alias=True)
+        sess["plan"] = plan_dump
+        cost = _cost_for(body.demo_id)
+        if bus:
+            await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="done")
+        logger.info(
+            "Agent 2 done demo_id=%s cost_usd=%s",
+            body.demo_id,
+            cost.get("total_cost_usd"),
+        )
+        return {
+            "demo_id": body.demo_id,
+            "agent": "strategy_delivery",
+            "output": {
+                "strategy": (plan_dump.get("opportunity") or {}).get("strategy"),
+                "delivery": plan_dump.get("delivery"),
+            },
+            "plan": plan_dump,
+            "cost": cost,
+            "decisions": plan_dump.get("decisionLog") or plan_dump.get("decision_log") or [],
+        }
 
-    plan_dump = plan.model_dump(by_alias=True)
-    sess["plan"] = plan_dump
-    cost = _cost_for(body.demo_id)
-    logger.info(
-        "Agent 2 done demo_id=%s cost_usd=%s",
-        body.demo_id,
-        cost.get("total_cost_usd"),
-    )
-    return {
-        "demo_id": body.demo_id,
-        "agent": "strategy_delivery",
-        "output": {
-            "strategy": (plan_dump.get("opportunity") or {}).get("strategy"),
-            "delivery": plan_dump.get("delivery"),
+    if not body.stream:
+        try:
+            return await _run(None)
+        except IntelligenceError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    bus = ProgressBus()
+
+    async def event_gen():
+        yield sse(
+            {
+                "type": "hello",
+                "agent": "agent2",
+                "demo_id": body.demo_id,
+                "steps": AGENT2_STEPS,
+            }
+        )
+
+        async def worker() -> None:
+            try:
+                result = await _run(bus)
+                await bus.result(result)
+            except IntelligenceError as exc:
+                await bus.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Agent 2 failed")
+                await bus.error(str(exc))
+            finally:
+                await bus.close()
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(bus.q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield sse_comment("heartbeat")
+                    if task.done():
+                        break
+                    continue
+                if item is None:
+                    break
+                yield sse(item)
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            yield sse({"type": "done"})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
-        "plan": plan_dump,
-        "cost": cost,
-        "decisions": plan_dump.get("decisionLog") or plan_dump.get("decision_log") or [],
-    }
+    )
 
 
 @app.get("/api/cost/{demo_id}")

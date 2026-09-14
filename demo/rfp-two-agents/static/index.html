@@ -174,6 +174,120 @@
     .readable .meta-line { color: var(--muted); font-size: var(--fs-xs); }
     .readable strong { color: var(--ok); font-weight: 650; }
 
+    /* Execution progress — real SSE steps (Nielsen: determinate step count, not fake %) */
+    .run-progress {
+      display: none;
+      margin-top: 0.85rem;
+      padding: 0.85rem 0.95rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .run-progress.on { display: block; }
+    .run-progress .rp-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.65rem;
+    }
+    .run-progress .rp-title {
+      font-size: var(--fs-sm);
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+    .run-progress .rp-meta {
+      color: var(--muted);
+      font-size: var(--fs-xs);
+      font-variant-numeric: tabular-nums;
+    }
+    .rp-track {
+      height: 4px;
+      background: #0a0e12;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 0.75rem;
+    }
+    .rp-fill {
+      height: 100%;
+      width: 100%;
+      transform-origin: left center;
+      transform: scaleX(0);
+      background: linear-gradient(90deg, var(--accent), var(--ok));
+      border-radius: 999px;
+      transition: transform 280ms ease-out;
+    }
+    .rp-fill.indeterminate {
+      opacity: 0.55;
+      transform: scaleX(0.4);
+      transition: none;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .rp-fill { transition: none; }
+    }
+    .rp-steps {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      max-height: 220px;
+      overflow: auto;
+    }
+    .rp-steps li {
+      display: grid;
+      grid-template-columns: 1.1rem 1fr;
+      gap: 0.55rem;
+      align-items: start;
+      font-size: var(--fs-xs);
+      color: var(--muted);
+      padding: 0.25rem 0.15rem;
+      border-radius: 4px;
+    }
+    .rp-steps li.active {
+      color: var(--text);
+      background: rgba(61, 155, 253, 0.08);
+    }
+    .rp-steps li.done { color: var(--text); }
+    .rp-steps li.error { color: #ff7b72; }
+    .rp-steps li.skipped { opacity: 0.55; }
+    .rp-dot {
+      width: 0.65rem;
+      height: 0.65rem;
+      margin-top: 0.2rem;
+      border-radius: 50%;
+      border: 1.5px solid var(--border);
+      background: transparent;
+      flex-shrink: 0;
+    }
+    .rp-steps li.done .rp-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+    .rp-steps li.active .rp-dot {
+      border-color: var(--accent);
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(61, 155, 253, 0.25);
+    }
+    .rp-steps li.error .rp-dot {
+      background: #ff7b72;
+      border-color: #ff7b72;
+    }
+    .rp-label { font-weight: 600; }
+    .rp-detail {
+      display: block;
+      color: var(--muted);
+      font-weight: 400;
+      margin-top: 0.1rem;
+    }
+    .rp-live {
+      margin-top: 0.55rem;
+      font-size: var(--fs-xs);
+      color: var(--accent);
+      min-height: 1.2em;
+    }
+
   </style>
 </head>
 <body>
@@ -218,6 +332,15 @@
         <button type="button" id="run1">Run Agent 1</button>
         <button type="button" class="ok" id="approve" disabled>Approve → unlock Agent 2</button>
       </div>
+      <div class="run-progress" id="prog1" aria-live="polite" aria-busy="false" hidden>
+        <div class="rp-head">
+          <span class="rp-title">Agent 1 running</span>
+          <span class="rp-meta" id="prog1Meta">0 / 0</span>
+        </div>
+        <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="prog1Fill"></div></div>
+        <ol class="rp-steps" id="prog1Steps"></ol>
+        <div class="rp-live" id="prog1Live"></div>
+      </div>
       <div class="status" id="status1"></div>
       <div class="cost" id="cost1">Cost: —</div>
       <pre id="tools1" style="max-height:12vh">(pipeline trace)</pre>
@@ -248,6 +371,15 @@
       <div class="actions">
         <button type="button" id="run2" disabled>Run Agent 2</button>
         <button type="button" class="secondary" id="refreshCost">Refresh cost</button>
+      </div>
+      <div class="run-progress" id="prog2" aria-live="polite" aria-busy="false" hidden>
+        <div class="rp-head">
+          <span class="rp-title">Agent 2 running</span>
+          <span class="rp-meta" id="prog2Meta">0 / 0</span>
+        </div>
+        <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="prog2Fill"></div></div>
+        <ol class="rp-steps" id="prog2Steps"></ol>
+        <div class="rp-live" id="prog2Live"></div>
       </div>
       <div class="status" id="status2"></div>
       <div class="cost" id="cost2">Cost: —</div>
@@ -506,6 +638,161 @@
       }
     }
 
+    const DEFAULT_STEPS = {
+      agent1: [
+        { step: "parse_pdf", label: "Parse RFP PDF" },
+        { step: "evidence_pack", label: "Build evidence pack" },
+        { step: "lx_compliance", label: "LangExtract · compliance" },
+        { step: "lx_evaluation", label: "LangExtract · evaluation" },
+        { step: "lx_facts", label: "LangExtract · dates & money" },
+        { step: "lx_scope", label: "LangExtract · statement of work" },
+        { step: "sonnet_normalize", label: "Sonnet · normalize opportunity" },
+        { step: "validators", label: "Deterministic validators" },
+        { step: "repair", label: "Targeted repair (if needed)" },
+        { step: "provenance", label: "Ground provenance" },
+        { step: "apply_plan", label: "Apply to execution plan" },
+      ],
+      agent2: [
+        { step: "load_prompt", label: "Load strategy prompt" },
+        { step: "kb_retrieve", label: "Supermemory KB retrieval" },
+        { step: "strategy_llm", label: "Sonnet · strategy & delivery" },
+        { step: "assemble", label: "Assemble strategy + delivery JSON" },
+      ],
+    };
+
+    function createProgress(prefix) {
+      const root = $(prefix);
+      const stepsEl = $(prefix + "Steps");
+      const fill = $(prefix + "Fill");
+      const meta = $(prefix + "Meta");
+      const live = $(prefix + "Live");
+      let steps = [];
+      let startedAt = 0;
+      let timer = null;
+
+      function tick() {
+        if (!startedAt) return;
+        const sec = Math.floor((Date.now() - startedAt) / 1000);
+        const done = steps.filter((s) => s.status === "done" || s.status === "skipped").length;
+        meta.textContent = `${done} / ${steps.length} · ${sec}s`;
+      }
+
+      function render() {
+        const doneN = steps.filter((s) => s.status === "done" || s.status === "skipped").length;
+        const frac = steps.length ? doneN / steps.length : 0;
+        fill.classList.toggle("indeterminate", frac === 0);
+        fill.style.transform = `scaleX(${Math.max(frac, frac === 0 ? 0.4 : 0)})`;
+        stepsEl.innerHTML = steps
+          .map((s) => {
+            const st = s.status || "pending";
+            const detail = s.detail
+              ? `<span class="rp-detail">${esc(s.detail)}</span>`
+              : "";
+            return `<li class="${esc(st)}"><span class="rp-dot" aria-hidden="true"></span><span><span class="rp-label">${esc(s.label)}</span>${detail}</span></li>`;
+          })
+          .join("");
+        tick();
+      }
+
+      return {
+        start(catalog) {
+          steps = (catalog || []).map((s) => ({
+            step: s.step,
+            label: s.label,
+            status: "pending",
+            detail: "",
+          }));
+          startedAt = Date.now();
+          root.hidden = false;
+          root.classList.add("on");
+          root.setAttribute("aria-busy", "true");
+          live.textContent = "Starting…";
+          render();
+          clearInterval(timer);
+          timer = setInterval(tick, 1000);
+        },
+        update(evt) {
+          const id = evt.step;
+          let row = steps.find((s) => s.step === id);
+          if (!row) {
+            row = { step: id, label: evt.label || id, status: "pending", detail: "" };
+            steps.push(row);
+          }
+          if (evt.label) row.label = evt.label;
+          if (evt.status) row.status = evt.status;
+          if (evt.detail != null && evt.detail !== "") row.detail = evt.detail;
+          if (evt.status === "active") {
+            live.textContent = row.label + (row.detail ? ` — ${row.detail}` : "");
+          }
+          render();
+        },
+        stop(ok) {
+          clearInterval(timer);
+          timer = null;
+          root.setAttribute("aria-busy", "false");
+          live.textContent = ok ? "Complete" : "Stopped";
+          if (ok) {
+            steps.forEach((s) => {
+              if (s.status === "pending" || s.status === "active") s.status = "done";
+            });
+            fill.classList.remove("indeterminate");
+            fill.style.transform = "scaleX(1)";
+            render();
+          }
+        },
+        hide() {
+          clearInterval(timer);
+          root.classList.remove("on");
+          root.hidden = true;
+        },
+      };
+    }
+
+    const prog1 = createProgress("prog1");
+    const prog2 = createProgress("prog2");
+
+    async function readSse(res, onEvent) {
+      if (!res.ok) {
+        const errText = await res.text();
+        let msg = errText;
+        try {
+          const j = JSON.parse(errText);
+          msg = j.detail || errText;
+        } catch (_) {}
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let result = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() || "";
+        for (const chunk of parts) {
+          const lines = chunk.split("\n");
+          let dataLine = "";
+          for (const line of lines) {
+            if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+          }
+          if (!dataLine) continue;
+          let evt;
+          try {
+            evt = JSON.parse(dataLine);
+          } catch (_) {
+            continue;
+          }
+          onEvent(evt);
+          if (evt.type === "result") result = evt;
+          if (evt.type === "error") throw new Error(evt.message || "Agent failed");
+        }
+      }
+      if (!result) throw new Error("Stream ended without a result");
+      return result;
+    }
+
     $("saveP1").onclick = async () => {
       await persistPrompt(1);
       $("status1").textContent = "Prompt 1 saved — next Run uses it.";
@@ -517,12 +804,13 @@
     };
 
     $("run1").onclick = async () => {
-      $("status1").textContent = "Running Agent 1 (evidence pack → one Sonnet)…";
+      $("status1").textContent = "Running Agent 1…";
       $("status1").classList.remove("err");
       $("run1").disabled = true;
       approved = false;
+      prog1.start(DEFAULT_STEPS.agent1);
       try {
-        await persistPrompt(1); // unsaved textarea edits apply on Run
+        await persistPrompt(1);
         const f = $("file").files[0];
         if (!f) throw new Error("Upload an RFP PDF first");
         if (!/\.pdf$/i.test(f.name)) throw new Error("PDF only");
@@ -532,18 +820,23 @@
         fd.append("sector", $("sector").value);
         fd.append("location", $("location").value);
         fd.append("file", f);
+        fd.append("stream", "1");
         const res = await fetch("/api/agent1", { method: "POST", body: fd });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        const data = await readSse(res, (evt) => {
+          if (evt.type === "hello" && evt.steps) prog1.start(evt.steps);
+          if (evt.type === "step") prog1.update(evt);
+        });
         demoId = data.demo_id;
         lastOut1 = data.output || {};
         renderOut1();
         $("tools1").textContent = (data.toolTrace || []).join("\n") || "(no tools)";
         $("prov1").textContent = JSON.stringify(data.provenance || [], null, 2);
         $("cost1").innerHTML = fmtCost(data.cost);
-        $("status1").textContent = "Done (budget A1). Review Readable/JSON, then Approve.";
+        prog1.stop(true);
+        $("status1").textContent = "Done. Review Readable/JSON, then Approve.";
         setSession();
       } catch (e) {
+        prog1.stop(false);
         $("status1").textContent = String(e.message || e);
         $("status1").classList.add("err");
       } finally {
@@ -571,24 +864,29 @@
 
     $("run2").onclick = async () => {
       if (!demoId || !approved) return;
-      $("status2").textContent = "Running Agent 2 (KB retrieval + LLM)…";
+      $("status2").textContent = "Running Agent 2…";
       $("status2").classList.remove("err");
       $("run2").disabled = true;
+      prog2.start(DEFAULT_STEPS.agent2);
       try {
-        await persistPrompt(2); // unsaved textarea edits apply on Run
+        await persistPrompt(2);
         const res = await fetch("/api/agent2", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ demo_id: demoId, approved: true }),
+          body: JSON.stringify({ demo_id: demoId, approved: true, stream: true }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        const data = await readSse(res, (evt) => {
+          if (evt.type === "hello" && evt.steps) prog2.start(evt.steps);
+          if (evt.type === "step") prog2.update(evt);
+        });
         lastOut2 = data.output || {};
         renderOut2();
         $("cost2").innerHTML = fmtCost(data.cost);
         $("cost1").innerHTML = fmtCost(data.cost);
+        prog2.stop(true);
         $("status2").textContent = "Done.";
       } catch (e) {
+        prog2.stop(false);
         $("status2").textContent = String(e.message || e);
         $("status2").classList.add("err");
       } finally {
