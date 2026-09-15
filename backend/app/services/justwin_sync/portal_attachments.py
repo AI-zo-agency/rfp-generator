@@ -92,6 +92,28 @@ def _is_ionwave_url(url: str) -> bool:
     return "ionwave.net" in host
 
 
+# Headless scrape hangs or hits a bot wall on these hosts. Ionwave public
+# Bid Attachments still work; everything else must fail fast.
+_SKIP_PORTAL_HOST_MARKERS = (
+    "bonfirehub.com",
+    "bonfire",
+    "opengov.com",
+    "bidnetdirect.com",
+    "bidnet",
+    "planetbids.com",
+    "procure.org",  # hudsoncountynjprocure.org and similar BidNet skins
+)
+
+# Playwright's 90s goto did not abort Chrome TCP hangs (~4 min on dead portals).
+PORTAL_GOTO_TIMEOUT_MS = 12_000
+PORTAL_PDF_TIMEOUT_MS = 20_000
+
+
+def should_skip_portal_scrape(url: str) -> bool:
+    host = urlparse(url or "").netloc.casefold()
+    return any(marker in host for marker in _SKIP_PORTAL_HOST_MARKERS)
+
+
 def package_looks_thin(pdf_bytes: bytes | None = None, *, text: str = "") -> bool:
     """Heuristic: invitation / checklist packet without the full RFP body."""
     body = text or ""
@@ -188,19 +210,14 @@ def fetch_portal_attachment_pdfs(
     if not url.startswith("http"):
         return []
 
-    # Bonfire (and similar) often sit behind Cloudflare bot challenges — skip
-    # rather than hang the sync. Ionwave public detail pages work headless.
-    host = urlparse(url).netloc.casefold()
-    if "bonfirehub.com" in host or "bonfire" in host:
-        logger.info(
-            "[justwin-sync] skip portal scrape for Cloudflare-protected host %s",
-            host,
-        )
+    if should_skip_portal_scrape(url):
+        host = urlparse(url).netloc.casefold()
+        logger.info("[justwin-sync] skip portal scrape for host %s", host)
         return []
 
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_timeout(2500)
+        page.goto(url, wait_until="domcontentloaded", timeout=PORTAL_GOTO_TIMEOUT_MS)
+        page.wait_for_timeout(400)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[justwin-sync] portal goto failed (%s): %s", url, exc)
         return []
@@ -218,14 +235,14 @@ def fetch_portal_attachment_pdfs(
     anchors = _collect_pdf_anchors(page)
     if not anchors and _is_ionwave_url(url):
         # Retry once after a short wait — ASP.NET grids can hydrate late.
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(800)
         anchors = _collect_pdf_anchors(page)
 
     pdfs: list[PortalPdf] = []
     for name, href in anchors[:max_files]:
         abs_url = href if href.startswith("http") else urljoin(url, href)
         try:
-            res = page.request.get(abs_url, timeout=90_000)
+            res = page.request.get(abs_url, timeout=PORTAL_PDF_TIMEOUT_MS)
             if not res.ok:
                 logger.warning(
                     "[justwin-sync] portal PDF HTTP %s for %s",

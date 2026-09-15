@@ -15,7 +15,16 @@ export interface JustWinApiClient {
   companyId: string;
 }
 
-interface RawLead {
+interface JustWinInsights {
+  summary?: string;
+  title?: string;
+  due_date?: string;
+  qa_due_date?: string;
+  proposal_due_date?: string;
+  submission_due_date?: string;
+}
+
+export interface RawLead {
   id: string;
   target?: string;
   created?: string;
@@ -25,8 +34,11 @@ interface RawLead {
   state?: { abbreviation?: string } | null;
   readonly_values?: {
     name?: string;
+    due_date?: string | null;
+    originating_url?: string;
+    target_name?: string;
     relevance_score_integer?: number;
-    insights?: { summary?: string; title?: string; due_date?: string };
+    insights?: JustWinInsights;
   } | null;
 }
 
@@ -134,6 +146,23 @@ export async function createApiClient(page: Page): Promise<JustWinApiClient> {
   return { page, headers, companyId };
 }
 
+/** Proposal Due from JustWin structured fields — never Q&A. */
+export function dueDateFromJustWinPayload(raw: RawLead): string {
+  const readonly = raw.readonly_values ?? {};
+  const insights = readonly.insights ?? {};
+  for (const candidate of [
+    raw.due_date,
+    readonly.due_date,
+    insights.due_date,
+    insights.proposal_due_date,
+    insights.submission_due_date,
+  ]) {
+    const text = String(candidate ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 function toLead(raw: RawLead, tab: LifecycleState): JustWinLead {
   const readonly = raw.readonly_values ?? {};
   const title = readonly.name ?? readonly.insights?.title ?? "Untitled solicitation";
@@ -143,8 +172,7 @@ function toLead(raw: RawLead, tab: LifecycleState): JustWinLead {
     title,
     location: raw.state?.abbreviation ?? "",
     postedDate: postedDateOf(raw),
-    // JustWin already gives an ISO due date; no PDF parsing required.
-    dueDate: raw.due_date ?? "",
+    dueDate: dueDateFromJustWinPayload(raw),
     score: readonly.relevance_score_integer ?? 0,
     description: readonly.insights?.summary ?? title,
     detailUrl: `${getJustWinBaseUrl()}/leads/${raw.id}/summary`,

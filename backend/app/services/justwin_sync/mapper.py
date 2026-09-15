@@ -12,6 +12,16 @@ def parse_justwin_date(raw: str) -> str:
     today = datetime.now(timezone.utc).date().isoformat()
     if not trimmed:
         return today
+    for fmt in (
+        "%b %d %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%B %d, %Y",
+    ):
+        try:
+            return datetime.strptime(trimmed, fmt).date().isoformat()
+        except ValueError:
+            pass
     try:
         with_year = datetime.strptime(
             f"{trimmed} {datetime.now(timezone.utc).year}", "%b %d %Y"
@@ -54,7 +64,7 @@ def map_lead_to_rfp(lead: JustWinLead, pdf_path: str | None = None) -> RfpRecord
         source="justwin",
         sector="Public Sector",
         location=lead.location,
-        dueDate=_parse_justwin_date(lead.due_date),
+        dueDate=parse_justwin_date(lead.due_date) if (lead.due_date or "").strip() else "",
         receivedDate=_parse_justwin_date(lead.posted_date),
         stage="intake",
         status="new",
