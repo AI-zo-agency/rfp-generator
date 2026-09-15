@@ -66,7 +66,7 @@ _PHASE_DISPATCH: dict[str, tuple[str, str]] = {
 async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     import uuid
 
-    from app.services.llm_call_context import llm_call_context
+    from app.services.llm_call_context import llm_call_context, normalize_user_email
     from app.services.proposal_generation_cancel import aclear_generation_cancel
     from app.services.proposal_pipeline_checkpoint import pipeline_phase
 
@@ -78,6 +78,7 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
         )
     # Reserved for the worker orchestrator — never pass through to phase funcs.
     chain_next = kwargs.pop("chain_next", True)
+    user_email = normalize_user_email(str(kwargs.pop("user_email", "") or ""))
     module_path, func_name = _PHASE_DISPATCH[phase]
     module = __import__(module_path, fromlist=[func_name])
     func = getattr(module, func_name)
@@ -88,14 +89,24 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     await aclear_generation_cancel(rfp_id)
     run_id = str(uuid.uuid4())
     async with pipeline_phase(rfp_id, phase):
-        with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+        with llm_call_context(
+            rfp_id=rfp_id,
+            run_id=run_id,
+            node_name=phase,
+            user_email=user_email,
+        ):
             await func(rfp_id, **kwargs)
 
     if chain_next:
-        await _enqueue_next_generate_phase(rfp_id, phase)
+        await _enqueue_next_generate_phase(rfp_id, phase, user_email=user_email)
 
 
-async def _enqueue_next_generate_phase(rfp_id: str, completed_phase: str) -> None:
+async def _enqueue_next_generate_phase(
+    rfp_id: str,
+    completed_phase: str,
+    *,
+    user_email: str = "",
+) -> None:
     """Keep Generate proposal moving without requiring the browser to POST next.
 
     The client still polls/continues; if it drops after Phase 2, Celery starts
@@ -149,8 +160,12 @@ async def _enqueue_next_generate_phase(rfp_id: str, completed_phase: str) -> Non
     except Exception:  # noqa: BLE001 — never block the chain on a read
         prior_profile = None
     await record_phase_started(rfp_id, next_phase, scan_profile=prior_profile)
+    chain_kwargs: dict = {"chain_next": True}
+    email = (user_email or "").strip().lower()
+    if email:
+        chain_kwargs["user_email"] = email
     async_result = run_pipeline_phase_task.delay(
-        rfp_id, next_phase, {"chain_next": True}
+        rfp_id, next_phase, chain_kwargs
     )
     if settings.celery_enabled:
         import json
@@ -197,17 +212,22 @@ def run_pipeline_phase_task(self, rfp_id: str, phase: str, kwargs: dict | None =
         raise
 
 
-async def _dispatch_go_no_go(rfp_id: str) -> None:
+async def _dispatch_go_no_go(rfp_id: str, *, user_email: str = "") -> None:
     import uuid
 
     from app.services.go_no_go_service import GoNoGoError, analyze_rfp
-    from app.services.llm_call_context import llm_call_context
+    from app.services.llm_call_context import llm_call_context, normalize_user_email
     from app.services.rfp_repository import get_rfp, save_go_no_go_analysis
 
     current = get_rfp(rfp_id)
     if not current:
         raise GoNoGoError("RFP not found", status_code=404)
-    with llm_call_context(rfp_id=rfp_id, run_id=str(uuid.uuid4()), node_name="go_no_go"):
+    with llm_call_context(
+        rfp_id=rfp_id,
+        run_id=str(uuid.uuid4()),
+        node_name="go_no_go",
+        user_email=normalize_user_email(user_email),
+    ):
         analysis = await analyze_rfp(current)
     updated = save_go_no_go_analysis(rfp_id, analysis)
     if not updated:
@@ -215,9 +235,9 @@ async def _dispatch_go_no_go(rfp_id: str) -> None:
 
 
 @celery_app.task(bind=True, name="proposal.run_go_no_go")
-def run_go_no_go_task(self, rfp_id: str) -> None:
+def run_go_no_go_task(self, rfp_id: str, user_email: str = "") -> None:
     try:
-        asyncio.run(_dispatch_go_no_go(rfp_id))
+        asyncio.run(_dispatch_go_no_go(rfp_id, user_email=user_email))
     except Exception as exc:
         logger.exception("Celery Go/No-Go analysis failed for %s", rfp_id)
         from app.api.v1.rfps import _mark_analyze_failed

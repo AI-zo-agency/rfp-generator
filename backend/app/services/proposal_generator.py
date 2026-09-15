@@ -1382,6 +1382,14 @@ async def run_phase2_retrieval(
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
+    from app.services.llm_call_guards import is_blocked_rfp_id
+
+    if is_blocked_rfp_id(rfp_id):
+        raise ProposalError(
+            f"Phase 2 blocked for ephemeral/test RFP id {rfp_id!r}.",
+            status_code=403,
+        )
+
     with pipeline_phase("phase-2", rfp_id=rfp_id):
         return await _run_phase2_retrieval_inner(rfp_id, outline_mode=outline_mode)
 

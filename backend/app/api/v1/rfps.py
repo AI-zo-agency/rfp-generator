@@ -362,6 +362,10 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     # Drop stale Stage 1 results so re-runs never show the prior GO panel.
     clear_go_no_go_analysis(rfp_id)
 
+    from app.services.llm_call_context import get_llm_user_email
+
+    user_email = get_llm_user_email()
+
     async def _run() -> None:
         import uuid
 
@@ -375,6 +379,7 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
                 rfp_id=rfp_id,
                 run_id=str(uuid.uuid4()),
                 node_name="go_no_go",
+                user_email=user_email or None,
             ):
                 analysis = await analyze_rfp(current)
             updated = save_go_no_go_analysis(rfp_id, analysis)
@@ -393,7 +398,7 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     def _celery_dispatch() -> object:
         from app.celery_app import run_go_no_go_task
 
-        return run_go_no_go_task.delay(rfp_id)
+        return run_go_no_go_task.delay(rfp_id, user_email)
 
     await start_proposal_job(
         rfp_id,

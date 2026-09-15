@@ -17,93 +17,41 @@ function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function asUnknownList(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
+function mapUserSpend(raw: unknown): { email: string; proposalSpentUsd: number }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row) => {
+      if (!row || typeof row !== "object") return null;
+      const r = row as Record<string, unknown>;
+      const email = String(r.email ?? "").trim();
+      const proposalSpentUsd = Number(r.proposal_spent_usd ?? 0);
+      if (!email || !(proposalSpentUsd > 0)) return null;
+      return { email, proposalSpentUsd };
+    })
+    .filter((x): x is { email: string; proposalSpentUsd: number } => Boolean(x));
 }
 
-function mapSummary(data: Record<string, unknown>): LlmCostSummary {
-  const unknownBreakdown = asRecord(data.unknown_breakdown);
-  const monthlyRaw = asRecord(data.monthly_budget);
-  const monthlyBudget: LlmMonthlyBudget | null =
-    Object.keys(monthlyRaw).length === 0
-      ? null
-      : {
-          enabled: Boolean(monthlyRaw.enabled),
-          limitUsd: Number(monthlyRaw.limit_usd ?? 0),
-          spentUsd: Number(monthlyRaw.spent_usd ?? 0),
-          remainingUsd: Number(monthlyRaw.remaining_usd ?? 0),
-          blocked: Boolean(monthlyRaw.blocked),
-          proposalSpentUsd: Number(monthlyRaw.proposal_spent_usd ?? 0),
-          financialSpentUsd: Number(monthlyRaw.financial_spent_usd ?? 0),
-          periodStart: asString(monthlyRaw.period_start),
-          periodEnd: asString(monthlyRaw.period_end),
-          timezone: asString(monthlyRaw.timezone, "UTC"),
-        };
-
+function emptySummary(monthlyBudget: LlmMonthlyBudget | null): LlmCostSummary {
   return {
-    totalCostUsd: Number(data.total_cost_usd ?? 0),
-    totalInputTokens: Number(data.total_input_tokens ?? 0),
-    totalOutputTokens: Number(data.total_output_tokens ?? 0),
-    callCount: Number(data.call_count ?? 0),
-    proposalCount: Number(data.proposal_count ?? 0),
-    unattributedCostUsd: Number(data.unattributed_cost_usd ?? 0),
-    unknownNodeCostUsd: Number(data.unknown_node_cost_usd ?? 0),
-    unknownNodeCalls: Number(data.unknown_node_calls ?? 0),
-    unknownBreakdown: {
-      byModel: asUnknownList(unknownBreakdown.by_model).map((r) => {
-        const row = r as Record<string, unknown>;
-        return {
-          model: row.model != null ? asString(row.model) : undefined,
-          date: row.date != null ? asString(row.date) : undefined,
-          costUsd: Number(row.cost_usd ?? 0),
-          calls: Number(row.calls ?? 0),
-        };
-      }),
-      byDate: asUnknownList(unknownBreakdown.by_date).map((r) => {
-        const row = r as Record<string, unknown>;
-        return {
-          model: row.model != null ? asString(row.model) : undefined,
-          date: row.date != null ? asString(row.date) : undefined,
-          costUsd: Number(row.cost_usd ?? 0),
-          calls: Number(row.calls ?? 0),
-        };
-      }),
-    },
-    byProposal: asUnknownList(data.by_proposal).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        rfpId: asString(row.rfp_id),
-        title: asString(row.title),
-        costUsd: Number(row.cost_usd ?? 0),
-        inputTokens: Number(row.input_tokens ?? 0),
-        outputTokens: Number(row.output_tokens ?? 0),
-        calls: Number(row.calls ?? 0),
-        runCount: Number(row.run_count ?? 0),
-      };
-    }),
-    byNode: asUnknownList(data.by_node).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        nodeName: asString(row.node_name, "unknown"),
-        costUsd: Number(row.cost_usd ?? 0),
-        calls: Number(row.calls ?? 0),
-      };
-    }),
-    byModel: asUnknownList(data.by_model).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        model: asString(row.model, "unknown"),
-        costUsd: Number(row.cost_usd ?? 0),
-        calls: Number(row.calls ?? 0),
-      };
-    }),
+    totalCostUsd: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    callCount: 0,
+    proposalCount: 0,
+    unattributedCostUsd: 0,
+    unknownNodeCostUsd: 0,
+    unknownNodeCalls: 0,
+    unknownBreakdown: { byModel: [], byDate: [] },
+    byProposal: [],
+    byNode: [],
+    byModel: [],
     monthlyBudget,
   };
 }
 
 /**
- * Loads the heavy LLM cost rollup in the browser so navigating to Analytics
- * is instant. The old server-render awaited a multi-minute Supabase scan.
+ * Analytics LLM section — monthly budget + cost per person only.
+ * All-time /summary rollup is temporarily disabled (slow + noisy).
  */
 export function AnalyticsLlmCostSection() {
   const [summary, setSummary] = useState<LlmCostSummary | null>(null);
@@ -116,18 +64,36 @@ export function AnalyticsLlmCostSection() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch("/api/llm-cost/summary", {
+        // Lightweight monthly meter only — do not call /api/llm-cost/summary.
+        // const res = await fetch("/api/llm-cost/summary", { ... });
+        const res = await fetch("/api/llm-cost/monthly-budget", {
           cache: "no-store",
           headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(45_000),
+          signal: AbortSignal.timeout(30_000),
         });
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as { detail?: string };
-          throw new Error(body.detail || `Cost summary failed (${res.status})`);
+          throw new Error(body.detail || `Monthly budget failed (${res.status})`);
         }
-        const data = (await res.json()) as Record<string, unknown>;
+        const monthlyRaw = asRecord(await res.json());
         if (cancelled) return;
-        setSummary(mapSummary(data));
+        const monthlyBudget: LlmMonthlyBudget | null =
+          Object.keys(monthlyRaw).length === 0
+            ? null
+            : {
+                enabled: Boolean(monthlyRaw.enabled),
+                limitUsd: Number(monthlyRaw.limit_usd ?? 0),
+                spentUsd: Number(monthlyRaw.spent_usd ?? 0),
+                remainingUsd: Number(monthlyRaw.remaining_usd ?? 0),
+                blocked: Boolean(monthlyRaw.blocked),
+                proposalSpentUsd: Number(monthlyRaw.proposal_spent_usd ?? 0),
+                financialSpentUsd: Number(monthlyRaw.financial_spent_usd ?? 0),
+                periodStart: asString(monthlyRaw.period_start),
+                periodEnd: asString(monthlyRaw.period_end),
+                timezone: asString(monthlyRaw.timezone, "UTC"),
+                proposalByUser: mapUserSpend(monthlyRaw.proposal_by_user),
+              };
+        setSummary(emptySummary(monthlyBudget));
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : "Cost summary unavailable");

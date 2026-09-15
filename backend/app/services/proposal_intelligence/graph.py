@@ -387,6 +387,15 @@ async def run_intelligence_graph(
     outline_mode: str = "zo_template",
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
+    from app.services.llm import LlmError
+    from app.services.llm_call_guards import is_blocked_rfp_id
+
+    if is_blocked_rfp_id(rfp_id):
+        raise LlmError(
+            f"Intelligence graph blocked for ephemeral/test RFP id {rfp_id!r}.",
+            status_code=403,
+        )
+
     log_path = get_intelligence_log_path()
     log_intel_event("graph_start", rfp_id=rfp_id, log_path=str(log_path))
 

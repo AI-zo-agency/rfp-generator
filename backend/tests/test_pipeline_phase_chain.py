@@ -31,13 +31,17 @@ class ChainNextGeneratePhaseTests(unittest.IsolatedAsyncioTestCase):
         ):
             settings.celery_enabled = False
             task.delay.return_value = mock_result
-            await _enqueue_next_generate_phase("rfp-1", "phase-2")
+            await _enqueue_next_generate_phase(
+                "rfp-1", "phase-2", user_email="dev@zo.com"
+            )
             check_cancel.assert_awaited()
             # scan_profile is carried forward now — passing it as None used to
             # blank the checkpoint's profile and reset Review & Fix progress.
             started.assert_awaited_with("rfp-1", "phase-3", scan_profile=None)
             task.delay.assert_called_once_with(
-                "rfp-1", "phase-3", {"chain_next": True}
+                "rfp-1",
+                "phase-3",
+                {"chain_next": True, "user_email": "dev@zo.com"},
             )
 
     async def test_chains_budget_to_self_edit(self) -> None:

@@ -108,6 +108,14 @@ def _enforce_monthly_llm_budget() -> None:
         logger.warning("monthly LLM budget check failed: %s", str(exc)[:200])
 
 
+def _enforce_llm_preflight() -> None:
+    """Budget + ephemeral/anonymous hard blocks before any provider HTTP."""
+    from app.services.llm_call_guards import enforce_llm_call_guards
+
+    enforce_llm_call_guards()
+    _enforce_monthly_llm_budget()
+
+
 def _enforce_run_cost_cap(node_name: str | None, run_id: str | None) -> None:
     """Hard stop when the current run already exceeded the configured budget."""
     cap = _resolve_run_cost_cap_usd(node_name)
@@ -1092,6 +1100,8 @@ def _record_successful_call(
             )
             return
 
+        from app.services.llm_call_context import get_llm_user_email
+
         record_llm_call(
             run_id=resolved_run,
             rfp_id=resolved_rfp,
@@ -1106,6 +1116,7 @@ def _record_successful_call(
             tokens_estimated=estimated,
             cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
+            user_email=get_llm_user_email(),
         )
         logger.info(
             "LLM cost: node=%s model=%s tier=%s in=%d out=%d cache_w=%d cache_r=%d "
@@ -1217,7 +1228,7 @@ async def chat_json(
     if node_name is None:
         node_name = _resolved_node or None
     openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
-    _enforce_monthly_llm_budget()
+    _enforce_llm_preflight()
     _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
@@ -1684,7 +1695,7 @@ async def chat_text(
     # phase off a contextvar, so without this guard a financial call made while
     # a proposal is in flight could pick up that proposal's cap.
     # Monthly org cap still applies — finance and proposals share one $N/mo pool.
-    _enforce_monthly_llm_budget()
+    _enforce_llm_preflight()
     if cost_sink is None:
         _enforce_run_cost_cap(node_name, run_id)
 

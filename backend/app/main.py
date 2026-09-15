@@ -55,6 +55,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def attach_llm_user_email(request, call_next):  # type: ignore[no-untyped-def]
+    """Attribute proposal LLM spend to the signed-in email (X-User-Email)."""
+    from app.services.llm_call_context import reset_llm_user_email, set_llm_user_email
+
+    email = request.headers.get("x-user-email") or request.headers.get("X-User-Email") or ""
+    token = set_llm_user_email(email)
+    try:
+        return await call_next(request)
+    finally:
+        reset_llm_user_email(token)
+
+
 app.include_router(api_router)
 app.include_router(auth_router)
 

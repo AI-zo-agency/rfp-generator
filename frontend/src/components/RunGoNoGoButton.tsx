@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { withAuthUserEmail } from "@/lib/auth-user-email";
 
 interface RunGoNoGoButtonProps {
   rfpId: string;
@@ -122,7 +123,10 @@ export function RunGoNoGoButton({
     setAnalyzing(true);
     setError(null);
     try {
-      const res = await fetch(`/api/rfps/${rfpId}/analyze`, { method: "POST" });
+      const res = await fetch(`/api/rfps/${rfpId}/analyze`, {
+        method: "POST",
+        headers: withAuthUserEmail(),
+      });
       const data = (await res.json()) as AnalyzeStatus & {
         message?: string;
       };

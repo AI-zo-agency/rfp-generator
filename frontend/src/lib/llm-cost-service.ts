@@ -43,6 +43,8 @@ export interface LlmMonthlyBudget {
   periodStart: string;
   periodEnd: string;
   timezone: string;
+  /** Proposal spend this month by signed-in email (from deploy attribution onward). */
+  proposalByUser: { email: string; proposalSpentUsd: number }[];
 }
 
 export interface LlmCostSummary {
@@ -188,6 +190,15 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
             periodStart: asString(monthlyRaw.period_start),
             periodEnd: asString(monthlyRaw.period_end),
             timezone: asString(monthlyRaw.timezone, "UTC"),
+            proposalByUser: asUnknownList(monthlyRaw.proposal_by_user)
+              .map((row) => {
+                const r = asRecord(row);
+                const email = asString(r.email).trim();
+                const proposalSpentUsd = Number(r.proposal_spent_usd ?? 0);
+                if (!email || !(proposalSpentUsd > 0)) return null;
+                return { email, proposalSpentUsd };
+              })
+              .filter((x): x is { email: string; proposalSpentUsd: number } => Boolean(x)),
           };
     return {
       totalCostUsd: Number(data.total_cost_usd ?? 0),

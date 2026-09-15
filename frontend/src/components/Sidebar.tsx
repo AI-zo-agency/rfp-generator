@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ZoLogo } from "./ZoLogo";
+import { SidebarAiCostPanel } from "./SidebarAiCostPanel";
 import {
   IconAnalytics,
   IconDashboard,
@@ -69,6 +70,8 @@ export function Sidebar({ collapsed }: SidebarProps) {
           })}
         </div>
       </nav>
+
+      <SidebarAiCostPanel collapsed={collapsed} />
     </aside>
   );
 }

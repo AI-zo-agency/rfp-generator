@@ -86,11 +86,13 @@ CREATE TABLE IF NOT EXISTS llm_call_log (
   cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   tokens_estimated BOOLEAN NOT NULL DEFAULT FALSE,
+  user_email TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log (run_id);
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_rfp_id ON llm_call_log (rfp_id);
+CREATE INDEX IF NOT EXISTS idx_llm_call_log_user_email ON llm_call_log (user_email);
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id TEXT PRIMARY KEY,
