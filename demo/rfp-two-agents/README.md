@@ -81,7 +81,7 @@ export RFP_FIXTURE_PDF=/path/to/RFQ13180.pdf
 ```
 
 | Agent 2 | Production `run_strategy_delivery` + real Supermemory |
-| Outline | Production `run_execution_plan` + `run_dynamic_section_planner(strict_rfp)` + `run_proposal_checklister` |
+| Outline | Production `run_execution_plan` + `run_dynamic_section_planner(strict_rfp)` + `run_proposal_checklister` (submission/closing completeness excerpts, same as Phase 2) |
 
 ## Flow on the call
 

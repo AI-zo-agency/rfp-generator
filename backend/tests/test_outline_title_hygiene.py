@@ -1,6 +1,6 @@
 """Unit tests for outline title hygiene — humanize_outline_title and its call sites.
 
-Pure unit tests. No network / LLM calls (safe_chat_json is mocked where needed).
+Pure unit tests. No network / LLM calls (ensure_missing_submittals_coverage is mocked).
 """
 
 from __future__ import annotations
@@ -78,23 +78,23 @@ class TestChecklisterHumanizesTitles(unittest.IsolatedAsyncioTestCase):
             OutlineSection(id="s1", title="Cover Letter", order=1)
         ]
 
-        llm_payload = {
-            "missing_sections": [
-                {
-                    "title": _LONG_SENTENCE,
-                    "required": True,
-                    "conditionalReason": "",
-                    "evaluationWeight": None,
-                    "protectFromCap": True,
-                    "submissionInstrument": "narrative",
-                }
-            ],
-            "reasoning": "test",
-        }
+        injected = OutlineSection(
+            id="rfp-submittal-long",
+            title=_LONG_SENTENCE,
+            order=2,
+            required=True,
+            protectFromCap=True,
+            submissionInstrument="form",
+            conditionalReason="Flagged missing by completeness check",
+        )
+
+        async def _fake_ensure(sections, _rfp, *, section_factory=None):
+            _ = section_factory
+            return list(sections) + [injected], [_LONG_SENTENCE]
 
         with patch(
-            "app.services.proposal_intelligence.agents.checklister.safe_chat_json",
-            new=AsyncMock(return_value=(llm_payload, "test-provider")),
+            "app.services.proposal_evaluation_coverage.ensure_missing_submittals_coverage",
+            new=AsyncMock(side_effect=_fake_ensure),
         ):
             updated = await run_proposal_checklister(
                 plan=plan, rfp_context="irrelevant rfp text"

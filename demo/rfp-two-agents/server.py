@@ -645,7 +645,7 @@ async def outline(body: OutlineBody) -> Any:
             )
             await bus.emit(
                 step="checklister",
-                label="Checklister · missing forms & topics",
+                label="Checklister · submission/closing completeness",
                 status="active",
             )
         with llm_call_context(
@@ -654,6 +654,8 @@ async def outline(body: OutlineBody) -> Any:
             node_name="checklister",
             user_email=_DEMO_USER_EMAIL,
         ):
+            # Same production completeness path as dynamic_section_planner
+            # (submission/closing excerpts + dual-sample) — not rfp[:25k].
             plan = await run_proposal_checklister(
                 plan=plan,
                 rfp_context=rfp_text,
@@ -662,7 +664,7 @@ async def outline(body: OutlineBody) -> Any:
         if bus:
             await bus.emit(
                 step="checklister",
-                label="Checklister · missing forms & topics",
+                label="Checklister · submission/closing completeness",
                 status="done",
             )
             await bus.emit(

@@ -126,6 +126,6 @@ AGENT2_STEPS: list[dict[str, str]] = [
 OUTLINE_STEPS: list[dict[str, str]] = [
     {"step": "execution_plan", "label": "Execution plan · WBS / timeline / resources"},
     {"step": "dynamic_section", "label": "Dynamic section planner · strict_rfp"},
-    {"step": "checklister", "label": "Checklister · missing forms & topics"},
+    {"step": "checklister", "label": "Checklister · submission/closing completeness"},
     {"step": "extract_titles", "label": "Extract section titles"},
 ]
