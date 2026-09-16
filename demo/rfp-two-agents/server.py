@@ -1,4 +1,4 @@
-"""Demo: gated Agent 1 → approve → Agent 2 (imports production merged_passes).
+"""Demo: Agent 1 → approve → Agent 2 → approve → strict RFP section list.
 
 Run from this folder (repo venv + backend/.env):
 
@@ -40,9 +40,17 @@ from app.services.llm_call_log import get_rfp_cost_breakdown  # noqa: E402
 from app.services.proposal_intelligence import merged_passes  # noqa: E402
 from app.services.proposal_intelligence.plan_ops import IntelligenceError  # noqa: E402
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan  # noqa: E402
+from app.services.proposal_intelligence.agents.checklister import (  # noqa: E402
+    run_proposal_checklister,
+)
+from app.services.proposal_intelligence.agents.dynamic_section_planner import (  # noqa: E402
+    run_dynamic_section_planner,
+)
 from app.services.proposal_intelligence.merged_passes import (  # noqa: E402
+    run_execution_plan,
     run_strategy_delivery,
 )
+from app.services.monthly_llm_budget import clear_monthly_budget_cache  # noqa: E402
 
 from agent1_tools import (  # noqa: E402
     RfpDoc,
@@ -52,6 +60,7 @@ from agent1_tools import (  # noqa: E402
 from progress_bus import (  # noqa: E402
     AGENT1_STEPS,
     AGENT2_STEPS,
+    OUTLINE_STEPS,
     ProgressBus,
     sse,
     sse_comment,
@@ -65,6 +74,10 @@ from prompt_store import (  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rfp-two-agents-demo")
+
+# Not "demo-*" — llm_call_guards blocks those prefixes from OpenRouter spend.
+# Signed email satisfies llm_require_user_email_for_proposals for production LLM hops.
+_DEMO_USER_EMAIL = "rfp-demo@zo.agency"
 
 app = FastAPI(title="RFP two-agent demo")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -97,6 +110,117 @@ def _session_or_404(demo_id: str) -> dict[str, Any]:
     if not sess:
         raise HTTPException(404, "Unknown demo_id — run Agent 1 first")
     return sess
+
+
+def _count_outline_nodes(nodes: list[dict[str, Any]]) -> int:
+    total = 0
+    for n in nodes:
+        total += 1
+        kids = n.get("children") or []
+        if isinstance(kids, list):
+            total += _count_outline_nodes([k for k in kids if isinstance(k, dict)])
+    return total
+
+
+def _slim_outline_sections(plan_dump: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flat outline → nested {id, title, evaluationWeight, children[]} for UI."""
+    writing = plan_dump.get("writing") or {}
+    outline = writing.get("proposalOutline") or writing.get("proposal_outline") or {}
+    sections = outline.get("sections") or []
+    by_id: dict[str, dict[str, Any]] = {}
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("id") or "").strip()
+        if not sid:
+            continue
+        by_id[sid] = {
+            "id": sid,
+            "title": str(s.get("title") or ""),
+            "evaluationWeight": s.get("evaluationWeight", s.get("evaluation_weight")),
+            "order": int(s.get("order") or 0),
+            "parentId": s.get("parentId") or s.get("parent_id"),
+            "child_ids": [str(c) for c in (s.get("children") or []) if c],
+            "children": [],
+        }
+    for node in by_id.values():
+        for cid in node["child_ids"]:
+            child = by_id.get(cid)
+            if child is not None:
+                node["children"].append(child)
+        node["children"].sort(key=lambda x: int(x.get("order") or 0))
+    child_ids = {c["id"] for n in by_id.values() for c in n["children"]}
+    roots = [n for n in by_id.values() if n["id"] not in child_ids]
+    roots.sort(key=lambda x: int(x.get("order") or 0))
+
+    def clean(n: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": n["id"],
+            "title": n["title"],
+            "evaluationWeight": n["evaluationWeight"],
+            "children": [clean(c) for c in n["children"]],
+        }
+
+    return [clean(r) for r in roots]
+
+
+async def _sse_agent_stream(
+    *,
+    agent: str,
+    demo_id: str,
+    steps: list[dict[str, str]],
+    run_fn,
+) -> StreamingResponse:
+    bus = ProgressBus()
+
+    async def event_gen():
+        yield sse({"type": "hello", "agent": agent, "demo_id": demo_id, "steps": steps})
+
+        async def worker() -> None:
+            try:
+                result = await run_fn(bus)
+                await bus.result(result)
+            except IntelligenceError as exc:
+                await bus.error(str(exc))
+            except LlmError as exc:
+                await bus.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("%s failed", agent)
+                await bus.error(str(exc))
+            finally:
+                await bus.close()
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(bus.q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield sse_comment("heartbeat")
+                    if task.done():
+                        break
+                    continue
+                if item is None:
+                    break
+                yield sse(item)
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            yield sse({"type": "done"})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class PromptUpdate(BaseModel):
@@ -177,7 +301,7 @@ async def put_prompts(body: PromptUpdate) -> dict[str, str]:
 
 @app.get("/api/progress/catalog")
 async def progress_catalog() -> dict[str, Any]:
-    return {"agent1": AGENT1_STEPS, "agent2": AGENT2_STEPS}
+    return {"agent1": AGENT1_STEPS, "agent2": AGENT2_STEPS, "outline": OUTLINE_STEPS}
 
 
 @app.post("/api/agent1")
@@ -197,7 +321,7 @@ async def agent1(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    demo_id = f"demo-{uuid.uuid4().hex[:12]}"
+    demo_id = f"rfpda-{uuid.uuid4().hex[:12]}"
     run_id = str(uuid.uuid4())
     meta = {
         "title": title.strip() or "Demo RFP",
@@ -222,7 +346,12 @@ async def agent1(
                 status="done",
                 detail=f"{doc.page_count} pages · {file.filename}",
             )
-        with llm_call_context(rfp_id=demo_id, run_id=run_id, node_name="opportunity_extract"):
+        with llm_call_context(
+            rfp_id=demo_id,
+            run_id=run_id,
+            node_name="opportunity_extract",
+            user_email=_DEMO_USER_EMAIL,
+        ):
             opportunity, tool_trace, provenance = await extract_opportunity_with_tools(
                 doc=doc,
                 system_prompt=system_prompt,
@@ -249,6 +378,8 @@ async def agent1(
             "rfp_text": doc.full_text(),
             "rfp_meta": meta,
             "agent1_approved": False,
+            "agent2_done": False,
+            "agent2_approved": False,
             "run_id": run_id,
             "opportunity_raw": out_opportunity,
             "tool_trace": tool_trace,
@@ -347,7 +478,19 @@ async def approve(body: Agent2Body) -> dict[str, Any]:
         raise HTTPException(400, "Set approved=true after reviewing Agent 1")
     sess["agent1_approved"] = True
     logger.info("Agent 1 approved demo_id=%s", body.demo_id)
-    return {"demo_id": body.demo_id, "approved": True}
+    return {"demo_id": body.demo_id, "approved": True, "gate": "agent1"}
+
+
+@app.post("/api/approve2")
+async def approve2(body: Agent2Body) -> dict[str, Any]:
+    sess = _session_or_404(body.demo_id)
+    if not sess.get("agent2_done"):
+        raise HTTPException(400, "Run Agent 2 before approving")
+    if not body.approved:
+        raise HTTPException(400, "Set approved=true after reviewing Agent 2")
+    sess["agent2_approved"] = True
+    logger.info("Agent 2 approved demo_id=%s — outline unlocked", body.demo_id)
+    return {"demo_id": body.demo_id, "approved": True, "gate": "agent2"}
 
 
 class Agent2StreamBody(Agent2Body):
@@ -360,6 +503,8 @@ async def agent2(body: Agent2StreamBody) -> Any:
     if not sess.get("agent1_approved") and not body.approved:
         raise HTTPException(400, "Approve Agent 1 output before running Agent 2")
     sess["agent1_approved"] = True
+    sess["agent2_approved"] = False
+    sess["agent2_done"] = False
 
     async def _run(bus: ProgressBus | None) -> dict[str, Any]:
         plan = ProposalExecutionPlan.model_validate(sess["plan"])
@@ -383,6 +528,7 @@ async def agent2(body: Agent2StreamBody) -> Any:
             rfp_id=body.demo_id,
             run_id=sess.get("run_id") or str(uuid.uuid4()),
             node_name="strategy_delivery",
+            user_email=_DEMO_USER_EMAIL,
         ):
             plan = await run_strategy_delivery(plan=plan, rfp_meta=meta)
         if bus:
@@ -391,7 +537,13 @@ async def agent2(body: Agent2StreamBody) -> Any:
             await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="active")
         plan_dump = plan.model_dump(by_alias=True)
         sess["plan"] = plan_dump
+        sess["agent2_done"] = True
+        sess["agent2_approved"] = False
         cost = _cost_for(body.demo_id)
+        try:
+            clear_monthly_budget_cache()
+        except Exception:  # noqa: BLE001
+            pass
         if bus:
             await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="done")
         logger.info(
@@ -417,60 +569,158 @@ async def agent2(body: Agent2StreamBody) -> Any:
         except IntelligenceError as exc:
             raise HTTPException(502, str(exc)) from exc
 
-    bus = ProgressBus()
+    return await _sse_agent_stream(
+        agent="agent2",
+        demo_id=body.demo_id,
+        steps=AGENT2_STEPS,
+        run_fn=_run,
+    )
 
-    async def event_gen():
-        yield sse(
-            {
-                "type": "hello",
-                "agent": "agent2",
-                "demo_id": body.demo_id,
-                "steps": AGENT2_STEPS,
-            }
-        )
 
-        async def worker() -> None:
-            try:
-                result = await _run(bus)
-                await bus.result(result)
-            except IntelligenceError as exc:
-                await bus.error(str(exc))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Agent 2 failed")
-                await bus.error(str(exc))
-            finally:
-                await bus.close()
+class OutlineBody(BaseModel):
+    demo_id: str
+    approved: bool = True
+    stream: bool = True
 
-        task = asyncio.create_task(worker())
+
+@app.post("/api/outline")
+async def outline(body: OutlineBody) -> Any:
+    sess = _session_or_404(body.demo_id)
+    if not sess.get("agent2_approved") and not body.approved:
+        raise HTTPException(400, "Approve Agent 2 before building the section list")
+    if not sess.get("agent2_done"):
+        raise HTTPException(400, "Run Agent 2 before building the section list")
+    sess["agent2_approved"] = True
+
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        plan = ProposalExecutionPlan.model_validate(sess["plan"])
+        meta = dict(sess.get("rfp_meta") or {})
+        rfp_text = str(sess.get("rfp_text") or "")
+        if not rfp_text.strip():
+            raise IntelligenceError("Session missing RFP text — re-run Agent 1")
+        run_id = sess.get("run_id") or str(uuid.uuid4())
+        logger.info("Outline start demo_id=%s mode=strict_rfp", body.demo_id)
+
+        if bus:
+            await bus.emit(
+                step="execution_plan",
+                label="Execution plan · WBS / timeline / resources",
+                status="active",
+            )
+        with llm_call_context(
+            rfp_id=body.demo_id,
+            run_id=run_id,
+            node_name="execution_plan",
+            user_email=_DEMO_USER_EMAIL,
+        ):
+            plan = await run_execution_plan(plan=plan, rfp_meta=meta)
+        if bus:
+            await bus.emit(
+                step="execution_plan",
+                label="Execution plan · WBS / timeline / resources",
+                status="done",
+            )
+            await bus.emit(
+                step="dynamic_section",
+                label="Dynamic section planner · strict_rfp",
+                status="active",
+            )
+        with llm_call_context(
+            rfp_id=body.demo_id,
+            run_id=run_id,
+            node_name="dynamic_section",
+            user_email=_DEMO_USER_EMAIL,
+        ):
+            plan = await run_dynamic_section_planner(
+                plan=plan,
+                rfp_context=rfp_text,
+                rfp_meta=meta,
+                outline_mode="strict_rfp",
+            )
+        if bus:
+            await bus.emit(
+                step="dynamic_section",
+                label="Dynamic section planner · strict_rfp",
+                status="done",
+            )
+            await bus.emit(
+                step="checklister",
+                label="Checklister · missing forms & topics",
+                status="active",
+            )
+        with llm_call_context(
+            rfp_id=body.demo_id,
+            run_id=run_id,
+            node_name="checklister",
+            user_email=_DEMO_USER_EMAIL,
+        ):
+            plan = await run_proposal_checklister(
+                plan=plan,
+                rfp_context=rfp_text,
+                rfp_meta=meta,
+            )
+        if bus:
+            await bus.emit(
+                step="checklister",
+                label="Checklister · missing forms & topics",
+                status="done",
+            )
+            await bus.emit(
+                step="extract_titles",
+                label="Extract section titles",
+                status="active",
+            )
+
+        plan_dump = plan.model_dump(by_alias=True)
+        sess["plan"] = plan_dump
+        sections = _slim_outline_sections(plan_dump)
+        section_count = _count_outline_nodes(sections)
+        cost = _cost_for(body.demo_id)
         try:
-            while True:
-                try:
-                    item = await asyncio.wait_for(bus.q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield sse_comment("heartbeat")
-                    if task.done():
-                        break
-                    continue
-                if item is None:
-                    break
-                yield sse(item)
-        finally:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-            yield sse({"type": "done"})
+            clear_monthly_budget_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        if bus:
+            await bus.emit(
+                step="extract_titles",
+                label="Extract section titles",
+                status="done",
+                detail=f"{section_count} sections",
+            )
+        logger.info(
+            "Outline done demo_id=%s sections=%s cost_usd=%s",
+            body.demo_id,
+            section_count,
+            cost.get("total_cost_usd"),
+        )
+        return {
+            "demo_id": body.demo_id,
+            "agent": "outline",
+            "output": {
+                "outlineMode": "strict_rfp",
+                "sections": sections,
+                "sectionCount": section_count,
+            },
+            "plan": plan_dump,
+            "cost": cost,
+            "decisions": plan_dump.get("decisionLog") or plan_dump.get("decision_log") or [],
+        }
 
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    if not body.stream:
+        try:
+            return await _run(None)
+        except HTTPException:
+            raise
+        except IntelligenceError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except LlmError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    return await _sse_agent_stream(
+        agent="outline",
+        demo_id=body.demo_id,
+        steps=OUTLINE_STEPS,
+        run_fn=_run,
     )
 
 

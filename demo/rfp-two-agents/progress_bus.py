@@ -122,3 +122,10 @@ AGENT2_STEPS: list[dict[str, str]] = [
     {"step": "strategy_llm", "label": "Sonnet · strategy & delivery"},
     {"step": "assemble", "label": "Assemble strategy + delivery JSON"},
 ]
+
+OUTLINE_STEPS: list[dict[str, str]] = [
+    {"step": "execution_plan", "label": "Execution plan · WBS / timeline / resources"},
+    {"step": "dynamic_section", "label": "Dynamic section planner · strict_rfp"},
+    {"step": "checklister", "label": "Checklister · missing forms & topics"},
+    {"step": "extract_titles", "label": "Extract section titles"},
+]

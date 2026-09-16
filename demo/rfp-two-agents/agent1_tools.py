@@ -477,34 +477,110 @@ def _parse_tool_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _strip_trailing_commas(text: str) -> str:
+    """Remove commas before } or ] outside strings (common Sonnet slip)."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if escape:
+            out.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            i += 1
+            continue
+        if not in_string and ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _looks_like_opportunity_blob(text: str) -> bool:
+    t = text.casefold()
+    return '"understanding"' in t or '"compliance"' in t or '"scope"' in t
+
+
+def _is_opportunity_payload(parsed: dict[str, Any]) -> bool:
+    if "understanding" in parsed or "compliance" in parsed or "scope" in parsed:
+        return True
+    # Classification salvage can return {industry, servicesRequested} — reject.
+    if "industry" in parsed or "servicesRequested" in parsed or "buyerType" in parsed:
+        return False
+    return False
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Parse opportunity JSON; prefer truncate-close over Stage-3 budget salvage."""
     if not text:
         return None
-    parsed: dict[str, Any] | None = None
+
+    candidates: list[str] = []
     try:
-        parsed = llm._parse_json_response(text)  # noqa: SLF001 — demo reuse
-    except Exception:
-        parsed = None
-    if parsed is None:
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
-            try:
-                obj = json.loads(match.group(0))
-                parsed = obj if isinstance(obj, dict) else None
-            except json.JSONDecodeError:
-                parsed = None
-    if not parsed:
-        return None
-    # Classification salvage can return {industry, servicesRequested} and must not
-    # be treated as opportunity JSON (leads to missing client/projectType → 502).
-    if "understanding" not in parsed and "compliance" not in parsed and "scope" not in parsed:
-        if "industry" in parsed or "servicesRequested" in parsed or "buyerType" in parsed:
-            logger.warning(
-                "Rejected non-opportunity JSON keys=%s",
-                sorted(parsed.keys())[:12],
+        extracted = llm._extract_json_from_text(text)  # noqa: SLF001
+        candidates.append(extracted)
+        candidates.append(_strip_trailing_commas(extracted))
+    except Exception:  # noqa: BLE001
+        candidates.append(text)
+
+    fancy = (
+        text.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
+    if fancy not in candidates:
+        candidates.append(fancy)
+        try:
+            candidates.append(
+                _strip_trailing_commas(llm._extract_json_from_text(fancy))  # noqa: SLF001
             )
-            return None
-    return parsed
+        except Exception:  # noqa: BLE001
+            pass
+
+    for cand in candidates:
+        try:
+            parsed = llm._try_parse_json_object(cand)  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            parsed = None
+        if isinstance(parsed, dict) and _is_opportunity_payload(parsed):
+            return parsed
+
+    # Last resort: full parse_json_response, but only if it looks like opportunity.
+    try:
+        parsed = llm._parse_json_response(text)  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "opportunity JSON parse failed: %s preview=%r",
+            str(exc)[:160],
+            text[:120],
+        )
+        parsed = None
+    if isinstance(parsed, dict) and _is_opportunity_payload(parsed):
+        return parsed
+    if isinstance(parsed, dict):
+        logger.warning(
+            "Rejected non-opportunity JSON keys=%s",
+            sorted(parsed.keys())[:12],
+        )
+    return None
 
 
 async def _openrouter_tools_round(
@@ -940,12 +1016,15 @@ async def _single_json_call(
 
     trace: list[str] = []
     msgs = list(messages)
-    rounds = max(1, max_tool_rounds + 1)
+    # +1 so a failed final JSON attempt can still run one repair turn.
+    rounds = max(1, max_tool_rounds + 1) + 1
     last_diag = ""
     reasoning_effort = "medium"
     for round_i in range(rounds):
-        use_tools = tools if (tools and round_i < max_tool_rounds) else None
-        if tools and round_i == max_tool_rounds and max_tool_rounds > 0:
+        # Tools only on early rounds; last two rounds are JSON-only (final + repair).
+        tool_cutoff = max_tool_rounds
+        use_tools = tools if (tools and round_i < tool_cutoff) else None
+        if tools and round_i == tool_cutoff and max_tool_rounds > 0:
             msgs.append(
                 {
                     "role": "user",
@@ -1001,16 +1080,38 @@ async def _single_json_call(
             trace.append("retry:reasoning_effort=low")
 
         msgs.append({"role": "assistant", "content": content or "(empty)"})
-        msgs.append(
-            {
-                "role": "user",
-                "content": (
-                    "Return ONLY valid opportunity JSON with top-level keys "
-                    "understanding, compliance, scope, evaluation, successCriteria, provenance. "
-                    "No markdown, no preamble."
-                ),
-            }
-        )
+        if _looks_like_opportunity_blob(content):
+            # Model returned opportunity-shaped text that won't parse (trailing
+            # commas, truncation). Ask for a compact repair instead of a full rewrite.
+            reasoning_effort = "low"
+            tools = None
+            max_tool_rounds = 0
+            trace.append("retry:fix_invalid_opportunity_json")
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous reply looked like opportunity JSON but was not "
+                        "valid JSON (parse failed). Return ONLY a repaired compact JSON "
+                        "object with top-level keys understanding, compliance, scope, "
+                        "evaluation, successCriteria, provenance. "
+                        "No markdown fences, no trailing commas, no commentary. "
+                        "Keep compliance.items and scope lists; shorten prose if needed "
+                        "so the JSON completes."
+                    ),
+                }
+            )
+        else:
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Return ONLY valid opportunity JSON with top-level keys "
+                        "understanding, compliance, scope, evaluation, successCriteria, provenance. "
+                        "No markdown, no preamble."
+                    ),
+                }
+            )
     raise IntelligenceError(f"{node_name} returned no JSON ({last_diag})")
 
 
