@@ -283,38 +283,37 @@ async def _seed_demo_rfp_for_generate(
     *,
     bus: ProgressBus | None = None,
 ) -> ProposalExecutionPlan:
-    """Upsert RFP, freeze outline (protectFromCap), writing briefs, research cache.
+    """Upsert RFP, freeze outline, writing briefs, hard-validate, Phase 2 corpus.
 
     Does not re-run section planner / checklister — session plan is authoritative.
+    Empty retrieval plan / blocked validation raises (production parity).
     """
-    from app.models.proposal import ProposalResearchCache
     from app.services.proposal_common import ProposalError
+    from app.services.proposal_generator import finalize_phase2_research_from_plan
     from app.services.proposal_intelligence.agents.validation import run_validate_plan
-    from app.services.proposal_intelligence.assembler import derive_legacy_fields
     from app.services.proposal_intelligence.merged_passes import run_writing_briefs
-    from app.services.proposal_repository import asave_research_cache
 
     total = len(GENERATE_STEPS)
     meta = dict(sess.get("rfp_meta") or {})
     run_id = str(sess.get("run_id") or uuid.uuid4())
 
-    if bus:
-        await bus.emit(
-            step="seed_rfp",
-            label="Seed RFP + PDF",
-            status="active",
-            index=0,
-            total=total,
-        )
+    async def _step(step: str, label: str, index: int, status: str, detail: str = "") -> None:
+        if not bus:
+            return
+        payload: dict[str, Any] = {
+            "step": step,
+            "label": label,
+            "status": status,
+            "index": index,
+            "total": total,
+        }
+        if detail:
+            payload["detail"] = detail
+        await bus.emit(**payload)
+
+    await _step("seed_rfp", "Seed RFP + PDF", 0, "active")
     await _upsert_demo_rfp_row(sess, demo_id)
-    if bus:
-        await bus.emit(
-            step="seed_rfp",
-            label="Seed RFP + PDF",
-            status="done",
-            index=0,
-            total=total,
-        )
+    await _step("seed_rfp", "Seed RFP + PDF", 0, "done")
 
     plan = _plan_from_session(sess)
     stamped = _stamp_outline_protect_from_cap(plan)
@@ -324,14 +323,7 @@ async def _seed_demo_rfp_for_generate(
         stamped,
     )
 
-    if bus:
-        await bus.emit(
-            step="writing_briefs",
-            label="Writing briefs",
-            status="active",
-            index=1,
-            total=total,
-        )
+    await _step("writing_briefs", "Writing briefs + validate", 1, "active")
     with llm_call_context(
         rfp_id=demo_id,
         run_id=run_id,
@@ -340,74 +332,58 @@ async def _seed_demo_rfp_for_generate(
     ):
         plan = await run_writing_briefs(plan=plan, rfp_meta=meta)
     plan = run_validate_plan(plan)
+    if plan.validation.readiness_status == "blocked":
+        blockers = list(plan.validation.blockers or [])
+        raise ProposalError(
+            "Plan not ready to draft: " + "; ".join(blockers[:5] or ["blocked"]),
+            status_code=422,
+        )
     if plan.validation.readiness_status != "ready":
-        # Soft-unblock for demo: budget ambiguity must not stop narrative draft.
-        # Keep real drafting blockers as errors.
-        drafting_blockers = [
-            b
-            for b in (plan.validation.blockers or [])
-            if "retrieval plan empty" not in b.casefold()
-            and "cost/pricing" not in b.casefold()
-        ]
-        if drafting_blockers and plan.validation.readiness_status == "blocked":
-            raise ProposalError(
-                "Plan not ready to draft: " + "; ".join(drafting_blockers[:3]),
-                status_code=400,
-            )
-        plan.validation.readiness_status = "ready"
-        plan.metadata.validation_status = "ready"
-        logger.warning(
-            "Demo force readiness=ready demo_id=%s prior_blockers=%s",
-            demo_id,
-            (plan.validation.blockers or [])[:5],
+        raise ProposalError(
+            f"Plan validation status={plan.validation.readiness_status!r}; "
+            "expected ready before Phase 2 corpus.",
+            status_code=422,
         )
-    if bus:
-        await bus.emit(
-            step="writing_briefs",
-            label="Writing briefs",
-            status="done",
-            detail=f"{len(plan.writing.section_plans.plans)} briefs",
-            index=1,
-            total=total,
-        )
-
-    if bus:
-        await bus.emit(
-            step="persist_research",
-            label="Persist research cache",
-            status="active",
-            index=2,
-            total=total,
-        )
-    legacy = derive_legacy_fields(plan, outline_mode="strict_rfp")
-    now = datetime.now(timezone.utc).isoformat()
-    research = ProposalResearchCache(
-        rfpId=demo_id,
-        rfpSections=legacy["rfpSections"],
-        outlineMode="strict_rfp",
-        requirementLedger=legacy.get("requirementLedger"),
-        sectionQueries=legacy.get("sectionQueries") or {},
-        proofPoints=legacy.get("proofPoints") or [],
-        proposalExecutionPlan=plan,
-        updatedAt=now,
-        provider=plan.metadata.provider,
+    await _step(
+        "writing_briefs",
+        "Writing briefs + validate",
+        1,
+        "done",
+        detail=f"{len(plan.writing.section_plans.plans)} briefs",
     )
-    await asave_research_cache(research)
+
+    await _step(
+        "phase2_finalize",
+        "Phase 2 · corpus + locks + lessons",
+        2,
+        "active",
+    )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="phase2_finalize",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        research = await finalize_phase2_research_from_plan(
+            demo_id,
+            plan=plan,
+            outline_mode="strict_rfp",
+        )
     sess["plan"] = plan.model_dump(by_alias=True)
     sess["research_seeded"] = True
-    if bus:
-        await bus.emit(
-            step="persist_research",
-            label="Persist research cache",
-            status="done",
-            detail=f"{len(research.rfp_sections)} rfpSections",
-            index=2,
-            total=total,
-        )
+    corpus_n = len(research.evidence_corpus or [])
+    await _step(
+        "phase2_finalize",
+        "Phase 2 · corpus + locks + lessons",
+        2,
+        "done",
+        detail=f"{len(research.rfp_sections)} tabs · corpus={corpus_n}",
+    )
     logger.info(
-        "Demo research seeded demo_id=%s sections=%s readiness=%s",
+        "Demo Phase 2 finalize demo_id=%s sections=%s corpus=%s readiness=%s",
         demo_id,
         len(research.rfp_sections),
+        corpus_n,
         plan.validation.readiness_status,
     )
     return plan
@@ -982,155 +958,169 @@ async def _run_generate_proposal(
     demo_id: str,
     bus: ProgressBus | None,
 ) -> dict[str, Any]:
-    """Frozen outline → Phase 3 → gated 3.5 → 3.6. Soft-skips budget on ambiguity."""
+    """Frozen outline → Phase 2 corpus → 3 → 3.5 → closing → structure → 3.6 → P4 → finalize.
+
+    Hard gates match production: empty retrieval / blocked validation → 422;
+    budget ambiguity → 422 (absent cost still skips Phase 3.5).
+    """
     from app.services.proposal_common import ProposalError
+    from app.services.proposal_fulfill_rfp_gaps import run_build_finalize_pass
     from app.services.proposal_generator import (
         run_phase3_5_budget,
         run_phase3_6_self_edit,
         run_phase3_drafting,
+        run_phase4_presubmit_review,
+        run_post_budget_attach_passes,
+    )
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        aget_research_cache,
     )
     from app.services.proposal_submission_authority import phase35_budget_gate
 
     sess = _session_or_404(demo_id)
     total = len(GENERATE_STEPS)
+    run_id = str(sess.get("run_id") or uuid.uuid4())
+
+    async def _step(
+        step: str, label: str, index: int, status: str, detail: str = ""
+    ) -> None:
+        if not bus:
+            return
+        await bus.emit(
+            step=step,
+            label=label,
+            status=status,
+            detail=detail,
+            index=index,
+            total=total,
+        )
 
     plan = await _seed_demo_rfp_for_generate(sess, demo_id, bus=bus)
 
-    if bus:
-        await bus.emit(
-            step="phase3",
-            label="Phase 3 · draft sections",
-            status="active",
-            index=3,
-            total=total,
-        )
+    await _step("phase3", "Phase 3 · draft sections", 3, "active")
     with llm_call_context(
         rfp_id=demo_id,
-        run_id=str(sess.get("run_id") or uuid.uuid4()),
+        run_id=run_id,
         node_name="phase3_drafting",
         user_email=_DEMO_USER_EMAIL,
     ):
-        draft, _research = await run_phase3_drafting(demo_id)
+        draft, research = await run_phase3_drafting(demo_id)
     section_count = len(draft.sections) if draft else 0
-    if bus:
-        await bus.emit(
-            step="phase3",
-            label="Phase 3 · draft sections",
-            status="done",
-            detail=f"{section_count} sections",
-            index=3,
-            total=total,
-        )
+    await _step(
+        "phase3",
+        "Phase 3 · draft sections",
+        3,
+        "done",
+        detail=f"{section_count} sections",
+    )
 
     budget_gate_status = "ran"
     budget_gate_detail = ""
     gate, gate_detail = phase35_budget_gate(plan)
-    if bus:
-        await bus.emit(
-            step="phase3_5",
-            label="Phase 3.5 · budget (cost-gated)",
-            status="active",
-            index=4,
-            total=total,
-        )
+    await _step("phase3_5", "Phase 3.5 · budget (cost-gated)", 4, "active")
     if gate == "skip":
         budget_gate_status = "skipped"
         budget_gate_detail = gate_detail or "No confirmed cost submittal"
-        if bus:
-            await bus.emit(
-                step="phase3_5",
-                label="Phase 3.5 · budget (cost-gated)",
-                status="skipped",
-                detail=budget_gate_detail,
-                index=4,
-                total=total,
-            )
+        await _step(
+            "phase3_5",
+            "Phase 3.5 · budget (cost-gated)",
+            4,
+            "skipped",
+            detail=budget_gate_detail,
+        )
     elif gate == "block":
-        # Soft-skip — do not fail the whole generate run on cost ambiguity.
-        budget_gate_status = "skipped"
-        budget_gate_detail = gate_detail or "Cost requirement ambiguous"
-        logger.warning(
-            "Demo Phase 3.5 soft-skipped demo_id=%s detail=%s",
-            demo_id,
-            budget_gate_detail[:200],
+        raise ProposalError(
+            gate_detail
+            or "Budget generation blocked — unresolved RFP pricing ambiguity.",
+            status_code=422,
         )
-        if bus:
-            await bus.emit(
-                step="phase3_5",
-                label="Phase 3.5 · budget (cost-gated)",
-                status="skipped",
-                detail=budget_gate_detail,
-                index=4,
-                total=total,
-            )
     else:
-        try:
-            with llm_call_context(
-                rfp_id=demo_id,
-                run_id=str(sess.get("run_id") or uuid.uuid4()),
-                node_name="phase3_5_budget",
-                user_email=_DEMO_USER_EMAIL,
-            ):
-                await run_phase3_5_budget(demo_id)
-            if bus:
-                await bus.emit(
-                    step="phase3_5",
-                    label="Phase 3.5 · budget (cost-gated)",
-                    status="done",
-                    index=4,
-                    total=total,
-                )
-        except ProposalError as exc:
-            if getattr(exc, "status_code", 400) == 422:
-                budget_gate_status = "skipped"
-                budget_gate_detail = str(exc)
-                logger.warning(
-                    "Demo Phase 3.5 422 soft-skip demo_id=%s: %s",
-                    demo_id,
-                    budget_gate_detail[:200],
-                )
-                if bus:
-                    await bus.emit(
-                        step="phase3_5",
-                        label="Phase 3.5 · budget (cost-gated)",
-                        status="skipped",
-                        detail=budget_gate_detail,
-                        index=4,
-                        total=total,
-                    )
-            else:
-                raise
+        with llm_call_context(
+            rfp_id=demo_id,
+            run_id=run_id,
+            node_name="phase3_5_budget",
+            user_email=_DEMO_USER_EMAIL,
+        ):
+            draft, research, _budget = await run_phase3_5_budget(demo_id)
+        await _step("phase3_5", "Phase 3.5 · budget (cost-gated)", 4, "done")
 
-    if bus:
-        await bus.emit(
-            step="phase3_6",
-            label="Phase 3.6 · senior editor",
-            status="active",
-            index=5,
-            total=total,
-        )
+    # Closing + submission + structure (same helper as generate_full_proposal).
+    draft = await aget_proposal_draft(demo_id) or draft
+    research = await aget_research_cache(demo_id) or research
+    await _step("closing_submission", "Closing + submission attach", 5, "active")
+    await _step("structure_coverage", "Structure coverage pass", 6, "active")
     with llm_call_context(
         rfp_id=demo_id,
-        run_id=str(sess.get("run_id") or uuid.uuid4()),
+        run_id=run_id,
+        node_name="closing_submission",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        draft, research = await run_post_budget_attach_passes(
+            demo_id, draft, research
+        )
+    await _step("closing_submission", "Closing + submission attach", 5, "done")
+    await _step(
+        "structure_coverage",
+        "Structure coverage pass",
+        6,
+        "done",
+        detail="via post-budget attach",
+    )
+
+    await _step("phase3_6", "Phase 3.6 · senior editor", 7, "active")
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
         node_name="phase3_6_self_edit",
         user_email=_DEMO_USER_EMAIL,
     ):
-        await run_phase3_6_self_edit(demo_id)
-    if bus:
-        await bus.emit(
-            step="phase3_6",
-            label="Phase 3.6 · senior editor",
-            status="done",
-            index=5,
-            total=total,
-        )
-        await bus.emit(
-            step="ready_export",
-            label="Ready for Word export",
-            status="done",
-            index=6,
-            total=total,
-        )
+        draft, research, _edit = await run_phase3_6_self_edit(demo_id)
+    await _step("phase3_6", "Phase 3.6 · senior editor", 7, "done")
+
+    await _step(
+        "phase4",
+        "Phase 4 · pre-submit (+ adversarial)",
+        8,
+        "active",
+    )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="phase4_presubmit",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        _review, research = await run_phase4_presubmit_review(demo_id)
+    await _step(
+        "phase4",
+        "Phase 4 · pre-submit (+ adversarial)",
+        8,
+        "done",
+    )
+
+    await _step(
+        "build_finalize",
+        "Build finalize · final checks",
+        9,
+        "active",
+    )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="build_finalize",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        await run_build_finalize_pass(demo_id)
+    await _step(
+        "build_finalize",
+        "Build finalize · final checks",
+        9,
+        "done",
+    )
+
+    draft = await aget_proposal_draft(demo_id) or draft
+    section_count = len(draft.sections) if draft else section_count
+    await _step("ready_export", "Ready for Word export", 10, "done")
 
     sess["draft_ready"] = True
     writing = (sess.get("plan") or {}).get("writing") or {}

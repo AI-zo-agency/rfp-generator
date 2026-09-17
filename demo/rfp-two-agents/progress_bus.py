@@ -130,14 +130,19 @@ OUTLINE_STEPS: list[dict[str, str]] = [
     {"step": "extract_titles", "label": "Extract section titles"},
 ]
 
-# Frozen outline → manuscript → Word (no re-planner / Align / Complete Scan).
+# Frozen outline → Phase 2 corpus → manuscript → closing → P4 → Word
+# (no re-planner / Align / Complete Scan).
 GENERATE_STEPS: list[dict[str, str]] = [
     {"step": "seed_rfp", "label": "Seed RFP + PDF"},
-    {"step": "writing_briefs", "label": "Writing briefs"},
-    {"step": "persist_research", "label": "Persist research cache"},
+    {"step": "writing_briefs", "label": "Writing briefs + validate"},
+    {"step": "phase2_finalize", "label": "Phase 2 · corpus + locks + lessons"},
     {"step": "phase3", "label": "Phase 3 · draft sections"},
     {"step": "phase3_5", "label": "Phase 3.5 · budget (cost-gated)"},
+    {"step": "closing_submission", "label": "Closing + submission attach"},
+    {"step": "structure_coverage", "label": "Structure coverage pass"},
     {"step": "phase3_6", "label": "Phase 3.6 · senior editor"},
+    {"step": "phase4", "label": "Phase 4 · pre-submit (+ adversarial)"},
+    {"step": "build_finalize", "label": "Build finalize · final checks"},
     {"step": "ready_export", "label": "Ready for Word export"},
 ]
 

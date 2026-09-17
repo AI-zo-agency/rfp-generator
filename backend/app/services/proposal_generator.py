@@ -1456,6 +1456,49 @@ async def _run_phase2_retrieval_inner(
             status_code=422,
         )
 
+    return await finalize_phase2_research_from_plan(
+        rfp_id,
+        plan=plan,
+        legacy=legacy,
+        outline_mode=mode,
+        rfp=rfp,
+        rfp_context=rfp_context,
+        prior_research=prior_research,
+    )
+
+
+async def finalize_phase2_research_from_plan(
+    rfp_id: str,
+    *,
+    plan: ProposalExecutionPlan,
+    legacy: dict | None = None,
+    outline_mode: str | None = None,
+    rfp: RfpRecord | None = None,
+    rfp_context: str | None = None,
+    prior_research: ProposalResearchCache | None = None,
+) -> ProposalResearchCache:
+    """Post-intelligence Phase 2: loss lessons, locks, shared corpus, research cache.
+
+    Used by production ``run_phase2_retrieval`` after the intelligence graph, and by
+    the demo generate path when the outline/plan is already frozen (no re-planner).
+    """
+    if rfp is None or rfp_context is None:
+        loaded_rfp, _content, loaded_ctx = _load_rfp_for_proposal(rfp_id)
+        rfp = rfp or loaded_rfp
+        rfp_context = rfp_context if rfp_context is not None else loaded_ctx
+    if prior_research is None:
+        prior_research = await aget_research_cache(rfp_id)
+
+    mode = _normalize_outline_mode(
+        outline_mode
+        if outline_mode is not None
+        else (prior_research.outline_mode if prior_research else None)
+    )
+    if legacy is None:
+        from app.services.proposal_intelligence.assembler import derive_legacy_fields
+
+        legacy = derive_legacy_fields(plan, outline_mode=mode)
+
     rfp_sections = legacy.get("rfpSections") or []
     section_queries = legacy.get("sectionQueries") or {}
     proof_points = legacy.get("proofPoints") or []
@@ -1463,7 +1506,7 @@ async def _run_phase2_retrieval_inner(
 
     loss_lessons, writing_avoidances, _loss_sources = await build_loss_lessons_for_rfp(
         rfp=rfp,
-        rfp_context=rfp_context,
+        rfp_context=rfp_context or "",
     )
 
     existing_locks = prior_research.manuscript_locks if prior_research else None
@@ -1480,7 +1523,7 @@ async def _run_phase2_retrieval_inner(
             roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
                 rfp_client=rfp.client,
                 rfp_sector=rfp.sector,
-                rfp_context=rfp_context,
+                rfp_context=rfp_context or "",
             )
         except ProposalGenerationCancelled:
             raise
@@ -1491,7 +1534,7 @@ async def _run_phase2_retrieval_inner(
 
         manuscript_locks = await build_manuscript_locks(
             rfp=rfp,
-            rfp_context=rfp_context,
+            rfp_context=rfp_context or "",
             plan=plan,
             roster_excerpt=roster_excerpt or "",
         )
@@ -3938,6 +3981,225 @@ async def run_phase4_finalize_gaps(
     return review, saved_research, updated_draft
 
 
+async def run_post_budget_attach_passes(
+    rfp_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache,
+) -> tuple[ProposalDraft, ProposalResearchCache]:
+    """Closing + submission attach + optional blocker suite + structure coverage.
+
+    Shared by ``generate_full_proposal`` and the demo frozen-outline generate path.
+    Runs between Phase 3.5 budget and Phase 3.6 senior editor.
+    """
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        return draft, research
+
+    from app.services.proposal_fulfill_rfp_gaps import (
+        ensure_closing_sections,
+        _merge_closing_into_research_map,
+    )
+    from app.services.proposal_rfp_submission_requirements import (
+        ensure_all_rfp_submission_requirements,
+        merge_deliverables_into_research,
+    )
+    from app.services.rfp_content import load_local_rfp_text
+
+    with pipeline_phase("closing-and-submission", rfp_id=rfp_id):
+        _desc, pdf_text, _pdf_exists, _missing, _pages, _img = load_local_rfp_text(
+            rfp, max_chars=250_000
+        )
+        full_rfp_text = combine_rfp_text(
+            _desc or (rfp.description or ""), pdf_text, max_chars=250_000
+        )
+        if len(full_rfp_text.strip()) < 200:
+            full_rfp_text = load_rfp_for_proposal(rfp_id)[2]
+
+        with pipeline_step("ensure_closing_sections"):
+            draft, closing_added, close_logs, research = await ensure_closing_sections(
+                draft=draft,
+                rfp=rfp,
+                rfp_text=full_rfp_text,
+                research=research,
+            )
+        research = _merge_closing_into_research_map(research, closing_added) or research
+        for line in close_logs[:8]:
+            logger.info("Full proposal closing: %s — %s", rfp_id, line)
+        step_trace(
+            "closing_sections_done",
+            rfp_id=rfp_id,
+            added=len(closing_added or []),
+            added_titles=[
+                getattr(c, "title", str(c))[:80] for c in (closing_added or [])[:15]
+            ],
+            log_sample=list(close_logs or [])[:8],
+            **summarize_sections(
+                [
+                    s
+                    for s in draft.sections
+                    if any(
+                        getattr(c, "section_id", None) == s.id
+                        for c in (closing_added or [])
+                    )
+                ]
+                if closing_added
+                else []
+            ),
+        )
+
+        try:
+            with pipeline_step("ensure_submission_requirements"):
+                draft, deliverables_added, sub_logs, _checklist = (
+                    await ensure_all_rfp_submission_requirements(
+                        draft=draft,
+                        rfp=rfp,
+                        rfp_text=full_rfp_text,
+                        research=research,
+                    )
+                )
+            research = (
+                merge_deliverables_into_research(research, deliverables_added)
+                or research
+            )
+            for line in sub_logs[:8]:
+                logger.info("Full proposal submission: %s — %s", rfp_id, line)
+            step_trace(
+                "submission_requirements_done",
+                rfp_id=rfp_id,
+                added=len(deliverables_added or []),
+                log_sample=list(sub_logs or [])[:8],
+                manuscript_summary=summarize_sections(draft.sections),
+            )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Full proposal submission attach pass skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+            step_trace(
+                "submission_requirements_skipped",
+                rfp_id=rfp_id,
+                error_type=exc.__class__.__name__,
+                error_message=str(exc)[:300],
+            )
+
+        await _assert_proposal_not_reset(rfp_id)
+        from app.core.config import settings as app_settings
+
+        if not app_settings.fast_proposal_generation:
+            try:
+                from app.services.proposal_blocker_prevention import (
+                    apply_feedback_blocker_suite,
+                )
+
+                suite = await apply_feedback_blocker_suite(
+                    draft,
+                    rfp=rfp,
+                    research=research,
+                    rfp_text=full_rfp_text,
+                    use_llm_contradiction=True,
+                )
+                draft = suite.draft
+                for line in suite.logs[:10]:
+                    logger.info(
+                        "Full proposal post-closing blocker suite: %s — %s",
+                        rfp_id,
+                        line,
+                    )
+            except ProposalGenerationCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Full proposal post-closing blocker suite skipped for %s: %s",
+                    rfp_id,
+                    exc,
+                )
+        else:
+            logger.info(
+                "Full proposal: skipping post-closing contradiction scan (fast mode) %s",
+                rfp_id,
+            )
+        await asave_proposal_draft(draft)
+        await asave_research_cache(research)
+
+    # RFP structure coverage — add missing scored tabs before senior editor.
+    try:
+        from app.services.rfp_content import load_local_rfp_text
+        from app.services.proposal_zero_fabrication import (
+            apply_structure_coverage_pass,
+        )
+
+        _desc, pdf_text, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
+        struct_rfp_text = combine_rfp_text(
+            _desc or (rfp.description or ""), pdf_text, max_chars=250_000
+        )
+        if len(struct_rfp_text.strip()) < 200:
+            struct_rfp_text = load_rfp_for_proposal(rfp_id)[2]
+        from app.core.config import settings as app_settings
+
+        draft, struct_logs = await apply_structure_coverage_pass(
+            draft,
+            rfp=rfp,
+            rfp_text=struct_rfp_text,
+            research=research,
+            use_llm=llm.is_configured()
+            and not app_settings.fast_proposal_generation,
+        )
+        if struct_logs:
+            await asave_proposal_draft(draft)
+            for line in struct_logs[:10]:
+                logger.info("Full proposal structure coverage: %s — %s", rfp_id, line)
+            step_trace(
+                "structure_coverage_pass",
+                rfp_id=rfp_id,
+                log_count=len(struct_logs),
+                samples=struct_logs[:8],
+            )
+
+        try:
+            from app.services.proposal_rfp_compulsory_content import (
+                audit_draft_against_rfp_compulsory_content,
+                merge_compulsory_gap_stubs,
+            )
+
+            shortfalls = await audit_draft_against_rfp_compulsory_content(
+                draft, struct_rfp_text
+            )
+            if shortfalls:
+                draft, stub_logs = merge_compulsory_gap_stubs(draft, shortfalls)
+                await asave_proposal_draft(draft)
+                for line in stub_logs[:8]:
+                    logger.info(
+                        "Full proposal compulsory content: %s — %s",
+                        rfp_id,
+                        line,
+                    )
+                step_trace(
+                    "compulsory_content_audit",
+                    rfp_id=rfp_id,
+                    shortfalls=len(shortfalls),
+                    samples=[s.message[:120] for s in shortfalls[:6]],
+                )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as comp_exc:  # noqa: BLE001
+            logger.warning(
+                "Full proposal compulsory content audit skipped for %s: %s",
+                rfp_id,
+                comp_exc,
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Full proposal structure coverage skipped for %s: %s", rfp_id, exc
+        )
+
+    return draft, research
+
+
 async def generate_full_proposal(
     rfp_id: str,
     *,
@@ -4027,214 +4289,8 @@ async def generate_full_proposal(
             draft, research = await run_phase3_drafting(rfp_id)
             draft, research, _budget = await run_phase3_5_budget(rfp_id)
 
-        # Compulsory closing + RFP-demanded forms/attachments (before senior editor).
+        draft, research = await run_post_budget_attach_passes(rfp_id, draft, research)
         rfp = get_rfp(rfp_id)
-        if rfp:
-            from app.services.proposal_fulfill_rfp_gaps import (
-                ensure_closing_sections,
-                _merge_closing_into_research_map,
-            )
-            from app.services.proposal_rfp_submission_requirements import (
-                ensure_all_rfp_submission_requirements,
-                merge_deliverables_into_research,
-            )
-            from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
-
-            with pipeline_phase("closing-and-submission", rfp_id=rfp_id):
-                _desc, pdf_text, _pdf_exists, _missing, _pages, _img = load_local_rfp_text(
-                    rfp, max_chars=250_000
-                )
-                full_rfp_text = combine_rfp_text(
-                    _desc or (rfp.description or ""), pdf_text, max_chars=250_000
-                )
-                if len(full_rfp_text.strip()) < 200:
-                    full_rfp_text = load_rfp_for_proposal(rfp_id)[2]
-
-                with pipeline_step("ensure_closing_sections"):
-                    draft, closing_added, close_logs, research = await ensure_closing_sections(
-                        draft=draft,
-                        rfp=rfp,
-                        rfp_text=full_rfp_text,
-                        research=research,
-                    )
-                research = _merge_closing_into_research_map(research, closing_added) or research
-                for line in close_logs[:8]:
-                    logger.info("Full proposal closing: %s — %s", rfp_id, line)
-                step_trace(
-                    "closing_sections_done",
-                    rfp_id=rfp_id,
-                    added=len(closing_added or []),
-                    added_titles=[
-                        getattr(c, "title", str(c))[:80] for c in (closing_added or [])[:15]
-                    ],
-                    log_sample=list(close_logs or [])[:8],
-                    **summarize_sections(
-                        [
-                            s
-                            for s in draft.sections
-                            if any(
-                                getattr(c, "section_id", None) == s.id
-                                for c in (closing_added or [])
-                            )
-                        ]
-                        if closing_added
-                        else []
-                    ),
-                )
-
-                try:
-                    with pipeline_step("ensure_submission_requirements"):
-                        draft, deliverables_added, sub_logs, _checklist = (
-                            await ensure_all_rfp_submission_requirements(
-                                draft=draft,
-                                rfp=rfp,
-                                rfp_text=full_rfp_text,
-                                research=research,
-                            )
-                        )
-                    research = (
-                        merge_deliverables_into_research(research, deliverables_added)
-                        or research
-                    )
-                    for line in sub_logs[:8]:
-                        logger.info("Full proposal submission: %s — %s", rfp_id, line)
-                    step_trace(
-                        "submission_requirements_done",
-                        rfp_id=rfp_id,
-                        added=len(deliverables_added or []),
-                        log_sample=list(sub_logs or [])[:8],
-                        manuscript_summary=summarize_sections(draft.sections),
-                    )
-                except ProposalGenerationCancelled:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Full proposal submission attach pass skipped for %s: %s",
-                        rfp_id,
-                        exc,
-                    )
-                    step_trace(
-                        "submission_requirements_skipped",
-                        rfp_id=rfp_id,
-                        error_type=exc.__class__.__name__,
-                        error_message=str(exc)[:300],
-                    )
-
-                await _assert_proposal_not_reset(rfp_id)
-                from app.core.config import settings as app_settings
-
-                if not app_settings.fast_proposal_generation:
-                    try:
-                        from app.services.proposal_blocker_prevention import (
-                            apply_feedback_blocker_suite,
-                        )
-
-                        suite = await apply_feedback_blocker_suite(
-                            draft,
-                            rfp=rfp,
-                            research=research,
-                            rfp_text=full_rfp_text,
-                            use_llm_contradiction=True,
-                        )
-                        draft = suite.draft
-                        for line in suite.logs[:10]:
-                            logger.info(
-                                "Full proposal post-closing blocker suite: %s — %s",
-                                rfp_id,
-                                line,
-                            )
-                    except ProposalGenerationCancelled:
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "Full proposal post-closing blocker suite skipped for %s: %s",
-                            rfp_id,
-                            exc,
-                        )
-                else:
-                    logger.info(
-                        "Full proposal: skipping post-closing contradiction scan (fast mode) %s",
-                        rfp_id,
-                    )
-                await asave_proposal_draft(draft)
-                await asave_research_cache(research)
-
-        # RFP structure coverage — add missing scored tabs before senior editor.
-        rfp = get_rfp(rfp_id)
-        if rfp:
-            try:
-                from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
-                from app.services.proposal_zero_fabrication import (
-                    apply_structure_coverage_pass,
-                )
-
-                _desc, pdf_text, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
-                struct_rfp_text = combine_rfp_text(
-                    _desc or (rfp.description or ""), pdf_text, max_chars=250_000
-                )
-                if len(struct_rfp_text.strip()) < 200:
-                    struct_rfp_text = load_rfp_for_proposal(rfp_id)[2]
-                from app.core.config import settings as app_settings
-
-                draft, struct_logs = await apply_structure_coverage_pass(
-                    draft,
-                    rfp=rfp,
-                    rfp_text=struct_rfp_text,
-                    research=research,
-                    use_llm=llm.is_configured()
-                    and not app_settings.fast_proposal_generation,
-                )
-                if struct_logs:
-                    await asave_proposal_draft(draft)
-                    for line in struct_logs[:10]:
-                        logger.info("Full proposal structure coverage: %s — %s", rfp_id, line)
-                    step_trace(
-                        "structure_coverage_pass",
-                        rfp_id=rfp_id,
-                        log_count=len(struct_logs),
-                        samples=struct_logs[:8],
-                    )
-
-                # Same compulsory-count gate as Complete & Clean — Generate must not
-                # ship short case-study / reference packets when THIS RFP states a floor.
-                try:
-                    from app.services.proposal_rfp_compulsory_content import (
-                        audit_draft_against_rfp_compulsory_content,
-                        merge_compulsory_gap_stubs,
-                    )
-
-                    shortfalls = await audit_draft_against_rfp_compulsory_content(
-                        draft, struct_rfp_text
-                    )
-                    if shortfalls:
-                        draft, stub_logs = merge_compulsory_gap_stubs(draft, shortfalls)
-                        await asave_proposal_draft(draft)
-                        for line in stub_logs[:8]:
-                            logger.info(
-                                "Full proposal compulsory content: %s — %s",
-                                rfp_id,
-                                line,
-                            )
-                        step_trace(
-                            "compulsory_content_audit",
-                            rfp_id=rfp_id,
-                            shortfalls=len(shortfalls),
-                            samples=[s.message[:120] for s in shortfalls[:6]],
-                        )
-                except ProposalGenerationCancelled:
-                    raise
-                except Exception as comp_exc:  # noqa: BLE001
-                    logger.warning(
-                        "Full proposal compulsory content audit skipped for %s: %s",
-                        rfp_id,
-                        comp_exc,
-                    )
-            except ProposalGenerationCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Full proposal structure coverage skipped for %s: %s", rfp_id, exc
-                )
 
         draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
 

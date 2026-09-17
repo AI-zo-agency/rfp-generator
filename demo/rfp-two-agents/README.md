@@ -61,15 +61,18 @@ Files under `checkpoints/` are gitignored (local only).
 
 ## Generate path (frozen outline)
 
-After `/api/run`, the session holds the execution plan + RFP text (+ PDF bytes). **Generate** then:
+After `/api/run`, the session holds the execution plan + RFP text (+ PDF bytes). **Generate** then mirrors production post-outline drafting:
 
 1. Upserts an `rfpda-*` RFP (`goNoGo=go`) and optional PDF  
 2. Stamps every outline tab `protectFromCap=true` so Phase 3 lean/cap cannot drop Todd-approved titles  
-3. Runs `writing_briefs` + `derive_legacy_fields` → research cache (`outlineMode=strict_rfp`)  
-4. Phase 3 drafting → Phase 3.5 budget (**soft-skipped** when cost is absent/ambiguous) → Phase 3.6 senior editor  
-5. Marks `draft_ready` so export can download Word  
+3. Runs `writing_briefs` + **hard** `validate` (empty retrieval / blocked plan → 422 — no demo force-ready)  
+4. **Phase 2 finalize** — loss lessons, manuscript locks, `build_shared_evidence_corpus` + allocation ledger (same helper as production Phase 2 after intelligence)  
+5. Phase 3 drafting → Phase 3.5 budget (`skip` when cost absent; **block/422 raises** on ambiguity)  
+6. Closing + submission attach + structure coverage (`run_post_budget_attach_passes`)  
+7. Phase 3.6 senior editor → Phase 4 pre-submit (adversarial when config on) → build finalize  
+8. Marks `draft_ready` so export can download Word  
 
-Does **not** re-run opportunity / strategy / section planner / Align-to-RFP / Complete Scan.
+Does **not** re-run opportunity / strategy / section planner / Align-to-RFP / full Complete Scan.
 
 ## Live prompt edits
 
@@ -91,7 +94,9 @@ PDF (upload or URL)
   → execution_plan → dynamic_section(strict_rfp) → checklister
   → nested section titles
   → [client reviews TOC]
-  → Generate: seed RFP → writing_briefs → Phase 3 → 3.5 (gated) → 3.6
+  → Generate: seed → writing_briefs+validate → Phase2 corpus
+       → Phase 3 → 3.5 (gated) → closing/submission → structure
+       → 3.6 → Phase 4 (+adversarial) → build finalize
   → Download Word
 ```
 
@@ -104,6 +109,6 @@ Cost uses `llm_call_context` → `llm_call_log` / `get_rfp_cost_breakdown`. Sess
 ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Manual smoke: OSFM (or similar) PDF → section list → Generate → Download Word. If cost is `ambiguous`, generate still finishes; budget step shows skipped; DOCX has no invented Cost Sheet body.
+Manual smoke: OSFM (or similar) PDF → section list → Generate → Download Word. If cost is `ambiguous`, generate **fails with 422** (production parity). If cost is `absent`, budget step skips and drafting continues.
 
 Redeploy the Railway demo staging service after merging for the live site to pick this up.

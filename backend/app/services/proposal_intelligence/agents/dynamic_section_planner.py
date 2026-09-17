@@ -251,6 +251,35 @@ def _parse_page_limit(rfp_meta: dict[str, str] | None) -> int | None:
     return value if value > 0 else None
 
 
+def _merge_align_outline_tabs(
+    planner_sections: list[OutlineSection],
+    align_sections: list[OutlineSection],
+) -> list[OutlineSection]:
+    """Union Align packet/TOC tabs into planner output (title near-dup only).
+
+    Align extract alone used to replace the planner and often returned forms
+    only. Planner alone can miss Attachments. Merge keeps both.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    if not align_sections:
+        return list(planner_sections)
+    out = list(planner_sections)
+    for tab in align_sections:
+        title = (tab.title or "").strip()
+        if not title:
+            continue
+        if any(
+            outline_titles_near_duplicate(title, (existing.title or "").strip())
+            for existing in out
+            if (existing.title or "").strip()
+        ):
+            continue
+        order = len(out) + 1
+        out.append(tab.model_copy(update={"order": order, "protect_from_cap": True}))
+    return out
+
+
 async def run_dynamic_section_planner(
     *,
     plan: ProposalExecutionPlan,
@@ -326,6 +355,8 @@ async def run_dynamic_section_planner(
             AGENT,
             len(preview),
         )
+    else:
+        preview = []
     provider = ""
     raw, provider = await safe_chat_json(
         [
@@ -370,13 +401,8 @@ async def run_dynamic_section_planner(
     if not outline.sections:
         # Prefer submission-format titles over inventing a scoreboard outline.
         titles: list[str] = []
-        if structure_specs:
-            from_specs = outline_sections_from_rfp_specs(
-                structure_specs,
-                section_factory=lambda raw: OutlineSection.model_validate(raw),
-                skip_static_dedupe=skip_static,
-            )
-            titles = [s.title for s in from_specs if (s.title or "").strip()][:section_cap]
+        if preview:
+            titles = [s.title for s in preview if (s.title or "").strip()][:section_cap]
         if not titles and response_form:
             for crit in plan.opportunity.evaluation.criteria[:6]:
                 name = (crit.name or "").strip()
@@ -384,27 +410,38 @@ async def run_dynamic_section_planner(
                     titles.append(name)
         if not titles:
             titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
-            outline = ProposalOutline(
-                sections=[
-                    OutlineSection(
-                        id=f"rfp-sec-{i}",
-                        title=title,
-                        order=i,
-                        required=True,
-                        conditionalReason=(
-                            "Fallback from Align submission-format extract — confirm against RFP TOC"
-                            if structure_specs
-                            else (
-                                "Fallback from evaluation response form — confirm against RFP TOC"
-                                if response_form
-                                else "Fallback outline — confirm against RFP TOC"
-                            )
-                        ),
-                        protectFromCap=True,
-                    )
-                    for i, title in enumerate(titles, start=1)
-                ],
-                confidence=0.35,
+        outline = ProposalOutline(
+            sections=[
+                OutlineSection(
+                    id=f"rfp-sec-{i}",
+                    title=title,
+                    order=i,
+                    required=True,
+                    conditionalReason=(
+                        "Fallback from Align submission-format extract — confirm against RFP TOC"
+                        if preview
+                        else (
+                            "Fallback from evaluation response form — confirm against RFP TOC"
+                            if response_form
+                            else "Fallback outline — confirm against RFP TOC"
+                        )
+                    ),
+                    protectFromCap=True,
+                )
+                for i, title in enumerate(titles, start=1)
+            ],
+            confidence=0.35,
+        )
+    if preview:
+        before_n = len(outline.sections)
+        outline.sections = _merge_align_outline_tabs(list(outline.sections), preview)
+        merged_n = len(outline.sections) - before_n
+        if merged_n:
+            logger.info(
+                "%s merged %d Align tab(s) into planner outline (now %d)",
+                AGENT,
+                merged_n,
+                len(outline.sections),
             )
     outline.confidence = clamp_confidence(outline.confidence)
     from app.services.proposal_outline_dedup import (
