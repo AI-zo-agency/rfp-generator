@@ -43,6 +43,33 @@ class ProposalMemory(BaseModel):
     confidence: float = 1.0
 
 
+CostRequirementStatus = Literal["confirmed", "absent", "ambiguous"]
+
+
+class SubmissionConstraint(BaseModel):
+    """Global submission rule — not a manuscript tab."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str = "other"
+    text: str = ""
+    required: bool = True
+    source_text: str = Field(default="", alias="sourceText")
+    source_section: str = Field(default="", alias="sourceSection")
+
+
+class PlanAmbiguity(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    topic: str
+    status: Literal["unresolved", "resolved"] = "unresolved"
+    evidence_for: str = Field(default="", alias="evidenceFor")
+    evidence_against: str = Field(default="", alias="evidenceAgainst")
+    recommended_action: str = Field(default="", alias="recommendedAction")
+    blocks_drafting: bool = Field(default=False, alias="blocksDrafting")
+    blocks_budget: bool = Field(default=False, alias="blocksBudget")
+
+
 class PlanValidation(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -437,7 +464,7 @@ class OutlineSection(BaseModel):
     # Agent-stamped: never drop for hard-cap / lean filler hygiene.
     protect_from_cap: bool = Field(default=False, alias="protectFromCap")
     # Agent-stamped instrument kind for near-dup + protect (not title synonym regex).
-    # cost | form | disclosure | references | narrative | null
+    # cost | form | disclosure | references | narrative | clarify | null
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )
@@ -526,6 +553,13 @@ class WritingIntelligence(BaseModel):
     section_plans: SectionPlans = Field(default_factory=SectionPlans, alias="sectionPlans")
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan, alias="retrievalPlan")
     reviewer_personas: Any | None = Field(default=None, alias="reviewerPersonas")
+    submission_constraints: list[SubmissionConstraint] = Field(
+        default_factory=list, alias="submissionConstraints"
+    )
+    ambiguities: list[PlanAmbiguity] = Field(default_factory=list)
+    cost_requirement_status: CostRequirementStatus = Field(
+        default="absent", alias="costRequirementStatus"
+    )
 
 
 class ProposalExecutionPlan(BaseModel):

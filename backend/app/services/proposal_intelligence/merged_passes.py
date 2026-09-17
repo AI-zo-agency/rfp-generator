@@ -804,6 +804,7 @@ async def run_writing_briefs(
     from app.services.proposal_intelligence.agents.section_strategy_planner import (
         _parse_page_limit,
     )
+    from app.services.proposal_submission_authority import page_limit_from_constraints
 
     hits = await retrieve_intelligence("won_patterns", query=_query_for_plan(plan), limit=5)
     excerpts = [
@@ -813,7 +814,7 @@ async def run_writing_briefs(
     source_names = [
         str(h.get("source") or "").strip() for h in hits if str(h.get("source") or "").strip()
     ]
-    page_limit = _parse_page_limit(rfp_meta)
+    page_limit = page_limit_from_constraints(plan) or _parse_page_limit(rfp_meta)
     page_limit_line = (
         f"Proposal page limit from RFP: {page_limit} pages "
         f"(~{page_limit * 350} narrative words total including static Sections 1–3). "

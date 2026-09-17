@@ -70,6 +70,12 @@ def _week_window(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _day_window(now: datetime) -> tuple[datetime, datetime]:
+    """UTC calendar day containing ``now`` → [start, next day)."""
+    start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    return start, start + timedelta(days=1)
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -278,17 +284,20 @@ def _sum_financial_llm_calls_usd(start_iso: str, end_iso: str) -> float:
 def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
     """Return spent / limit / remaining for the current UTC month (post-epoch).
 
-    Also includes current UTC ISO-week spend for the sidebar meter.
+    Also includes current UTC day + ISO-week spend for the sidebar meter.
     """
     global _status_cache
     limit = float(getattr(settings, "monthly_llm_budget_usd", 0.0) or 0.0)
+    day_limit = float(getattr(settings, "daily_llm_budget_usd", 5.0) or 0.0)
     enabled = limit > 0
     now = _utcnow()
     month_start, month_end = _month_window(now)
     week_start, week_end = _week_window(now)
+    day_start, day_end = _day_window(now)
     epoch = _parse_epoch(str(getattr(settings, "monthly_llm_budget_epoch", "") or ""))
     window_start = _clip_start(month_start, epoch)
     week_window_start = _clip_start(week_start, epoch)
+    day_window_start = _clip_start(day_start, epoch)
 
     if use_cache and _status_cache is not None:
         cached_at, cached = _status_cache
@@ -300,6 +309,9 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
     week_proposal = 0.0
     week_financial = 0.0
     week_spent = 0.0
+    day_proposal = 0.0
+    day_financial = 0.0
+    day_spent = 0.0
     by_user: list[dict[str, Any]] = []
     week_by_user: list[dict[str, Any]] = []
     read_error: str | None = None
@@ -310,6 +322,9 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
             )
             week_proposal, week_financial, week_spent, week_by_user = _period_spend(
                 week_window_start, week_end
+            )
+            day_proposal, day_financial, day_spent, _day_by_user = _period_spend(
+                day_window_start, day_end
             )
         except Exception as exc:  # noqa: BLE001
             # Stricter: cannot read ledger → treat as blocked.
@@ -337,6 +352,12 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
         "week_financial_spent_usd": round(week_financial, 6) if enabled else 0.0,
         "week_period_start": _iso(week_window_start),
         "week_period_end": _iso(week_end),
+        "day_limit_usd": round(day_limit, 6) if enabled and day_limit > 0 else 0.0,
+        "day_spent_usd": round(day_spent, 6) if enabled else 0.0,
+        "day_proposal_spent_usd": round(day_proposal, 6) if enabled else 0.0,
+        "day_financial_spent_usd": round(day_financial, 6) if enabled else 0.0,
+        "day_period_start": _iso(day_window_start),
+        "day_period_end": _iso(day_end),
         "epoch": _iso(epoch) if epoch else "",
         "timezone": "UTC",
         "read_error": read_error,

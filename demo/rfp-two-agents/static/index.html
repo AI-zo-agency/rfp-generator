@@ -36,19 +36,10 @@
     header h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -0.02em; }
     header .meta { color: var(--muted); font-size: var(--fs-xs); }
     main {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 0;
-      min-height: calc(100vh - 64px);
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem 3rem;
     }
-    @media (max-width: 1200px) {
-      main { grid-template-columns: 1fr; }
-    }
-    .col {
-      padding: 1.25rem 1.35rem;
-      border-right: 1px solid var(--border);
-    }
-    .col:last-child { border-right: none; }
     h2 {
       margin: 0 0 0.75rem;
       font-size: var(--fs-md);
@@ -66,8 +57,7 @@
       font: inherit;
       font-size: var(--fs-sm);
     }
-    textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-xs); }
-    textarea.prompt { min-height: 220px; }
+    textarea.prompt { min-height: 160px; resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-xs); }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
     .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.95rem; }
     button {
@@ -82,7 +72,6 @@
     }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
-    button.ok { background: var(--ok); }
     .cost {
       margin-top: 0.85rem;
       padding: 0.75rem 0.85rem;
@@ -104,6 +93,7 @@
       text-transform: uppercase;
       vertical-align: middle;
     }
+    .badge.on { border-color: var(--ok); color: var(--ok); }
     .badge.strict {
       color: var(--ok);
       border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
@@ -115,7 +105,6 @@
       font-size: var(--fs-xs);
       margin-left: 0.35rem;
     }
-
     .status { color: var(--muted); margin-top: 0.55rem; min-height: 1.25em; font-size: var(--fs-sm); }
     .status.err { color: #ff7b72; }
     pre {
@@ -134,16 +123,14 @@
     details { margin-top: 0.85rem; }
     summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
     .hint { margin: 0 0 0.65rem; color: var(--muted); font-size: var(--fs-xs); }
-    .badge {
-      display: inline-block;
-      padding: 0.2rem 0.55rem;
-      border-radius: 999px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      font-size: var(--fs-xs);
+    .or {
+      text-align: center;
       color: var(--muted);
+      font-size: var(--fs-xs);
+      margin: 0.65rem 0;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
     }
-    .badge.on { border-color: var(--ok); color: var(--ok); }
     .view-toggle {
       display: inline-flex;
       gap: 0;
@@ -174,31 +161,11 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       overflow: auto;
-      max-height: 48vh;
+      max-height: 60vh;
       font-size: var(--fs-sm);
       line-height: 1.55;
     }
-    .readable h3 {
-      margin: 1rem 0 0.4rem;
-      font-size: var(--fs-md);
-      color: var(--text);
-    }
-    .readable h3:first-child { margin-top: 0; }
-    .readable h4 {
-      margin: 0.75rem 0 0.3rem;
-      font-size: var(--fs-sm);
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      font-weight: 650;
-    }
-    .readable ul { margin: 0.25rem 0 0.5rem 1.1rem; padding: 0; }
-    .readable li { margin: 0.2rem 0; }
-    .readable p { margin: 0.25rem 0 0.5rem; color: var(--text); }
     .readable .meta-line { color: var(--muted); font-size: var(--fs-xs); }
-    .readable strong { color: var(--ok); font-weight: 650; }
-
-    /* Execution progress — real SSE steps (Nielsen: determinate step count, not fake %) */
     .run-progress {
       display: none;
       margin-top: 0.85rem;
@@ -256,7 +223,7 @@
       display: flex;
       flex-direction: column;
       gap: 0.35rem;
-      max-height: 220px;
+      max-height: 280px;
       overflow: auto;
     }
     .rp-steps li {
@@ -311,7 +278,6 @@
       color: var(--accent);
       min-height: 1.2em;
     }
-
   </style>
 </head>
 <body>
@@ -321,141 +287,95 @@
     <span class="badge" id="sessBadge">no session</span>
   </header>
   <main>
-    <section class="col">
-      <h2>1 · Opportunity extract</h2>
-      <div class="row">
-        <div>
-          <label>Title</label>
-          <input id="title" value="Demo RFP" />
-        </div>
-        <div>
-          <label>Client</label>
-          <input id="client" placeholder="Buyer name" />
-        </div>
+    <h2>Run · section list <span class="badge strict">strict_rfp</span></h2>
+    <p class="hint">
+      Paste an RFP PDF URL or upload a PDF. One run extracts opportunity, builds strategy, then returns the section list.
+    </p>
+    <div class="row">
+      <div>
+        <label>Title</label>
+        <input id="title" value="Demo RFP" />
       </div>
-      <div class="row">
-        <div>
-          <label>Sector</label>
-          <input id="sector" placeholder="e.g. Municipal tourism" />
-        </div>
-        <div>
-          <label>Location</label>
-          <input id="location" />
-        </div>
+      <div>
+        <label>Client</label>
+        <input id="client" placeholder="Buyer name" />
       </div>
-      <label>RFP PDF</label>
-      <input type="file" id="file" accept=".pdf,application/pdf" required />
-      <details>
-        <summary>Edit Agent 1 system prompt (saved to disk)</summary>
-        <textarea class="prompt" id="prompt1"></textarea>
-        <div class="actions">
-          <button type="button" class="secondary" id="saveP1">Save prompt 1</button>
-        </div>
-      </details>
-      <div class="actions">
-        <button type="button" id="run1">Run Agent 1</button>
-        <button type="button" class="ok" id="approve" disabled>Approve → unlock Agent 2</button>
+    </div>
+    <div class="row">
+      <div>
+        <label>Sector</label>
+        <input id="sector" placeholder="e.g. Municipal tourism" />
       </div>
-      <div class="run-progress" id="prog1" aria-live="polite" aria-busy="false" hidden>
-        <div class="rp-head">
-          <span class="rp-title">Agent 1 running</span>
-          <span class="rp-meta" id="prog1Meta">0 / 0</span>
-        </div>
-        <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="prog1Fill"></div></div>
-        <ol class="rp-steps" id="prog1Steps"></ol>
-        <div class="rp-live" id="prog1Live"></div>
+      <div>
+        <label>Location</label>
+        <input id="location" />
       </div>
-      <div class="status" id="status1"></div>
-      <div class="cost" id="cost1">Cost: —</div>
-      <pre id="tools1" style="max-height:12vh">(pipeline trace)</pre>
-      <details open>
-        <summary>Provenance (source-backed fields)</summary>
-        <pre id="prov1" style="max-height:18vh">(provenance)</pre>
-      </details>
-      <div class="view-toggle" role="group" aria-label="Agent 1 output view">
-        <button type="button" class="active" data-view="readable" data-target="1">Readable</button>
-        <button type="button" data-view="json" data-target="1">JSON</button>
-      </div>
-      <div id="out1Readable" class="readable">(Agent 1 output)</div>
-      <pre id="out1" hidden>(Agent 1 JSON)</pre>
-    </section>
+    </div>
+    <label>RFP PDF URL</label>
+    <input id="rfpUrl" type="url" placeholder="https://…/rfp.pdf" />
+    <div class="or">or</div>
+    <label>RFP PDF file</label>
+    <input type="file" id="file" accept=".pdf,application/pdf" />
 
-    <section class="col">
-      <h2>2 · Strategy + delivery</h2>
-      <p class="hint">
-        Uses Agent 1 plan + real Supermemory KB (won patterns, methodology, pricing…).
-      </p>
-      <details>
-        <summary>Edit Agent 2 system prompt (saved to disk)</summary>
-        <textarea class="prompt" id="prompt2"></textarea>
-        <div class="actions">
-          <button type="button" class="secondary" id="saveP2">Save prompt 2</button>
-        </div>
-      </details>
+    <details>
+      <summary>Edit agent prompts (optional)</summary>
+      <label>Agent 1 · opportunity</label>
+      <textarea class="prompt" id="prompt1"></textarea>
+      <label>Agent 2 · strategy + delivery</label>
+      <textarea class="prompt" id="prompt2"></textarea>
       <div class="actions">
-        <button type="button" id="run2" disabled>Run Agent 2</button>
-        <button type="button" class="ok" id="approve2" disabled>Approve → unlock section list</button>
-        <button type="button" class="secondary" id="refreshCost">Refresh cost</button>
+        <button type="button" class="secondary" id="savePrompts">Save prompts</button>
       </div>
-      <div class="run-progress" id="prog2" aria-live="polite" aria-busy="false" hidden>
-        <div class="rp-head">
-          <span class="rp-title">Agent 2 running</span>
-          <span class="rp-meta" id="prog2Meta">0 / 0</span>
-        </div>
-        <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="prog2Fill"></div></div>
-        <ol class="rp-steps" id="prog2Steps"></ol>
-        <div class="rp-live" id="prog2Live"></div>
-      </div>
-      <div class="status" id="status2"></div>
-      <div class="cost" id="cost2">Cost: —</div>
-      <div class="view-toggle" role="group" aria-label="Agent 2 output view">
-        <button type="button" class="active" data-view="readable" data-target="2">Readable</button>
-        <button type="button" data-view="json" data-target="2">JSON</button>
-      </div>
-      <div id="out2Readable" class="readable">(Agent 2 output)</div>
-      <pre id="out2" hidden>(Agent 2 JSON)</pre>
-    </section>
+    </details>
 
-    <section class="col">
-      <h2>3 · Strict RFP section list <span class="badge strict">strict_rfp</span></h2>
-      <p class="hint">
-        After Agent 2: execution plan → dynamic section planner → checklister.
-        Titles only — no manuscript. Costs write to Supabase <code>llm_call_log</code> (Proposals).
-      </p>
-      <div class="actions">
-        <button type="button" id="runOutline" disabled>Build section list</button>
+    <div class="actions">
+      <button type="button" id="run">Run → sections</button>
+      <button type="button" class="secondary" id="refreshCost">Refresh cost</button>
+    </div>
+
+    <label for="checkpointSelect">Saved outline checkpoint</label>
+    <div class="actions" style="margin-top:0.35rem;align-items:center">
+      <select id="checkpointSelect" style="flex:1;min-width:12rem;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:0.55rem 0.7rem;font:inherit">
+        <option value="">— none yet —</option>
+      </select>
+      <button type="button" class="secondary" id="loadCheckpoint">Load outline</button>
+      <button type="button" class="secondary" id="refreshCheckpoints">Refresh</button>
+    </div>
+    <p class="meta-line" style="margin:0.4rem 0 0">
+      Load a saved list, then Generate below — does not re-run the section planner.
+    </p>
+
+    <div class="run-progress" id="prog" aria-live="polite" aria-busy="false" hidden>
+      <div class="rp-head">
+        <span class="rp-title">Pipeline running</span>
+        <span class="rp-meta" id="progMeta">0 / 0</span>
       </div>
-      <div class="run-progress" id="prog3" aria-live="polite" aria-busy="false" hidden>
-        <div class="rp-head">
-          <span class="rp-title">Outline running</span>
-          <span class="rp-meta" id="prog3Meta">0 / 0</span>
-        </div>
-        <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="prog3Fill"></div></div>
-        <ol class="rp-steps" id="prog3Steps"></ol>
-        <div class="rp-live" id="prog3Live"></div>
-      </div>
-      <div class="status" id="status3"></div>
-      <div class="cost" id="cost3">Cost: —</div>
-      <div class="view-toggle" role="group" aria-label="Outline output view">
-        <button type="button" class="active" data-view="readable" data-target="3">Readable</button>
-        <button type="button" data-view="json" data-target="3">JSON</button>
-      </div>
-      <div id="out3Readable" class="readable">(Section list)</div>
-      <pre id="out3" hidden>(Outline JSON)</pre>
-    </section>
+      <div class="rp-track" aria-hidden="true"><div class="rp-fill" id="progFill"></div></div>
+      <ol class="rp-steps" id="progSteps"></ol>
+      <div class="rp-live" id="progLive"></div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="cost" id="cost">Cost: —</div>
+
+    <div class="view-toggle" role="group" aria-label="Output view">
+      <button type="button" class="active" data-view="readable">Sections</button>
+      <button type="button" data-view="json">JSON</button>
+    </div>
+    <div id="outReadable" class="readable">(Section list appears here)</div>
+    <pre id="outJson" hidden>(JSON)</pre>
+
+    <div class="actions" id="generateRow" style="margin-top:1rem">
+      <button type="button" id="generate" disabled>Generate proposal</button>
+      <button type="button" class="secondary" id="downloadDocx" disabled>Download Word</button>
+    </div>
+    <div class="status" id="generateMeta" style="margin-top:0.35rem"></div>
   </main>
 
   <script>
     let demoId = null;
-    let approved = false;
-    let agent2Done = false;
-    let approved2 = false;
-    let lastOut1 = null;
-    let lastOut2 = null;
-    let lastOut3 = null;
-    let view1 = "readable";
-    let view2 = "readable";
-    let view3 = "readable";
+    let lastOut = null;
+    let draftReady = false;
+    let viewMode = "readable";
 
     const $ = (id) => document.getElementById(id);
 
@@ -467,164 +387,13 @@
         .replace(/"/g, "&quot;");
     }
 
-    function listHtml(items) {
-      const arr = Array.isArray(items) ? items.filter((x) => x != null && String(x).trim()) : [];
-      if (!arr.length) return "<p class='meta-line'>None listed</p>";
-      return "<ul>" + arr.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul>";
-    }
-
-    function kv(label, value) {
-      if (value == null || value === "") return "";
-      return "<p><strong>" + esc(label) + ":</strong> " + esc(value) + "</p>";
-    }
-
-    function opportunityToReadable(o) {
-      if (!o || typeof o !== "object") return "<p class='meta-line'>No output yet</p>";
-      const u = o.understanding || {};
-      const budget = u.budgetIntel || {};
-      const timeline = u.timelineIntel || {};
-      const scope = o.scope || {};
-      const compliance = o.compliance || {};
-      const evaluation = o.evaluation || {};
-      const success = o.successCriteria || {};
-      const items = Array.isArray(compliance.items) ? compliance.items : [];
-      const criteria = Array.isArray(evaluation.criteria) ? evaluation.criteria : [];
-      const successItems = Array.isArray(success.items) ? success.items : [];
-
-      let html = "";
-      html += "<h3>Understanding</h3>";
-      html += kv("Client", u.client);
-      html += kv("Industry", u.industry);
-      html += kv("Organization", u.orgType);
-      html += kv("Project type", u.projectType);
-      html += kv("Complexity", u.complexity);
-      html += "<h4>Services</h4>" + listHtml(u.services);
-      html += "<h4>Business goals</h4>" + listHtml(u.businessGoals);
-      html += "<h4>Pain points</h4>" + listHtml(u.painPoints);
-      html += "<h4>Desired outcomes</h4>" + listHtml(u.desiredOutcomes);
-      html += "<h4>Budget</h4>";
-      html += kv("Ceiling", budget.ceiling);
-      html += kv("Pricing model", budget.pricingModelHint);
-      html += kv("Contract type", budget.contractType);
-      if (budget.notes) html += "<p>" + esc(budget.notes) + "</p>";
-      html += "<h4>Timeline</h4>";
-      html += kv("Project start", timeline.projectStart);
-      html += kv("Completion", timeline.completion);
-      html += kv("Go-live", timeline.goLive);
-      html += listHtml(timeline.milestones);
-      if (timeline.notes) html += "<p>" + esc(timeline.notes) + "</p>";
-
-      html += "<h3>Scope</h3>";
-      html += "<h4>Mandatory</h4>" + listHtml(scope.mandatory);
-      html += "<h4>Optional</h4>" + listHtml(scope.optional);
-      html += "<h4>Future phases</h4>" + listHtml(scope.futurePhases);
-      html += "<h4>Out of scope</h4>" + listHtml(scope.outOfScope);
-      html += "<h4>Dependencies</h4>" + listHtml(scope.dependencies);
-      if (scope.notes) html += "<p><strong>Notes:</strong> " + esc(scope.notes) + "</p>";
-
-      html += "<h3>Compliance checklist (" + items.length + ")</h3>";
-      if (!items.length) html += "<p class='meta-line'>No items</p>";
-      items.forEach((it, i) => {
-        const mand = it.mandatory ? "Required" : "Conditional / optional";
-        html += "<h4>" + esc(it.id || ("item-" + (i + 1))) + " · " + esc(mand) + "</h4>";
-        html += "<p>" + esc(it.requirement || "") + "</p>";
-        html += kv("Source", it.sourceRef);
-        html += kv("Target section", it.targetSection);
-        html += kv("Evidence", it.evidenceNeeded);
-        html += kv("Owner", it.owner);
-      });
-
-      html += "<h3>Evaluation</h3>";
-      html += kv("Scored response form", evaluation.scoredResponseForm === true ? "Yes" : evaluation.scoredResponseForm === false ? "No" : evaluation.scoredResponseForm);
-      html += kv("Total points", evaluation.totalPoints);
-      html += kv("Char limit", evaluation.responseCharLimit);
-      html += kv("Writing style", evaluation.writingStyle);
-      html += "<h4>Emphasis</h4>" + listHtml(evaluation.emphasis);
-      if (!criteria.length) {
-        html += "<p class='meta-line'>No scored criteria extracted (or none published)</p>";
-      } else {
-        criteria.forEach((c) => {
-          html += "<h4>" + esc(c.name || c.itemCode || "Criterion");
-          if (c.weight != null) html += " · " + esc(c.weight) + " pts";
-          html += "</h4>";
-          const sub = Array.isArray(c.items) ? c.items : [];
-          if (sub.length) {
-            html += "<ul>" + sub.map((s) =>
-              "<li><strong>" + esc(s.itemCode || "") + "</strong> " + esc(s.ask || "") +
-              (s.weight != null ? " <span class='meta-line'>(" + esc(s.weight) + ")</span>" : "") +
-              "</li>"
-            ).join("") + "</ul>";
-          }
-        });
-      }
-
-      html += "<h3>Success themes</h3>";
-      if (!successItems.length) html += "<p class='meta-line'>None</p>";
-      successItems.forEach((s) => {
-        html += "<p><strong>" + esc(s.criterion || "") + "</strong>";
-        if (s.recurringTheme) html += " <span class='meta-line'>(recurring)</span>";
-        html += "</p>";
-        if (s.why) html += "<p class='meta-line'>" + esc(s.why) + "</p>";
-      });
-      return html;
-    }
-
-    function agent2ToReadable(o) {
-      if (!o || typeof o !== "object") return "<p class='meta-line'>No output yet</p>";
-      const s = o.strategy || {};
-      const d = o.delivery || {};
-      const pattern = d.deliveryPattern || {};
-      const model = d.deliveryModel || {};
-      const method = d.methodology || {};
-      const budget = d.budget || {};
-      let html = "<h3>Strategy</h3>";
-      html += kv("Winning theme", s.winningTheme);
-      html += kv("Core message", s.coreMessage);
-      html += kv("Tone", s.tone);
-      html += kv("Why us", s.whyUs);
-      html += kv("Proof strategy", s.proofStrategy);
-      html += kv("Competitive position", s.competitivePosition);
-      if (s.executiveNarrative) html += "<p>" + esc(s.executiveNarrative) + "</p>";
-      html += "<h4>Differentiators</h4>" + listHtml(s.differentiators);
-      html += "<h4>Trust builders</h4>" + listHtml(s.trustBuilders);
-      html += "<h4>Key messages</h4>" + listHtml(s.keyMessages);
-      html += "<h4>Evaluator concerns</h4>" + listHtml(s.primaryEvaluatorConcerns);
-      html += "<h3>Delivery</h3>";
-      html += kv("Model", model.type);
-      html += kv("Governance", model.governance);
-      html += kv("Cadence", model.cadence);
-      html += kv("Staffing shape", pattern.staffingShape);
-      html += kv("Phase shape", pattern.phaseShape);
-      html += "<h4>Patterns observed</h4>" + listHtml(pattern.patternsObserved);
-      const phases = Array.isArray(method.phases) ? method.phases : [];
-      html += "<h4>Methodology phases</h4>";
-      if (!phases.length) html += "<p class='meta-line'>None</p>";
-      phases.forEach((ph) => {
-        html += "<p><strong>" + esc(ph.name || "") + "</strong></p>" + listHtml(ph.activities);
-      });
-      html += "<h4>Budget approach</h4>";
-      html += kv("Strategy", budget.pricingStrategy);
-      html += kv("Model", budget.pricingModel);
-      html += kv("Ceiling", budget.ceiling);
-      return html;
-    }
-
-    function renderOut1() {
-      if (!lastOut1) return;
-      $("out1").textContent = JSON.stringify(lastOut1, null, 2);
-      $("out1Readable").innerHTML = opportunityToReadable(lastOut1);
-      const showMd = view1 === "readable";
-      $("out1Readable").hidden = !showMd;
-      $("out1").hidden = showMd;
-    }
-
-    function renderOut2() {
-      if (!lastOut2) return;
-      $("out2").textContent = JSON.stringify(lastOut2, null, 2);
-      $("out2Readable").innerHTML = agent2ToReadable(lastOut2);
-      const showMd = view2 === "readable";
-      $("out2Readable").hidden = !showMd;
-      $("out2").hidden = showMd;
+    function syncGenerateButtons() {
+      const hasSections =
+        !!demoId &&
+        Array.isArray(lastOut && lastOut.sections) &&
+        lastOut.sections.length > 0;
+      $("generate").disabled = !hasSections;
+      $("downloadDocx").disabled = !draftReady;
     }
 
     function outlineListHtml(sections, depth) {
@@ -634,7 +403,9 @@
       let html = "<ol class='outline-list'>";
       arr.forEach((s) => {
         const w = s.evaluationWeight;
+        const inst = s.submissionInstrument || s.submission_instrument;
         html += "<li><strong>" + esc(s.title || s.id || "Untitled") + "</strong>";
+        if (inst) html += " <span class='badge strict'>" + esc(inst) + "</span>";
         if (w != null && w !== "") html += "<span class='ow'>(" + esc(w) + " pts)</span>";
         html += outlineListHtml(s.children || [], depth + 1);
         html += "</li>";
@@ -643,34 +414,45 @@
       return html;
     }
 
-    function renderOut3() {
-      const o = lastOut3 || {};
+    function renderOut() {
+      const o = lastOut || {};
       const sections = o.sections || [];
-      const showMd = view3 === "readable";
-      $("out3Readable").hidden = !showMd;
-      $("out3").hidden = showMd;
+      const showMd = viewMode === "readable";
+      $("outReadable").hidden = !showMd;
+      $("outJson").hidden = showMd;
       if (showMd) {
         let html = "<p class='meta-line'>outlineMode · " + esc(o.outlineMode || "strict_rfp");
         if (o.sectionCount != null) html += " · " + esc(o.sectionCount) + " sections";
+        if (o.costRequirementStatus) {
+          html += " · cost: " + esc(o.costRequirementStatus);
+        }
         html += "</p>";
+        const constraints = o.submissionConstraints || [];
+        const amb = o.ambiguities || [];
+        if (constraints.length || amb.length) {
+          html += "<div class='meta-line' style='margin-bottom:0.75rem'>";
+          if (constraints.length) {
+            html += "<strong>Constraints</strong><ul>";
+            constraints.forEach((c) => {
+              html += "<li>" + esc(c.kind || "rule") + ": " + esc(c.text || "") + "</li>";
+            });
+            html += "</ul>";
+          }
+          if (amb.length) {
+            html += "<strong>Ambiguities</strong><ul>";
+            amb.forEach((a) => {
+              html += "<li>" + esc(a.topic || "") + " — " + esc(a.recommendedAction || a.recommended_action || "") + "</li>";
+            });
+            html += "</ul>";
+          }
+          html += "</div>";
+        }
         html += outlineListHtml(sections, 0);
-        $("out3Readable").innerHTML = html;
+        $("outReadable").innerHTML = html;
       } else {
-        $("out3").textContent = JSON.stringify(o, null, 2);
+        $("outJson").textContent = JSON.stringify(o, null, 2);
       }
     }
-
-    document.querySelectorAll(".view-toggle button").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const target = btn.getAttribute("data-target");
-        const mode = btn.getAttribute("data-view");
-        btn.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        if (target === "1") { view1 = mode; renderOut1(); }
-        else if (target === "2") { view2 = mode; renderOut2(); }
-        else { view3 = mode; renderOut3(); }
-      });
-    });
 
     function fmtCost(cost) {
       if (!cost) return "Cost: —";
@@ -689,23 +471,68 @@
       if (!demoId) {
         el.textContent = "no session";
         el.classList.remove("on");
-        $("approve").disabled = true;
-        $("run2").disabled = true;
-        $("approve2").disabled = true;
-        $("runOutline").disabled = true;
+        syncGenerateButtons();
         return;
       }
-      let label = demoId;
-      if (approved2) label += " · outline unlocked";
-      else if (agent2Done) label += " · awaiting A2 approve";
-      else if (approved) label += " · A2 unlocked";
-      else label += " · awaiting A1 approve";
-      el.textContent = label;
-      el.classList.toggle("on", approved || approved2);
-      $("approve").disabled = !demoId || approved;
-      $("run2").disabled = !demoId || !approved;
-      $("approve2").disabled = !demoId || !agent2Done || approved2;
-      $("runOutline").disabled = !demoId || !approved2;
+      el.textContent = demoId;
+      el.classList.add("on");
+      syncGenerateButtons();
+    }
+
+    async function loadCheckpointList(selectId) {
+      const sel = $("checkpointSelect");
+      try {
+        const data = await fetch("/api/checkpoints").then((r) => r.json());
+        const rows = data.checkpoints || [];
+        const keep = selectId || sel.value;
+        sel.innerHTML = "";
+        if (!rows.length) {
+          sel.innerHTML = '<option value="">— none yet —</option>';
+          return;
+        }
+        rows.forEach((c) => {
+          const opt = document.createElement("option");
+          opt.value = c.demo_id;
+          const when = (c.saved_at || "").slice(0, 19).replace("T", " ");
+          opt.textContent =
+            (c.section_count || 0) +
+            " secs · " +
+            (c.title || c.demo_id) +
+            (when ? " · " + when : "");
+          sel.appendChild(opt);
+        });
+        if (keep && rows.some((c) => c.demo_id === keep)) sel.value = keep;
+      } catch (e) {
+        sel.innerHTML = '<option value="">— load failed —</option>';
+      }
+    }
+
+    async function restoreLatestSession() {
+      try {
+        const data = await fetch("/api/sessions").then((r) => r.json());
+        const rows = data.sessions || [];
+        if (!rows.length) return false;
+        const id = rows[0].demo_id;
+        const res = await fetch("/api/sessions/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ demo_id: id }),
+        });
+        const body = await res.json();
+        if (!res.ok) return false;
+        demoId = body.demo_id;
+        lastOut = body.output || {};
+        draftReady = !!body.draft_ready;
+        renderOut();
+        if (body.cost) $("cost").innerHTML = fmtCost(body.cost);
+        $("status").textContent =
+          "Restored session · " + (lastOut.sectionCount || 0) +
+          " sections — Generate proposal is below the list.";
+        setSession();
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
 
     async function loadHealth() {
@@ -724,49 +551,52 @@
       $("prompt2").value = p.agent2 || "";
     }
 
-    async function persistPrompt(which) {
-      const body =
-        which === 1
-          ? { agent1: $("prompt1").value }
-          : { agent2: $("prompt2").value };
+    async function persistPrompts() {
       const res = await fetch("/api/prompts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          agent1: $("prompt1").value,
+          agent2: $("prompt2").value,
+        }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || `Failed to save prompt ${which}`);
+        throw new Error(data.detail || "Failed to save prompts");
       }
     }
 
-    const DEFAULT_STEPS = {
-      agent1: [
-        { step: "parse_pdf", label: "Parse RFP PDF" },
-        { step: "evidence_pack", label: "Build evidence pack" },
-        { step: "lx_compliance", label: "LangExtract · compliance" },
-        { step: "lx_evaluation", label: "LangExtract · evaluation" },
-        { step: "lx_facts", label: "LangExtract · dates & money" },
-        { step: "lx_scope", label: "LangExtract · statement of work" },
-        { step: "sonnet_normalize", label: "Sonnet · normalize opportunity" },
-        { step: "validators", label: "Deterministic validators" },
-        { step: "repair", label: "Targeted repair (if needed)" },
-        { step: "provenance", label: "Ground provenance" },
-        { step: "apply_plan", label: "Apply to execution plan" },
-      ],
-      agent2: [
-        { step: "load_prompt", label: "Load strategy prompt" },
-        { step: "kb_retrieve", label: "Supermemory KB retrieval" },
-        { step: "strategy_llm", label: "Sonnet · strategy & delivery" },
-        { step: "assemble", label: "Assemble strategy + delivery JSON" },
-      ],
-      outline: [
-        { step: "execution_plan", label: "Execution plan · WBS / timeline / resources" },
-        { step: "dynamic_section", label: "Dynamic section planner · strict_rfp" },
-        { step: "checklister", label: "Checklister · submission/closing completeness" },
-        { step: "extract_titles", label: "Extract section titles" },
-      ],
-    };
+    const DEFAULT_PIPELINE = [
+      { step: "parse_pdf", label: "Parse RFP PDF" },
+      { step: "evidence_pack", label: "Build evidence pack" },
+      { step: "lx_compliance", label: "LangExtract · compliance" },
+      { step: "lx_evaluation", label: "LangExtract · evaluation" },
+      { step: "lx_facts", label: "LangExtract · dates & money" },
+      { step: "lx_scope", label: "LangExtract · statement of work" },
+      { step: "sonnet_normalize", label: "Sonnet · normalize opportunity" },
+      { step: "validators", label: "Deterministic validators" },
+      { step: "repair", label: "Targeted repair (if needed)" },
+      { step: "provenance", label: "Ground provenance" },
+      { step: "apply_plan", label: "Apply to execution plan" },
+      { step: "load_prompt", label: "Load strategy prompt" },
+      { step: "kb_retrieve", label: "Supermemory KB retrieval" },
+      { step: "strategy_llm", label: "Sonnet · strategy & delivery" },
+      { step: "assemble", label: "Assemble strategy + delivery JSON" },
+      { step: "execution_plan", label: "Execution plan · WBS / timeline / resources" },
+      { step: "dynamic_section", label: "Dynamic section planner · strict_rfp" },
+      { step: "checklister", label: "Checklister · submission/closing completeness" },
+      { step: "extract_titles", label: "Extract section titles" },
+    ];
+
+    const DEFAULT_GENERATE = [
+      { step: "seed_rfp", label: "Seed RFP + PDF" },
+      { step: "writing_briefs", label: "Writing briefs" },
+      { step: "persist_research", label: "Persist research cache" },
+      { step: "phase3", label: "Phase 3 · draft sections" },
+      { step: "phase3_5", label: "Phase 3.5 · budget (cost-gated)" },
+      { step: "phase3_6", label: "Phase 3.6 · senior editor" },
+      { step: "ready_export", label: "Ready for Word export" },
+    ];
 
     function createProgress(prefix) {
       const root = $(prefix);
@@ -848,17 +678,10 @@
             render();
           }
         },
-        hide() {
-          clearInterval(timer);
-          root.classList.remove("on");
-          root.hidden = true;
-        },
       };
     }
 
-    const prog1 = createProgress("prog1");
-    const prog2 = createProgress("prog2");
-    const prog3 = createProgress("prog3");
+    const prog = createProgress("prog");
 
     async function readSse(res, onEvent) {
       if (!res.ok) {
@@ -895,194 +718,207 @@
           }
           onEvent(evt);
           if (evt.type === "result") result = evt;
-          if (evt.type === "error") throw new Error(evt.message || "Agent failed");
+          if (evt.type === "error") throw new Error(evt.message || "Pipeline failed");
         }
       }
       if (!result) throw new Error("Stream ended without a result");
       return result;
     }
 
-    $("saveP1").onclick = async () => {
-      await persistPrompt(1);
-      $("status1").textContent = "Prompt 1 saved — next Run uses it.";
-    };
+    document.querySelectorAll(".view-toggle button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        viewMode = btn.getAttribute("data-view");
+        btn.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        renderOut();
+      });
+    });
 
-    $("saveP2").onclick = async () => {
-      await persistPrompt(2);
-      $("status2").textContent = "Prompt 2 saved — next Run uses it.";
-    };
-
-    $("run1").onclick = async () => {
-      $("status1").textContent = "Running Agent 1…";
-      $("status1").classList.remove("err");
-      $("run1").disabled = true;
-      approved = false;
-      agent2Done = false;
-      approved2 = false;
-      lastOut2 = null;
-      lastOut3 = null;
-      renderOut2();
-      renderOut3();
-      prog1.start(DEFAULT_STEPS.agent1);
+    $("savePrompts").onclick = async () => {
       try {
-        await persistPrompt(1);
+        await persistPrompts();
+        $("status").textContent = "Prompts saved — next Run uses them.";
+        $("status").classList.remove("err");
+      } catch (e) {
+        $("status").textContent = String(e.message || e);
+        $("status").classList.add("err");
+      }
+    };
+
+    $("run").onclick = async () => {
+      $("status").textContent = "Running pipeline…";
+      $("status").classList.remove("err");
+      $("generateMeta").textContent = "";
+      $("run").disabled = true;
+      draftReady = false;
+      lastOut = null;
+      renderOut();
+      syncGenerateButtons();
+      prog.start(DEFAULT_PIPELINE);
+      try {
+        await persistPrompts();
+        const url = ($("rfpUrl").value || "").trim();
         const f = $("file").files[0];
-        if (!f) throw new Error("Upload an RFP PDF first");
-        if (!/\.pdf$/i.test(f.name)) throw new Error("PDF only");
+        if (!url && !f) throw new Error("Paste an RFP PDF URL or upload a PDF");
+        if (url && f) throw new Error("Use either a URL or a file, not both");
+        if (f && !/\.pdf$/i.test(f.name)) throw new Error("PDF only");
+
         const fd = new FormData();
         fd.append("title", $("title").value);
         fd.append("client", $("client").value);
         fd.append("sector", $("sector").value);
         fd.append("location", $("location").value);
-        fd.append("file", f);
         fd.append("stream", "1");
-        const res = await fetch("/api/agent1", { method: "POST", body: fd });
+        if (url) fd.append("rfp_url", url);
+        if (f) fd.append("file", f);
+
+        const res = await fetch("/api/run", { method: "POST", body: fd });
         const data = await readSse(res, (evt) => {
-          if (evt.type === "hello" && evt.steps) prog1.start(evt.steps);
-          if (evt.type === "step") prog1.update(evt);
+          if (evt.type === "hello" && evt.steps) prog.start(evt.steps);
+          if (evt.type === "step") prog.update(evt);
         });
         demoId = data.demo_id;
-        lastOut1 = data.output || {};
-        renderOut1();
-        $("tools1").textContent = (data.toolTrace || []).join("\n") || "(no tools)";
-        $("prov1").textContent = JSON.stringify(data.provenance || [], null, 2);
-        $("cost1").innerHTML = fmtCost(data.cost);
-        prog1.stop(true);
-        $("status1").textContent = "Done. Review Readable/JSON, then Approve.";
+        lastOut = data.output || {};
+        draftReady = false;
+        renderOut();
+        $("cost").innerHTML = fmtCost(data.cost);
+        prog.stop(true);
+        $("status").textContent =
+          "Done · " + (lastOut.sectionCount || 0) +
+          " sections saved to checkpoint. Load later or Generate now.";
         setSession();
+        await loadCheckpointList(demoId);
       } catch (e) {
-        prog1.stop(false);
-        $("status1").textContent = String(e.message || e);
-        $("status1").classList.add("err");
+        prog.stop(false);
+        $("status").textContent = String(e.message || e);
+        $("status").classList.add("err");
       } finally {
-        $("run1").disabled = false;
+        $("run").disabled = false;
+        syncGenerateButtons();
       }
     };
 
-    $("approve").onclick = async () => {
+    $("refreshCheckpoints").onclick = () => loadCheckpointList();
+
+    $("loadCheckpoint").onclick = async () => {
+      const id = $("checkpointSelect").value;
+      if (!id) {
+        $("status").textContent = "Pick a saved checkpoint first";
+        $("status").classList.add("err");
+        return;
+      }
+      $("status").textContent = "Loading frozen outline…";
+      $("status").classList.remove("err");
+      try {
+        const res = await fetch("/api/checkpoints/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ demo_id: id }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Load failed");
+        demoId = data.demo_id;
+        lastOut = data.output || {};
+        draftReady = false;
+        $("generateMeta").textContent = "";
+        renderOut();
+        $("status").textContent =
+          "Loaded checkpoint · " + (lastOut.sectionCount || 0) +
+          " sections (frozen). Generate uses this list only.";
+        setSession();
+      } catch (e) {
+        $("status").textContent = String(e.message || e);
+        $("status").classList.add("err");
+      } finally {
+        syncGenerateButtons();
+      }
+    };
+
+    $("generate").onclick = async () => {
       if (!demoId) return;
-      const res = await fetch("/api/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ demo_id: demoId, approved: true }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        $("status1").textContent = data.detail || "approve failed";
-        $("status1").classList.add("err");
-        return;
-      }
-      approved = true;
-      $("status1").textContent = "Approved — Agent 2 unlocked.";
-      setSession();
-    };
-
-    $("run2").onclick = async () => {
-      if (!demoId || !approved) return;
-      $("status2").textContent = "Running Agent 2…";
-      $("status2").classList.remove("err");
-      $("run2").disabled = true;
-      agent2Done = false;
-      approved2 = false;
-      lastOut3 = null;
-      renderOut3();
-      setSession();
-      prog2.start(DEFAULT_STEPS.agent2);
+      $("status").textContent = "Generating proposal from frozen outline…";
+      $("status").classList.remove("err");
+      $("generateMeta").textContent = "";
+      $("generate").disabled = true;
+      $("run").disabled = true;
+      draftReady = false;
+      syncGenerateButtons();
+      prog.start(DEFAULT_GENERATE);
       try {
-        await persistPrompt(2);
-        const res = await fetch("/api/agent2", {
+        const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ demo_id: demoId, approved: true, stream: true }),
+          body: JSON.stringify({ demo_id: demoId, stream: true }),
         });
         const data = await readSse(res, (evt) => {
-          if (evt.type === "hello" && evt.steps) prog2.start(evt.steps);
-          if (evt.type === "step") prog2.update(evt);
+          if (evt.type === "hello" && evt.steps) prog.start(evt.steps);
+          if (evt.type === "step") prog.update(evt);
         });
-        lastOut2 = data.output || {};
-        renderOut2();
-        $("cost2").innerHTML = fmtCost(data.cost);
-        $("cost1").innerHTML = fmtCost(data.cost);
-        $("cost3").innerHTML = fmtCost(data.cost);
-        agent2Done = true;
-        approved2 = false;
-        prog2.stop(true);
-        $("status2").textContent = "Done. Approve to unlock section list.";
+        draftReady = !!data.draft_ready;
+        $("cost").innerHTML = fmtCost(data.cost);
+        prog.stop(true);
+        const gate = data.budgetGate || {};
+        let meta =
+          (data.sectionCount || 0) + " drafted sections · cost " +
+          (data.costRequirementStatus || "—");
+        if (gate.status === "skipped") {
+          meta += " · budget skipped" + (gate.detail ? ": " + gate.detail : "");
+        } else if (gate.status === "ran") {
+          meta += " · budget included";
+        }
+        $("generateMeta").textContent = meta;
+        $("status").textContent = "Proposal ready — Download Word.";
         setSession();
       } catch (e) {
-        prog2.stop(false);
-        $("status2").textContent = String(e.message || e);
-        $("status2").classList.add("err");
+        prog.stop(false);
+        $("status").textContent = String(e.message || e);
+        $("status").classList.add("err");
       } finally {
-        $("run2").disabled = !approved;
-        setSession();
+        $("run").disabled = false;
+        syncGenerateButtons();
       }
     };
 
-    $("approve2").onclick = async () => {
-      if (!demoId || !agent2Done) return;
-      const res = await fetch("/api/approve2", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ demo_id: demoId, approved: true }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        $("status2").textContent = data.detail || "approve2 failed";
-        $("status2").classList.add("err");
-        return;
-      }
-      approved2 = true;
-      $("status2").textContent = "Approved — section list unlocked.";
-      setSession();
-    };
-
-    $("runOutline").onclick = async () => {
-      if (!demoId || !approved2) return;
-      $("status3").textContent = "Building strict RFP section list…";
-      $("status3").classList.remove("err");
-      $("runOutline").disabled = true;
-      prog3.start(DEFAULT_STEPS.outline);
+    $("downloadDocx").onclick = async () => {
+      if (!demoId || !draftReady) return;
       try {
-        const res = await fetch("/api/outline", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ demo_id: demoId, approved: true, stream: true }),
-        });
-        const data = await readSse(res, (evt) => {
-          if (evt.type === "hello" && evt.steps) prog3.start(evt.steps);
-          if (evt.type === "step") prog3.update(evt);
-        });
-        lastOut3 = data.output || {};
-        renderOut3();
-        const costHtml = fmtCost(data.cost);
-        $("cost3").innerHTML = costHtml;
-        $("cost2").innerHTML = costHtml;
-        $("cost1").innerHTML = costHtml;
-        prog3.stop(true);
-        $("status3").textContent =
-          "Done · " + (lastOut3.sectionCount || 0) + " sections (strict_rfp).";
+        const res = await fetch("/api/export/docx?demo_id=" + encodeURIComponent(demoId));
+        if (!res.ok) {
+          const errText = await res.text();
+          let msg = errText;
+          try {
+            const j = JSON.parse(errText);
+            msg = j.detail || errText;
+          } catch (_) {}
+          throw new Error(msg || "Export failed");
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        let name = "proposal.docx";
+        const m = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(cd);
+        if (m) name = decodeURIComponent(m[1].replace(/"/g, ""));
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        $("status").textContent = "Downloaded " + name;
       } catch (e) {
-        prog3.stop(false);
-        $("status3").textContent = String(e.message || e);
-        $("status3").classList.add("err");
-      } finally {
-        setSession();
+        $("status").textContent = String(e.message || e);
+        $("status").classList.add("err");
       }
     };
 
     $("refreshCost").onclick = async () => {
       if (!demoId) return;
       const cost = await fetch(`/api/cost/${demoId}`).then((r) => r.json());
-      const html = fmtCost(cost);
-      $("cost1").innerHTML = html;
-      $("cost2").innerHTML = html;
-      $("cost3").innerHTML = html;
+      $("cost").innerHTML = fmtCost(cost);
     };
 
     loadHealth();
     loadPrompts();
-    setSession();
+    loadCheckpointList();
+    restoreLatestSession().then(() => setSession());
   </script>
 </body>
 </html>

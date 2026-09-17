@@ -129,3 +129,21 @@ OUTLINE_STEPS: list[dict[str, str]] = [
     {"step": "checklister", "label": "Checklister · submission/closing completeness"},
     {"step": "extract_titles", "label": "Extract section titles"},
 ]
+
+# Frozen outline → manuscript → Word (no re-planner / Align / Complete Scan).
+GENERATE_STEPS: list[dict[str, str]] = [
+    {"step": "seed_rfp", "label": "Seed RFP + PDF"},
+    {"step": "writing_briefs", "label": "Writing briefs"},
+    {"step": "persist_research", "label": "Persist research cache"},
+    {"step": "phase3", "label": "Phase 3 · draft sections"},
+    {"step": "phase3_5", "label": "Phase 3.5 · budget (cost-gated)"},
+    {"step": "phase3_6", "label": "Phase 3.6 · senior editor"},
+    {"step": "ready_export", "label": "Ready for Word export"},
+]
+
+# Single-run demo: all phases in one SSE catalog (step ids stay unique across phases).
+PIPELINE_STEPS: list[dict[str, str]] = [
+    *AGENT1_STEPS,
+    *AGENT2_STEPS,
+    *OUTLINE_STEPS,
+]

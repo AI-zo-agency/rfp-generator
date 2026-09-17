@@ -589,6 +589,52 @@ def partition_phase3_sections(
             )
             continue
 
+        from app.services.proposal_submission_authority import (
+            attachment_checklist_stub,
+            clarify_blocker_stub,
+            instrument_is_checklist,
+            instrument_skips_full_narrative_draft,
+        )
+
+        instrument = getattr(mapped, "submission_instrument", None)
+        if instrument_skips_full_narrative_draft(instrument):
+            prior = existing_by_id.get(mapped.id)
+            if prior is None or not _phase3_content_is_usable(prior.content):
+                reason = (mapped.requirements or [""])[0]
+                if instrument == "clarify":
+                    body = clarify_blocker_stub(mapped.title or "", reason)
+                elif str(instrument or "").casefold() == "cost":
+                    body = (
+                        f"## {mapped.title or 'Pricing'}\n\n"
+                        "Pricing/fee content is produced in Phase 3.5 when the RFP "
+                        "requires a confirmed cost deliverable."
+                    )
+                elif instrument_is_checklist(instrument):
+                    body = attachment_checklist_stub(
+                        mapped.title or "", str(instrument or "form")
+                    )
+                else:
+                    body = attachment_checklist_stub(mapped.title or "", "form")
+                already.append(
+                    ProposalSection(
+                        id=mapped.id,
+                        title=mapped.title,
+                        content=body,
+                        status="generated",
+                        source="generated",
+                        mode="write",
+                        required=True,
+                    )
+                )
+            elif prior is not None:
+                already.append(prior)
+            logger.info(
+                "Phase 3 routing stub (not full narrative) instrument=%s title=%r",
+                instrument,
+                mapped.title,
+            )
+            continue
+
         to_draft.append(mapped)
     return to_draft, already
 

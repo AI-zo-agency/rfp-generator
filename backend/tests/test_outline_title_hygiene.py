@@ -92,9 +92,15 @@ class TestChecklisterHumanizesTitles(unittest.IsolatedAsyncioTestCase):
             _ = section_factory
             return list(sections) + [injected], [_LONG_SENTENCE]
 
+        async def _noop_authority(p, _ctx):
+            return p
+
         with patch(
             "app.services.proposal_evaluation_coverage.ensure_missing_submittals_coverage",
             new=AsyncMock(side_effect=_fake_ensure),
+        ), patch(
+            "app.services.proposal_submission_authority.apply_submission_authority_pass",
+            new=AsyncMock(side_effect=_noop_authority),
         ):
             updated = await run_proposal_checklister(
                 plan=plan, rfp_context="irrelevant rfp text"

@@ -1,4 +1,4 @@
-"""Demo: Agent 1 → approve → Agent 2 → approve → strict RFP section list.
+"""Demo: one-shot RFP → opportunity → strategy → strict section list.
 
 Run from this folder (repo venv + backend/.env):
 
@@ -14,14 +14,17 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 import asyncio
-import json
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from datetime import date, datetime, timezone  # noqa: E402
 
 DEMO_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = DEMO_ROOT.parents[1]
@@ -57,10 +60,17 @@ from agent1_tools import (  # noqa: E402
     apply_opportunity_to_plan,
     extract_opportunity_with_tools,
 )
+from checkpoint_store import (  # noqa: E402
+    list_checkpoints,
+    load_outline_checkpoint,
+    save_outline_checkpoint,
+)
 from progress_bus import (  # noqa: E402
     AGENT1_STEPS,
     AGENT2_STEPS,
+    GENERATE_STEPS,
     OUTLINE_STEPS,
+    PIPELINE_STEPS,
     ProgressBus,
     sse,
     sse_comment,
@@ -71,6 +81,8 @@ from prompt_store import (  # noqa: E402
     save_prompts as _store_save_prompts,
     supabase_configured as _prompts_supabase_configured,
 )
+
+_MAX_RFP_BYTES = 50 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rfp-two-agents-demo")
@@ -108,8 +120,51 @@ def _cost_for(demo_id: str) -> dict[str, Any]:
 def _session_or_404(demo_id: str) -> dict[str, Any]:
     sess = _SESSIONS.get(demo_id)
     if not sess:
-        raise HTTPException(404, "Unknown demo_id — run Agent 1 first")
+        raise HTTPException(404, "Unknown demo_id — run the pipeline first")
     return sess
+
+
+def _filename_from_url(url: str) -> str:
+    path = unquote(urlparse(url).path or "")
+    name = Path(path).name
+    if name.lower().endswith(".pdf"):
+        return name
+    return "rfp.pdf"
+
+
+async def _fetch_pdf_from_url(url: str) -> tuple[bytes, str]:
+    """Download an RFP PDF from http(s). Returns (bytes, filename)."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(400, "RFP URL must be http(s)")
+    try:
+        async with httpx.AsyncClient(
+            timeout=120.0,
+            follow_redirects=True,
+            headers={"User-Agent": "zo-agency-rfp-demo/1.0"},
+        ) as client:
+            resp = await client.get(url.strip())
+    except httpx.HTTPError as exc:
+        logger.error("RFP URL fetch failed url=%s err=%s", url, exc)
+        raise HTTPException(400, f"Could not download RFP URL: {exc}") from exc
+    if resp.status_code >= 400:
+        raise HTTPException(400, f"RFP URL returned HTTP {resp.status_code}")
+    raw = resp.content
+    if len(raw) > _MAX_RFP_BYTES:
+        raise HTTPException(400, "RFP PDF exceeds 50MB limit")
+    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+    filename = _filename_from_url(url)
+    cd = resp.headers.get("content-disposition") or ""
+    if "filename=" in cd.lower():
+        # ponytail: naive Content-Disposition parse; upgrade if buyers send RFC 5987
+        part = cd.split("filename=", 1)[-1].strip().strip("\"'")
+        if part.lower().endswith(".pdf"):
+            filename = Path(part).name
+    if not (filename.lower().endswith(".pdf") or "pdf" in ctype or raw[:4] == b"%PDF"):
+        raise HTTPException(400, "URL did not return a PDF")
+    if raw[:4] != b"%PDF":
+        raise HTTPException(400, "Downloaded file is not a PDF")
+    return raw, filename
 
 
 def _count_outline_nodes(nodes: list[dict[str, Any]]) -> int:
@@ -154,14 +209,208 @@ def _slim_outline_sections(plan_dump: dict[str, Any]) -> list[dict[str, Any]]:
     roots.sort(key=lambda x: int(x.get("order") or 0))
 
     def clean(n: dict[str, Any]) -> dict[str, Any]:
+        raw = by_id.get(n["id"], {})
         return {
             "id": n["id"],
             "title": n["title"],
             "evaluationWeight": n["evaluationWeight"],
+            "submissionInstrument": raw.get("submissionInstrument")
+            or raw.get("submission_instrument"),
             "children": [clean(c) for c in n["children"]],
         }
 
     return [clean(r) for r in roots]
+
+
+def _stamp_outline_protect_from_cap(plan: ProposalExecutionPlan) -> int:
+    """Freeze client-approved TOC tabs against Phase 3 lean/cap drops."""
+    stamped = 0
+    for sec in plan.writing.proposal_outline.sections:
+        sec.protect_from_cap = True
+        stamped += 1
+    return stamped
+
+
+def _plan_from_session(sess: dict[str, Any]) -> ProposalExecutionPlan:
+    raw = sess.get("plan")
+    if not raw:
+        raise HTTPException(400, "Session has no frozen outline — run the pipeline first")
+    return ProposalExecutionPlan.model_validate(raw)
+
+
+async def _upsert_demo_rfp_row(sess: dict[str, Any], demo_id: str) -> None:
+    """Persist RFP so production load_rfp_for_proposal / Phase 3 can run."""
+    from app.models.rfp import RfpRecord
+    from app.services.rfp_repository import (
+        save_manual_pdf,
+        update_rfp_pdf_path,
+        upsert_rfp,
+    )
+
+    meta = sess.get("rfp_meta") or {}
+    today = date.today().isoformat()
+    rfp_text = str(sess.get("rfp_text") or "")
+    if len(rfp_text.strip()) < 200:
+        raise HTTPException(400, "Session RFP text too short to draft a proposal")
+
+    record = RfpRecord(
+        id=demo_id,
+        title=str(meta.get("title") or "Demo RFP"),
+        client=str(meta.get("client") or "Demo Client") or "Demo Client",
+        source="manual",
+        sector=str(meta.get("sector") or "Public Sector") or "Public Sector",
+        location=str(meta.get("location") or ""),
+        dueDate=today,
+        receivedDate=today,
+        lastActivity=today,
+        lastActivityNote="rfp-two-agents demo generate seed",
+        goNoGo="go",
+        stage="sections_4_5",
+        status="in_progress",
+        description=rfp_text,
+    )
+    await asyncio.to_thread(upsert_rfp, record)
+    pdf_bytes = sess.get("pdf_bytes")
+    if isinstance(pdf_bytes, (bytes, bytearray)) and pdf_bytes:
+        path = await asyncio.to_thread(save_manual_pdf, demo_id, bytes(pdf_bytes))
+        await asyncio.to_thread(update_rfp_pdf_path, demo_id, path)
+        logger.info("Demo RFP PDF saved demo_id=%s path=%s", demo_id, path)
+
+
+async def _seed_demo_rfp_for_generate(
+    sess: dict[str, Any],
+    demo_id: str,
+    *,
+    bus: ProgressBus | None = None,
+) -> ProposalExecutionPlan:
+    """Upsert RFP, freeze outline (protectFromCap), writing briefs, research cache.
+
+    Does not re-run section planner / checklister — session plan is authoritative.
+    """
+    from app.models.proposal import ProposalResearchCache
+    from app.services.proposal_common import ProposalError
+    from app.services.proposal_intelligence.agents.validation import run_validate_plan
+    from app.services.proposal_intelligence.assembler import derive_legacy_fields
+    from app.services.proposal_intelligence.merged_passes import run_writing_briefs
+    from app.services.proposal_repository import asave_research_cache
+
+    total = len(GENERATE_STEPS)
+    meta = dict(sess.get("rfp_meta") or {})
+    run_id = str(sess.get("run_id") or uuid.uuid4())
+
+    if bus:
+        await bus.emit(
+            step="seed_rfp",
+            label="Seed RFP + PDF",
+            status="active",
+            index=0,
+            total=total,
+        )
+    await _upsert_demo_rfp_row(sess, demo_id)
+    if bus:
+        await bus.emit(
+            step="seed_rfp",
+            label="Seed RFP + PDF",
+            status="done",
+            index=0,
+            total=total,
+        )
+
+    plan = _plan_from_session(sess)
+    stamped = _stamp_outline_protect_from_cap(plan)
+    logger.info(
+        "Demo outline frozen protectFromCap demo_id=%s sections=%s",
+        demo_id,
+        stamped,
+    )
+
+    if bus:
+        await bus.emit(
+            step="writing_briefs",
+            label="Writing briefs",
+            status="active",
+            index=1,
+            total=total,
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="writing_briefs",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        plan = await run_writing_briefs(plan=plan, rfp_meta=meta)
+    plan = run_validate_plan(plan)
+    if plan.validation.readiness_status != "ready":
+        # Soft-unblock for demo: budget ambiguity must not stop narrative draft.
+        # Keep real drafting blockers as errors.
+        drafting_blockers = [
+            b
+            for b in (plan.validation.blockers or [])
+            if "retrieval plan empty" not in b.casefold()
+            and "cost/pricing" not in b.casefold()
+        ]
+        if drafting_blockers and plan.validation.readiness_status == "blocked":
+            raise ProposalError(
+                "Plan not ready to draft: " + "; ".join(drafting_blockers[:3]),
+                status_code=400,
+            )
+        plan.validation.readiness_status = "ready"
+        plan.metadata.validation_status = "ready"
+        logger.warning(
+            "Demo force readiness=ready demo_id=%s prior_blockers=%s",
+            demo_id,
+            (plan.validation.blockers or [])[:5],
+        )
+    if bus:
+        await bus.emit(
+            step="writing_briefs",
+            label="Writing briefs",
+            status="done",
+            detail=f"{len(plan.writing.section_plans.plans)} briefs",
+            index=1,
+            total=total,
+        )
+
+    if bus:
+        await bus.emit(
+            step="persist_research",
+            label="Persist research cache",
+            status="active",
+            index=2,
+            total=total,
+        )
+    legacy = derive_legacy_fields(plan, outline_mode="strict_rfp")
+    now = datetime.now(timezone.utc).isoformat()
+    research = ProposalResearchCache(
+        rfpId=demo_id,
+        rfpSections=legacy["rfpSections"],
+        outlineMode="strict_rfp",
+        requirementLedger=legacy.get("requirementLedger"),
+        sectionQueries=legacy.get("sectionQueries") or {},
+        proofPoints=legacy.get("proofPoints") or [],
+        proposalExecutionPlan=plan,
+        updatedAt=now,
+        provider=plan.metadata.provider,
+    )
+    await asave_research_cache(research)
+    sess["plan"] = plan.model_dump(by_alias=True)
+    sess["research_seeded"] = True
+    if bus:
+        await bus.emit(
+            step="persist_research",
+            label="Persist research cache",
+            status="done",
+            detail=f"{len(research.rfp_sections)} rfpSections",
+            index=2,
+            total=total,
+        )
+    logger.info(
+        "Demo research seeded demo_id=%s sections=%s readiness=%s",
+        demo_id,
+        len(research.rfp_sections),
+        plan.validation.readiness_status,
+    )
+    return plan
 
 
 async def _sse_agent_stream(
@@ -185,8 +434,14 @@ async def _sse_agent_stream(
             except LlmError as exc:
                 await bus.error(str(exc))
             except Exception as exc:  # noqa: BLE001
-                logger.exception("%s failed", agent)
-                await bus.error(str(exc))
+                # ProposalError and other typed failures still stream as error events.
+                from app.services.proposal_common import ProposalError
+
+                if isinstance(exc, ProposalError):
+                    await bus.error(str(exc))
+                else:
+                    logger.exception("%s failed", agent)
+                    await bus.error(str(exc))
             finally:
                 await bus.close()
 
@@ -230,10 +485,16 @@ class PromptUpdate(BaseModel):
 
 class Agent2Body(BaseModel):
     demo_id: str
-    approved: bool = Field(
-        default=True,
-        description="Must be true — gate after reviewing Agent 1 output",
-    )
+    stream: bool = True
+
+
+class GenerateBody(BaseModel):
+    demo_id: str
+    stream: bool = True
+
+
+class LoadCheckpointBody(BaseModel):
+    demo_id: str
 
 
 @app.get("/")
@@ -301,7 +562,697 @@ async def put_prompts(body: PromptUpdate) -> dict[str, str]:
 
 @app.get("/api/progress/catalog")
 async def progress_catalog() -> dict[str, Any]:
-    return {"agent1": AGENT1_STEPS, "agent2": AGENT2_STEPS, "outline": OUTLINE_STEPS}
+    return {
+        "pipeline": PIPELINE_STEPS,
+        "agent1": AGENT1_STEPS,
+        "agent2": AGENT2_STEPS,
+        "outline": OUTLINE_STEPS,
+        "generate": GENERATE_STEPS,
+    }
+
+
+@app.get("/api/checkpoints")
+async def checkpoints_list() -> dict[str, Any]:
+    rows = list_checkpoints()
+    return {"checkpoints": rows, "count": len(rows)}
+
+
+@app.get("/api/sessions")
+async def sessions_list() -> dict[str, Any]:
+    """In-memory demo sessions (survive page refresh; clear on server reload)."""
+    rows: list[dict[str, Any]] = []
+    for demo_id, sess in reversed(list(_SESSIONS.items())):
+        plan = sess.get("plan") or {}
+        sections = _slim_outline_sections(plan) if plan else []
+        meta = sess.get("rfp_meta") or {}
+        rows.append(
+            {
+                "demo_id": demo_id,
+                "section_count": _count_outline_nodes(sections),
+                "title": str(meta.get("title") or demo_id),
+                "client": str(meta.get("client") or ""),
+                "draft_ready": bool(sess.get("draft_ready")),
+                "from_checkpoint": bool(sess.get("from_checkpoint")),
+            }
+        )
+    return {"sessions": rows, "count": len(rows)}
+
+
+@app.post("/api/sessions/load")
+async def sessions_load(body: LoadCheckpointBody) -> dict[str, Any]:
+    """Re-attach UI to an in-memory session after refresh (same outline, no re-run)."""
+    sess = _session_or_404(body.demo_id)
+    plan = sess.get("plan") or {}
+    sections = _slim_outline_sections(plan)
+    section_count = _count_outline_nodes(sections)
+    writing = plan.get("writing") or {}
+    return {
+        "demo_id": body.demo_id,
+        "draft_ready": bool(sess.get("draft_ready")),
+        "output": {
+            "outlineMode": "strict_rfp",
+            "sections": sections,
+            "sectionCount": section_count,
+            "costRequirementStatus": writing.get("costRequirementStatus")
+            or writing.get("cost_requirement_status"),
+            "submissionConstraints": writing.get("submissionConstraints")
+            or writing.get("submission_constraints")
+            or [],
+            "ambiguities": writing.get("ambiguities") or [],
+        },
+        "cost": _cost_for(body.demo_id),
+    }
+
+
+@app.post("/api/checkpoints/load")
+async def checkpoints_load(body: LoadCheckpointBody) -> dict[str, Any]:
+    """Restore a saved outline into the in-memory session (no re-planner)."""
+    try:
+        ckpt = load_outline_checkpoint(body.demo_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    demo_id = ckpt["demo_id"]
+    plan = ckpt.get("plan") or {}
+    if not plan:
+        raise HTTPException(400, "Checkpoint has no execution plan")
+    sections = ckpt.get("sections") or _slim_outline_sections(plan)
+    section_count = int(ckpt.get("section_count") or _count_outline_nodes(sections))
+    writing = plan.get("writing") or {}
+
+    _SESSIONS[demo_id] = {
+        "plan": plan,
+        "rfp_text": ckpt.get("rfp_text") or "",
+        "rfp_meta": ckpt.get("rfp_meta") or {},
+        "run_id": ckpt.get("run_id") or str(uuid.uuid4()),
+        "opportunity_raw": ckpt.get("opportunity_raw") or {},
+        "tool_trace": [],
+        "provenance": {},
+        "pdf_bytes": ckpt.get("pdf_bytes"),
+        "pdf_filename": ckpt.get("pdf_filename") or "rfp.pdf",
+        "draft_ready": False,
+        "research_seeded": False,
+        "from_checkpoint": True,
+    }
+    logger.info(
+        "Checkpoint loaded demo_id=%s sections=%s",
+        demo_id,
+        section_count,
+    )
+    return {
+        "demo_id": demo_id,
+        "from_checkpoint": True,
+        "saved_at": ckpt.get("saved_at"),
+        "output": {
+            "outlineMode": "strict_rfp",
+            "sections": sections,
+            "sectionCount": section_count,
+            "costRequirementStatus": writing.get("costRequirementStatus")
+            or writing.get("cost_requirement_status"),
+            "submissionConstraints": writing.get("submissionConstraints")
+            or writing.get("submission_constraints")
+            or [],
+            "ambiguities": writing.get("ambiguities") or [],
+        },
+    }
+
+
+async def _run_full_pipeline(
+    *,
+    doc: RfpDoc,
+    filename: str,
+    meta: dict[str, str],
+    bus: ProgressBus | None,
+    pdf_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    """Opportunity → strategy → strict outline. No human approve gates."""
+    demo_id = f"rfpda-{uuid.uuid4().hex[:12]}"
+    run_id = str(uuid.uuid4())
+    system_prompt = _load_prompt("agent1")
+    _apply_prompts()
+
+    plan = ProposalExecutionPlan(rfpId=demo_id)
+    logger.info(
+        "Pipeline start demo_id=%s pages=%s file=%s",
+        demo_id,
+        doc.page_count,
+        filename,
+    )
+    if bus:
+        await bus.emit(
+            step="parse_pdf",
+            label="Parse RFP PDF",
+            status="done",
+            detail=f"{doc.page_count} pages · {filename}",
+        )
+
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="opportunity_extract",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        opportunity, tool_trace, provenance = await extract_opportunity_with_tools(
+            doc=doc,
+            system_prompt=system_prompt,
+            rfp_meta=meta,
+            on_progress=bus,
+        )
+        if bus:
+            await bus.emit(
+                step="apply_plan",
+                label="Apply to execution plan",
+                status="active",
+            )
+        plan = await apply_opportunity_to_plan(plan=plan, raw=opportunity)
+        if bus:
+            await bus.emit(
+                step="apply_plan",
+                label="Apply to execution plan",
+                status="done",
+            )
+
+    if bus:
+        await bus.emit(step="load_prompt", label="Load strategy prompt", status="done")
+        await bus.emit(
+            step="kb_retrieve",
+            label="Supermemory KB retrieval",
+            status="active",
+            detail="won patterns · methodology · pricing · playbooks",
+        )
+        await bus.emit(
+            step="strategy_llm",
+            label="Sonnet · strategy & delivery",
+            status="active",
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="strategy_delivery",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        plan = await run_strategy_delivery(plan=plan, rfp_meta=meta)
+    if bus:
+        await bus.emit(step="kb_retrieve", label="Supermemory KB retrieval", status="done")
+        await bus.emit(step="strategy_llm", label="Sonnet · strategy & delivery", status="done")
+        await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="done")
+
+    rfp_text = doc.full_text()
+    if bus:
+        await bus.emit(
+            step="execution_plan",
+            label="Execution plan · WBS / timeline / resources",
+            status="active",
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="execution_plan",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        plan = await run_execution_plan(plan=plan, rfp_meta=meta)
+    if bus:
+        await bus.emit(
+            step="execution_plan",
+            label="Execution plan · WBS / timeline / resources",
+            status="done",
+        )
+        await bus.emit(
+            step="dynamic_section",
+            label="Dynamic section planner · strict_rfp",
+            status="active",
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="dynamic_section",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        plan = await run_dynamic_section_planner(
+            plan=plan,
+            rfp_context=rfp_text,
+            rfp_meta=meta,
+            outline_mode="strict_rfp",
+        )
+    if bus:
+        await bus.emit(
+            step="dynamic_section",
+            label="Dynamic section planner · strict_rfp",
+            status="done",
+        )
+        await bus.emit(
+            step="checklister",
+            label="Checklister · submission/closing completeness",
+            status="active",
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=run_id,
+        node_name="checklister",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        plan = await run_proposal_checklister(
+            plan=plan,
+            rfp_context=rfp_text,
+            rfp_meta=meta,
+        )
+    if bus:
+        await bus.emit(
+            step="checklister",
+            label="Checklister · submission/closing completeness",
+            status="done",
+        )
+        await bus.emit(
+            step="extract_titles",
+            label="Extract section titles",
+            status="active",
+        )
+
+    plan_dump = plan.model_dump(by_alias=True)
+    sections = _slim_outline_sections(plan_dump)
+    section_count = _count_outline_nodes(sections)
+    _SESSIONS[demo_id] = {
+        "plan": plan_dump,
+        "rfp_text": rfp_text,
+        "rfp_meta": meta,
+        "run_id": run_id,
+        "opportunity_raw": dict(opportunity),
+        "tool_trace": tool_trace,
+        "provenance": provenance,
+        "pdf_bytes": pdf_bytes,
+        "pdf_filename": filename,
+        "draft_ready": False,
+        "research_seeded": False,
+    }
+    try:
+        save_outline_checkpoint(
+            demo_id=demo_id,
+            plan=plan_dump,
+            rfp_text=rfp_text,
+            rfp_meta=meta,
+            sections=sections,
+            section_count=section_count,
+            run_id=run_id,
+            pdf_bytes=pdf_bytes,
+            pdf_filename=filename,
+            opportunity_raw=dict(opportunity),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Checkpoint save failed demo_id=%s", demo_id)
+    cost = _cost_for(demo_id)
+    try:
+        clear_monthly_budget_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    if bus:
+        await bus.emit(
+            step="extract_titles",
+            label="Extract section titles",
+            status="done",
+            detail=f"{section_count} sections",
+        )
+    writing = plan_dump.get("writing") or {}
+    logger.info(
+        "Pipeline done demo_id=%s sections=%s cost_usd=%s",
+        demo_id,
+        section_count,
+        cost.get("total_cost_usd"),
+    )
+    return {
+        "demo_id": demo_id,
+        "agent": "pipeline",
+        "output": {
+            "outlineMode": "strict_rfp",
+            "sections": sections,
+            "sectionCount": section_count,
+            "costRequirementStatus": writing.get("costRequirementStatus")
+            or writing.get("cost_requirement_status"),
+            "submissionConstraints": writing.get("submissionConstraints")
+            or writing.get("submission_constraints")
+            or [],
+            "ambiguities": writing.get("ambiguities") or [],
+        },
+        "opportunity": dict(opportunity),
+        "strategy": {
+            "strategy": (plan_dump.get("opportunity") or {}).get("strategy"),
+            "delivery": plan_dump.get("delivery"),
+        },
+        "cost": cost,
+        "toolTrace": tool_trace,
+        "provenance": provenance,
+    }
+
+
+@app.post("/api/run")
+async def run_pipeline(
+    title: str = Form(default="Demo RFP"),
+    client: str = Form(default=""),
+    sector: str = Form(default=""),
+    location: str = Form(default=""),
+    rfp_url: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+    stream: str = Form(default="1"),
+) -> Any:
+    """One-shot: PDF upload or URL → all agents → section list (SSE)."""
+    url = (rfp_url or "").strip()
+    has_file = bool(file and file.filename)
+    if has_file and url:
+        raise HTTPException(400, "Provide either an RFP PDF or a URL, not both")
+    if not has_file and not url:
+        raise HTTPException(400, "Upload an RFP PDF or paste an RFP URL")
+
+    if has_file:
+        assert file is not None
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(400, "Upload an RFP PDF")
+        raw = await file.read()
+        if len(raw) > _MAX_RFP_BYTES:
+            raise HTTPException(400, "RFP PDF exceeds 50MB limit")
+        filename = file.filename
+    else:
+        raw, filename = await _fetch_pdf_from_url(url)
+
+    try:
+        doc = RfpDoc.from_pdf_bytes(raw, filename=filename)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    meta = {
+        "title": title.strip() or "Demo RFP",
+        "client": client.strip(),
+        "sector": sector.strip(),
+        "location": location.strip(),
+    }
+    want_stream = stream.strip().lower() not in {"0", "false", "no"}
+
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        return await _run_full_pipeline(
+            doc=doc,
+            filename=filename,
+            meta=meta,
+            bus=bus,
+            pdf_bytes=raw,
+        )
+
+    if not want_stream:
+        try:
+            return await _run(None)
+        except IntelligenceError as exc:
+            logger.error("Pipeline intelligence error: %s", exc)
+            raise HTTPException(502, str(exc)) from exc
+        except LlmError as exc:
+            logger.error("Pipeline LLM error: %s", exc)
+            raise HTTPException(502, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Pipeline failed")
+            raise HTTPException(502, f"Pipeline failed: {exc}") from exc
+
+    return await _sse_agent_stream(
+        agent="pipeline",
+        demo_id="pending",
+        steps=PIPELINE_STEPS,
+        run_fn=_run,
+    )
+
+
+async def _run_generate_proposal(
+    *,
+    demo_id: str,
+    bus: ProgressBus | None,
+) -> dict[str, Any]:
+    """Frozen outline → Phase 3 → gated 3.5 → 3.6. Soft-skips budget on ambiguity."""
+    from app.services.proposal_common import ProposalError
+    from app.services.proposal_generator import (
+        run_phase3_5_budget,
+        run_phase3_6_self_edit,
+        run_phase3_drafting,
+    )
+    from app.services.proposal_submission_authority import phase35_budget_gate
+
+    sess = _session_or_404(demo_id)
+    total = len(GENERATE_STEPS)
+
+    plan = await _seed_demo_rfp_for_generate(sess, demo_id, bus=bus)
+
+    if bus:
+        await bus.emit(
+            step="phase3",
+            label="Phase 3 · draft sections",
+            status="active",
+            index=3,
+            total=total,
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=str(sess.get("run_id") or uuid.uuid4()),
+        node_name="phase3_drafting",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        draft, _research = await run_phase3_drafting(demo_id)
+    section_count = len(draft.sections) if draft else 0
+    if bus:
+        await bus.emit(
+            step="phase3",
+            label="Phase 3 · draft sections",
+            status="done",
+            detail=f"{section_count} sections",
+            index=3,
+            total=total,
+        )
+
+    budget_gate_status = "ran"
+    budget_gate_detail = ""
+    gate, gate_detail = phase35_budget_gate(plan)
+    if bus:
+        await bus.emit(
+            step="phase3_5",
+            label="Phase 3.5 · budget (cost-gated)",
+            status="active",
+            index=4,
+            total=total,
+        )
+    if gate == "skip":
+        budget_gate_status = "skipped"
+        budget_gate_detail = gate_detail or "No confirmed cost submittal"
+        if bus:
+            await bus.emit(
+                step="phase3_5",
+                label="Phase 3.5 · budget (cost-gated)",
+                status="skipped",
+                detail=budget_gate_detail,
+                index=4,
+                total=total,
+            )
+    elif gate == "block":
+        # Soft-skip — do not fail the whole generate run on cost ambiguity.
+        budget_gate_status = "skipped"
+        budget_gate_detail = gate_detail or "Cost requirement ambiguous"
+        logger.warning(
+            "Demo Phase 3.5 soft-skipped demo_id=%s detail=%s",
+            demo_id,
+            budget_gate_detail[:200],
+        )
+        if bus:
+            await bus.emit(
+                step="phase3_5",
+                label="Phase 3.5 · budget (cost-gated)",
+                status="skipped",
+                detail=budget_gate_detail,
+                index=4,
+                total=total,
+            )
+    else:
+        try:
+            with llm_call_context(
+                rfp_id=demo_id,
+                run_id=str(sess.get("run_id") or uuid.uuid4()),
+                node_name="phase3_5_budget",
+                user_email=_DEMO_USER_EMAIL,
+            ):
+                await run_phase3_5_budget(demo_id)
+            if bus:
+                await bus.emit(
+                    step="phase3_5",
+                    label="Phase 3.5 · budget (cost-gated)",
+                    status="done",
+                    index=4,
+                    total=total,
+                )
+        except ProposalError as exc:
+            if getattr(exc, "status_code", 400) == 422:
+                budget_gate_status = "skipped"
+                budget_gate_detail = str(exc)
+                logger.warning(
+                    "Demo Phase 3.5 422 soft-skip demo_id=%s: %s",
+                    demo_id,
+                    budget_gate_detail[:200],
+                )
+                if bus:
+                    await bus.emit(
+                        step="phase3_5",
+                        label="Phase 3.5 · budget (cost-gated)",
+                        status="skipped",
+                        detail=budget_gate_detail,
+                        index=4,
+                        total=total,
+                    )
+            else:
+                raise
+
+    if bus:
+        await bus.emit(
+            step="phase3_6",
+            label="Phase 3.6 · senior editor",
+            status="active",
+            index=5,
+            total=total,
+        )
+    with llm_call_context(
+        rfp_id=demo_id,
+        run_id=str(sess.get("run_id") or uuid.uuid4()),
+        node_name="phase3_6_self_edit",
+        user_email=_DEMO_USER_EMAIL,
+    ):
+        await run_phase3_6_self_edit(demo_id)
+    if bus:
+        await bus.emit(
+            step="phase3_6",
+            label="Phase 3.6 · senior editor",
+            status="done",
+            index=5,
+            total=total,
+        )
+        await bus.emit(
+            step="ready_export",
+            label="Ready for Word export",
+            status="done",
+            index=6,
+            total=total,
+        )
+
+    sess["draft_ready"] = True
+    writing = (sess.get("plan") or {}).get("writing") or {}
+    cost = _cost_for(demo_id)
+    try:
+        clear_monthly_budget_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        "Generate done demo_id=%s sections=%s budget=%s cost_usd=%s",
+        demo_id,
+        section_count,
+        budget_gate_status,
+        cost.get("total_cost_usd"),
+    )
+    return {
+        "demo_id": demo_id,
+        "agent": "generate",
+        "draft_ready": True,
+        "sectionCount": section_count,
+        "costRequirementStatus": writing.get("costRequirementStatus")
+        or writing.get("cost_requirement_status")
+        or plan.writing.cost_requirement_status,
+        "budgetGate": {
+            "status": budget_gate_status,
+            "detail": budget_gate_detail,
+        },
+        "cost": cost,
+    }
+
+
+@app.post("/api/generate")
+async def generate_proposal(body: GenerateBody) -> Any:
+    """Draft full manuscript from frozen session outline (SSE)."""
+    from app.services.proposal_common import ProposalError
+
+    _session_or_404(body.demo_id)
+
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        return await _run_generate_proposal(demo_id=body.demo_id, bus=bus)
+
+    if not body.stream:
+        try:
+            return await _run(None)
+        except ProposalError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        except IntelligenceError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except LlmError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Generate failed demo_id=%s", body.demo_id)
+            raise HTTPException(502, f"Generate failed: {exc}") from exc
+
+    return await _sse_agent_stream(
+        agent="generate",
+        demo_id=body.demo_id,
+        steps=GENERATE_STEPS,
+        run_fn=_run,
+    )
+
+
+@app.get("/api/export/docx")
+@app.post("/api/export/docx")
+async def export_docx(demo_id: str) -> Response:
+    """Word export via production build_export_packets."""
+    from app.services.proposal_docx_export import (
+        ProposalDocxExportError,
+        build_export_packets,
+    )
+    from app.services.proposal_repository import aget_proposal_draft
+
+    sess = _session_or_404(demo_id)
+    if not sess.get("draft_ready"):
+        raise HTTPException(400, "Generate a proposal first before downloading Word")
+
+    draft = await aget_proposal_draft(demo_id)
+    if not draft or not draft.sections:
+        raise HTTPException(400, "No proposal draft to export")
+
+    meta = sess.get("rfp_meta") or {}
+    title = str(meta.get("title") or "Proposal")
+    rfp_text = str(sess.get("rfp_text") or "")
+    try:
+        packets = build_export_packets(
+            draft=draft,
+            rfp_title=title,
+            rfp_text=rfp_text,
+        )
+    except ProposalDocxExportError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Docx export failed demo_id=%s", demo_id)
+        raise HTTPException(502, f"Word export failed: {exc}") from exc
+
+    if packets.mode == "separate_cost" and packets.zip_bytes and packets.zip_filename:
+        encoded = quote(packets.zip_filename)
+        return Response(
+            content=packets.zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
+                ),
+                "X-Zo-Export-Mode": "separate_cost",
+            },
+        )
+
+    file = packets.files[0]
+    encoded = quote(file.filename)
+    return Response(
+        content=file.content,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
+            ),
+            "X-Zo-Export-Mode": "single",
+        },
+    )
 
 
 @app.post("/api/agent1")
@@ -377,9 +1328,6 @@ async def agent1(
             "plan": plan_dump,
             "rfp_text": doc.full_text(),
             "rfp_meta": meta,
-            "agent1_approved": False,
-            "agent2_done": False,
-            "agent2_approved": False,
             "run_id": run_id,
             "opportunity_raw": out_opportunity,
             "tool_trace": tool_trace,
@@ -471,40 +1419,9 @@ async def agent1(
     )
 
 
-@app.post("/api/approve")
-async def approve(body: Agent2Body) -> dict[str, Any]:
-    sess = _session_or_404(body.demo_id)
-    if not body.approved:
-        raise HTTPException(400, "Set approved=true after reviewing Agent 1")
-    sess["agent1_approved"] = True
-    logger.info("Agent 1 approved demo_id=%s", body.demo_id)
-    return {"demo_id": body.demo_id, "approved": True, "gate": "agent1"}
-
-
-@app.post("/api/approve2")
-async def approve2(body: Agent2Body) -> dict[str, Any]:
-    sess = _session_or_404(body.demo_id)
-    if not sess.get("agent2_done"):
-        raise HTTPException(400, "Run Agent 2 before approving")
-    if not body.approved:
-        raise HTTPException(400, "Set approved=true after reviewing Agent 2")
-    sess["agent2_approved"] = True
-    logger.info("Agent 2 approved demo_id=%s — outline unlocked", body.demo_id)
-    return {"demo_id": body.demo_id, "approved": True, "gate": "agent2"}
-
-
-class Agent2StreamBody(Agent2Body):
-    stream: bool = True
-
-
 @app.post("/api/agent2")
-async def agent2(body: Agent2StreamBody) -> Any:
+async def agent2(body: Agent2Body) -> Any:
     sess = _session_or_404(body.demo_id)
-    if not sess.get("agent1_approved") and not body.approved:
-        raise HTTPException(400, "Approve Agent 1 output before running Agent 2")
-    sess["agent1_approved"] = True
-    sess["agent2_approved"] = False
-    sess["agent2_done"] = False
 
     async def _run(bus: ProgressBus | None) -> dict[str, Any]:
         plan = ProposalExecutionPlan.model_validate(sess["plan"])
@@ -537,8 +1454,6 @@ async def agent2(body: Agent2StreamBody) -> Any:
             await bus.emit(step="assemble", label="Assemble strategy + delivery JSON", status="active")
         plan_dump = plan.model_dump(by_alias=True)
         sess["plan"] = plan_dump
-        sess["agent2_done"] = True
-        sess["agent2_approved"] = False
         cost = _cost_for(body.demo_id)
         try:
             clear_monthly_budget_cache()
@@ -579,25 +1494,21 @@ async def agent2(body: Agent2StreamBody) -> Any:
 
 class OutlineBody(BaseModel):
     demo_id: str
-    approved: bool = True
     stream: bool = True
 
 
 @app.post("/api/outline")
 async def outline(body: OutlineBody) -> Any:
     sess = _session_or_404(body.demo_id)
-    if not sess.get("agent2_approved") and not body.approved:
-        raise HTTPException(400, "Approve Agent 2 before building the section list")
-    if not sess.get("agent2_done"):
-        raise HTTPException(400, "Run Agent 2 before building the section list")
-    sess["agent2_approved"] = True
+    if not sess.get("plan"):
+        raise HTTPException(400, "No plan in session — run the pipeline first")
 
     async def _run(bus: ProgressBus | None) -> dict[str, Any]:
         plan = ProposalExecutionPlan.model_validate(sess["plan"])
         meta = dict(sess.get("rfp_meta") or {})
         rfp_text = str(sess.get("rfp_text") or "")
         if not rfp_text.strip():
-            raise IntelligenceError("Session missing RFP text — re-run Agent 1")
+            raise IntelligenceError("Session missing RFP text — re-run the pipeline")
         run_id = sess.get("run_id") or str(uuid.uuid4())
         logger.info("Outline start demo_id=%s mode=strict_rfp", body.demo_id)
 
@@ -654,8 +1565,6 @@ async def outline(body: OutlineBody) -> Any:
             node_name="checklister",
             user_email=_DEMO_USER_EMAIL,
         ):
-            # Same production completeness path as dynamic_section_planner
-            # (submission/closing excerpts + dual-sample) — not rfp[:25k].
             plan = await run_proposal_checklister(
                 plan=plan,
                 rfp_context=rfp_text,
@@ -695,6 +1604,7 @@ async def outline(body: OutlineBody) -> Any:
             section_count,
             cost.get("total_cost_usd"),
         )
+        writing = plan_dump.get("writing") or {}
         return {
             "demo_id": body.demo_id,
             "agent": "outline",
@@ -702,6 +1612,12 @@ async def outline(body: OutlineBody) -> Any:
                 "outlineMode": "strict_rfp",
                 "sections": sections,
                 "sectionCount": section_count,
+                "costRequirementStatus": writing.get("costRequirementStatus")
+                or writing.get("cost_requirement_status"),
+                "submissionConstraints": writing.get("submissionConstraints")
+                or writing.get("submission_constraints")
+                or [],
+                "ambiguities": writing.get("ambiguities") or [],
             },
             "plan": plan_dump,
             "cost": cost,

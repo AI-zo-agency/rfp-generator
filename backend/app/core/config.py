@@ -234,6 +234,8 @@ class Settings(BaseSettings):
     # for the current UTC calendar month, but only rows after
     # monthly_llm_budget_epoch (fresh counter from deploy). 0 disables.
     monthly_llm_budget_usd: float = 20.0
+    # Soft daily meter denominator for the sidebar (UTC day). Display only.
+    daily_llm_budget_usd: float = 5.0
     # ISO-8601 UTC. Spend before this timestamp does not count toward the cap.
     monthly_llm_budget_epoch: str = "2026-09-12T05:00:00+00:00"
 

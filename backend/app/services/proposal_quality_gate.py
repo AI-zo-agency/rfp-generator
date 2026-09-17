@@ -656,6 +656,25 @@ async def run_quality_gate(
     report = QualityGateReport()
     max_rounds = _configured_max_rounds()
 
+    if research and research.proposal_execution_plan is not None:
+        from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+        from app.services.proposal_submission_authority import outline_routing_quality_tickets
+
+        raw_plan = research.proposal_execution_plan
+        plan_obj: ProposalExecutionPlan | None = None
+        if isinstance(raw_plan, ProposalExecutionPlan):
+            plan_obj = raw_plan
+        elif isinstance(raw_plan, dict):
+            try:
+                plan_obj = ProposalExecutionPlan.model_validate(raw_plan)
+            except Exception:  # noqa: BLE001
+                plan_obj = None
+        for item in outline_routing_quality_tickets(plan_obj):
+            report.changes.append(
+                f"Outline routing ({item.get('code')}): {item.get('topic')} — "
+                f"{item.get('detail', '')[:200]}"
+            )
+
     async def _checkpoint() -> None:
         if ensure_not_stopped is not None:
             await ensure_not_stopped()

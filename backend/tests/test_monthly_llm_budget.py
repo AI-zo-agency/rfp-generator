@@ -16,9 +16,11 @@ def test_status_sums_proposal_and_finance_after_epoch(monkeypatch):
     )
 
     def fake_spend(start, end):
-        # Month window is epoch-clipped to Sep 12; week is Mon Sep 14.
+        # Month window is epoch-clipped to Sep 12; week is Mon Sep 14; day is Sep 15.
         if start.day == 12:
             return (7.5, 2.25, 9.75, [])
+        if start.day == 15:
+            return (0.4, 0.1, 0.5, [])
         return (1.0, 0.5, 1.5, [])
 
     monkeypatch.setattr(budget, "_period_spend", fake_spend)
@@ -39,6 +41,10 @@ def test_status_sums_proposal_and_finance_after_epoch(monkeypatch):
     assert status["week_spent_usd"] == pytest.approx(1.5)
     assert status["week_proposal_spent_usd"] == pytest.approx(1.0)
     assert status["week_financial_spent_usd"] == pytest.approx(0.5)
+    assert status["day_limit_usd"] == pytest.approx(5.0)
+    assert status["day_spent_usd"] == pytest.approx(0.5)
+    assert status["day_proposal_spent_usd"] == pytest.approx(0.4)
+    assert status["day_financial_spent_usd"] == pytest.approx(0.1)
     assert status["period_start"].startswith("2026-09-12")
 
 
@@ -106,10 +112,12 @@ def test_pre_epoch_spend_ignored(monkeypatch):
     )
     budget.clear_monthly_budget_cache()
     budget.get_monthly_budget_status()
-    assert len(starts) == 2
-    # Month window starts Sep 1 → clipped to epoch; week starts Mon Sep 14 (> epoch).
+    assert len(starts) == 3
+    # Month window starts Sep 1 → clipped to epoch; week starts Mon Sep 14 (> epoch);
+    # day starts Sep 15.
     assert starts[0].startswith("2026-09-12T05:00:00")
     assert starts[1].startswith("2026-09-14")
+    assert starts[2].startswith("2026-09-15")
 
 
 def test_week_window_is_monday_utc():
@@ -118,6 +126,14 @@ def test_week_window_is_monday_utc():
     assert start.weekday() == 0  # Monday
     assert start.day == 14
     assert (end - start).days == 7
+
+
+def test_day_window_is_utc_calendar_day():
+    now = budget.datetime(2026, 9, 15, 18, 30, tzinfo=budget.timezone.utc)
+    start, end = budget._day_window(now)
+    assert start.hour == 0
+    assert start.day == 15
+    assert (end - start).days == 1
 
 
 def test_status_includes_proposal_by_user(monkeypatch):

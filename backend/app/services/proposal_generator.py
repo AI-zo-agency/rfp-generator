@@ -3052,6 +3052,51 @@ async def _run_phase3_5_budget_inner(
         budget_before_drafting=bool(getattr(app_settings, "budget_before_drafting", False)),
         has_manuscript=has_manuscript,
     )
+    research = await aget_research_cache(rfp_id)
+    from app.services.proposal_submission_authority import phase35_budget_gate
+
+    plan = None
+    if research and research.proposal_execution_plan is not None:
+        raw_plan = research.proposal_execution_plan
+        if isinstance(raw_plan, ProposalExecutionPlan):
+            plan = raw_plan
+        elif isinstance(raw_plan, dict):
+            try:
+                plan = ProposalExecutionPlan.model_validate(raw_plan)
+            except Exception:  # noqa: BLE001
+                plan = None
+    gate, gate_detail = phase35_budget_gate(plan)
+    if gate == "skip":
+        logger.info("Phase 3.5 budget skipped for %s: %s", rfp_id, gate_detail)
+        step_trace(
+            "phase3_5_budget_skipped",
+            rfp_id=rfp_id,
+            reason=(gate_detail or "")[:300],
+        )
+        draft = await aget_proposal_draft(rfp_id)
+        if draft is None:
+            raise ProposalError(
+                "Phase 3 manuscript required before budget skip path.",
+                status_code=400,
+            )
+        from app.models.proposal import ProposalBudget
+
+        budget = (
+            research.budget
+            if research and research.budget
+            else ProposalBudget(rfpId=rfp_id)
+        )
+        return draft, research or ProposalResearchCache(rfpId=rfp_id), budget
+    if gate == "block":
+        step_trace(
+            "phase3_5_budget_blocked",
+            rfp_id=rfp_id,
+            reason=(gate_detail or "")[:300],
+        )
+        raise ProposalError(
+            gate_detail or "Budget generation blocked — unresolved RFP pricing ambiguity.",
+            status_code=422,
+        )
     try:
         with pipeline_step("generate_proposal_budget"):
             budget, research = await generate_proposal_budget(rfp_id)

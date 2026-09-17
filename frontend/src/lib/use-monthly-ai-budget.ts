@@ -3,9 +3,8 @@
 import { useEffect, useState } from "react";
 
 /**
- * Shared monthly AI budget snapshot for header badge + sidebar.
- * One in-flight fetch + one poll timer for the whole app (avoids double
- * /monthly-budget spam every 30s from TopBar + Sidebar).
+ * Shared monthly AI budget snapshot for the sidebar meter.
+ * One in-flight fetch + one poll timer for the whole app.
  */
 
 export type MonthlyAiBudgetSnapshot = {
@@ -19,6 +18,10 @@ export type MonthlyAiBudgetSnapshot = {
   weekSpentUsd: number;
   weekProposalSpentUsd: number;
   weekFinancialSpentUsd: number;
+  dayLimitUsd: number;
+  daySpentUsd: number;
+  dayProposalSpentUsd: number;
+  dayFinancialSpentUsd: number;
 };
 
 const POLL_MS = 120_000;
@@ -48,6 +51,10 @@ function parseBudget(data: Record<string, unknown>): MonthlyAiBudgetSnapshot | n
     weekSpentUsd: Number(data.week_spent_usd ?? 0),
     weekProposalSpentUsd: Number(data.week_proposal_spent_usd ?? 0),
     weekFinancialSpentUsd: Number(data.week_financial_spent_usd ?? 0),
+    dayLimitUsd: Number(data.day_limit_usd ?? 0),
+    daySpentUsd: Number(data.day_spent_usd ?? 0),
+    dayProposalSpentUsd: Number(data.day_proposal_spent_usd ?? 0),
+    dayFinancialSpentUsd: Number(data.day_financial_spent_usd ?? 0),
   };
 }
 
@@ -97,7 +104,7 @@ function ensurePolling() {
 
 /**
  * Subscribe to the shared monthly AI budget. First subscriber triggers load;
- * TopBar + Sidebar share one network request.
+ * Sidebar shares one network request.
  */
 export function useMonthlyAiBudget(): MonthlyAiBudgetSnapshot | null {
   const [budget, setBudget] = useState<MonthlyAiBudgetSnapshot | null>(

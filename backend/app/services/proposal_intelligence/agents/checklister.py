@@ -88,4 +88,7 @@ async def run_proposal_checklister(
         ),
         confidence=0.95 if kept_added else 1.0,
     )
+    from app.services.proposal_submission_authority import apply_submission_authority_pass
+
+    plan = await apply_submission_authority_pass(plan, rfp_context)
     return plan

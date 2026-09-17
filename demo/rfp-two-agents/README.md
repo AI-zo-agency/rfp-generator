@@ -1,14 +1,14 @@
-# RFP two-agent demo (+ strict section list)
+# RFP intelligence demo (outline → generate → Word)
 
-Client-call demo for Phase 2 Intelligence:
+Client-call demo for Phase 2 Intelligence plus a **frozen-outline** full proposal path:
 
-1. **Agent 1** — `opportunity_extract` (read RFP → structured opportunity)
-2. Human **approve**
-3. **Agent 2** — `strategy_delivery` (win strategy + delivery; **real Supermemory KB**)
-4. Human **approve**
-5. **Build section list** — `execution_plan` → `dynamic_section` (`strict_rfp`) → `checklister` → titles only
+1. Upload an RFP PDF **or** paste a PDF URL  
+2. Pipeline runs opportunity → strategy/delivery → strict section list  
+3. Review the **section list** (client-approved TOC)  
+4. Click **Generate proposal** (does **not** re-run the section planner)  
+5. **Download Word** for client review  
 
-Same production runners as `backend/app/services/proposal_intelligence/`. Prompts for Agents 1–2 live in this folder / Supabase.
+Same production runners as `backend/app/services/proposal_intelligence/` and drafting/export as the main app. Prompts for opportunity / strategy live in this folder / Supabase.
 
 ## Prerequisites
 
@@ -27,11 +27,49 @@ Open **http://127.0.0.1:8765**
 
 Uvicorn **reload** watches `demo/rfp-two-agents` and `backend/app` — Python edits restart the process automatically (in-memory demo sessions clear on reload). Prompt / HTML edits do not need a process restart.
 
-Agent runs stream **real step progress** over SSE (`text/event-stream`). The UI shows an execution-progress list + step count (not a fake percentage timer).
+Agent runs stream **real step progress** over SSE (`text/event-stream`).
 
 You do **not** need the main Next.js frontend or the normal `uvicorn app.main` API.
 
 `app` is a symlink to `../../backend/app` (plus `pyrightconfig.json`) so `from app…` resolves in the IDE and at runtime.
+
+## API
+
+| Endpoint | Role |
+|----------|------|
+| `POST /api/run` | **Primary** — PDF file *or* `rfp_url` → outline (SSE); auto-saves checkpoint |
+| `GET /api/checkpoints` | List saved outlines under `checkpoints/` |
+| `POST /api/checkpoints/load` | Restore a frozen outline into session (no re-planner) |
+| `POST /api/generate` | Frozen outline → writing briefs → Phase 3 → gated 3.5 → 3.6 (SSE) |
+| `GET/POST /api/export/docx?demo_id=` | Word (or ZIP if separate cost file) via `build_export_packets` |
+| `GET /api/health` | Models + keys configured |
+| `GET/PUT /api/prompts` | Agent 1 / 2 system prompts |
+| `GET /api/cost/{demo_id}` | Cumulative spend |
+
+Legacy per-hop routes (`/api/agent1`, `/api/agent2`, `/api/outline`) remain ungated for debugging; the UI calls `/api/run` (or **Load outline** from a checkpoint) then `/api/generate`.
+
+## Outline checkpoints
+
+Every successful `/api/run` writes:
+
+- `checkpoints/{demo_id}.json` — frozen execution plan + section list + RFP text/meta  
+- `checkpoints/{demo_id}.pdf` — PDF sidecar (when available)
+
+**Load outline** restores that exact TOC into the session. **Generate proposal** drafts **only those tabs** (no section planner / checklister re-run). Re-running **Run → sections** creates a *new* checkpoint; it does not overwrite an older file’s id.
+
+Files under `checkpoints/` are gitignored (local only).
+
+## Generate path (frozen outline)
+
+After `/api/run`, the session holds the execution plan + RFP text (+ PDF bytes). **Generate** then:
+
+1. Upserts an `rfpda-*` RFP (`goNoGo=go`) and optional PDF  
+2. Stamps every outline tab `protectFromCap=true` so Phase 3 lean/cap cannot drop Todd-approved titles  
+3. Runs `writing_briefs` + `derive_legacy_fields` → research cache (`outlineMode=strict_rfp`)  
+4. Phase 3 drafting → Phase 3.5 budget (**soft-skipped** when cost is absent/ambiguous) → Phase 3.6 senior editor  
+5. Marks `draft_ready` so export can download Word  
+
+Does **not** re-run opportunity / strategy / section planner / Align-to-RFP / Complete Scan.
 
 ## Live prompt edits
 
@@ -42,64 +80,30 @@ You do **not** need the main Next.js frontend or the normal `uvicorn app.main` A
 
 **One-time:** run migration `backend/supabase/migrations/20260914_demo_rfp_agent_prompts.sql` in the Supabase SQL editor. First read/save then seeds/updates that row from the disk files.
 
-Edit in the UI or editor — **Run auto-saves** the matching textarea. Each agent loads from Supabase when configured (else disk). No server restart for prompt text.
+Edit in the UI (collapsed “Edit agent prompts”) — **Run auto-saves** both textareas. Outline hops use production module prompts (not editable here).
 
-Hops 3–5 (outline) use production module prompts (not editable in this demo).
-
-## Agent 1 pipeline (demo only)
-
-Does not modify production `merged_passes`.
+## Pipeline
 
 ```
-PDF → RfpDoc
-    → Stage 1: section classification (section_classifier.py)
-    → Stage 2: evidence pack + LangExtract harvest (Flash, 4 passes: compliance/eval/facts/SOW)
-    → Stage 3: ONE Sonnet normalize + gap fill (tools max ~2)
-    → schema validate + deterministic validators (opportunity_validators.py)
-    → targeted Sonnet repair ONLY when triggers fire
-    → provenance merge (model + pack + LangExtract)
+PDF (upload or URL)
+  → Opportunity extract (LangExtract + Sonnet + validators)
+  → Strategy + delivery (Supermemory KB)
+  → execution_plan → dynamic_section(strict_rfp) → checklister
+  → nested section titles
+  → [client reviews TOC]
+  → Generate: seed RFP → writing_briefs → Phase 3 → 3.5 (gated) → 3.6
+  → Download Word
 ```
 
-| Piece | Role |
-|-------|------|
-| `langextract_harvest.py` | High-recall grounded extraction via OpenRouter Flash |
-| `section_classifier.py` | Section types + template-page detection |
-| `opportunity_validators.py` | Post-award/conditional mandatory, scoring guard, complexity rubric, contradictions |
-| `agent1_tools.py` | Orchestration, repair triggers, apply to plan |
-| `prompts/agent1_opportunity_system.txt` | Normalizer prompt (not a summarizer) |
-
-Optional deps: `pip install -r requirements.txt` (langextract) into repo `.venv`.
-
-### Regression (County RFQ 13180)
-
-No PDF is committed. Point at your local copy:
-
-```bash
-export RFP_FIXTURE_PDF=/path/to/RFQ13180.pdf
-../../.venv/bin/python run_fixture_compare.py
-../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
-```
-
-| Agent 2 | Production `run_strategy_delivery` + real Supermemory |
-| Outline | Production `run_execution_plan` + `run_dynamic_section_planner(strict_rfp)` + `run_proposal_checklister` (submission/closing completeness excerpts, same as Phase 2) |
-
-## Flow on the call
-
-1. Upload RFP PDF → **Run Agent 1** → show JSON + cost  
-2. Client feedback → tweak prompt → re-run Agent 1 if needed  
-3. **Approve → unlock Agent 2**  
-4. **Run Agent 2** → show strategy/delivery JSON + cumulative cost  
-5. **Approve → unlock section list**  
-6. **Build section list** → nested titles only (`writing.proposalOutline.sections`) + cumulative cost  
-
-Cost uses `llm_call_context` → `llm_call_log` / `get_rfp_cost_breakdown` (per-node USD + tokens). The same Supabase `llm_call_log` rows feed the main app sidebar **AI / Proposals** spend meter (not Finance). Outline nodes: `execution_plan`, `dynamic_section`, `checklister`.
-
-Session ids use the prefix `rfpda-` (not `demo-`) so production `llm_call_guards` does not treat them as ephemeral test burns.
-
-Redeploy the Railway demo staging service after merging for the live site to pick this up.
+Cost uses `llm_call_context` → `llm_call_log` / `get_rfp_cost_breakdown`. Session ids use prefix `rfpda-`.
 
 ## Sanity check
 
 ```bash
 ../../.venv/bin/python -c "import server; print('ok', server._load_prompt('agent1')[:40])"
+../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+Manual smoke: OSFM (or similar) PDF → section list → Generate → Download Word. If cost is `ambiguous`, generate still finishes; budget step shows skipped; DOCX has no invented Cost Sheet body.
+
+Redeploy the Railway demo staging service after merging for the live site to pick this up.

@@ -565,7 +565,8 @@ class AlignOutlineOnIntelligencePlanTests(unittest.TestCase):
 
 
 class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_format_extract_replaces_planner_llm(self) -> None:
+    async def test_format_extract_merges_with_planner_llm(self) -> None:
+        """Align forms/packet tabs must not replace the planner — merge after."""
         from unittest.mock import AsyncMock, patch
 
         from app.services.proposal_fulfill_rfp_structure import RfpSectionSpec
@@ -575,14 +576,38 @@ class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase)
         from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
         specs = [
-            RfpSectionSpec(rfp_title="Cover Letter", instructions="Required cover letter."),
-            RfpSectionSpec(rfp_title="Technical Approach", instructions="Required approach."),
+            RfpSectionSpec(
+                rfp_title="Offeror Information and Certification Sheet",
+                instructions="[DESIGNER NOTE: Attach signed PDF]",
+            ),
+            RfpSectionSpec(rfp_title="References", instructions="Required references."),
         ]
-        planner_llm = AsyncMock(side_effect=AssertionError("planner LLM must not run"))
+        planner_json = {
+            "sections": [
+                {
+                    "id": "rfp-sec-1",
+                    "title": "Technical Approach",
+                    "order": 1,
+                    "required": True,
+                    "evaluationWeight": 40,
+                },
+                {
+                    "id": "rfp-sec-2",
+                    "title": "Qualifications",
+                    "order": 2,
+                    "required": True,
+                    "evaluationWeight": 30,
+                },
+            ],
+            "confidence": 0.8,
+        }
+        planner_llm = AsyncMock(return_value=(planner_json, "test"))
         rfp = (
-            "Proposal shall include:\n"
-            "1. Cover Letter\n"
-            "2. Technical Approach\n"
+            "Proposal Content:\n"
+            "1. Technical Approach\n"
+            "2. Qualifications\n"
+            "3. Offeror Information and Certification Sheet\n"
+            "4. References\n"
         )
         with (
             patch(
@@ -607,11 +632,16 @@ class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase)
                 rfp_context=rfp,
                 rfp_meta={"title": "Test RFP"},
             )
-        planner_llm.assert_not_awaited()
+        planner_llm.assert_awaited()
         titles = [s.title for s in plan.writing.proposal_outline.sections]
-        self.assertIn("Cover Letter", titles)
         self.assertIn("Technical Approach", titles)
-        self.assertLess(titles.index("Cover Letter"), titles.index("Technical Approach"))
+        self.assertIn("Qualifications", titles)
+        # Align packet tabs merge in via align_outline_sections_to_rfp_specs
+        self.assertTrue(
+            any("Offeror Information" in t or "Certification" in t for t in titles),
+            titles,
+        )
+        self.assertIn("References", titles)
 
     async def test_empty_format_extract_falls_back_to_planner(self) -> None:
         from unittest.mock import AsyncMock, patch
@@ -673,6 +703,19 @@ class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase)
             RfpSectionSpec(rfp_title="Key Personnel"),
             RfpSectionSpec(rfp_title="Technical Approach"),
         ]
+        # Planner may emit a thin narrative set; Align merge must still keep
+        # Company Overview under strict_rfp (dropped as Zo-static in zo_template).
+        planner_json = {
+            "sections": [
+                {
+                    "id": "rfp-sec-1",
+                    "title": "Technical Approach",
+                    "order": 1,
+                    "required": True,
+                }
+            ],
+            "confidence": 0.8,
+        }
         with (
             patch(
                 "app.services.proposal_fulfill_rfp_structure.extract_rfp_submission_format_specs",
@@ -680,7 +723,7 @@ class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase)
             ),
             patch(
                 "app.services.proposal_intelligence.agents.dynamic_section_planner.safe_chat_json",
-                new=AsyncMock(side_effect=AssertionError("planner LLM must not run")),
+                new=AsyncMock(return_value=(planner_json, "test")),
             ),
             patch(
                 "app.services.proposal_closing_ledger.get_or_extract_closing_ledger",
