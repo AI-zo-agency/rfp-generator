@@ -261,6 +261,43 @@ class EdgeCaseGuardTests(unittest.TestCase):
         self.assertNotRegex(body, r"(?m)^\*\*Contact:\*\*\s*$")
         self.assertNotRegex(body, r"(?m)^1\.\s+City of Umatilla")
 
+    def test_rfp_outline_3x_tabs_are_not_harvested_as_reference_clients(self) -> None:
+        """OSFM-style 3.4.x requirement tabs must not become Client / Engagement."""
+        draft = ProposalDraft(
+            rfpId="rfpda-osfm",
+            sections=[
+                _sec(
+                    "rfp-sec-1",
+                    "3.4 OFFERS CONTENT REQUIREMENTS",
+                    "Narrative about offer structure.",
+                ),
+                _sec(
+                    "rfp-sec-2",
+                    "3.4.2 References — Reference Check Form (Attachment D)",
+                    "[MANUAL FILL: Sonja, pull reference contacts before submission.]",
+                ),
+                _sec(
+                    "rfp-sec-3",
+                    "3.4.4 Responsibility Inquiry (Attachment G)",
+                    "Form guidance.",
+                ),
+                _sec(
+                    "rfp-closing-attachment_d",
+                    "2 References, Reference Check Form (Attachment D)",
+                    "[MANUAL FILL: Sonja — verified contacts from ClientList.]",
+                ),
+            ],
+            updatedAt="2026-09-17T00:00:00Z",
+        )
+        out, logs = apply_edge_case_guards_to_draft(draft)
+        bodies = "\n".join(s.content or "" for s in out.sections)
+        self.assertNotIn("OFFERS CONTENT REQUIREMENTS", bodies)
+        self.assertNotIn("Responsibility Inquiry", bodies)
+        self.assertTrue(any("rebuilt References" in log for log in logs))
+        refs = next(s for s in out.sections if "reference" in (s.title or "").casefold())
+        self.assertIn("[MANUAL FILL: Sonja — client / engagement from ClientList]", refs.content or "")
+        self.assertNotIn("Past municipal / public-sector delivery", refs.content or "")
+
 
 if __name__ == "__main__":
     unittest.main()

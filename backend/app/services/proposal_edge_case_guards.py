@@ -514,52 +514,47 @@ def _extract_markdown_table_block(content: str) -> str | None:
     return None
 
 
-def _engagement_rows_from_case_studies(draft: ProposalDraft) -> list[str]:
-    """Build table data rows from Section 3 case-study titles — never invent contacts."""
-    rows: list[str] = []
+def _case_study_engagement_names(draft: ProposalDraft) -> list[str]:
+    """Client/engagement labels from MasterTemplate Section 3 case studies only.
+
+    Only ``section-3-*`` ids count. Matching titles like ``3.4.2 References``
+    is wrong — those are RFP outline tabs, not case studies (OSFM shipped
+    outline headings as reference clients).
+    """
+    names: list[str] = []
+    seen: set[str] = set()
     for section in draft.sections:
         sid = section.id or ""
-        title = (section.title or "").strip()
-        if not (
-            sid.startswith("section-3-")
-            or re.match(r"^\s*3\.\d+", title)
-        ):
+        if not sid.startswith("section-3-"):
             continue
+        title = (section.title or "").strip()
         # "3.1 — City of Umatilla Digital Campaign 2006"
         name = re.sub(r"^\s*\d+(?:\.\d+)*\s*[.:—–\-]\s*", "", title).strip()
         if not name or len(name) < 4:
             continue
-        if "overview" in name.casefold() or "our work" in name.casefold():
+        name_cf = name.casefold()
+        if "overview" in name_cf or "our work" in name_cf:
             continue
-        rows.append(
-            f"| {name} | Past municipal / public-sector delivery "
-            f"(see Section 3) | {_REF_CONTACT_FILL} | {_REF_CONTACT_FILL} |"
-        )
-        if len(rows) >= 5:
-            break
-    return rows
-
-
-def _engagement_names_from_case_studies(draft: ProposalDraft) -> list[str]:
-    names: list[str] = []
-    for section in draft.sections:
-        sid = section.id or ""
-        title = (section.title or "").strip()
-        if not (
-            sid.startswith("section-3-")
-            or re.match(r"^\s*3\.\d+", title)
-        ):
+        if name_cf in seen:
             continue
-        name = re.sub(r"^\s*\d+(?:\.\d+)*\s*[.:—–\-]\s*", "", title).strip()
-        if not name or len(name) < 4:
-            continue
-        if "overview" in name.casefold() or "our work" in name.casefold():
-            continue
-        names.append(name)
+        seen.add(name_cf)
+        names.append(name[:140])
         if len(names) >= 5:
             break
     return names
 
+
+def _engagement_rows_from_case_studies(draft: ProposalDraft) -> list[str]:
+    """Build table data rows from Section 3 case-study titles — never invent contacts."""
+    return [
+        f"| {name} | Past municipal / public-sector delivery "
+        f"(see Section 3) | {_REF_CONTACT_FILL} | {_REF_CONTACT_FILL} |"
+        for name in _case_study_engagement_names(draft)
+    ]
+
+
+def _engagement_names_from_case_studies(draft: ProposalDraft) -> list[str]:
+    return _case_study_engagement_names(draft)
 
 def _references_tab_needs_table(content: str) -> bool:
     """True when References lacks a usable contact/engagement markdown table."""

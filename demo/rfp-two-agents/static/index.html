@@ -339,10 +339,11 @@
         <option value="">— none yet —</option>
       </select>
       <button type="button" class="secondary" id="loadCheckpoint">Load outline</button>
+      <button type="button" id="continuePipeline" disabled>Continue</button>
       <button type="button" class="secondary" id="refreshCheckpoints">Refresh</button>
     </div>
     <p class="meta-line" style="margin:0.4rem 0 0">
-      Load a saved list, then Generate below — does not re-run the section planner.
+      Load a saved list, then Generate — or Continue to resume from the last checkpoint (skips re-draft when a manuscript already exists).
     </p>
 
     <div class="run-progress" id="prog" aria-live="polite" aria-busy="false" hidden>
@@ -376,6 +377,7 @@
     let lastOut = null;
     let draftReady = false;
     let viewMode = "readable";
+    let pipelineBusy = false;
 
     const $ = (id) => document.getElementById(id);
 
@@ -392,8 +394,10 @@
         !!demoId &&
         Array.isArray(lastOut && lastOut.sections) &&
         lastOut.sections.length > 0;
-      $("generate").disabled = !hasSections;
-      $("downloadDocx").disabled = !draftReady;
+      const hasCkpt = !!($("checkpointSelect") && $("checkpointSelect").value);
+      $("generate").disabled = pipelineBusy || !hasSections;
+      $("continuePipeline").disabled = pipelineBusy || !(hasCkpt || hasSections);
+      $("downloadDocx").disabled = pipelineBusy || !draftReady;
     }
 
     function outlineListHtml(sections, depth) {
@@ -488,6 +492,7 @@
         sel.innerHTML = "";
         if (!rows.length) {
           sel.innerHTML = '<option value="">— none yet —</option>';
+          syncGenerateButtons();
           return;
         }
         rows.forEach((c) => {
@@ -502,8 +507,10 @@
           sel.appendChild(opt);
         });
         if (keep && rows.some((c) => c.demo_id === keep)) sel.value = keep;
+        syncGenerateButtons();
       } catch (e) {
         sel.innerHTML = '<option value="">— load failed —</option>';
+        syncGenerateButtons();
       }
     }
 
@@ -754,6 +761,7 @@
       $("status").classList.remove("err");
       $("generateMeta").textContent = "";
       $("run").disabled = true;
+      pipelineBusy = true;
       draftReady = false;
       lastOut = null;
       renderOut();
@@ -797,12 +805,14 @@
         $("status").textContent = String(e.message || e);
         $("status").classList.add("err");
       } finally {
+        pipelineBusy = false;
         $("run").disabled = false;
         syncGenerateButtons();
       }
     };
 
     $("refreshCheckpoints").onclick = () => loadCheckpointList();
+    $("checkpointSelect").onchange = () => syncGenerateButtons();
 
     $("loadCheckpoint").onclick = async () => {
       const id = $("checkpointSelect").value;
@@ -823,12 +833,13 @@
         if (!res.ok) throw new Error(data.detail || "Load failed");
         demoId = data.demo_id;
         lastOut = data.output || {};
-        draftReady = false;
+        draftReady = !!data.draft_ready;
         $("generateMeta").textContent = "";
         renderOut();
         $("status").textContent =
           "Loaded checkpoint · " + (lastOut.sectionCount || 0) +
-          " sections (frozen). Generate uses this list only.";
+          " sections (frozen)" +
+          (draftReady ? ". Proposal already ready — Download Word." : ". Generate uses this list only.");
         setSession();
       } catch (e) {
         $("status").textContent = String(e.message || e);
@@ -838,26 +849,33 @@
       }
     };
 
-    $("generate").onclick = async () => {
-      if (!demoId) return;
-      $("status").textContent = "Generating proposal from frozen outline…";
+    async function runGenerateOrContinue(opts) {
+      const id = opts.demoId;
+      const url = opts.url;
+      const label = opts.label;
+      if (!id && url.indexOf("/continue") < 0) return;
+      $("status").textContent = label;
       $("status").classList.remove("err");
       $("generateMeta").textContent = "";
-      $("generate").disabled = true;
+      pipelineBusy = true;
       $("run").disabled = true;
       draftReady = false;
       syncGenerateButtons();
       prog.start(DEFAULT_GENERATE);
       try {
-        const res = await fetch("/api/generate", {
+        const body = { stream: true };
+        if (id) body.demo_id = id;
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ demo_id: demoId, stream: true }),
+          body: JSON.stringify(body),
         });
         const data = await readSse(res, (evt) => {
           if (evt.type === "hello" && evt.steps) prog.start(evt.steps);
           if (evt.type === "step") prog.update(evt);
+          if (evt.type === "hello" && evt.demo_id) demoId = evt.demo_id;
         });
+        if (data.demo_id) demoId = data.demo_id;
         draftReady = !!data.draft_ready;
         $("cost").innerHTML = fmtCost(data.cost);
         prog.stop(true);
@@ -865,6 +883,8 @@
         let meta =
           (data.sectionCount || 0) + " drafted sections · cost " +
           (data.costRequirementStatus || "—");
+        if (data.resumed) meta += " · resumed (skipped re-draft)";
+        if (data.alreadyComplete) meta += " · already complete (no re-run)";
         if (gate.status === "skipped") {
           meta += " · budget skipped" + (gate.detail ? ": " + gate.detail : "");
         } else if (gate.status === "ran") {
@@ -878,9 +898,33 @@
         $("status").textContent = String(e.message || e);
         $("status").classList.add("err");
       } finally {
+        pipelineBusy = false;
         $("run").disabled = false;
         syncGenerateButtons();
       }
+    }
+
+    $("continuePipeline").onclick = async () => {
+      const id = $("checkpointSelect").value || demoId;
+      if (!id) {
+        $("status").textContent = "Pick a saved checkpoint first";
+        $("status").classList.add("err");
+        return;
+      }
+      await runGenerateOrContinue({
+        demoId: id,
+        url: "/api/continue",
+        label: "Continuing from checkpoint…",
+      });
+    };
+
+    $("generate").onclick = async () => {
+      if (!demoId) return;
+      await runGenerateOrContinue({
+        demoId: demoId,
+        url: "/api/generate",
+        label: "Generating proposal from frozen outline…",
+      });
     };
 
     $("downloadDocx").onclick = async () => {

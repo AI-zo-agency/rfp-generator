@@ -64,6 +64,7 @@ from checkpoint_store import (  # noqa: E402
     list_checkpoints,
     load_outline_checkpoint,
     save_outline_checkpoint,
+    set_checkpoint_draft_ready,
 )
 from progress_bus import (  # noqa: E402
     AGENT1_STEPS,
@@ -236,6 +237,75 @@ def _plan_from_session(sess: dict[str, Any]) -> ProposalExecutionPlan:
     if not raw:
         raise HTTPException(400, "Session has no frozen outline — run the pipeline first")
     return ProposalExecutionPlan.model_validate(raw)
+
+
+def _draft_has_content(draft: Any) -> bool:
+    """True when a persisted draft has at least one non-empty section body."""
+    if not draft:
+        return False
+    sections = getattr(draft, "sections", None) or []
+    return any((getattr(s, "content", None) or "").strip() for s in sections)
+
+
+_PLACEHOLDER_EXPORT_TITLES = frozenset(
+    {"", "demo rfp", "proposal", "untitled", "rfp"}
+)
+
+
+def _export_title_from_session(sess: dict[str, Any]) -> str:
+    """Prefer a real RFP name over the demo form placeholder.
+
+    Form TITLE defaults to "Demo RFP"; the uploaded PDF stem is usually the
+    actual solicitation name (e.g. Wildfire Preparedness…).
+    """
+    meta = sess.get("rfp_meta") or {}
+    title = str(meta.get("title") or "").strip()
+    pdf_stem = Path(str(sess.get("pdf_filename") or "")).stem.strip()
+    if title.casefold() not in _PLACEHOLDER_EXPORT_TITLES:
+        return title
+    if pdf_stem.casefold() not in _PLACEHOLDER_EXPORT_TITLES:
+        return pdf_stem
+    return title or pdf_stem or "Proposal"
+
+
+def _research_looks_complete(research: Any) -> bool:
+    """Phase 4 wrote presubmit_review → generate already finished once."""
+    return research is not None and getattr(research, "presubmit_review", None) is not None
+
+
+async def _sync_draft_ready_from_store(sess: dict[str, Any], demo_id: str) -> bool:
+    """Recover draft_ready after reload when draft+Phase-4 already exist in DB."""
+    if sess.get("draft_ready"):
+        return True
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        aget_research_cache,
+    )
+
+    draft = await aget_proposal_draft(demo_id)
+    research = await aget_research_cache(demo_id)
+    if _draft_has_content(draft) and _research_looks_complete(research):
+        sess["draft_ready"] = True
+        try:
+            set_checkpoint_draft_ready(demo_id, ready=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to persist draft_ready for %s", demo_id)
+        logger.info("Recovered draft_ready from store demo_id=%s", demo_id)
+        return True
+    return False
+
+
+def _ensure_session(demo_id: str) -> dict[str, Any]:
+    """In-memory session, or restore from checkpoint after server reload."""
+    if demo_id in _SESSIONS:
+        return _SESSIONS[demo_id]
+    try:
+        _restore_session_from_checkpoint(demo_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(404, f"Unknown demo session: {demo_id}") from exc
+    return _session_or_404(demo_id)
 
 
 async def _upsert_demo_rfp_row(sess: dict[str, Any], demo_id: str) -> None:
@@ -467,6 +537,14 @@ class Agent2Body(BaseModel):
 class GenerateBody(BaseModel):
     demo_id: str
     stream: bool = True
+    resume: bool = False
+
+
+class ContinueBody(BaseModel):
+    """Resume generate from a saved outline checkpoint (optional demo_id → latest)."""
+
+    demo_id: str | None = None
+    stream: bool = True
 
 
 class LoadCheckpointBody(BaseModel):
@@ -600,11 +678,10 @@ async def sessions_load(body: LoadCheckpointBody) -> dict[str, Any]:
     }
 
 
-@app.post("/api/checkpoints/load")
-async def checkpoints_load(body: LoadCheckpointBody) -> dict[str, Any]:
-    """Restore a saved outline into the in-memory session (no re-planner)."""
+def _restore_session_from_checkpoint(demo_id: str) -> dict[str, Any]:
+    """Load outline checkpoint into _SESSIONS. Returns UI payload fields."""
     try:
-        ckpt = load_outline_checkpoint(body.demo_id)
+        ckpt = load_outline_checkpoint(demo_id)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -628,19 +705,21 @@ async def checkpoints_load(body: LoadCheckpointBody) -> dict[str, Any]:
         "provenance": {},
         "pdf_bytes": ckpt.get("pdf_bytes"),
         "pdf_filename": ckpt.get("pdf_filename") or "rfp.pdf",
-        "draft_ready": False,
+        "draft_ready": bool(ckpt.get("draft_ready")),
         "research_seeded": False,
         "from_checkpoint": True,
     }
     logger.info(
-        "Checkpoint loaded demo_id=%s sections=%s",
+        "Checkpoint loaded demo_id=%s sections=%s draft_ready=%s",
         demo_id,
         section_count,
+        bool(ckpt.get("draft_ready")),
     )
     return {
         "demo_id": demo_id,
         "from_checkpoint": True,
         "saved_at": ckpt.get("saved_at"),
+        "draft_ready": bool(ckpt.get("draft_ready")),
         "output": {
             "outlineMode": "strict_rfp",
             "sections": sections,
@@ -653,6 +732,12 @@ async def checkpoints_load(body: LoadCheckpointBody) -> dict[str, Any]:
             "ambiguities": writing.get("ambiguities") or [],
         },
     }
+
+
+@app.post("/api/checkpoints/load")
+async def checkpoints_load(body: LoadCheckpointBody) -> dict[str, Any]:
+    """Restore a saved outline into the in-memory session (no re-planner)."""
+    return _restore_session_from_checkpoint(body.demo_id)
 
 
 async def _run_full_pipeline(
@@ -957,11 +1042,13 @@ async def _run_generate_proposal(
     *,
     demo_id: str,
     bus: ProgressBus | None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Frozen outline → Phase 2 corpus → 3 → 3.5 → closing → structure → 3.6 → P4 → finalize.
 
-    Hard gates match production: empty retrieval / blocked validation → 422;
-    budget ambiguity → 422 (absent cost still skips Phase 3.5).
+    Hard gates: empty retrieval / blocked validation → 422.
+    Cost absent or ambiguous → soft-skip Phase 3.5 (continue narrative + Word export).
+    resume=True + existing draft/research → skip re-seed / Phase 3, soft at budget gate.
     """
     from app.services.proposal_common import ProposalError
     from app.services.proposal_fulfill_rfp_gaps import run_build_finalize_pass
@@ -996,32 +1083,109 @@ async def _run_generate_proposal(
             total=total,
         )
 
-    plan = await _seed_demo_rfp_for_generate(sess, demo_id, bus=bus)
+    existing_draft = await aget_proposal_draft(demo_id)
+    existing_research = await aget_research_cache(demo_id)
 
-    await _step("phase3", "Phase 3 · draft sections", 3, "active")
-    with llm_call_context(
-        rfp_id=demo_id,
-        run_id=run_id,
-        node_name="phase3_drafting",
-        user_email=_DEMO_USER_EMAIL,
-    ):
-        draft, research = await run_phase3_drafting(demo_id)
-    section_count = len(draft.sections) if draft else 0
-    await _step(
-        "phase3",
-        "Phase 3 · draft sections",
-        3,
-        "done",
-        detail=f"{section_count} sections",
+    # Already finished once (survives reload via checkpoint flag or Phase-4 review).
+    already_done = bool(sess.get("draft_ready")) or (
+        resume
+        and _draft_has_content(existing_draft)
+        and _research_looks_complete(existing_research)
     )
+    if already_done and _draft_has_content(existing_draft):
+        logger.info(
+            "Generate already complete — skipping re-run demo_id=%s sections=%s",
+            demo_id,
+            len(existing_draft.sections),
+        )
+        for i, row in enumerate(GENERATE_STEPS):
+            await _step(row["step"], row["label"], i, "done", detail="already complete")
+        sess["draft_ready"] = True
+        try:
+            set_checkpoint_draft_ready(demo_id, ready=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to persist draft_ready for %s", demo_id)
+        writing = (sess.get("plan") or {}).get("writing") or {}
+        plan = _plan_from_session(sess)
+        cost = _cost_for(demo_id)
+        return {
+            "demo_id": demo_id,
+            "agent": "generate",
+            "draft_ready": True,
+            "sectionCount": len(existing_draft.sections),
+            "resumed": True,
+            "alreadyComplete": True,
+            "costRequirementStatus": writing.get("costRequirementStatus")
+            or writing.get("cost_requirement_status")
+            or plan.writing.cost_requirement_status,
+            "budgetGate": {"status": "skipped", "detail": "already complete"},
+            "cost": cost,
+        }
+
+    can_resume = (
+        resume
+        and _draft_has_content(existing_draft)
+        and existing_research is not None
+    )
+
+    if can_resume:
+        logger.info(
+            "Generate resume skipping Phase 3 demo_id=%s sections=%s",
+            demo_id,
+            len(existing_draft.sections),
+        )
+        for i, row in enumerate(GENERATE_STEPS[:4]):
+            await _step(row["step"], row["label"], i, "done", detail="resumed")
+        plan = _plan_from_session(sess)
+        draft = existing_draft
+        research = existing_research
+        section_count = len(draft.sections)
+    else:
+        if resume:
+            logger.info(
+                "Generate resume fell through to full path demo_id=%s "
+                "has_draft=%s has_research=%s",
+                demo_id,
+                _draft_has_content(existing_draft),
+                existing_research is not None,
+            )
+        plan = await _seed_demo_rfp_for_generate(sess, demo_id, bus=bus)
+
+        await _step("phase3", "Phase 3 · draft sections", 3, "active")
+        with llm_call_context(
+            rfp_id=demo_id,
+            run_id=run_id,
+            node_name="phase3_drafting",
+            user_email=_DEMO_USER_EMAIL,
+        ):
+            draft, research = await run_phase3_drafting(demo_id)
+        section_count = len(draft.sections) if draft else 0
+        await _step(
+            "phase3",
+            "Phase 3 · draft sections",
+            3,
+            "done",
+            detail=f"{section_count} sections",
+        )
 
     budget_gate_status = "ran"
     budget_gate_detail = ""
     gate, gate_detail = phase35_budget_gate(plan)
     await _step("phase3_5", "Phase 3.5 · budget (cost-gated)", 4, "active")
-    if gate == "skip":
+    if gate in {"skip", "block"}:
+        # Soft-skip: ambiguity must not kill narrative generate / Word export.
         budget_gate_status = "skipped"
-        budget_gate_detail = gate_detail or "No confirmed cost submittal"
+        budget_gate_detail = gate_detail or (
+            "Cost requirement ambiguous"
+            if gate == "block"
+            else "No confirmed cost submittal"
+        )
+        logger.warning(
+            "Demo Phase 3.5 soft-skipped demo_id=%s gate=%s detail=%s",
+            demo_id,
+            gate,
+            budget_gate_detail[:200],
+        )
         await _step(
             "phase3_5",
             "Phase 3.5 · budget (cost-gated)",
@@ -1029,21 +1193,34 @@ async def _run_generate_proposal(
             "skipped",
             detail=budget_gate_detail,
         )
-    elif gate == "block":
-        raise ProposalError(
-            gate_detail
-            or "Budget generation blocked — unresolved RFP pricing ambiguity.",
-            status_code=422,
-        )
     else:
-        with llm_call_context(
-            rfp_id=demo_id,
-            run_id=run_id,
-            node_name="phase3_5_budget",
-            user_email=_DEMO_USER_EMAIL,
-        ):
-            draft, research, _budget = await run_phase3_5_budget(demo_id)
-        await _step("phase3_5", "Phase 3.5 · budget (cost-gated)", 4, "done")
+        try:
+            with llm_call_context(
+                rfp_id=demo_id,
+                run_id=run_id,
+                node_name="phase3_5_budget",
+                user_email=_DEMO_USER_EMAIL,
+            ):
+                draft, research, _budget = await run_phase3_5_budget(demo_id)
+            await _step("phase3_5", "Phase 3.5 · budget (cost-gated)", 4, "done")
+        except ProposalError as exc:
+            if getattr(exc, "status_code", 400) == 422:
+                budget_gate_status = "skipped"
+                budget_gate_detail = str(exc)
+                logger.warning(
+                    "Demo Phase 3.5 422 soft-skip demo_id=%s: %s",
+                    demo_id,
+                    budget_gate_detail[:200],
+                )
+                await _step(
+                    "phase3_5",
+                    "Phase 3.5 · budget (cost-gated)",
+                    4,
+                    "skipped",
+                    detail=budget_gate_detail,
+                )
+            else:
+                raise
 
     # Closing + submission + structure (same helper as generate_full_proposal).
     draft = await aget_proposal_draft(demo_id) or draft
@@ -1123,6 +1300,10 @@ async def _run_generate_proposal(
     await _step("ready_export", "Ready for Word export", 10, "done")
 
     sess["draft_ready"] = True
+    try:
+        set_checkpoint_draft_ready(demo_id, ready=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to persist draft_ready for %s", demo_id)
     writing = (sess.get("plan") or {}).get("writing") or {}
     cost = _cost_for(demo_id)
     try:
@@ -1130,17 +1311,19 @@ async def _run_generate_proposal(
     except Exception:  # noqa: BLE001
         pass
     logger.info(
-        "Generate done demo_id=%s sections=%s budget=%s cost_usd=%s",
+        "Generate done demo_id=%s sections=%s budget=%s cost_usd=%s resume=%s",
         demo_id,
         section_count,
         budget_gate_status,
         cost.get("total_cost_usd"),
+        can_resume,
     )
     return {
         "demo_id": demo_id,
         "agent": "generate",
         "draft_ready": True,
         "sectionCount": section_count,
+        "resumed": can_resume,
         "costRequirementStatus": writing.get("costRequirementStatus")
         or writing.get("cost_requirement_status")
         or plan.writing.cost_requirement_status,
@@ -1160,7 +1343,9 @@ async def generate_proposal(body: GenerateBody) -> Any:
     _session_or_404(body.demo_id)
 
     async def _run(bus: ProgressBus | None) -> dict[str, Any]:
-        return await _run_generate_proposal(demo_id=body.demo_id, bus=bus)
+        return await _run_generate_proposal(
+            demo_id=body.demo_id, bus=bus, resume=body.resume
+        )
 
     if not body.stream:
         try:
@@ -1183,6 +1368,52 @@ async def generate_proposal(body: GenerateBody) -> Any:
     )
 
 
+@app.post("/api/continue")
+async def continue_from_checkpoint(body: ContinueBody) -> Any:
+    """Load last (or named) outline checkpoint, then resume generate.
+
+    If a draft already exists for that demo_id, skips re-seed / Phase 3 and
+    continues from the budget gate (soft-skip on cost ambiguity).
+    If generate already finished (Phase 4 present), returns immediately.
+    """
+    from app.services.proposal_common import ProposalError
+
+    demo_id = (body.demo_id or "").strip()
+    if not demo_id:
+        rows = list_checkpoints()
+        if not rows:
+            raise HTTPException(404, "No saved checkpoint to continue from")
+        demo_id = str(rows[0]["demo_id"])
+        logger.info("Continue using latest checkpoint demo_id=%s", demo_id)
+
+    _restore_session_from_checkpoint(demo_id)
+    sess = _SESSIONS[demo_id]
+    await _sync_draft_ready_from_store(sess, demo_id)
+
+    async def _run(bus: ProgressBus | None) -> dict[str, Any]:
+        return await _run_generate_proposal(demo_id=demo_id, bus=bus, resume=True)
+
+    if not body.stream:
+        try:
+            return await _run(None)
+        except ProposalError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        except IntelligenceError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except LlmError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Continue failed demo_id=%s", demo_id)
+            raise HTTPException(502, f"Continue failed: {exc}") from exc
+
+    return await _sse_agent_stream(
+        agent="generate",
+        demo_id=demo_id,
+        steps=GENERATE_STEPS,
+        run_fn=_run,
+    )
+
+
 @app.get("/api/export/docx")
 @app.post("/api/export/docx")
 async def export_docx(demo_id: str) -> Response:
@@ -1193,17 +1424,28 @@ async def export_docx(demo_id: str) -> Response:
     )
     from app.services.proposal_repository import aget_proposal_draft
 
-    sess = _session_or_404(demo_id)
-    if not sess.get("draft_ready"):
-        raise HTTPException(400, "Generate a proposal first before downloading Word")
+    sess = _ensure_session(demo_id)
+    await _sync_draft_ready_from_store(sess, demo_id)
 
     draft = await aget_proposal_draft(demo_id)
     if not draft or not draft.sections:
-        raise HTTPException(400, "No proposal draft to export")
+        raise HTTPException(400, "No proposal draft to export — Generate or Continue first")
+    if not sess.get("draft_ready"):
+        # Draft exists (e.g. mid-pipeline stop) — still allow Word if content present.
+        if not _draft_has_content(draft):
+            raise HTTPException(400, "Generate a proposal first before downloading Word")
+        sess["draft_ready"] = True
 
     meta = sess.get("rfp_meta") or {}
-    title = str(meta.get("title") or "Proposal")
+    title = _export_title_from_session(sess)
     rfp_text = str(sess.get("rfp_text") or "")
+    logger.info(
+        "Docx export demo_id=%s title=%s form_title=%s pdf=%s",
+        demo_id,
+        title,
+        meta.get("title"),
+        sess.get("pdf_filename"),
+    )
     try:
         packets = build_export_packets(
             draft=draft,

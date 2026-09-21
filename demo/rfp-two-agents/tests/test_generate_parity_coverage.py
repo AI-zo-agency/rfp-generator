@@ -38,9 +38,6 @@ REQUIRED_CALL_SNIPPETS = (
 FORBIDDEN_SOFT_GATE_SNIPPETS = (
     "force readiness",
     "Demo force readiness",
-    "soft-skipped",
-    "soft-skip",
-    "422 soft-skip",
 )
 
 

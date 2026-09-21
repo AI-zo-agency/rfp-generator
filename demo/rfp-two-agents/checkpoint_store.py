@@ -57,6 +57,7 @@ def save_outline_checkpoint(
         "pdf_filename": pdf_filename or "",
         "has_pdf": bool(pdf_bytes),
         "opportunity_raw": opportunity_raw or {},
+        "draft_ready": False,
     }
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     if pdf_bytes:
@@ -122,4 +123,19 @@ def load_outline_checkpoint(demo_id: str) -> dict[str, Any]:
         "pdf_filename": str(data.get("pdf_filename") or "rfp.pdf"),
         "opportunity_raw": data.get("opportunity_raw") or {},
         "saved_at": data.get("saved_at"),
+        "draft_ready": bool(data.get("draft_ready")),
     }
+
+
+def set_checkpoint_draft_ready(demo_id: str, *, ready: bool = True) -> None:
+    """Persist generate-complete so Continue/export survive server reload."""
+    path = checkpoint_json_path(demo_id)
+    if not path.is_file():
+        logger.warning("set_checkpoint_draft_ready: no file for %s", demo_id)
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["draft_ready"] = bool(ready)
+    if ready:
+        data["draft_ready_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    logger.info("Checkpoint draft_ready=%s demo_id=%s", ready, demo_id)
