@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import type { Page } from "playwright";
-import { createApiClient, type JustWinApiClient } from "./justwin-api";
+import { createApiClient, dueDateFromJustWinPayload, type JustWinApiClient, type RawLead } from "./justwin-api";
 
 const PDF_ROOT =
   process.env.PDF_STORAGE_PATH ?? path.join(process.cwd(), "storage", "pdfs");
@@ -16,6 +16,25 @@ function saveBuffer(externalId: string, buffer: Buffer): string | undefined {
   const target = path.join(dir, "rfp.pdf");
   fs.writeFileSync(target, buffer);
   return target;
+}
+
+function shouldSkipPortalScrape(url: string): boolean {
+  const host = (() => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+  return [
+    "bonfirehub.com",
+    "bonfire",
+    "opengov.com",
+    "bidnetdirect.com",
+    "bidnet",
+    "planetbids.com",
+    "procure.org",
+  ].some((marker) => host.includes(marker));
 }
 
 function scoreName(name: string): number {
@@ -40,22 +59,19 @@ function scoreName(name: string): number {
 export async function downloadSolicitationPdf(
   client: JustWinApiClient,
   externalId: string
-): Promise<string | undefined> {
+): Promise<{ path?: string; dueDate: string }> {
   const leadRes = await client.page.request.get(`${API_ROOT}/leads/${externalId}`, {
     headers: client.headers,
   });
   if (!leadRes.ok()) {
     console.log(`[justwin-sync] ${externalId}: lead not found`);
-    return undefined;
+    return { dueDate: "" };
   }
-  const lead = (await leadRes.json()) as {
-    target?: string;
-    documentless?: boolean;
-    readonly_values?: { originating_url?: string; target_name?: string };
-  };
+  const lead = (await leadRes.json()) as RawLead;
+  const dueDate = dueDateFromJustWinPayload(lead);
   if (lead.documentless || !lead.target) {
     console.log(`[justwin-sync] ${externalId}: no solicitation document`);
-    return undefined;
+    return { dueDate };
   }
 
   const viewRes = await client.page.request.get(
@@ -64,12 +80,12 @@ export async function downloadSolicitationPdf(
   );
   if (!viewRes.ok()) {
     console.log(`[justwin-sync] ${externalId}: no solicitation document`);
-    return undefined;
+    return { dueDate };
   }
   const s3Url = ((await viewRes.json()) as { url?: string }).url;
   if (!s3Url) {
     console.log(`[justwin-sync] ${externalId}: no solicitation document`);
-    return undefined;
+    return { dueDate };
   }
 
   const pdfResponse = await client.page.request.get(s3Url);
@@ -80,13 +96,13 @@ export async function downloadSolicitationPdf(
   let bestLabel = "justwin";
 
   const originating = (lead.readonly_values?.originating_url || "").trim();
-  if (originating && !/bonfire/i.test(originating)) {
+  if (originating && !shouldSkipPortalScrape(originating)) {
     try {
       await client.page.goto(originating, {
         waitUntil: "domcontentloaded",
-        timeout: 90000,
+        timeout: 12000,
       });
-      await client.page.waitForTimeout(2500);
+      await client.page.waitForTimeout(400);
       const anchors = await client.page.locator("a").evaluateAll((els) =>
         els.map((a) => ({
           text: (a.textContent || "").trim().slice(0, 200),
@@ -107,7 +123,7 @@ export async function downloadSolicitationPdf(
         if (!text.toLowerCase().includes(".pdf") && !href.includes("extract.aspx")) {
           continue;
         }
-        const res = await client.page.request.get(href, { timeout: 90000 });
+        const res = await client.page.request.get(href, { timeout: 20000 });
         if (!res.ok()) continue;
         const buf = Buffer.from(await res.body());
         if (buf.length < 500 || buf.subarray(0, 4).toString() !== "%PDF") continue;
@@ -137,7 +153,7 @@ export async function downloadSolicitationPdf(
   }
 
   console.log(`[justwin-sync] saved PDF (${bestLabel}): ${target}`);
-  return target;
+  return { path: target, dueDate };
 }
 
 /** Convenience wrapper when no API client has been created yet. */
@@ -146,5 +162,6 @@ export async function downloadPdfForLead(
   externalId: string
 ): Promise<string | undefined> {
   const client = await createApiClient(page);
-  return downloadSolicitationPdf(client, externalId);
+  const downloaded = await downloadSolicitationPdf(client, externalId);
+  return downloaded.path;
 }

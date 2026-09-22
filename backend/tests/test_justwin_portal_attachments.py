@@ -106,6 +106,50 @@ class PortalAttachmentHelpersTests(unittest.TestCase):
         )
         self.assertFalse(package_looks_thin(text=text))
 
+    def test_skip_hosts_that_hang_or_challenge_headless(self) -> None:
+        from app.services.justwin_sync.portal_attachments import (
+            should_skip_portal_scrape,
+        )
+
+        self.assertTrue(
+            should_skip_portal_scrape(
+                "https://procurement.opengov.com/portal/octa/projects/296507/document"
+            )
+        )
+        self.assertTrue(
+            should_skip_portal_scrape(
+                "https://www.hudsoncountynjprocure.org/?utm_source"
+            )
+        )
+        self.assertTrue(
+            should_skip_portal_scrape("https://agency.bonfirehub.com/opportunities/1")
+        )
+        self.assertFalse(
+            should_skip_portal_scrape(
+                "https://col.ionwave.net/PublicBid.aspx?bidid=123"
+            )
+        )
+
+    def test_skipped_portal_does_not_navigate(self) -> None:
+        from app.services.justwin_sync.portal_attachments import (
+            fetch_portal_attachment_pdfs,
+        )
+
+        class FakePage:
+            navigated = False
+
+            def goto(self, *args, **kwargs):
+                self.navigated = True
+                raise AssertionError("skipped hosts must not call page.goto")
+
+        page = FakePage()
+        pdfs = fetch_portal_attachment_pdfs(
+            page,
+            "https://www.hudsoncountynjprocure.org/?utm_source",
+        )
+        self.assertEqual(pdfs, [])
+        self.assertFalse(page.navigated)
+
 
 if __name__ == "__main__":
     unittest.main()

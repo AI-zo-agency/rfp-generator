@@ -130,7 +130,7 @@ def run_justwin_sync(
                 if needs_pdf or needs_enrich:
                     try:
                         pdf_bytes = download_solicitation_pdf_bytes(
-                            client, lead.external_id
+                            client, lead.external_id, lead=lead
                         )
                     except Exception as pdf_err:  # noqa: BLE001
                         logger.warning(
@@ -159,25 +159,15 @@ def run_justwin_sync(
 
             pdf_bytes: bytes | None = None
             try:
-                pdf_bytes = download_solicitation_pdf_bytes(client, lead.external_id)
+                pdf_bytes = download_solicitation_pdf_bytes(
+                    client, lead.external_id, lead=lead
+                )
             except Exception as pdf_err:  # noqa: BLE001 — continue other leads
                 logger.warning(
                     "[justwin-sync] PDF download warning for %s: %s",
                     lead.external_id,
                     pdf_err,
                 )
-
-            if pdf_bytes and not lead.due_date:
-                try:
-                    from app.services.rfp_due_date import extract_due_date_from_pdf_bytes
-
-                    extracted = extract_due_date_from_pdf_bytes(pdf_bytes)
-                    if extracted:
-                        lead.due_date = extracted
-                except Exception as due_err:  # noqa: BLE001
-                    logger.warning(
-                        "[justwin-sync] due date extraction skipped: %s", due_err
-                    )
 
             pdf_path_hint = f"pending:{lead.external_id}" if pdf_bytes else None
             record = map_lead_to_rfp(lead, pdf_path_hint)

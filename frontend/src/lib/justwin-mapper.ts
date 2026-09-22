@@ -4,20 +4,21 @@ import type { RfpRecord } from "@/types/rfp";
 function parseJustWinDate(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) {
-    return new Date().toISOString().split("T")[0];
+    return "";
   }
 
-  const withYear = new Date(`${trimmed} ${new Date().getFullYear()}`);
-  if (!Number.isNaN(withYear.getTime())) {
-    return withYear.toISOString().split("T")[0];
-  }
+  const iso = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
 
   const parsed = new Date(trimmed);
   if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString().split("T")[0];
+    const year = parsed.getFullYear();
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
 
-  return new Date().toISOString().split("T")[0];
+  return "";
 }
 
 function extractClient(title: string): string {
@@ -41,7 +42,8 @@ export function mapLeadToRfp(lead: JustWinLead, pdfPath?: string): RfpRecord {
     sector: "Public Sector",
     location: lead.location,
     dueDate: parseJustWinDate(lead.dueDate),
-    receivedDate: parseJustWinDate(lead.postedDate),
+    receivedDate:
+      parseJustWinDate(lead.postedDate) || new Date().toISOString().split("T")[0],
     stage: "intake",
     status: "new",
     priority: lead.score >= 4 ? "high" : "medium",

@@ -29,25 +29,6 @@ async function uploadPdfToBackend(rfpId: string, pdfPath: string): Promise<void>
   }
 }
 
-async function extractDueDateFromPdf(pdfPath: string): Promise<string | null> {
-  try {
-    const fs = await import("fs");
-    const content = fs.readFileSync(pdfPath);
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/extract-due-date`, {
-      method: "POST",
-      headers: { "Content-Type": "application/pdf" },
-      body: content,
-    });
-    if (response.ok) {
-      const data = (await response.json()) as { dueDate?: string | null };
-      return data.dueDate ?? null;
-    }
-  } catch (err) {
-    console.warn(`[justwin-sync] due date extraction skipped:`, err);
-  }
-  return null;
-}
-
 async function main() {
   if (!JUSTWIN_SYNC_CLI_ENABLED) {
     console.error(
@@ -94,21 +75,16 @@ async function main() {
     for (const lead of leads) {
       let pdfPath: string | undefined;
       try {
-        pdfPath = await downloadSolicitationPdf(client, lead.externalId);
+        const downloaded = await downloadSolicitationPdf(client, lead.externalId);
+        pdfPath = downloaded.path;
+        if (downloaded.dueDate) {
+          lead.dueDate = downloaded.dueDate;
+        }
       } catch (pdfErr) {
         console.warn(
           `[justwin-sync] PDF download warning for ${lead.externalId}:`,
           pdfErr instanceof Error ? pdfErr.message : pdfErr
         );
-      }
-
-      // JustWin supplies the due date directly; only fall back to parsing the
-      // PDF when the lead has none.
-      if (pdfPath && !lead.dueDate) {
-        const extractedDueDate = await extractDueDateFromPdf(pdfPath);
-        if (extractedDueDate) {
-          lead.dueDate = extractedDueDate;
-        }
       }
 
       const record = mapLeadToRfp(lead, pdfPath ? `pending:${lead.externalId}` : undefined);

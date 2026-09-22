@@ -134,17 +134,60 @@ def create_api_client(page: Page) -> JustWinApiClient:
     return JustWinApiClient(page=page, headers=headers, company_id=company_id)
 
 
+def due_date_from_justwin_payload(raw: dict[str, Any] | None) -> str:
+    """Proposal due date from JustWin's structured fields — never Q&A.
+
+    List and detail payloads put the date on ``due_date`` and/or
+    ``readonly_values.insights.due_date``. Q&A deadlines live on separate
+    keys and must not become the RFP due date.
+    """
+    if not raw:
+        return ""
+    readonly = raw.get("readonly_values") or {}
+    if not isinstance(readonly, dict):
+        readonly = {}
+    insights = readonly.get("insights") or {}
+    if not isinstance(insights, dict):
+        insights = {}
+    for candidate in (
+        raw.get("due_date"),
+        readonly.get("due_date"),
+        insights.get("due_date"),
+        insights.get("proposal_due_date"),
+        insights.get("submission_due_date"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def apply_justwin_due_date(
+    lead: JustWinLead, payload: dict[str, Any] | None
+) -> None:
+    """Stamp JustWin's Due onto the lead when the detail payload has one."""
+    parsed = due_date_from_justwin_payload(payload)
+    if parsed:
+        lead.due_date = parsed
+
+
 def _to_lead(raw: dict[str, Any], tab: LifecycleState) -> JustWinLead:
     readonly = raw.get("readonly_values") or {}
+    if not isinstance(readonly, dict):
+        readonly = {}
     insights = readonly.get("insights") or {}
+    if not isinstance(insights, dict):
+        insights = {}
     title = readonly.get("name") or insights.get("title") or "Untitled solicitation"
     state = raw.get("state") or {}
+    if not isinstance(state, dict):
+        state = {}
     return JustWinLead(
         external_id=str(raw["id"]),
         title=str(title),
         location=str(state.get("abbreviation") or ""),
         posted_date=posted_date_of(raw),
-        due_date=str(raw.get("due_date") or ""),
+        due_date=due_date_from_justwin_payload(raw),
         score=int(readonly.get("relevance_score_integer") or 0),
         description=str(insights.get("summary") or title),
         detail_url=f"{get_justwin_base_url()}/leads/{raw['id']}/summary",
@@ -292,7 +335,10 @@ def _download_target_pdf(
 
 
 def download_solicitation_pdf_bytes(
-    client: JustWinApiClient, external_id: str
+    client: JustWinApiClient,
+    external_id: str,
+    *,
+    lead: JustWinLead | None = None,
 ) -> bytes | None:
     """Download JustWin's attached PDF plus public portal Bid Attachments.
 
@@ -300,6 +346,9 @@ def download_solicitation_pdf_bytes(
     full RFP (FINAL.pdf, exhibits, SOW) sits on the buyer's public page as Bid
     Attachments — linked via ``readonly_values.originating_url``. We merge those
     into one package so intelligence sees the real solicitation.
+
+    When ``lead`` is passed, JustWin's structured Due is copied from the same
+    detail payload used to locate the PDF — no PDF regex.
     """
     from app.services.justwin_sync.portal_attachments import (
         fetch_portal_attachment_pdfs,
@@ -308,20 +357,22 @@ def download_solicitation_pdf_bytes(
         sort_portal_pdfs,
     )
 
-    lead = _lead_payload(client, external_id)
-    if not lead:
+    payload = _lead_payload(client, external_id)
+    if lead is not None:
+        apply_justwin_due_date(lead, payload)
+    if not payload:
         logger.info("[justwin-sync] %s: lead not found", external_id)
         return None
-    if lead.get("documentless") or not lead.get("target"):
+    if payload.get("documentless") or not payload.get("target"):
         logger.info("[justwin-sync] %s: no solicitation document", external_id)
         return None
 
-    primary = _download_target_pdf(client, str(lead["target"]))
+    primary = _download_target_pdf(client, str(payload["target"]))
     if primary is None:
         logger.info("[justwin-sync] %s: no solicitation document", external_id)
         return None
 
-    readonly = lead.get("readonly_values") or {}
+    readonly = payload.get("readonly_values") or {}
     originating = str(readonly.get("originating_url") or "").strip()
     portal_pdfs = []
     if originating:
