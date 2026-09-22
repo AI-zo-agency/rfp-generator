@@ -50,6 +50,10 @@ HARD RULES:
   no generic agency marketing filler; hit the scored ask then stop.
 - keyMessages: 2–4 concrete bullets tied to THIS RFP's language — not vague brand claims.
 - successDefinition: what the evaluator should be able to score after reading THIS tab only.
+- deliveryRoles: confirm or refine the outline stamp by MEANING (not title keywords).
+  Zero or more of "substance" | "calendar" | "price". Same definitions as the outline planner.
+  Copy from outline when already correct; fix when the outline missed a combined calendar+substance
+  tab or mis-tagged a form as price. Leave [] for bios/case studies/cover/references/attachments.
 
 Return JSON only:
 {
@@ -67,7 +71,8 @@ Return JSON only:
       "wordBudget": 500,
       "tone": "executive",
       "register": "narrative",
-      "audience": "string"
+      "audience": "string",
+      "deliveryRoles": []
     }
   ],
   "confidence": 0.0
@@ -233,6 +238,9 @@ def apply_section_strategy_from_raw(
         outline_inst = (
             outline_sec.submission_instrument if outline_sec is not None else None
         )
+        # Prefer brief roles; if empty, inherit outline LLM stamp (still meaning-based).
+        if not section_plan.delivery_roles and outline_sec is not None:
+            section_plan.delivery_roles = list(outline_sec.delivery_roles or [])
         if outline_inst == "clarify":
             section_plan.word_budget = 80
             section_plan.writer_instructions = (

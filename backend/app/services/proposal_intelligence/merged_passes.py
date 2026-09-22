@@ -23,6 +23,7 @@ from app.services.proposal_evaluation_coverage import (
     sanitize_evaluation_criteria_names,
     evaluation_extraction_looks_degenerate,
 )
+from app.services.proposal_delivery_package import methodology_retrieval_query
 from app.services.proposal_intelligence.agents.section_strategy_planner import (
     apply_section_strategy_from_raw,
 )
@@ -252,8 +253,11 @@ Return JSON ONLY:
 }
 
 Rules:
-- deliveryModel = HOW work happens (Agile/cadence). Do not list Discovery/UX phases there.
-- methodology = WHAT work happens (phases). Typical: Discovery, UX, Design, Development, QA, Training, Launch.
+- deliveryModel = HOW work happens (Agile/cadence). Do not list phase catalogs there.
+- methodology = WHAT work happens (workstreams/phases named for THIS RFP). Prefer 4–6
+  substantive names Budget and Timeline can reuse. Never default to website UX/Dev/QA/Launch
+  unless the scope is clearly a site redesign/build (sponsorship, social, festival,
+  brand, paid media, etc. are first-class).
 - pricingStrategy ≠ pricingModel. Never invent exact dollar awards.
 - deliveryPattern comes from won-proposal excerpts (patterns only — never copy marketing prose).
 - No proposal prose.
@@ -566,7 +570,12 @@ async def run_strategy_delivery(
         ),
         retrieve_intelligence(
             "methodology",
-            query=f"{u.project_type} website methodology delivery phases",
+            query=methodology_retrieval_query(
+                project_type=u.project_type,
+                industry=u.industry,
+                org_type=u.org_type,
+                sector=str(rfp_meta.get("sector") or ""),
+            ),
             limit=5,
         ),
         retrieve_intelligence(

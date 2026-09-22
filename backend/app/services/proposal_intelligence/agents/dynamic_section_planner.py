@@ -169,6 +169,13 @@ Rules:
   scored Cost deliverable. Use "disclosure" for AI / generative-AI disclosures.
   Use "references" for reference forms. Use "form" for other signed compliance forms.
   Use "narrative" for approach / experience essays. Leave null only when unsure.
+- Set deliveryRoles by MEANING for THIS RFP tab (judge the buyer's ask — never by title
+  keyword lists). Zero or more of: "substance" | "calendar" | "price".
+  * substance = the plan of work / how we will deliver (whatever the buyer named it)
+  * calendar = timing / stages / weeks-months / milestones (standalone OR combined with substance)
+  * price = fees / cost / rates / budget dollars
+  Leave [] for bios, case studies, cover letters, references, forms/attachments, checklists.
+  One tab may carry both substance and calendar when the RFP combines them.
 
 Return JSON only:
 {
@@ -184,7 +191,8 @@ Return JSON only:
       "dependencies": [],
       "evaluationWeight": null,
       "protectFromCap": false,
-      "submissionInstrument": null
+      "submissionInstrument": null,
+      "deliveryRoles": []
     }
   ],
   "confidence": 0.0

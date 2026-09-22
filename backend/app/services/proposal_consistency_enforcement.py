@@ -312,8 +312,42 @@ def _fmt_week_span(start: int, end: int) -> str:
     return f"Weeks {start}–{end} after award"
 
 
-def _schedule_timing_rows(window_weeks: int | None) -> list[tuple[str, str, str]]:
-    """Four overlapping phases a designer can typeset. Relative weeks, not invented dates."""
+def _schedule_timing_rows(
+    window_weeks: int | None,
+    *,
+    workstream_names: list[str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Calendar rows a designer can typeset. Prefer approach workstream names."""
+    names = [n.strip() for n in (workstream_names or []) if n and str(n).strip()]
+    # Cap at 6 so stubs stay layout-friendly; drop empties.
+    names = names[:6]
+    if len(names) >= 2:
+        n = len(names)
+        rows: list[tuple[str, str, str]] = []
+        if window_weeks and window_weeks >= 4:
+            w = int(window_weeks)
+            for i, name in enumerate(names):
+                start = 1 if i == 0 else max(1, round(w * i / n))
+                end = w if i == n - 1 else max(start + 1, round(w * (i + 1) / n))
+                milestone = "Complete" if i < n - 1 else "Launch-ready / close-out"
+                timing = (
+                    f"Week {w} after award (RFP launch window)"
+                    if i == n - 1
+                    else _fmt_week_span(start, end)
+                )
+                rows.append((name, timing, milestone))
+            return rows
+        for i, name in enumerate(names):
+            if i == 0:
+                timing = "Starts at award"
+            elif i == n - 1:
+                timing = "By the RFP launch / go-live / term end"
+            else:
+                timing = "Overlaps prior; locks before next"
+            milestone = "Checkpoint" if i < n - 1 else "Close-out"
+            rows.append((name, timing, milestone))
+        return rows
+
     if window_weeks and window_weeks >= 4:
         w = int(window_weeks)
         d_end = max(1, round(w * 0.25))
@@ -341,8 +375,10 @@ def _schedule_calendar_stub(
     title: str,
     approach_title: str,
     window_weeks: int | None,
+    *,
+    workstream_names: list[str] | None = None,
 ) -> str:
-    rows = _schedule_timing_rows(window_weeks)
+    rows = _schedule_timing_rows(window_weeks, workstream_names=workstream_names)
     table = "| Phase | Timing | Milestone |\n| --- | --- | --- |\n" + "".join(
         f"| {phase} | {timing} | {milestone} |\n" for phase, timing, milestone in rows
     )
@@ -357,8 +393,9 @@ def _schedule_calendar_stub(
             f"Phase method lives in {approach_title}."
         )
     note = (
-        "[DESIGNER NOTE: Typeset as a 4-row calendar. Columns: Phase | Timing | "
-        "Milestone. Timing is weeks from award — never leave Timing blank.]"
+        "[DESIGNER NOTE: Typeset as a calendar table. Columns: Phase | Timing | "
+        "Milestone. Timing is weeks from award — never leave Timing blank. "
+        "Keep Phase names aligned with the approach / scope tab.]"
     )
     return f"## {title}\n\n{lead}\n\n{table}\n{note}\n"
 

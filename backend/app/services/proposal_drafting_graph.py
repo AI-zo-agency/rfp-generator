@@ -933,6 +933,28 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         lines.append(json.dumps(budget_plan, indent=2)[:3000])
 
     try:
+        from app.services.proposal_delivery_package import (
+            build_delivery_package,
+            format_delivery_package_block,
+            roles_from_execution_plan,
+        )
+
+        roles = roles_from_execution_plan(
+            plan if isinstance(plan, dict) else {},
+            section_id=str(section_id or ""),
+            section_title=section_title or str(section_id),
+        )
+        if roles:
+            package = build_delivery_package(plan if isinstance(plan, dict) else {})
+            block = format_delivery_package_block(
+                roles, package, section_title=section_title or str(section_id)
+            )
+            if block:
+                lines.append(block)
+    except Exception:
+        pass
+
+    try:
         from app.services.proposal_consistency_enforcement import (
             format_rfp_calendar_constraint,
         )
@@ -1539,14 +1561,55 @@ def _build_draft_prompt_zones(
                     "[VERIFY: percent time] — never invent 10%/35%/25% grids or reuse "
                     "static tables from other proposals.\n\n"
                 )
-            if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
+            # Delivery roles come from Phase 2 LLM stamps (meaning), not title synonyms.
+            try:
+                from app.services.proposal_delivery_package import (
+                    DeliveryRole,
+                    roles_from_execution_plan,
+                )
+
+                _roles = roles_from_execution_plan(
+                    state.get("execution_plan")
+                    if isinstance(state.get("execution_plan"), dict)
+                    else {},
+                    section_id=str(payload.get("sectionId") or ""),
+                    section_title=str(payload.get("title") or ""),
+                )
+                _has_substance = DeliveryRole.SUBSTANCE in _roles
+                _has_calendar = DeliveryRole.CALENDAR in _roles
+                _has_price = DeliveryRole.PRICE in _roles
+            except Exception:
+                _has_substance = False
+                _has_calendar = False
+                _has_price = False
+
+            if _has_price:
+                zone_c += (
+                    f"DELIVERY PRICE ROLE on {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Transparency / model / allocation only. "
+                    "Do not invent agency fee line-item tables (Phase 3.5 owns dollars). "
+                    "Map future fee lines to DELIVERY PACKAGE workstream names — "
+                    "no parallel phase taxonomy.\n\n"
+                )
+            elif any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
+                # Legacy fallback only when Phase 2 did not stamp deliveryRoles.
                 zone_c += (
                     f"BUDGET NARRATIVE REQUIRED for {payload.get('sectionId')}: "
                     "Write transparency, pass-through media buys, compensation model, and "
                     "allocation rationale using RFP spend figures from requirements/plan. "
                     "Do not invent agency fee line-item tables. Do not return empty content.\n\n"
                 )
-            if any(
+
+            if _has_calendar:
+                zone_c += (
+                    f"DELIVERY CALENDAR ROLE on {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Dates / milestones / owners with Timing "
+                    "filled (week-from-award or calendar month). Bind names to the "
+                    "DELIVERY PACKAGE. Prefer week-from-award when the RFP gives a window; "
+                    "use [VERIFY] only when the RFP gives no window and no event dates. "
+                    "Do not restate full methodology prose.\n\n"
+                )
+            elif any(
                 k in title_lower
                 for k in (
                     "schedule",
@@ -1562,6 +1625,16 @@ def _build_draft_prompt_zones(
                     "Fit entirely inside the RFP award→launch / contract window from RFP "
                     "context / Delivery Timeline Plan. Never invent a longer sequential "
                     "plan than the RFP allows. Missing dates → [VERIFY: …], never fabricate.\n\n"
+                )
+
+            if _has_substance and not _has_price:
+                zone_c += (
+                    f"DELIVERY SUBSTANCE SECTION {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Keep the buyer tab title. Write one complete "
+                    "defendable plan (thesis + named workstreams + checkpoints + out-of-scope). "
+                    "Do not ship a partial angle that needs a second draft to complete. "
+                    "Reuse DELIVERY PACKAGE workstream names when present. "
+                    "If this tab also owns calendar, include Timing with the same names.\n\n"
                 )
             if any(
                 k in title_lower

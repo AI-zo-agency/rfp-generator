@@ -468,6 +468,9 @@ class OutlineSection(BaseModel):
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )
+    # LLM-judged delivery roles for THIS tab (by meaning, not title synonyms).
+    # Allowed values: substance | calendar | price. Empty = not a delivery tab.
+    delivery_roles: list[str] = Field(default_factory=list, alias="deliveryRoles")
 
 
 class ProposalOutline(BaseModel):
@@ -516,6 +519,9 @@ class SectionPlan(BaseModel):
     winning_pattern: WinningPattern = Field(
         default_factory=WinningPattern, alias="winningPattern"
     )
+    # Copied/confirmed from outline; LLM may refine by meaning.
+    # Allowed: substance | calendar | price.
+    delivery_roles: list[str] = Field(default_factory=list, alias="deliveryRoles")
 
 
 class SectionPlans(BaseModel):
