@@ -798,8 +798,9 @@ def _merge_sections_into_draft(
 
 
 def _normalize_outline_mode(raw: str | None) -> str:
-    mode = (raw or "zo_template").strip().lower()
-    return mode if mode in {"zo_template", "strict_rfp"} else "zo_template"
+    # Default matches approved demo outline: buyer TOC / submission format, no Zo 1–3 shell.
+    mode = (raw or "strict_rfp").strip().lower()
+    return mode if mode in {"zo_template", "strict_rfp"} else "strict_rfp"
 
 
 def _static_sections_from_draft(

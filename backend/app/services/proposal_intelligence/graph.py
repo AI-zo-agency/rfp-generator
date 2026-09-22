@@ -235,7 +235,7 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
         if "rfp_meta" in accepted:
             call_kwargs["rfp_meta"] = _meta(state)
         if "outline_mode" in accepted:
-            call_kwargs["outline_mode"] = state.get("outline_mode") or "zo_template"
+            call_kwargs["outline_mode"] = state.get("outline_mode") or "strict_rfp"
         succeeded = False
         try:
             with llm_call_context(
@@ -307,7 +307,7 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
     legacy = derive_legacy_fields(
         plan,
         page_limit=page_limit_int,
-        outline_mode=str(state.get("outline_mode") or "zo_template"),
+        outline_mode=str(state.get("outline_mode") or "strict_rfp"),
     )
     sections = legacy.get("rfpSections") or []
     log_intel_event(
@@ -384,7 +384,7 @@ async def run_intelligence_graph(
     rfp_location: str | None,
     rfp_context: str,
     page_limit: int | None = None,
-    outline_mode: str = "zo_template",
+    outline_mode: str = "strict_rfp",
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
     from app.services.llm import LlmError
@@ -410,9 +410,9 @@ async def run_intelligence_graph(
         completed=completed_nodes,
     )
 
-    mode = (outline_mode or "zo_template").strip().lower()
+    mode = (outline_mode or "strict_rfp").strip().lower()
     if mode not in {"zo_template", "strict_rfp"}:
-        mode = "zo_template"
+        mode = "strict_rfp"
 
     initial: IntelligenceGraphState = {
         "rfp_id": rfp_id,
