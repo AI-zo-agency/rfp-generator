@@ -19,9 +19,14 @@ _YEAR_BUDGET_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CEILING_CONTEXT_RE = re.compile(
-    r"(?:fixed[\s-]?price|not\s+to\s+exceed|NTE|ceiling|maximum\s+(?:contract|compensation|budget)|"
-    r"total\s+(?:contract|project|award)\s+(?:value|amount|budget)|contract\s+value|"
-    r"compensation\s+shall\s+not|budget\s+(?:of|is|shall))",
+    r"(?:fixed[\s-]?price|not\s+to\s+exceed|\bNTE\b|ceiling|"
+    r"shall\s+not\s+exceed|cannot\s+exceed|must\s+not\s+exceed|may\s+not\s+exceed|"
+    r"do\s+not\s+(?:exceed|go\s+above)|no\s+more\s+than|"
+    r"maximum\s+(?:contract|compensation|budget|fee|available)|"
+    r"total\s+(?:contract|project|award|available)\s+(?:value|amount|budget)|"
+    r"contract(?:ed)?\s+amount|contract\s+value|"
+    r"compensation\s+shall\s+not|budget\s+(?:of|is|shall|not\s+to\s+exceed)\b|"
+    r"annual\s+contract(?:ed)?\s+amount)",
     re.IGNORECASE,
 )
 # Small-business / vendor-eligibility dollars are NOT contract value.
@@ -41,7 +46,7 @@ _EVAL_ANCHOR_RE = re.compile(
     r"total\s+(?:of\s+)?100\s+points)",
     re.IGNORECASE,
 )
-# Require the literal word points/pts after the number — never bare "3" from "3 years".
+# Prefer full criterion names. Bare "Qualifications" alone collides Firm vs Key.
 _EVAL_ROW_RE = re.compile(
     r"(?P<label>"
     r"Overall\s+Capabilities|"
@@ -50,12 +55,14 @@ _EVAL_ROW_RE = re.compile(
     r"Familiarity\s+with.{0,40}Brand|"
     r"Cost\s+Points?\s+Conversion|"
     r"Price\s+Reasonableness|"
-    r"Price|"
-    r"Portfolio|"
+    r"Firm\s+Qualifications|"
+    r"Key\s+Qualifications|"
+    r"Project\s+Understanding|"
     r"Technical\s+(?:Approach|Proposal|Capability)|"
     r"Cost(?:\s*/\s*Price)?|"
+    r"Price|"
+    r"Portfolio|"
     r"Experience|"
-    r"Qualifications|"
     r"References|"
     r"Oral\s+Presentation|"
     r"Interview"
@@ -64,11 +71,18 @@ _EVAL_ROW_RE = re.compile(
     r"(?P<pts>\d{1,3})\s*(?:points?|pts\.?)\b",
     re.IGNORECASE | re.DOTALL,
 )
+# Colon/dash OR whitespace between label and points (DuPage: "Firm Qualifications 20 points").
 _EVAL_POINTS_LINE_RE = re.compile(
     r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-]{3,80}?)"
-    r"\s*[:\-|–—]\s*"
+    r"(?:\s*(?:[:\-–—])\s*|[ \t]+)"
     r"(?P<pts>\d{1,3})\s*(?:points?|pts\.?)\b",
     re.IGNORECASE,
+)
+# Bare integer weights inside an evaluation-anchor window (DuPage: "Firm Qualifications 20").
+# Only kept when the collected table later passes reliability (sum ≥ 40, ≥3 rows).
+_EVAL_BARE_WEIGHT_LINE_RE = re.compile(
+    r"(?m)^[ \t]*(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-,\.]{3,80}?)"
+    r"[ \t]+(?P<pts>\d{1,3})[ \t]*$",
 )
 # Percent-weighted tables (e.g. NYCEDC V.B: four criteria at 25% each).
 # Separator may be colon/dash/paren OR bare whitespace (Alameda: "… personnel 20%").
@@ -293,7 +307,28 @@ def extract_rfp_hard_facts(
             pts = int(row_m.group("pts"))
             if pts <= 0 or pts > 2000:
                 continue
-            if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
+            if len(label) < 4 or label.casefold() in {"section", "page", "item", "group", "total"}:
+                continue
+            collected_points.append((label, pts))
+        for row_m in _EVAL_BARE_WEIGHT_LINE_RE.finditer(window):
+            label = re.sub(r"\s+", " ", row_m.group("label")).strip(" .-:")
+            pts = int(row_m.group("pts"))
+            # Typical published criterion weights — skip year/count noise (3 years).
+            if pts < 5 or pts > 100:
+                continue
+            if len(label) < 4 or label.casefold() in {
+                "section",
+                "page",
+                "item",
+                "group",
+                "total",
+                "criterion",
+                "criteria",
+                "weight",
+                "weights",
+            }:
+                continue
+            if re.search(r"(?i)\b(?:years?|months?|employees?|days?|hours?)\b", label):
                 continue
             collected_points.append((label, pts))
         flat_window = _flatten_wrapped_percent_criteria(window)

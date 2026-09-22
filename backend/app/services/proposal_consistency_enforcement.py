@@ -180,6 +180,42 @@ def _phase_signature(content: str) -> set[str]:
     return sig
 
 
+def _workstream_names_from_content(content: str) -> list[str]:
+    """Ordered phase/workstream labels from Approach-style prose."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for match in _PHASE_HEADING_RE.finditer(content or ""):
+        label = re.sub(r"\s+", " ", (match.group(2) or "").strip())
+        label = re.split(r"\(|—|–", label, maxsplit=1)[0].strip(" .-:*")
+        if not label:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(label)
+    return names[:6]
+
+
+def _approach_title_and_workstreams(
+    sections: list[ProposalSection],
+) -> tuple[str, list[str]]:
+    """Best approach/substance tab title + ordered workstream names for stubs."""
+    approach_title = "Project Approach"
+    names: list[str] = []
+    for section in sections:
+        title = section.title or ""
+        if not _APPROACH_TITLE_RE.search(title):
+            continue
+        if _SCHEDULE_TITLE_RE.search(title):
+            continue
+        approach_title = title or approach_title
+        extracted = _workstream_names_from_content(section.content or "")
+        if len(extracted) > len(names):
+            names = extracted
+    return approach_title, names
+
+
 def compress_schedule_restating_approach(
     sections: list[ProposalSection],
 ) -> tuple[list[ProposalSection], int]:
@@ -199,6 +235,8 @@ def compress_schedule_restating_approach(
     if len(approach_sig) < 3:
         return sections, 0
 
+    approach_title, workstream_names = _approach_title_and_workstreams(sections)
+
     out: list[ProposalSection] = []
     compressed = 0
     for section in sections:
@@ -214,21 +252,17 @@ def compress_schedule_restating_approach(
         overlap = len(sched_sig & approach_sig) / max(len(sched_sig), 1)
         # Same Phase 1–N labels = methodology clone, not a calendar.
         # Even if weeks are present, overlapping phase titles mean Schedule
-        # restated Approach instead of owning dates-only.
+        # restates Approach instead of owning dates-only.
         if overlap < 0.5:
             out.append(section)
             continue
 
-        approach_title = next(
-            (
-                s.title
-                for s in sections
-                if _APPROACH_TITLE_RE.search(s.title or "")
-                and not _SCHEDULE_TITLE_RE.search(s.title or "")
-            ),
-            "Project Approach",
+        stub = _schedule_calendar_stub(
+            title,
+            approach_title,
+            window_weeks=None,
+            workstream_names=workstream_names or None,
         )
-        stub = _schedule_calendar_stub(title, approach_title, window_weeks=None)
         out.append(section.model_copy(update={"content": stub}))
         compressed += 1
         logger.info(
@@ -329,7 +363,12 @@ def _schedule_timing_rows(
             for i, name in enumerate(names):
                 start = 1 if i == 0 else max(1, round(w * i / n))
                 end = w if i == n - 1 else max(start + 1, round(w * (i + 1) / n))
-                milestone = "Complete" if i < n - 1 else "Launch-ready / close-out"
+                if i == 0:
+                    milestone = "Kickoff complete"
+                elif i == n - 1:
+                    milestone = "Launch-ready / close-out"
+                else:
+                    milestone = "Checkpoint"
                 timing = (
                     f"Week {w} after award (RFP launch window)"
                     if i == n - 1
@@ -340,11 +379,13 @@ def _schedule_timing_rows(
         for i, name in enumerate(names):
             if i == 0:
                 timing = "Starts at award"
+                milestone = "Kickoff complete"
             elif i == n - 1:
                 timing = "By the RFP launch / go-live / term end"
+                milestone = "Launch-ready / close-out"
             else:
                 timing = "Overlaps prior; locks before next"
-            milestone = "Checkpoint" if i < n - 1 else "Close-out"
+                milestone = "Checkpoint"
             rows.append((name, timing, milestone))
         return rows
 
@@ -421,15 +462,7 @@ def polish_schedule_tabs_for_designer(
     """Replace writer-facing calendar stubs with a filled table a designer can layout."""
     logs: list[str] = []
     window = infer_rfp_delivery_window_weeks(rfp_text)
-    approach_title = next(
-        (
-            s.title
-            for s in sections
-            if _APPROACH_TITLE_RE.search(s.title or "")
-            and not _SCHEDULE_TITLE_RE.search(s.title or "")
-        ),
-        "Project Approach",
-    )
+    approach_title, workstream_names = _approach_title_and_workstreams(sections)
     out: list[ProposalSection] = []
     for section in sections:
         title = section.title or ""
@@ -437,7 +470,12 @@ def polish_schedule_tabs_for_designer(
         if not _SCHEDULE_TITLE_RE.search(title) or not _schedule_needs_designer_polish(body):
             out.append(section)
             continue
-        stub = _schedule_calendar_stub(title, approach_title, window)
+        stub = _schedule_calendar_stub(
+            title,
+            approach_title,
+            window,
+            workstream_names=workstream_names or None,
+        )
         out.append(section.model_copy(update={"content": stub}))
         logs.append(
             f"{section.id}: Schedule/Timeline rewritten as a filled calendar "
@@ -461,15 +499,7 @@ def scrub_schedule_calendar_overrun(
     if window is None:
         return sections, logs
 
-    approach_title = next(
-        (
-            s.title
-            for s in sections
-            if _APPROACH_TITLE_RE.search(s.title or "")
-            and not _SCHEDULE_TITLE_RE.search(s.title or "")
-        ),
-        "Project Approach",
-    )
+    approach_title, workstream_names = _approach_title_and_workstreams(sections)
 
     out: list[ProposalSection] = []
     for section in sections:
@@ -481,7 +511,12 @@ def scrub_schedule_calendar_overrun(
             continue
 
         if _SCHEDULE_TITLE_RE.search(title):
-            stub = _schedule_calendar_stub(title, approach_title, window)
+            stub = _schedule_calendar_stub(
+                title,
+                approach_title,
+                window,
+                workstream_names=workstream_names or None,
+            )
             out.append(section.model_copy(update={"content": stub}))
             logs.append(
                 f"{section.id}: Schedule claimed Week {max_week} but RFP "

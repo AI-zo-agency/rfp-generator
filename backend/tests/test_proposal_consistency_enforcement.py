@@ -94,10 +94,52 @@ class ScheduleApproachDedupeTests(unittest.TestCase):
         sched = next(s for s in out if s.id == "schedule")
         self.assertIn("| Phase | Timing | Milestone |", sched.content or "")
         self.assertIn("Kickoff complete", sched.content or "")
+        # Live workstream names from Approach — not generic Discovery/Strategy/Creative.
+        self.assertIn("Discovery & Research", sched.content or "")
+        self.assertIn("Strategy Development", sched.content or "")
+        self.assertIn("Final Deliverables", sched.content or "")
+        self.assertNotIn("Creative / production", sched.content or "")
         self.assertNotIn("[VERIFY:", sched.content or "")
         self.assertNotIn("Do not restate", sched.content or "")
         self.assertNotIn("Stakeholder meetings.", sched.content or "")
         self.assertNotIn("Week 10", sched.content or "")
+
+    def test_polish_uses_approach_workstream_names(self) -> None:
+        from app.services.proposal_consistency_enforcement import (
+            polish_schedule_tabs_for_designer,
+        )
+
+        approach = ProposalSection(
+            id="approach",
+            title="Strategic Growth Approach",
+            content=(
+                "Phase 1: Website Maintenance\n"
+                "Phase 2: Social Media Growth\n"
+                "Phase 3: Sponsor Development\n"
+                "Phase 4: Close-out Reporting\n"
+            ),
+            status="generated",
+        )
+        schedule = ProposalSection(
+            id="timeline",
+            title="24. Timeline & Schedule",
+            content=(
+                "| Phase | Timing | Milestone |\n"
+                "| --- | --- | --- |\n"
+                "| Discovery |  | Kickoff |\n\n"
+                "Do not restate Approach methodology paragraphs here.\n"
+            ),
+            status="generated",
+        )
+        out, logs = polish_schedule_tabs_for_designer(
+            [approach, schedule], rfp_text=""
+        )
+        self.assertTrue(logs)
+        body = next(s for s in out if s.id == "timeline").content or ""
+        self.assertIn("Website Maintenance", body)
+        self.assertIn("Sponsor Development", body)
+        self.assertNotIn("Creative / production", body)
+        self.assertNotIn("Do not restate", body)
 
 
 class CalendarOverrunTests(unittest.TestCase):

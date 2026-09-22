@@ -57,6 +57,29 @@ References and past performance 5%
 Total 100%
 """
 
+DUPAGE_BUDGET_AND_EVAL_SNIPPET = """
+Section 6 Statement of Work. The annual contracted amount for General workNet DuPage
+Marketing and Communications shall not exceed $75,000. The annual contracted amount for
+Young Adult Outreach and Engagement Campaign shall not exceed $100,000.
+
+Section 7 Evaluation Criteria. Proposals will be scored on the following evaluation criteria:
+
+Firm Qualifications 20
+Key Qualifications 35
+Project Understanding 30
+Price 15
+Total 100
+"""
+
+DUPAGE_EVAL_WITH_POINTS_WORD = """
+Section 7 Evaluation Criteria. Points will be awarded as follows:
+Firm Qualifications 20 points
+Key Qualifications 35 points
+Project Understanding 30 points
+Price 15 points
+Total 100 points.
+"""
+
 
 class GoNoGoHardFactsTests(unittest.TestCase):
     def test_extracts_ceiling_and_year_budgets(self) -> None:
@@ -73,6 +96,53 @@ class GoNoGoHardFactsTests(unittest.TestCase):
             any("900" in line for line in facts["contract_value_lines"]),
             facts["contract_value_lines"],
         )
+
+    def test_extracts_shall_not_exceed_annual_contract_amounts(self) -> None:
+        """DuPage-style 'shall not exceed $75,000 / $100,000' is a real ceiling.
+
+        Live Go/No-Go wrongly said budget was undisclosed because HARD FACTS
+        only matched 'compensation shall not' / 'not to exceed', not bare
+        'shall not exceed' on annual contracted amounts.
+        """
+        facts = _extract_rfp_hard_facts(DUPAGE_BUDGET_AND_EVAL_SNIPPET)
+        blob = " | ".join(facts["contract_value_lines"]).casefold()
+        self.assertTrue(
+            any("75,000" in line or "75000" in line.replace(",", "") for line in facts["contract_value_lines"]),
+            facts["contract_value_lines"],
+        )
+        self.assertTrue(
+            any("100,000" in line or "100000" in line.replace(",", "") for line in facts["contract_value_lines"]),
+            facts["contract_value_lines"],
+        )
+        self.assertIn("shall not exceed", blob)
+
+    def test_extracts_space_separated_eval_weights_without_colon(self) -> None:
+        """Section 7 'Firm Qualifications 20' rows must count as disclosed weights."""
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(DUPAGE_BUDGET_AND_EVAL_SNIPPET)
+        blob = " | ".join(facts["evaluation_lines"]).casefold()
+        self.assertIn("firm qualifications", blob)
+        self.assertIn("key qualifications", blob)
+        self.assertIn("project understanding", blob)
+        self.assertIn("price", blob)
+        self.assertTrue(evaluation_table_is_reliable(facts), facts)
+        self.assertEqual(facts["evaluation_total"], 100)
+
+    def test_firm_and_key_qualifications_points_do_not_wipe_table(self) -> None:
+        """Short label 'Qualifications' must not collide Firm 20 vs Key 35."""
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(DUPAGE_EVAL_WITH_POINTS_WORD)
+        blob = " | ".join(facts["evaluation_lines"]).casefold()
+        self.assertIn("firm qualifications", blob)
+        self.assertIn("key qualifications", blob)
+        self.assertTrue(evaluation_table_is_reliable(facts), facts)
+        self.assertEqual(facts["evaluation_total"], 100)
 
     def test_extracts_evaluation_point_rows(self) -> None:
         facts = _extract_rfp_hard_facts(HTA_SNIPPET)
