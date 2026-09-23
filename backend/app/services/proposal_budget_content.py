@@ -246,18 +246,50 @@ def render_personnel_loading_form_markdown(
     Returns empty string when there are no bindable rates and no RFP role labels
     (caller must cut the hollow table rather than ship placeholder columns).
     """
-    roles = extract_rfp_labor_role_labels(rfp_text)
-    # Fall back to line-item role titles / descriptions when RFP parse is thin.
-    if len(roles) < 3:
-        for item in budget.line_items:
-            label = (item.role_title or item.description or "").strip()
-            if not label:
+    # Back-office / PO rows from the role card — not client Cost File classifications.
+    _skip_roles = frozenset({"contractor", "executive", "finance"})
+    # Rate-card internal labels → titles that match 04_Bio / client-facing schedule.
+    _display_alias = {
+        "programming": "Senior Web Developer",
+    }
+
+    def _display_role(label: str) -> str | None:
+        key = (label or "").casefold().strip()
+        if not key or key in _skip_roles:
+            return None
+        return _display_alias.get(key, label.strip())
+
+    def _priced_hourly_roles() -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in budget.line_items or []:
+            unit = (item.unit or "").casefold()
+            if unit not in {"hour", "hours", "hr", "hrs"}:
                 continue
-            key = label.casefold()
-            if key not in {r.casefold() for r in roles}:
-                roles.append(label.split("—")[0].split("-")[0].strip()[:60])
-            if len(roles) >= 12:
-                break
+            if item.rate is None and not (item.extended or 0):
+                continue
+            label = (item.role_title or item.description or "").strip()
+            shown = _display_role(label.split("—")[0].split("-")[0].strip()[:60])
+            if not shown:
+                continue
+            key = shown.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(shown)
+        return out
+
+    # Prefer priced hourly line items (KB role card) over noisy RFP TOC "roles".
+    priced = _priced_hourly_roles()
+    if len(priced) >= 2:
+        roles = priced
+    else:
+        roles = extract_rfp_labor_role_labels(rfp_text)
+        if len(roles) < 3:
+            for shown in priced:
+                if shown.casefold() not in {r.casefold() for r in roles}:
+                    roles.append(shown)
+        roles = [r for r in (_display_role(x) or "" for x in roles) if r]
 
     yoy = (budget.option_term_notes or "").strip()
     y2 = y3 = None
@@ -279,13 +311,19 @@ def render_personnel_loading_form_markdown(
     for role in roles:
         rate_val: float | None = None
         role_cf = role.casefold()
+        # Match alias reverse (Senior Web Developer ← Programming line).
+        match_keys = {role_cf}
+        for raw, alias in _display_alias.items():
+            if alias.casefold() == role_cf:
+                match_keys.add(raw)
         for item in budget.line_items:
             if item.id in used_ids:
                 continue
             blob = f"{item.role_title or ''} {item.description or ''}".casefold()
-            if role_cf and (
-                role_cf in blob
-                or any(t in blob for t in role_cf.split() if len(t) > 3)
+            if any(
+                k in blob or any(t in blob for t in k.split() if len(t) > 3)
+                for k in match_keys
+                if k
             ):
                 rate_val = _hourly_rate_from_line(item)
                 if rate_val is None and item.rate is not None and (
@@ -304,7 +342,8 @@ def render_personnel_loading_form_markdown(
                 vr_role = (vr.role or vr.person_name or "").strip()
                 if not vr_role or not (vr.hourly_rate or 0):
                     continue
-                if role_cf in vr_role.casefold() or vr_role.casefold() in role_cf:
+                vr_cf = vr_role.casefold()
+                if any(k in vr_cf or vr_cf in k for k in match_keys):
                     rate_val = float(vr.hourly_rate)
                     break
         rate_cell = _usd(rate_val) if rate_val is not None else "—"
@@ -350,6 +389,123 @@ def render_personnel_loading_form_markdown(
     lines.append("")
     return "\n".join(lines)
 
+
+def _rfp_is_tm_letter_proposal(rfp_text: str) -> bool:
+    body = rfp_text or ""
+    if re.search(r"(?i)time\s+and\s+expense", body):
+        return True
+    # Cost File / Schedule of Billing Rates = hourly schedule instrument (not lump project).
+    if re.search(r"(?i)schedule\s+of\s+billing\s+rates", body):
+        return True
+    return bool(
+        re.search(r"(?i)letter\s+proposal", body)
+        and re.search(r"(?i)hourly", body)
+    )
+
+
+def _rfp_locks_rates_for_term(rfp_text: str) -> bool:
+    body = rfp_text or ""
+    if re.search(r"(?i)no\s+billing\s+rate\s+changes", body):
+        return True
+    if re.search(
+        r"(?i)rates?\s+(?:shall\s+)?(?:be\s+)?(?:held|locked|fixed).{0,40}term",
+        body,
+    ):
+        return True
+    if re.search(
+        r"(?i)billing\s+rate.{0,60}(?:term\s+of\s+(?:this\s+)?(?:agreement|contract))",
+        body,
+    ):
+        return True
+    # Multi-year on-call + billing schedule → rates held across base + renewals.
+    return bool(
+        re.search(r"(?i)schedule\s+of\s+billing\s+rates", body)
+        and re.search(r"(?i)renewal|option(?:al)?\s+(?:one[-\s])?year", body)
+    )
+
+
+def _personnel_schedule_cost_file_markdown(
+    budget: ProposalBudget,
+    *,
+    rfp_text: str,
+    personnel_md: str,
+) -> str:
+    """Deterministic Cost File for schedule-only personnel_loading (on-call T&M).
+
+    No Proposed Investment total (hourly rows are rates, not a project fee).
+    No Fee Detail / flat-phase framing.
+    """
+    lines: list[str] = []
+    if re.search(r"(?i)cost\s+file|separate\s+file|sealed", rfp_text or ""):
+        lines.extend(
+            [
+                "## Cost Proposal Submission",
+                "",
+                "The Cost Proposal is submitted as a file separate from the technical "
+                "proposal. Cost information remains sealed from evaluation until "
+                "tentative selection, per the solicitation.",
+                "",
+            ]
+        )
+    lines.append(personnel_md.rstrip())
+    lines.append("")
+
+    if _rfp_is_tm_letter_proposal(rfp_text):
+        lines.extend(
+            [
+                "## Billing",
+                "",
+                "Services are billed monthly at the hourly rates in the Schedule of "
+                "Billing Rates above, against a not-to-exceed amount set in each "
+                "approved Letter Proposal / authorized assignment. Monthly invoices "
+                "list hours by person and any authorized reimbursable expenditures.",
+                "",
+            ]
+        )
+    if _rfp_locks_rates_for_term(rfp_text):
+        lines.extend(
+            [
+                "Rates are held for the full contract term, including any renewals — "
+                "no billing-rate changes during the term.",
+                "",
+            ]
+        )
+
+    # Reimbursables: RFP often requires them identified even when $0 / at-cost.
+    reimb_bits: list[str] = []
+    for item in budget.line_items or []:
+        blob = f"{item.description or ''} {item.category or ''}".casefold()
+        if any(
+            k in blob
+            for k in (
+                "reimburs",
+                "travel",
+                "permit",
+                "stock media",
+                "pass-through",
+                "passthrough",
+            )
+        ):
+            desc = (item.description or item.category or "").strip()
+            if desc and desc not in reimb_bits:
+                reimb_bits.append(desc[:240])
+    lines.extend(["## Reimbursable Expenses", ""])
+    if reimb_bits:
+        for bit in reimb_bits[:6]:
+            lines.append(f"- {bit}")
+        lines.append(
+            "- Billed at cost only with prior written approval in the applicable "
+            "Letter Proposal; not included in hourly professional fees."
+        )
+    else:
+        lines.append(
+            "Travel, location fees/permits for photography or videography, specialized "
+            "software licenses, and stock media beyond standard subscriptions — when "
+            "needed — are billed at cost with prior written approval in the Letter "
+            "Proposal. No other reimbursables are proposed."
+        )
+    lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 def _md_table_cell(text: str) -> str:
     """Strip characters that break GitHub/markdown pipe tables."""
@@ -3027,6 +3183,20 @@ def render_budget_markdown(
         if personnel_md:
             lines.append(personnel_md)
             lines.append("")
+            # Schedule-only Cost File (on-call T&M / billing rates): do not invent
+            # a Proposed Investment total from hourly rate rows, Fee Detail, or
+            # flat-phase Terms — those contradict Draft Agreement time-and-expense.
+            if not _has_priced_fixed_fees():
+                schedule_md = _personnel_schedule_cost_file_markdown(
+                    budget,
+                    rfp_text=rfp_text,
+                    personnel_md=personnel_md,
+                )
+                from app.services.proposal_manuscript import (
+                    scrub_client_facing_section_artifacts,
+                )
+
+                return scrub_client_facing_section_artifacts(schedule_md).rstrip() + "\n"
         else:
             # Hollow rate table — cut it; fall through to Fee Detail / MANUAL FILL.
             wants_personnel = False
