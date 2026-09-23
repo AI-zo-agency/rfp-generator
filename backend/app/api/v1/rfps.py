@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.rfp import (
     ActivityItem,
@@ -25,6 +26,7 @@ from app.services.rfp_repository import (
     mark_rfp_go,
     save_go_no_go_analysis,
     save_manual_pdf,
+    save_rfp_bid_scope,
     update_rfp_pdf_path,
     upsert_rfp,
 )
@@ -311,6 +313,52 @@ def mark_go(rfp_id: str) -> dict[str, str]:
     if not mark_rfp_go(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     return {"ok": "true", "goNoGo": "go"}
+
+
+class BidScopeRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    selected_tracks: list[str] = Field(alias="selectedTracks")
+    invalidate_artifacts: bool = Field(default=True, alias="invalidateArtifacts")
+
+
+async def _invalidate_proposal_artifacts(rfp_id: str) -> None:
+    """Lazy import — proposals module pulls LangChain and is heavy for unit tests."""
+    from app.api.v1.proposals import clear_proposal_artifacts_for_rfp
+
+    await clear_proposal_artifacts_for_rfp(rfp_id)
+
+
+@router.put("/{rfp_id}/bid-scope", response_model=RfpRecord)
+async def put_bid_scope(rfp_id: str, body: BidScopeRequest) -> RfpRecord:
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for t in body.selected_tracks:
+        label = (t or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        selected.append(label)
+    if not selected:
+        raise HTTPException(
+            status_code=400, detail="Select at least one track (or all tracks)."
+        )
+
+    locked_at = datetime.now(timezone.utc).isoformat()
+    updated = save_rfp_bid_scope(rfp_id, selected, locked_at=locked_at)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    if body.invalidate_artifacts:
+        await _invalidate_proposal_artifacts(rfp_id)
+        refreshed = get_rfp(rfp_id)
+        if refreshed:
+            return refreshed
+    return updated
 
 
 # Go/No-Go "can take a few minutes"; past this, a still-"running" signal is a

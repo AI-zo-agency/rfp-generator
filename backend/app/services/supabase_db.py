@@ -122,6 +122,28 @@ def _parse_analysis(raw: Any) -> dict | None:
     return None
 
 
+def _parse_selected_tracks(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            label = str(item or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            out.append(label)
+        return out
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return _parse_selected_tracks(parsed)
+    return []
+
+
 def _dict_to_rfp(row: dict[str, Any]) -> RfpRecord:
     rfp_id = str(row["id"])
     pdf_path = row.get("pdf_path")
@@ -153,6 +175,8 @@ def _dict_to_rfp(row: dict[str, Any]) -> RfpRecord:
         justwinDetailUrl=row.get("justwin_detail_url"),
         syncedAt=_iso(row.get("synced_at")),
         goNoGoAnalysis=_parse_analysis(row.get("go_no_go_analysis")),
+        selectedTracks=_parse_selected_tracks(row.get("selected_tracks")),
+        bidScopeLockedAt=_iso(row.get("bid_scope_locked_at")),
         pdfUrl=None,
     )
 
@@ -185,6 +209,8 @@ def _rfp_to_row(record: RfpRecord, *, go_no_go_analysis: Any | None = ...) -> di
         "pdf_path": record.pdf_path,
         "justwin_detail_url": record.justwin_detail_url,
         "synced_at": record.synced_at,
+        "selected_tracks": list(record.selected_tracks or []),
+        "bid_scope_locked_at": record.bid_scope_locked_at,
     }
     if go_no_go_analysis is not ...:
         row["go_no_go_analysis"] = go_no_go_analysis
@@ -207,6 +233,8 @@ _PRESERVED_ON_RESYNC = (
     "estimated_value",
     "page_limit",
     "pdf_path",
+    "selected_tracks",
+    "bid_scope_locked_at",
 )
 
 
@@ -477,6 +505,30 @@ def clear_go_no_go_analysis(rfp_id: str) -> RfpRecord | None:
             "last_activity_note": "Go/No-Go re-run in progress — previous analysis cleared.",
         }
     ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+    return get_rfp(rfp_id)
+
+
+def save_rfp_bid_scope(
+    rfp_id: str,
+    selected_tracks: list[str],
+    *,
+    locked_at: str | None,
+) -> RfpRecord | None:
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "selected_tracks": list(selected_tracks),
+        "bid_scope_locked_at": locked_at,
+        "last_activity": now,
+        "last_activity_note": (
+            f"Bid scope locked: {', '.join(selected_tracks)}"
+            if locked_at
+            else "Bid scope cleared"
+        ),
+    }
+    client.table("rfps").update(payload).or_(
+        f"id.eq.{rfp_id},external_id.eq.{rfp_id}"
+    ).execute()
     return get_rfp(rfp_id)
 
 

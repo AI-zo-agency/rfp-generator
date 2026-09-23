@@ -67,6 +67,10 @@ class RfpRecord(BaseModel):
     justwin_detail_url: str | None = Field(default=None, alias="justwinDetailUrl")
     synced_at: str | None = Field(default=None, alias="syncedAt")
     go_no_go_analysis: dict | None = Field(default=None, alias="goNoGoAnalysis")
+    # Multi-track bid scope (exact Fit track labels). Empty + unlocked = whole RFP
+    # or not yet confirmed when Fit found 2+ tracks.
+    selected_tracks: list[str] = Field(default_factory=list, alias="selectedTracks")
+    bid_scope_locked_at: str | None = Field(default=None, alias="bidScopeLockedAt")
     # Enriched from proposal draft — not a DB column on rfps
     google_doc_url: str | None = Field(default=None, alias="googleDocUrl")
 

@@ -577,6 +577,18 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
         logging.getLogger(__name__).exception(
             "Failed to archive draft before reset for %s", rfp_id
         )
+    await clear_proposal_artifacts_for_rfp(rfp_id)
+    return {
+        "ok": True,
+        "message": (
+            "Proposal draft and all checkpoints cleared from database. "
+            "A filled manuscript was archived first when one existed."
+        ),
+    }
+
+
+async def clear_proposal_artifacts_for_rfp(rfp_id: str) -> None:
+    """Delete draft, research cache, pipeline checkpoint, and generation cancel flag."""
     try:
         await adelete_proposal_draft(rfp_id)
     except Exception:
@@ -589,13 +601,6 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
     from app.services.proposal_generation_cancel import clear_generation_cancel
 
     clear_generation_cancel(rfp_id)
-    return {
-        "ok": True,
-        "message": (
-            "Proposal draft and all checkpoints cleared from database. "
-            "A filled manuscript was archived first when one existed."
-        ),
-    }
 
 
 class OutlineModeRequest(BaseModel):
