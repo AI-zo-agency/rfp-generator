@@ -161,6 +161,11 @@ class BudgetScopeGapTests(unittest.TestCase):
         self.assertEqual(len(flags), 1)
         self.assertIn("only 1 of the RFP's 3 scope groups", flags[0])
 
+        skipped = collect_budget_scope_gap_flags(
+            budget, sections, selected_tracks=["any-locked-subset"]
+        )
+        self.assertEqual(skipped, [])
+
     def test_all_groups_priced_no_flag(self) -> None:
         sections = self._sections(
             ["Group 1 — Digital Marketing", "Group 2 — Print", "Group 3 — Events"]

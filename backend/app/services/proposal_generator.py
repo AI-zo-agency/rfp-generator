@@ -3505,8 +3505,23 @@ async def _run_phase3_5_budget_inner(
         )
 
         sanity_flags = collect_budget_sanity_flags(budget)
+        selected_for_scope: list[str] | None = None
+        try:
+            from app.services.rfp_repository import get_rfp as _get_rfp_for_scope
+
+            scope_rfp = _get_rfp_for_scope(rfp_id)
+            if (
+                scope_rfp
+                and getattr(scope_rfp, "bid_scope_locked_at", None)
+                and getattr(scope_rfp, "selected_tracks", None)
+            ):
+                selected_for_scope = list(scope_rfp.selected_tracks)
+        except Exception:  # noqa: BLE001
+            selected_for_scope = None
         sanity_flags += collect_budget_scope_gap_flags(
-            budget, research.rfp_sections if research else []
+            budget,
+            research.rfp_sections if research else [],
+            selected_tracks=selected_for_scope,
         )
         if sanity_flags:
             for flag in sanity_flags:

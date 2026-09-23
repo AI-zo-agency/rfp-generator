@@ -179,9 +179,19 @@ def budget_scope_group_coverage(budget: Any, rfp_sections: Any) -> tuple[set[str
         return set(), set()
 
 
-def collect_budget_scope_gap_flags(budget: Any, rfp_sections: Any) -> list[str]:
-    """Flag only when the budget prices a strict subset of the RFP's scope groups."""
+def collect_budget_scope_gap_flags(
+    budget: Any,
+    rfp_sections: Any,
+    selected_tracks: list[str] | None = None,
+) -> list[str]:
+    """Flag only when the budget prices a strict subset of the RFP's scope groups.
+
+    When ``selected_tracks`` is non-empty (intentional partial bid), skip this
+    check — omitted tracks are expected.
+    """
     try:
+        if selected_tracks:
+            return []
         found, all_groups = budget_scope_group_coverage(budget, rfp_sections)
         if not found or not all_groups:
             return []

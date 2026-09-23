@@ -2101,6 +2101,20 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         {"role": "system", "content": STAGE3_BUDGET_PROMPT},
         {"role": "user", "content": user_content},
     ]
+    try:
+        from app.services.proposal_bid_scope import bid_scope_prompt_block
+
+        if getattr(rfp, "bid_scope_locked_at", None) and getattr(
+            rfp, "selected_tracks", None
+        ):
+            scope_block = bid_scope_prompt_block(list(rfp.selected_tracks or []))
+            if scope_block:
+                messages[0] = {
+                    "role": "system",
+                    "content": f"{STAGE3_BUDGET_PROMPT}\n\n{scope_block}",
+                }
+    except Exception:  # noqa: BLE001
+        pass
     raw: dict = {}
     provider = "skeleton"
     try:
