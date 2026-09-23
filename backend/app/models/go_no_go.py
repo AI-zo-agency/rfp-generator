@@ -134,3 +134,5 @@ class GoNoGoAnalysis(BaseModel):
     deadline: GoNoGoDeadlineInfo | None = None
     action_flags: list[str] = Field(default_factory=list, alias="actionFlags")
     provider: str | None = None
+    # Distinct non-empty track labels from capability_matrix (multi-lot RFPs).
+    available_tracks: list[str] = Field(default_factory=list, alias="availableTracks")
