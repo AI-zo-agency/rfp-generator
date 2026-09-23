@@ -98,3 +98,31 @@ def assert_bid_scope_ready_for_generate(
         raise ValueError(
             "Bid scope lock is missing selected_tracks. Re-confirm bid scope."
         )
+
+
+def available_tracks_from_rfp_analysis(analysis: Any) -> list[str]:
+    """Read availableTracks from a Go/No-Go analysis dict or model."""
+    if analysis is None:
+        return []
+    if not isinstance(analysis, dict):
+        tracks = getattr(analysis, "available_tracks", None)
+        if tracks:
+            return list(tracks)
+        rows = getattr(analysis, "capability_matrix", None) or []
+        return tracks_from_capability_rows(rows)
+    raw = analysis.get("availableTracks") or analysis.get("available_tracks") or []
+    if raw:
+        return [str(t).strip() for t in raw if str(t).strip()]
+    rows = analysis.get("capabilityMatrix") or analysis.get("capability_matrix") or []
+    return tracks_from_capability_rows(rows)
+
+
+def enforce_bid_scope_for_rfp(rfp: Any) -> None:
+    """Raise ValueError when a multi-track RFP has not locked bid scope."""
+    analysis = getattr(rfp, "go_no_go_analysis", None)
+    available = available_tracks_from_rfp_analysis(analysis)
+    assert_bid_scope_ready_for_generate(
+        available_tracks=available,
+        selected_tracks=list(getattr(rfp, "selected_tracks", None) or []),
+        bid_scope_locked_at=getattr(rfp, "bid_scope_locked_at", None),
+    )

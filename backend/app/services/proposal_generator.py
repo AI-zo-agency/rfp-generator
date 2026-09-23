@@ -1436,6 +1436,12 @@ async def _run_phase2_retrieval_inner(
                 rfp_context=rfp_context,
                 page_limit=resolved_page_limit or rfp.page_limit,
                 outline_mode=mode,
+                selected_tracks=(
+                    list(rfp.selected_tracks)
+                    if getattr(rfp, "bid_scope_locked_at", None)
+                    and getattr(rfp, "selected_tracks", None)
+                    else None
+                ),
             )
         except IntelligenceError as exc:
             step_trace(
@@ -1498,7 +1504,17 @@ async def finalize_phase2_research_from_plan(
     if legacy is None:
         from app.services.proposal_intelligence.assembler import derive_legacy_fields
 
-        legacy = derive_legacy_fields(plan, outline_mode=mode)
+        legacy = derive_legacy_fields(
+            plan,
+            outline_mode=mode,
+            selected_tracks=(
+                list(rfp.selected_tracks)
+                if rfp
+                and getattr(rfp, "bid_scope_locked_at", None)
+                and getattr(rfp, "selected_tracks", None)
+                else None
+            ),
+        )
 
     rfp_sections = legacy.get("rfpSections") or []
     section_queries = legacy.get("sectionQueries") or {}

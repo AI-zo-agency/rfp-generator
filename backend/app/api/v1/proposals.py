@@ -855,8 +855,16 @@ async def clear_proposal_stop_flag_endpoint(rfp_id: str) -> dict[str, bool]:
 async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate full proposal: static Sections 1–3 + RFP-mapped sections from evidence."""
     from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_bid_scope import enforce_bid_scope_for_rfp
 
     raise_http_if_monthly_budget_blocked()
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        enforce_bid_scope_for_rfp(rfp)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:
@@ -881,8 +889,16 @@ async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
 async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Same as POST /generate — static Sections 1–3 then RFP-varying sections."""
     from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_bid_scope import enforce_bid_scope_for_rfp
 
     raise_http_if_monthly_budget_blocked()
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        enforce_bid_scope_for_rfp(rfp)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:

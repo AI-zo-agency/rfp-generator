@@ -478,6 +478,8 @@ class OutlineSection(BaseModel):
     # LLM-judged delivery roles for THIS tab (by meaning, not title synonyms).
     # Allowed values: substance | calendar | price. Empty = not a delivery tab.
     delivery_roles: list[str] = Field(default_factory=list, alias="deliveryRoles")
+    # Exact Fit / buyer lot label this tab answers; "" = shared package (cover, forms…).
+    track: str = ""
 
 
 class ProposalOutline(BaseModel):

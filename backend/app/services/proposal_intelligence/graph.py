@@ -66,6 +66,7 @@ class IntelligenceGraphState(TypedDict, total=False):
     rfp_context: str
     page_limit: int | None
     outline_mode: str
+    selected_tracks: list[str]
     plan: dict[str, Any]
     legacy: dict[str, Any]
     provider: str
@@ -351,6 +352,7 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
         plan,
         page_limit=page_limit_int,
         outline_mode=str(state.get("outline_mode") or "strict_rfp"),
+        selected_tracks=list(state.get("selected_tracks") or []) or None,
     )
     sections = legacy.get("rfpSections") or []
     log_intel_event(
@@ -428,6 +430,7 @@ async def run_intelligence_graph(
     rfp_context: str,
     page_limit: int | None = None,
     outline_mode: str = "strict_rfp",
+    selected_tracks: list[str] | None = None,
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
     from app.services.llm import LlmError
@@ -457,6 +460,7 @@ async def run_intelligence_graph(
     if mode not in {"zo_template", "strict_rfp"}:
         mode = "strict_rfp"
 
+    tracks = [t for t in (selected_tracks or []) if (t or "").strip()]
     initial: IntelligenceGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -466,6 +470,7 @@ async def run_intelligence_graph(
         "rfp_context": rfp_context,
         "page_limit": page_limit,
         "outline_mode": mode,
+        "selected_tracks": tracks,
         "plan": checkpoint_plan or ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
         "legacy": {},
         "completed_nodes": completed_nodes,
@@ -477,7 +482,10 @@ async def run_intelligence_graph(
 
     plan = ProposalExecutionPlan.model_validate(final.get("plan") or {})
     legacy = final.get("legacy") or derive_legacy_fields(
-        plan, page_limit=page_limit, outline_mode=mode
+        plan,
+        page_limit=page_limit,
+        outline_mode=mode,
+        selected_tracks=tracks or None,
     )
     log_intel_event(
         "graph_end",

@@ -776,8 +776,10 @@ def derive_legacy_fields(
     *,
     page_limit: int | None = None,
     outline_mode: str = "zo_template",
+    selected_tracks: list[str] | None = None,
 ) -> dict[str, Any]:
     """Derive rfpSections / sectionQueries / proofPoints. Never returns evidenceCorpus."""
+    from app.services.proposal_bid_scope import filter_outline_sections_for_bid_scope
     from app.services.proposal_outline_dedup import filter_lean_outline_sections
 
     mode = (outline_mode or "zo_template").strip().lower()
@@ -786,10 +788,16 @@ def derive_legacy_fields(
     plans_by_id = {p.section_id: p for p in plan.writing.section_plans.plans}
     retrieval_by_id = {e.section_id: e for e in plan.writing.retrieval_plan.entries}
 
+    outline_sections = list(plan.writing.proposal_outline.sections)
+    if selected_tracks:
+        outline_sections = filter_outline_sections_for_bid_scope(
+            outline_sections, selected_tracks
+        )
+
     # Near-dup + static only — outline already lean-filtered with RFP context upstream.
     # Strict RFP: never drop Company Overview / Key Personnel / etc. as Zo dups.
     lean_sections, _dropped = filter_lean_outline_sections(
-        list(plan.writing.proposal_outline.sections),
+        outline_sections,
         rfp_context="",
         drop_generic_filler=False,
         skip_static_dedupe=skip_static,
@@ -869,6 +877,7 @@ def derive_legacy_fields(
                 evaluationWeight=weight,
                 protectFromCap=bool(getattr(section, "protect_from_cap", False)),
                 submissionInstrument=instrument,
+                track=str(getattr(section, "track", "") or ""),
             )
         )
 

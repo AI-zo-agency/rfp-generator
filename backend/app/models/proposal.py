@@ -42,6 +42,8 @@ class RfpSectionMap(BaseModel):
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )
+    # Exact Fit / buyer lot label; "" = shared / track-agnostic.
+    track: str = ""
 
 
 class EvidenceItem(BaseModel):

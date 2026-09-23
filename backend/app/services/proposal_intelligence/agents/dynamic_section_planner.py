@@ -176,6 +176,10 @@ Rules:
   * price = fees / cost / rates / budget dollars
   Leave [] for bios, case studies, cover letters, references, forms/attachments, checklists.
   One tab may carry both substance and calendar when the RFP combines them.
+- When BID SCOPE / AVAILABLE TRACKS labels are provided, stamp each section's "track"
+  with the EXACT buyer label that section answers, or "" for shared package tabs
+  (cover, forms, insurance, submission rules). Never invent labels not listed in
+  AVAILABLE TRACKS.
 
 Return JSON only:
 {
@@ -192,7 +196,8 @@ Return JSON only:
       "evaluationWeight": null,
       "protectFromCap": false,
       "submissionInstrument": null,
-      "deliveryRoles": []
+      "deliveryRoles": [],
+      "track": ""
     }
   ],
   "confidence": 0.0
