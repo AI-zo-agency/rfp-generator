@@ -233,7 +233,7 @@ class Settings(BaseSettings):
     # Hard org-wide monthly LLM cap (USD). Sums llm_call_log + financial_llm_calls
     # for the current UTC calendar month, but only rows after
     # monthly_llm_budget_epoch (fresh counter from deploy). 0 disables.
-    monthly_llm_budget_usd: float = 20.0
+    monthly_llm_budget_usd: float = 30.0
     # Soft daily meter denominator for the sidebar (UTC day). Display only.
     daily_llm_budget_usd: float = 5.0
     # ISO-8601 UTC. Spend before this timestamp does not count toward the cap.

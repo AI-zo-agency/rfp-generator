@@ -3831,11 +3831,30 @@ function ProposalDraftWorkspaceInner({
                   <p className="proposal-status-card-title">Build this proposal</p>
                   <p className="proposal-status-card-meta">
                     Start the draft or continue from the last saved checkpoint.
+                    {rfp.bidScopeLockedAt && (rfp.selectedTracks?.length ?? 0) > 0
+                      ? ` Bidding: ${rfp.selectedTracks!.join(", ")}.`
+                      : ""}
                   </p>
                   <button
                     type="button"
                     onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
-                    disabled={anyPipelineRunning}
+                    disabled={
+                      anyPipelineRunning ||
+                      !bidScopeIsReady(
+                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                        rfp.bidScopeLockedAt,
+                        rfp.selectedTracks,
+                      )
+                    }
+                    title={
+                      bidScopeIsReady(
+                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                        rfp.bidScopeLockedAt,
+                        rfp.selectedTracks,
+                      )
+                        ? undefined
+                        : "Lock bid scope on the RFP detail page first"
+                    }
                     className="proposal-status-build"
                   >
                     {primaryPipelineLabel}
