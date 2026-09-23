@@ -48,9 +48,17 @@ Flag only MATERIAL fact drift. Prose polish / rewording without changing facts i
 Material drift (flag these):
 - Invented work listed in out-of-scope (or clearly outside RFP tracks)
 - Dropped or omitted mandatory deliverables the section should cover
+  (especially when a scope-confirmation table lists fewer lines than
+  mandatoryDeliverables — missing trailing Scope of Services items)
 - Merged / commingled track NTEs or scopes when nonCommingleTracks is true
 - Horizon overrun (promised term beyond maxTerm / base+renewals)
 - Extra tracks or scopes not in tracks / mandatoryDeliverables / bidderProposes
+- Ownership conflict: section claims shared "usage rights" / agency retention of
+  deliverable ownership when buyerOwnsDeliverables is true
+- Unverified SLA: "same-day" / "often same-day" / hard turnaround promises without
+  a VERIFY/MANUAL FILL when no locked SLA exists in constraints
+- Protocol heading conflict: title like "outside this scope" while claiming full
+  scope coverage (should be buyer protocols, not can't-perform)
 
 Not material: synonyms for the same deliverable, tone, structure, or ordering.
 
@@ -58,7 +66,7 @@ Return JSON only:
 {
   "drifts": [
     {
-      "kind": "out_of_scope" | "missing_mandatory" | "commingle" | "horizon" | "extra_track" | "other",
+      "kind": "out_of_scope" | "missing_mandatory" | "commingle" | "horizon" | "extra_track" | "ownership" | "unverified_sla" | "protocol_heading" | "other",
       "severity": "critical" | "warning",
       "message": "one sentence; for out-of-scope include the words 'out of scope'",
       "excerpt": "verbatim quote from SECTION CONTENT evidencing the drift",
@@ -91,6 +99,8 @@ def constraints_are_material(constraints: DeliveryConstraints | None) -> bool:
         or constraints.bidder_proposes
         or horizon_bits
         or constraints.non_commingle_tracks
+        or constraints.buyer_owns_deliverables
+        or constraints.letter_proposal_gate
     )
 
 

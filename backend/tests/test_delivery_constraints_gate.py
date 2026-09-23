@@ -9,6 +9,7 @@ from app.models.delivery_constraints import DeliveryConstraints, DeliveryTrack
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.services.delivery_constraints_gate import (
     collect_delivery_constraint_issues,
+    constraints_are_material,
     gate_delivery_section,
     scan_delivery_constraints_on_draft_sync,
     section_title_is_sow_or_timeline,
@@ -222,6 +223,62 @@ class DeliveryConstraintsGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("out of scope" in (i.message or "").casefold() for i in issues)
         )
+
+    async def test_flags_ownership_and_unverified_sla_drifts(self) -> None:
+        constraints = DeliveryConstraints(
+            tracks=[],
+            mandatoryDeliverables=["Website content updates"],
+            outOfScope=[],
+            buyerOwnsDeliverables=True,
+            letterProposalGate=True,
+        )
+        self.assertTrue(constraints_are_material(constraints))
+        llm_json = {
+            "drifts": [
+                {
+                    "kind": "ownership",
+                    "severity": "critical",
+                    "message": "Claims vendor retains IP contrary to buyer ownership",
+                    "excerpt": "Agency retains all intellectual property",
+                    "constraintEvidence": "buyerOwnsDeliverables=true",
+                },
+                {
+                    "kind": "unverified_sla",
+                    "severity": "warning",
+                    "message": "Invented same-day turnaround without VERIFY",
+                    "excerpt": "often same-day turnaround",
+                    "constraintEvidence": "no locked SLA",
+                },
+            ]
+        }
+        with patch(
+            "app.services.delivery_constraints_gate.safe_chat_json",
+            new=AsyncMock(return_value=(llm_json, "mock")),
+        ):
+            issues = await gate_delivery_section(
+                "Approach and Methodology",
+                (
+                    "Agency retains all intellectual property in deliverables. "
+                    "We offer often same-day turnaround."
+                ),
+                constraints,
+            )
+        joined = " ".join(i.message or "" for i in issues).casefold()
+        self.assertIn("ownership", joined)
+        self.assertIn("same-day", joined)
+
+    def test_ownership_only_constraints_are_material(self) -> None:
+        self.assertTrue(
+            constraints_are_material(
+                DeliveryConstraints(buyerOwnsDeliverables=True)
+            )
+        )
+        self.assertTrue(
+            constraints_are_material(
+                DeliveryConstraints(letterProposalGate=True)
+            )
+        )
+        self.assertFalse(constraints_are_material(DeliveryConstraints()))
 
 
 if __name__ == "__main__":

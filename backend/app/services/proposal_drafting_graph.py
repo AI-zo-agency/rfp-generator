@@ -242,6 +242,34 @@ Rules (strict):
    max; wrap long cell text with normal sentences, not line breaks mid-row. Never put
    writer instructions in the tab ("do not restate…"). Missing calendar dates from the
    RFP → weeks from award labeled as proposed, not [VERIFY] tags.
+   On-call / Letter Proposal contracts: do NOT fill every schedule row with "per
+   assignment." Prefer a short post-award onboarding timeline (kickoff, brand/standards
+   intake, compliance portals, first Letter Proposal) then note that each later
+   assignment sets its own schedule in writing.
+47. APPROACH / METHOD / SCOPE OF SERVICES tabs (every RFP — principle-based):
+   (a) SCOPE COVERAGE: When Delivery Constraints / RFP list numbered Scope of Services
+       lines, confirm EACH line (table or bullets). Never drop the last items.
+   (b) NO OVERCLAIM: "We perform every listed service line" is OK. Never claim
+       "nothing out of reach" / "no gaps." Soften capabilities not evidenced in KB
+       (e.g. traditional media buying, specialized production) with Letter Proposal /
+       [VERIFY: capability owner] — do not invent credentials.
+   (c) OWNERSHIP: When Delivery Constraints say buyerOwnsDeliverables (or the Draft
+       Agreement gives the buyer exclusive ownership of work product), say final files
+       transfer to the buyer with stock/music/font licenses documented — NEVER "agreed
+       usage rights" that imply shared ownership.
+   (d) THIS CLIENT: Use locality / org facts from THIS RFP (geography, government form,
+       scale, multi-department demand). A section that could be sent to any city fails.
+   (e) EVIDENCE: Anchor the workflow with named KB case studies when present; otherwise
+       capability language without invented clients.
+   (f) REMOTE / ON-SITE: If the agency delivers remotely and the RFP implies shoots,
+       events, or on-site work, say how travel works and that it is authorized in the
+       Letter Proposal / reimbursables — stay consistent with Cost.
+   (g) NO UNVERIFIED SLAs: Never invent "same-day" / "often same-day" turnaround.
+       Use [VERIFY: Sonja — turnaround tiers] or omit.
+   (h) PROTOCOLS HEADING: If claiming full scope, do not title a block "outside this
+       scope." Prefer "Working within buyer protocols" for media-buy / publish gates.
+   (i) ACCESSIBILITY: Name a standard (e.g. WCAG) ONLY if KB/companyfacts support it;
+       otherwise [VERIFY] or describe a compliance review without a fake standard.
 46. COVER LETTER / TRANSMITTAL (Rev 6 signed passage · RFP format first · won form second):
    Structure and required fields follow THIS RFP's cover-letter / letter-of-transmittal
    instructions and submission package (addressee, required statements, page limits,

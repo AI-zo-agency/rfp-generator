@@ -86,11 +86,13 @@ Return JSON only:
   },
   "delivery": {
     "tracks": [{"id": "slug", "label": "string", "nteAnnual": number or null, "billing": "hourly|fixed|other"}],
-    "mandatoryDeliverables": ["string"],
+    "mandatoryDeliverables": ["string — EVERY numbered Scope of Services / SOW line when present"],
     "bidderProposes": ["string"],
     "outOfScope": ["string"],
     "horizon": {"baseTerm": "string", "renewals": "string", "maxTerm": "string"},
     "nonCommingleTracks": bool,
+    "buyerOwnsDeliverables": bool,
+    "letterProposalGate": bool,
     "evidence": [{"field": "string", "quote": "verbatim quote", "locator": "string"}]
   }
 }
@@ -111,6 +113,12 @@ Rules:
 - bidNumber: copy ONLY from THIS RFP; never invent or borrow from another solicitation.
 - Every non-null bidNumber, NTE, and form field MUST have an evidence quote from THIS excerpt.
 - Align delivery.tracks ids/labels with instrument.tracks when both exist.
+- mandatoryDeliverables: when THIS RFP lists a numbered Scope of Services / Scope of Work /
+  services list, copy EACH line (full list — do not truncate or summarize mid-list).
+- buyerOwnsDeliverables: true when Draft Agreement / contract says deliverables / work
+  product are the buyer's exclusive property (or equivalent work-for-hire ownership).
+- letterProposalGate: true when work starts only after a Letter Proposal / task order /
+  written authorization for each assignment (on-call / as-needed contracts).
 - Do NOT copy fields, bid numbers, or NTEs from other RFPs or prior knowledge.
 - Do NOT invent rates or hours.
 """
@@ -335,7 +343,8 @@ def normalize_delivery_payload(raw: Any) -> DeliveryConstraints:
     return DeliveryConstraints(
         tracks=_normalize_delivery_tracks(raw.get("tracks")),
         mandatoryDeliverables=_normalize_str_list(
-            raw.get("mandatoryDeliverables") or raw.get("mandatory_deliverables")
+            raw.get("mandatoryDeliverables") or raw.get("mandatory_deliverables"),
+            limit=40,
         ),
         bidderProposes=_normalize_str_list(
             raw.get("bidderProposes") or raw.get("bidder_proposes")
@@ -344,6 +353,12 @@ def normalize_delivery_payload(raw: Any) -> DeliveryConstraints:
         horizon=_normalize_horizon(raw.get("horizon")),
         nonCommingleTracks=bool(
             raw.get("nonCommingleTracks", raw.get("non_commingle_tracks", False))
+        ),
+        buyerOwnsDeliverables=bool(
+            raw.get("buyerOwnsDeliverables", raw.get("buyer_owns_deliverables", False))
+        ),
+        letterProposalGate=bool(
+            raw.get("letterProposalGate", raw.get("letter_proposal_gate", False))
         ),
         evidence=_normalize_evidence(raw.get("evidence")),
     )

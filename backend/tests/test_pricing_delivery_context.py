@@ -41,6 +41,8 @@ def _research_like() -> ProposalResearchCache:
         ],
         outOfScope=["County-wide website redesign"],
         nonCommingleTracks=True,
+        buyerOwnsDeliverables=True,
+        letterProposalGate=True,
         horizon=DeliveryHorizon(
             baseTerm="1 year",
             renewals="up to 3",
@@ -62,6 +64,8 @@ class PricingDeliveryContextTests(unittest.TestCase):
         self.assertIn("75,000", block)
         self.assertIn("deterministic render only", block.casefold())
         self.assertIn("must not change locked facts", block.casefold())
+        self.assertIn("buyer owns final deliverables", block.casefold())
+        self.assertIn("letter proposal", block.casefold())
 
     def test_budget_focus_keeps_tracks_omits_long_sow_list(self) -> None:
         block = format_pricing_delivery_constraints_block(
@@ -72,6 +76,9 @@ class PricingDeliveryContextTests(unittest.TestCase):
         self.assertIn("deterministic render only", block.casefold())
         # Horizon still useful for budget narrate; mandatory list is sow-heavy.
         self.assertNotIn("County-wide website redesign", block)
+        # Ownership/gate still apply when present (short binding facts).
+        self.assertIn("buyer owns final deliverables", block.casefold())
+        self.assertIn("letter proposal", block.casefold())
 
     def test_falls_back_to_opportunity_hard_constraints(self) -> None:
         plan = {

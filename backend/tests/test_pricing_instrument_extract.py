@@ -98,11 +98,15 @@ class ExtractNormalizeTests(unittest.TestCase):
                 ],
                 "mandatoryDeliverables": ["Website refresh"],
                 "nonCommingleTracks": True,
+                "buyerOwnsDeliverables": True,
+                "letterProposalGate": True,
                 "horizon": {"baseTerm": "1 year", "renewals": "up to 2", "maxTerm": "3 years"},
             }
         )
         self.assertEqual(len(dc.tracks), 1)
         self.assertTrue(dc.non_commingle_tracks)
+        self.assertTrue(dc.buyer_owns_deliverables)
+        self.assertTrue(dc.letter_proposal_gate)
         self.assertEqual(dc.horizon.base_term, "1 year")
         self.assertEqual(dc.mandatory_deliverables, ["Website refresh"])
 

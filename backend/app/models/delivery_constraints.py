@@ -33,4 +33,8 @@ class DeliveryConstraints(BaseModel):
     out_of_scope: list[str] = Field(default_factory=list, alias="outOfScope")
     horizon: DeliveryHorizon | None = None
     non_commingle_tracks: bool = Field(default=False, alias="nonCommingleTracks")
+    # Draft Agreement / contract: work product belongs to the buyer (exclusive).
+    buyer_owns_deliverables: bool = Field(default=False, alias="buyerOwnsDeliverables")
+    # On-call / task-order RFQs that gate work behind a Letter Proposal / task order.
+    letter_proposal_gate: bool = Field(default=False, alias="letterProposalGate")
     evidence: list[InstrumentEvidence] = Field(default_factory=list)

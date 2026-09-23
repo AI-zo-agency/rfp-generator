@@ -124,6 +124,8 @@ def _has_typed_signal(
         or delivery.mandatory_deliverables
         or delivery.out_of_scope
         or delivery.bidder_proposes
+        or delivery.buyer_owns_deliverables
+        or delivery.letter_proposal_gate
         or (
             delivery.horizon
             and any(
@@ -210,8 +212,11 @@ def format_pricing_delivery_constraints_block(
         if dc.non_commingle_tracks:
             lines.append("- Tracks must not be commingled (separate NTEs / scopes).")
         if want_sow_lists and dc.mandatory_deliverables:
-            lines.append("- SOW musts (price and narrate ONLY these):")
-            for i, d in enumerate(dc.mandatory_deliverables[:18], 1):
+            lines.append(
+                "- SOW / Scope of Services musts (Approach must confirm EACH line — "
+                "do not drop trailing items):"
+            )
+            for i, d in enumerate(dc.mandatory_deliverables[:40], 1):
                 text = str(d).strip()[:350]
                 if text:
                     lines.append(f"  {i}. {text}")
@@ -227,6 +232,20 @@ def format_pricing_delivery_constraints_block(
                 text = str(item).strip()[:300]
                 if text:
                     lines.append(f"  • {text}")
+        # Ownership + Letter Proposal gate are short binding facts — always surface
+        # when set (not only sow focus), so Cost/Timeline/Approach stay consistent.
+        if dc.buyer_owns_deliverables:
+            lines.append(
+                "- Ownership: buyer owns final deliverables / work product "
+                "(exclusive). Do NOT claim shared 'usage rights' or agency retention "
+                "of ownership unless THIS RFP explicitly allows it."
+            )
+        if dc.letter_proposal_gate:
+            lines.append(
+                "- Letter Proposal / task-order gate: no work starts until written "
+                "authorization for that assignment. Prefer onboarding timeline over "
+                "filler 'per assignment' schedule rows."
+            )
         if want_timeline and dc.horizon:
             h = dc.horizon
             if any((h.base_term, h.renewals, h.max_term)):
