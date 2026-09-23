@@ -323,7 +323,17 @@ def build_pricing_rate_card_from_guide_text(
     """Extract bindable rates from guide text (tables + inline). No invention."""
     text = guide_text or ""
     warnings: list[str] = []
-    if not text.strip() or text.strip().startswith("("):
+    # Only treat true "missing doc" stubs as empty — not labor headers that
+    # start with parentheticals like "(search — cite source filenames)".
+    stripped = text.strip()
+    missing_stub = bool(
+        not stripped
+        or re.match(
+            r"(?i)^\(\s*(?:no\s+00_guide_pricing|no\s+usable|no\s+matching|not\s+configured)",
+            stripped,
+        )
+    )
+    if missing_stub:
         warnings.append("No usable 00_Guide_Pricing text — rate card empty; flag unknowns.")
         card = PricingRateCard(
             rates=[],

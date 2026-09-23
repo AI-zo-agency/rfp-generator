@@ -1968,6 +1968,22 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     for warn in rate_card.warnings:
         logger.info("pricing_rate_card_warning rfp_id=%s warn=%s", rfp_id, warn)
 
+    # Seed approved hourly registry from KB role billable tables (Billable column).
+    try:
+        from app.services.pricing_approved_rates import ingest_role_billable_from_guide_bundle
+
+        kb_hourly = ingest_role_billable_from_guide_bundle(
+            guide_text, kb_sources=list(kb_sources or [])
+        )
+        step_trace(
+            "pricing_kb_role_billable_ingested",
+            rfp_id=rfp_id,
+            count=len(kb_hourly),
+            amounts=sorted({round(r.amount, 2) for r in kb_hourly})[:12],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KB role billable ingest skipped for %s: %s", rfp_id, exc)
+
     guide_missing = bool((guide_text or "").startswith("(No 00_Guide_Pricing"))
     pinned_ok = any(
         (src or "").casefold().startswith("00_guide_pricing") for src in (kb_sources or [])
@@ -2004,6 +2020,16 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             guide_text=guide_text or "",
             guide_missing=guide_missing,
         )
+        try:
+            from app.services.pricing_approved_rates import (
+                ingest_role_billable_from_guide_bundle,
+            )
+
+            ingest_role_billable_from_guide_bundle(
+                guide_text, kb_sources=list(kb_sources or [])
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("KB role billable ingest (retry) skipped: %s", exc)
         step_trace(
             "pricing_rate_card_refetch_ok",
             rfp_id=rfp_id,
@@ -2548,7 +2574,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         prepare_budget_for_client_display,
     )
 
-    budget = prepare_budget_for_client_display(budget)
+    budget = prepare_budget_for_client_display(budget, rate_card=rate_card)
     budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_context)
 
     revenue = float(budget.agency_revenue_estimate or 0)

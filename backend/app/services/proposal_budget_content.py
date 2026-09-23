@@ -99,100 +99,104 @@ def _usd(value: float | None) -> str:
 def derive_blended_form_rates(
     budget: ProposalBudget,
 ) -> tuple[float | None, float | None, float | None, str]:
-    """Return (hourly, monthly, annual, notes) for an RFP Pricing Proposal Form."""
+    """Return (hourly, monthly, annual, notes) for an RFP Pricing Proposal Form.
+
+    Hourly must resolve against pricing_approved_hourly_rates — never invent from
+    line-item blends or monthly÷160. Monthly/annual only when already set on the
+    ledger (instrument schema will set them later); do not derive from fee totals.
+    """
+    from app.services.pricing_approved_rates import resolve_approved_hourly
+
     hourly = budget.form_hourly_rate
     monthly = budget.form_monthly_rate
     annual = budget.form_annual_rate
     notes = (budget.form_rate_notes or "").strip()
 
-    if hourly is not None and monthly is not None and annual is not None:
-        return (
-            hourly,
-            monthly,
-            annual,
-            notes or "Rates as submitted on the RFP Pricing Proposal Form.",
-        )
-
-    hour_rows = [
-        item
-        for item in budget.line_items
-        if item.rate is not None
-        and item.quantity
-        and item.quantity > 0
-        and (item.unit or "").lower() in {"hour", "hours", "hr", "hrs"}
-    ]
-    if hourly is None and hour_rows:
-        total_hours = sum(float(i.quantity or 0) for i in hour_rows)
-        total_fees = sum(float(i.extended or 0) for i in hour_rows)
-        if total_hours > 0:
-            hourly = total_fees / total_hours
+    if hourly is not None:
+        hit = resolve_approved_hourly(hourly)
+        if hit is None:
+            hourly = None
+            notes = (
+                notes
+                or "[MANUAL FILL: SONJA — set approved hourly in pricing_approved_hourly_rates]"
+            ).strip()
+        else:
             notes = notes or (
-                "Blended hourly = agency-fee hours ÷ extended fees from the supporting rate build."
+                f"Hourly from approved registry: {hit.label or hit.rate_id} "
+                f"({hit.source_file}, {hit.approved_by})."
             )
 
-    fee_base = (
-        budget.agency_revenue_estimate
-        or budget.agency_fee_subtotal
-        or budget.lump_sum_total
-    )
-    if monthly is None and fee_base is not None and fee_base > 0:
-        monthly = float(fee_base) / 12.0
-        notes = notes or (
-            "Monthly rate = annualized agency fee ÷ 12 (supporting build below)."
-        )
-    if annual is None and monthly is not None:
-        annual = float(monthly) * 12.0
-    elif annual is None and fee_base is not None:
-        annual = float(fee_base)
-        if monthly is None:
-            monthly = annual / 12.0
-
-    if hourly is None and monthly is not None:
-        hourly = float(monthly) / 160.0
-        notes = notes or (
-            "Hourly rate approximated as monthly ÷ 160 billable hours for the RFP form; "
-            "confirm with Sonja before submission."
-        )
-
+    # Do not invent monthly/annual from agency fees — that produced DuPage $20,445.17.
     return hourly, monthly, annual, notes
 
 
 def render_verbatim_quotation_form_markdown(budget: ProposalBudget) -> str:
-    """Worksheet matching typical NJ college quotation forms — no substitute A/B/C/D structure."""
-    hourly, monthly, annual, notes = derive_blended_form_rates(budget)
+    """DEPRECATED name — fail-closed buyer-form worksheet (never NJ-college fields).
+
+    Kept as the symbol callers already import. Does NOT emit FEIN/fax/monthly/
+    annual/amounts-in-words unless later wired from a THIS-RFP form schema.
+    """
+    return render_buyer_pricing_form_worksheet(budget)
+
+
+def render_buyer_pricing_form_worksheet(budget: ProposalBudget) -> str:
+    """Minimal worksheet: verified agency identity + approved hourly or MANUAL FILL.
+
+    Principle: no guessed form rows. Full field schema comes from RFP instrument
+    extraction (next). Until then, tell humans to complete the buyer-issued form.
+    """
+    from app.services.agency_facts import (
+        AGENCY_DBA,
+        AGENCY_EMAIL,
+        AGENCY_FEIN,
+        AGENCY_LEGAL_NAME,
+        AGENCY_PHONE,
+    )
+    from app.services.pricing_approved_rates import (
+        load_approved_hourly_rates,
+        resolve_approved_hourly,
+    )
+
+    hourly, _monthly, _annual, notes = derive_blended_form_rates(budget)
+    registry = load_approved_hourly_rates()
+    approved = resolve_approved_hourly(hourly, registry=registry) if hourly is not None else None
+    if approved is not None:
+        rate_cell = _usd(float(approved.amount))
+    else:
+        rate_cell = "[MANUAL FILL: SONJA — approved hourly rate required]"
+
+    legal = f"{AGENCY_LEGAL_NAME} DBA {AGENCY_DBA}"
     lines = [
-        "## Quotation / Pricing Proposal Form (complete the RFP's official form — do not alter it)",
+        "## Buyer Pricing Form worksheet",
         "",
-        "The buyer's RFP states that **changes to the Quotation/Pricing Proposal Form can "
-        "disqualify the submission**. Fill in the **exact form the College issued** (PDF/Word). "
-        "Use this table only as a draft worksheet; do not replace their layout in the export package.",
+        "Complete the **buyer-issued** Proposal Pricing Form / Quotation form from "
+        "THIS RFP. Do not alter the buyer's layout. This worksheet lists only "
+        "verified agency identity and an approved hourly rate (if one exists) — "
+        "it does **not** invent fields from other RFPs (no college template, "
+        "no fax / monthly / annual / amounts-in-words unless THIS form asks).",
         "",
         "| Field | Response |",
         "| --- | --- |",
-        "| Legal Business Name | zö agency |",
-        "| Federal Tax ID (FEIN) | [MANUAL FILL: use verified FEIN from Section 1] |",
-        "| Business Address | [MANUAL FILL: use verified address from Section 1] |",
-        "| Authorized Representative (signature) | [MANUAL FILL: wet/digital signature] |",
-        "| Printed Name | [MANUAL FILL: authorized signatory] |",
-        "| Title | [MANUAL FILL] |",
-        "| Telephone | [MANUAL FILL: business phone from Section 1] |",
-        "| Fax | [MANUAL FILL or N/A] |",
-        "| Email | [MANUAL FILL: business email from Section 1] |",
-        f"| **Hourly Rate** | {_usd(hourly)} |",
-        "| Hourly Rate (amount in words) | [MANUAL FILL: spell hourly amount in words per RFP] |",
-        f"| **Monthly Rate** | {_usd(monthly)} |",
-        "| Monthly Rate (amount in words) | [MANUAL FILL: spell monthly amount in words per RFP] |",
-        f"| **Annual Rate** (monthly × 12 if required) | {_usd(annual)} |",
-        "| Annual Rate (amount in words) | [MANUAL FILL: spell annual amount in words per RFP] |",
+        f"| Company / Legal name | {legal} |",
+        f"| Federal Tax ID (FEIN) | {AGENCY_FEIN} |",
+        "| Authorized representative | Sonja Anderson, Agency Director / CEO |",
+        f"| Telephone | {AGENCY_PHONE} |",
+        f"| Email | {AGENCY_EMAIL} |",
+        f"| **Hourly rate** (if THIS form asks) | {rate_cell} |",
+        "",
+        "[MANUAL FILL: Sonja — enter rates, hours, and extended prices on the "
+        "buyer-issued form; keep each separately capped track under its RFP NTE.]",
         "",
     ]
     if notes:
-        lines.append(f"*Rate derivation (for internal use — do not paste onto the official form):* {notes}")
+        lines.append(f"*Internal note (do not paste onto the official form):* {notes}")
         lines.append("")
-    if hourly is None or monthly is None or annual is None:
+    if not registry:
         lines.append(
-            "[MANUAL FILL: Confirm hourly, monthly, and annual on the official Pricing Proposal "
-            "Form before export.]"
+            "*No approved hourly rates loaded yet (empty JSON registry and no KB "
+            "role billable cache). Phase 3.5 ingests Agency Role Rates–style "
+            "Billable columns from the KB; until then rates stay MANUAL FILL. "
+            "Never use 00_Guide_Pricing deliverable tiers or 07_FIN_ lost-bid files.*"
         )
         lines.append("")
     return "\n".join(lines)
@@ -203,34 +207,9 @@ def render_pricing_proposal_form_markdown(
     *,
     rfp_text: str = "",
 ) -> str:
-    if rfp_forbids_quotation_form_changes(rfp_text):
-        return render_verbatim_quotation_form_markdown(budget)
-    if (budget.budget_format or "").casefold() == "blended_rate_form":
-        return render_verbatim_quotation_form_markdown(budget)
-    hourly, monthly, annual, notes = derive_blended_form_rates(budget)
-    lines = [
-        "## Pricing Proposal Form",
-        "",
-        "This is the RFP-required rate block (complete and return). "
-        "Supporting line-item rationale follows only if needed for evaluators.",
-        "",
-        "| Rate | Amount |",
-        "| --- | ---: |",
-        f"| **Hourly rate** | {_usd(hourly)} |",
-        f"| **Monthly rate** | {_usd(monthly)} |",
-        f"| **Annual rate** *(monthly × 12)* | {_usd(annual)} |",
-        "",
-    ]
-    if notes:
-        lines.append(notes)
-        lines.append("")
-    if hourly is None or monthly is None or annual is None:
-        lines.append(
-            "[MANUAL FILL: Confirm blended hourly / monthly / annual on the agency's "
-            "Pricing Proposal Form before export.]"
-        )
-        lines.append("")
-    return "\n".join(lines)
+    # Always fail-closed worksheet — never the old NJ-college field set.
+    _ = rfp_text  # reserved for future instrument-schema extraction
+    return render_buyer_pricing_form_worksheet(budget)
 
 
 def _hourly_rate_from_line(item: BudgetLineItem) -> float | None:
@@ -2644,14 +2623,20 @@ def normalize_fixed_pricing_narrative(
     )
 
 
-def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
+def prepare_budget_for_client_display(
+    budget: ProposalBudget,
+    *,
+    rate_card=None,
+) -> ProposalBudget:
     """Dedupe travel, sync totals, scrub internal jargon before manuscript render.
 
     Preserves agency vs pass-through split: agency_revenue / lump_sum = agency fees
     (+ direct); total_client_invoicing = client grand total including pass-through.
     """
+    from app.services.pricing_approved_rates import scrub_unapproved_form_rates
     from app.services.proposal_budget_validation import split_line_item_totals
 
+    budget = scrub_unapproved_form_rates(budget, rate_card=rate_card)
     cleaned = dedupe_travel_vs_direct_expenses(budget)
     fees, reimbursables = _professional_fees_and_direct(cleaned)
     table_fees = fee_detail_professional_total(cleaned)
@@ -3011,6 +2996,15 @@ def render_budget_markdown(
             render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text).rstrip()
         )
         lines.append("")
+        # Form-only instrument: form worksheet only — no Proposed Investment,
+        # Terms, Option Terms, travel lines, or project-phase framing.
+        # Do not run Sonja→"agency leadership" jargon scrub — this worksheet is
+        # code-authored and intentionally names Sonja on MANUAL FILL handoffs.
+        rendered = "\n".join(lines).strip()
+        from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+        rendered = scrub_client_facing_section_artifacts(rendered)
+        return rendered + "\n"
 
     total = _canonical_client_total(budget)
     fees, direct = _professional_fees_and_direct(budget)

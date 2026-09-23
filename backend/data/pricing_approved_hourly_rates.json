@@ -1,0 +1,23 @@
+{
+  "_readme": [
+    "Sonja-approved HOURLY rates for official Pricing Forms / personnel loading.",
+    "",
+    "This is the ONLY legal source for form $/hr figures. The Pricing Guide menu",
+    "(e.g. 4.1 Custom Graphic Design $275/asset) is NOT an hourly rate card.",
+    "Files prefixed 07_FIN_ (lost bids / competitor pricing) are rejected.",
+    "",
+    "Empty rates[] ⇒ every form hourly rate renders [MANUAL FILL: SONJA].",
+    "",
+    "Example entry:",
+    "  {",
+    "    \"rateId\": \"public-sector-blended-2026\",",
+    "    \"label\": \"Blended public-sector hourly 2026\",",
+    "    \"amount\": 175,",
+    "    \"approvedBy\": \"Sonja Anderson\",",
+    "    \"sourceFile\": \"05_HourlyRates_Approved.xlsx\",",
+    "    \"effectiveFrom\": \"2026-10-01\",",
+    "    \"notes\": \"Confirmed for County T&M forms\"",
+    "  }"
+  ],
+  "rates": []
+}

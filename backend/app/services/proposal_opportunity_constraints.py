@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 Focus = Literal["all", "budget", "sow", "timeline"]
 
 # Submission / logistics lines that pollute scope.mandatory (not SOW deliverables).
+# Principle-based: buyer submission/award chrome — never client-specific names.
 _ADMIN_PREFIXES = (
     "submit ",
     "proposals will",
@@ -24,17 +25,12 @@ _ADMIN_PREFIXES = (
     "p roposals ",  # OCR-split "Proposals"
     "all proposals",
     "all openings",
-    "the county ",
     "bidders shall",
     "bidder shall",
     "proposal openings",
     "proposal form",
-    "dupage county accepts",
-    "county accepts",
-    "county of dupage",
     "certificate of insurance",
     "awarded contractor",
-    "illinois secretary",
     "in the event of any discrepancy",
     "work/specifications will",
     "demandstar",
@@ -44,8 +40,11 @@ _ADMIN_CONTAINS = (
     "notice of intent to award",
     "notice of award",
     "certificate of good standing",
+    "transmission failures",
     "transmitted in person",
     "hard copy specification",
+    "secretary of state",
+    "corporate/llc certificate",
 )
 
 
