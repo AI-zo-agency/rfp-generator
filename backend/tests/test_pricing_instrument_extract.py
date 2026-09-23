@@ -178,6 +178,138 @@ class ExtractNormalizeTests(unittest.TestCase):
         )
         self.assertIsNone(grounded.bid_number)
 
+    def test_grounding_keeps_companyfacts_identity_and_opp_nte(self) -> None:
+        from app.services.pricing_instrument_extract import (
+            ensure_buyer_form_completeness,
+            ground_instrument_against_excerpt,
+            merge_delivery_ntes_onto_instrument,
+            normalize_delivery_payload,
+            normalize_instrument_payload,
+        )
+
+        inst = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.9,
+                "bidNumber": "26-088-WIOA",
+                "identityFields": [
+                    {
+                        "key": "company_name",
+                        "label": "COMPANY NAME",
+                        "valueSource": "companyfacts",
+                    }
+                ],
+                "tracks": [
+                    {
+                        "id": "part-1",
+                        "label": "Part 1",
+                        "nteAnnual": 75000,
+                        "asksHourly": True,
+                        "asksHours": False,
+                    },
+                    {
+                        "id": "part-2",
+                        "label": "Part 2",
+                        "nteAnnual": 100000,
+                        "asksHourly": True,
+                        "asksHours": True,
+                    },
+                ],
+            }
+        )
+        # Form excerpt has labels + bid but not the dollar amounts.
+        excerpt = (
+            "PROPOSAL PRICING FORM\nBID NUMBER 26-088-WIOA\n"
+            "COMPANY NAME\nCONTACT PERSON\nCONTACT EMAIL\n"
+            "Printed Name Signature Title Date\n"
+        )
+        opp = "General Marketing track: $75,000 annual NTE; Youth Campaign: $100,000 NTE"
+        grounded = ground_instrument_against_excerpt(
+            inst, excerpt, secondary_corpus=opp
+        )
+        self.assertEqual(grounded.bid_number, "26-088-WIOA")
+        self.assertEqual(len(grounded.identity_fields), 1)
+        self.assertEqual(grounded.identity_fields[0].value_source, "companyfacts")
+        self.assertEqual(grounded.tracks[0].nte_annual, 75000.0)
+        self.assertEqual(grounded.tracks[1].nte_annual, 100000.0)
+
+        complete = ensure_buyer_form_completeness(grounded, excerpt)
+        keys = {f.key for f in complete.identity_fields}
+        self.assertIn("contact_person", keys)
+        self.assertIn("contact_email", keys)
+        self.assertIsNotNone(complete.signature)
+        self.assertTrue(complete.signature.signature_required)
+
+        # Merge path: delivery has NTEs, instrument tracks nulled.
+        thin = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.9,
+                "tracks": [
+                    {"id": "part-1", "label": "Part 1", "asksHourly": True},
+                    {"id": "part-2", "label": "Part 2", "asksHourly": True, "asksHours": True},
+                ],
+            }
+        )
+        delivery = normalize_delivery_payload(
+            {
+                "tracks": [
+                    {"id": "part-1", "label": "Part 1", "nteAnnual": 75000},
+                    {"id": "part-2", "label": "Part 2", "nteAnnual": 100000},
+                ]
+            }
+        )
+        merged = merge_delivery_ntes_onto_instrument(thin, delivery)
+        self.assertEqual(merged.tracks[0].nte_annual, 75000.0)
+        self.assertEqual(merged.tracks[1].nte_annual, 100000.0)
+
+    def test_instrument_needs_refresh_when_incomplete(self) -> None:
+        from app.services.pricing_instrument_extract import (
+            instrument_needs_refresh,
+            normalize_instrument_payload,
+        )
+
+        self.assertTrue(instrument_needs_refresh(None))
+        incomplete = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.9,
+                "tracks": [
+                    {"id": "a", "label": "A", "asksHourly": True},
+                    {"id": "b", "label": "B", "asksHourly": True},
+                ],
+            }
+        )
+        self.assertTrue(instrument_needs_refresh(incomplete))
+        complete = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.9,
+                "identityFields": [
+                    {
+                        "key": "company_name",
+                        "label": "COMPANY NAME",
+                        "valueSource": "companyfacts",
+                    },
+                    {
+                        "key": "contact_person",
+                        "label": "CONTACT PERSON",
+                        "valueSource": "companyfacts",
+                    },
+                    {
+                        "key": "contact_email",
+                        "label": "CONTACT EMAIL",
+                        "valueSource": "companyfacts",
+                    },
+                ],
+                "tracks": [
+                    {"id": "a", "label": "A", "nteAnnual": 1, "asksHourly": True},
+                    {"id": "b", "label": "B", "nteAnnual": 2, "asksHourly": True},
+                ],
+            }
+        )
+        self.assertFalse(instrument_needs_refresh(complete))
+
     def test_low_confidence_buyer_form_demoted(self) -> None:
         from app.services.pricing_instrument_extract import (
             apply_buyer_form_confidence_gate,
@@ -189,6 +321,90 @@ class ExtractNormalizeTests(unittest.TestCase):
         )
         demoted = apply_buyer_form_confidence_gate(inst)
         self.assertEqual(demoted.kind, "none")
+
+    def test_low_confidence_structural_rescue(self) -> None:
+        from app.services.pricing_instrument_extract import (
+            apply_buyer_form_confidence_gate,
+            ensure_buyer_form_completeness,
+            normalize_instrument_payload,
+        )
+
+        inst = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.4,
+                "bidNumber": "26-088-WIOA",
+                "tracks": [
+                    {
+                        "id": "part-1",
+                        "label": "Part 1",
+                        "nteAnnual": 75000,
+                        "asksHourly": True,
+                    },
+                    {
+                        "id": "part-2",
+                        "label": "Part 2",
+                        "nteAnnual": 100000,
+                        "asksHourly": True,
+                        "asksHours": True,
+                    },
+                ],
+            }
+        )
+        rescued = apply_buyer_form_confidence_gate(inst)
+        self.assertEqual(rescued.kind, "buyer_pricing_form")
+        self.assertGreaterEqual(rescued.confidence, 0.55)
+        complete = ensure_buyer_form_completeness(rescued, excerpt="")
+        keys = {f.key for f in complete.identity_fields}
+        self.assertEqual(keys, {"company_name", "contact_person", "contact_email"})
+        self.assertIsNotNone(complete.signature)
+
+    def test_ensure_completes_partial_identity_on_structural_form(self) -> None:
+        from app.services.pricing_instrument_extract import (
+            ensure_buyer_form_completeness,
+            instrument_needs_refresh,
+            normalize_instrument_payload,
+        )
+
+        partial = normalize_instrument_payload(
+            {
+                "kind": "buyer_pricing_form",
+                "confidence": 0.9,
+                "bidNumber": "26-088-WIOA",
+                "identityFields": [
+                    {
+                        "key": "company_name",
+                        "label": "COMPANY NAME",
+                        "valueSource": "companyfacts",
+                    },
+                    {
+                        "key": "contact_person",
+                        "label": "CONTACT PERSON",
+                        "valueSource": "companyfacts",
+                    },
+                ],
+                "tracks": [
+                    {
+                        "id": "part-1",
+                        "label": "Part 1",
+                        "nteAnnual": 75000,
+                        "asksHourly": True,
+                    },
+                    {
+                        "id": "part-2",
+                        "label": "Part 2",
+                        "nteAnnual": 100000,
+                        "asksHourly": True,
+                        "asksHours": True,
+                    },
+                ],
+            }
+        )
+        self.assertTrue(instrument_needs_refresh(partial))
+        complete = ensure_buyer_form_completeness(partial, excerpt="")
+        keys = {f.key for f in complete.identity_fields}
+        self.assertEqual(keys, {"company_name", "contact_person", "contact_email"})
+        self.assertFalse(instrument_needs_refresh(complete))
 
 
 class ExtractAsyncSmokeTests(unittest.IsolatedAsyncioTestCase):

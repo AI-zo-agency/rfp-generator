@@ -101,7 +101,13 @@ Rules:
 - kind=personnel_loading when THIS RFP asks for role/labor-category hourly rate tables.
 - kind=phased_fee_schedule when fees are by phase/deliverable with no buyer fillable form.
 - kind=none when no cost instrument is found or confidence is low.
-- identityFields: ONLY labels that appear on THIS form — never invent FEIN/phone/fax.
+- Put only THIS form's identity labels in identityFields (e.g. COMPANY NAME,
+  CONTACT PERSON, CONTACT EMAIL when those labels appear). Use valueSource
+  "companyfacts" for agency identity fills; never invent FEIN/phone/fax.
+- Track nteAnnual: use RFP form figures when present; otherwise use the
+  Opportunity pack dual-track ceilings when they clearly bind Part/track NTEs.
+- Signature: set required flags when the form shows Printed Name / Signature /
+  Title / Date.
 - bidNumber: copy ONLY from THIS RFP; never invent or borrow from another solicitation.
 - Every non-null bidNumber, NTE, and form field MUST have an evidence quote from THIS excerpt.
 - Align delivery.tracks ids/labels with instrument.tracks when both exist.
@@ -541,9 +547,19 @@ def bootstrap_delivery_tracks_from_opportunity(
 def ground_instrument_against_excerpt(
     instrument: PricingInstrument,
     excerpt: str,
+    *,
+    secondary_corpus: str = "",
 ) -> PricingInstrument:
-    """Drop / MANUAL-null fields whose evidence quote is missing or not in excerpt."""
+    """Drop / MANUAL-null *extract* fields whose quote or amount is not in corpus.
+
+    Companyfacts-backed identity fields are kept (they are not RFP quotes).
+    Track NTEs may be grounded against the RFP excerpt OR ``secondary_corpus``
+    (opportunity ceilings) so dual NTEs survive when only the opportunity pack
+    states the dollars.
+    """
     body = excerpt or ""
+    secondary = secondary_corpus or ""
+    amount_corpus = f"{body}\n{secondary}"
     grounded_ev = [
         ev for ev in (instrument.evidence or []) if _quote_in_excerpt(ev.quote, body)
     ]
@@ -571,10 +587,12 @@ def ground_instrument_against_excerpt(
         if nte is None:
             new_tracks.append(track)
             continue
-        # Need evidence quote mentioning this NTE, or the amount substring in excerpt.
         nte_s = f"{nte:,.0f}" if float(nte).is_integer() else f"{nte:,.2f}"
         nte_plain = str(int(nte)) if float(nte).is_integer() else str(nte)
-        amount_in_excerpt = nte_s in body or nte_plain in body.replace(",", "")
+        amount_in_corpus = (
+            nte_s in amount_corpus
+            or nte_plain in amount_corpus.replace(",", "")
+        )
         field_keys = (
             f"track.{track.id}.nte",
             f"{track.id}.nte",
@@ -584,7 +602,7 @@ def ground_instrument_against_excerpt(
             track.label,
         )
         ev_hit = any(_evidence_for_field(grounded_ev, k) for k in field_keys)
-        if ev_hit or amount_in_excerpt:
+        if ev_hit or amount_in_corpus:
             new_tracks.append(track)
         else:
             logger.info(
@@ -595,9 +613,13 @@ def ground_instrument_against_excerpt(
             new_tracks.append(track.model_copy(update={"nte_annual": None}))
     updates["tracks"] = new_tracks
 
-    # Identity labels must appear in the excerpt (form-native labels only).
+    # Keep companyfacts identity always; extract labels must appear on THIS form.
     kept_fields: list[IdentityField] = []
     for field in instrument.identity_fields or []:
+        src = (field.value_source or "").casefold()
+        if src == "companyfacts":
+            kept_fields.append(field)
+            continue
         label = (field.label or "").strip()
         if label and _quote_in_excerpt(label, body):
             kept_fields.append(field)
@@ -611,15 +633,245 @@ def ground_instrument_against_excerpt(
     return instrument.model_copy(update=updates)
 
 
-def apply_buyer_form_confidence_gate(instrument: PricingInstrument) -> PricingInstrument:
-    """Demote buyer_pricing_form below confidence threshold to kind=none."""
+# Form-native labels we may promote to companyfacts-backed identity when present
+# on the buyer form excerpt (principle: label must appear; values come from facts).
+_FORM_IDENTITY_LABELS: tuple[tuple[str, str], ...] = (
+    ("company_name", "COMPANY NAME"),
+    ("contact_person", "CONTACT PERSON"),
+    ("contact_email", "CONTACT EMAIL"),
+)
+
+
+def ensure_buyer_form_completeness(
+    instrument: PricingInstrument,
+    excerpt: str,
+) -> PricingInstrument:
+    """Fill gaps on buyer forms: form-native identity labels + signature defaults.
+
+    Does not invent FEIN/phone. Only adds identity rows when the form excerpt
+    literally contains the label. Signature defaults when the excerpt mentions
+    signature / printed name.
+    """
     if instrument.kind != "buyer_pricing_form":
         return instrument
-    if float(instrument.confidence or 0) >= _BUYER_FORM_MIN_CONFIDENCE:
+    body = excerpt or ""
+    body_cf = body.casefold()
+    updates: dict[str, Any] = {}
+
+    existing_keys = {
+        (f.key or "").casefold() for f in (instrument.identity_fields or [])
+    }
+    fields = list(instrument.identity_fields or [])
+    for key, label in _FORM_IDENTITY_LABELS:
+        if key in existing_keys:
+            continue
+        if _quote_in_excerpt(label, body):
+            fields.append(
+                IdentityField(key=key, label=label, valueSource="companyfacts")
+            )
+            existing_keys.add(key)
+    if fields != list(instrument.identity_fields or []):
+        updates["identity_fields"] = fields
+        logger.info(
+            "pricing_instrument_ensure identity_fields=%s",
+            [f.key for f in fields],
+        )
+
+    # Structural fallback: bid + NTE tracks → always complete the companyfacts
+    # identity trio (partial LLM identity must not omit CONTACT EMAIL).
+    final_fields = updates.get("identity_fields", fields)
+    structural = bool(
+        (instrument.bid_number or "").strip()
+        and any(t.nte_annual is not None for t in (instrument.tracks or []))
+    )
+    if structural:
+        have = {(f.key or "").casefold() for f in final_fields}
+        added = False
+        for key, label in _FORM_IDENTITY_LABELS:
+            if key in have:
+                continue
+            final_fields.append(
+                IdentityField(key=key, label=label, valueSource="companyfacts")
+            )
+            have.add(key)
+            added = True
+        if added or final_fields != list(instrument.identity_fields or []):
+            updates["identity_fields"] = final_fields
+            logger.info(
+                "pricing_instrument_ensure identity_fields structural complete=%s",
+                [f.key for f in final_fields],
+            )
+
+    sig = instrument.signature
+    sig_mentioned = any(
+        tok in body_cf
+        for tok in ("signature", "printed name", "sign here", "authorized signature")
+    )
+    # Default signature block for multi-track buyer forms even if excerpt missed it.
+    need_sig_default = sig_mentioned or (
+        len(instrument.tracks or []) >= 1
+        and (instrument.bid_number or "").strip()
+    )
+    if need_sig_default and (
+        sig is None
+        or not (
+            sig.printed_name_required
+            or sig.title_required
+            or sig.signature_required
+            or sig.date_required
+        )
+    ):
+        updates["signature"] = PricingSignature(
+            printedNameRequired=True,
+            titleRequired=True,
+            signatureRequired=True,
+            dateRequired=True,
+        )
+        logger.info("pricing_instrument_ensure signature defaults")
+
+    rules = list(instrument.internal_note_rules or [])
+    if len(instrument.tracks or []) >= 2:
+        for rule in ("one_hourly_per_track", "do_not_commingle_ntes"):
+            if rule not in rules:
+                rules.append(rule)
+        updates["internal_note_rules"] = rules
+
+    if not updates:
         return instrument
+    return instrument.model_copy(update=updates)
+
+
+def merge_delivery_ntes_onto_instrument(
+    instrument: PricingInstrument,
+    delivery: DeliveryConstraints,
+) -> PricingInstrument:
+    """Copy delivery-track NTEs onto instrument tracks when extract left them null."""
+    if instrument.kind != "buyer_pricing_form" or not instrument.tracks:
+        return instrument
+    by_id = {t.id: t for t in (delivery.tracks or []) if t.id}
+    by_label = {
+        (t.label or "").casefold(): t for t in (delivery.tracks or []) if t.label
+    }
+    new_tracks: list[PricingTrack] = []
+    changed = False
+    for track in instrument.tracks:
+        if track.nte_annual is not None:
+            new_tracks.append(track)
+            continue
+        hit = by_id.get(track.id) or by_label.get((track.label or "").casefold())
+        if hit is not None and hit.nte_annual is not None:
+            new_tracks.append(
+                track.model_copy(update={"nte_annual": float(hit.nte_annual)})
+            )
+            changed = True
+        else:
+            new_tracks.append(track)
+    if not changed:
+        return instrument
+    logger.info("pricing_instrument_merge_delivery_ntes tracks=%s", len(new_tracks))
+    return instrument.model_copy(update={"tracks": new_tracks})
+
+
+def instrument_needs_refresh(instrument: PricingInstrument | None) -> bool:
+    """True when Phase 3.5 should re-extract (missing or incomplete buyer form)."""
+    if instrument is None:
+        return True
+    # Demotion artifact: kind=none but form payload still present → repair.
+    if instrument.kind == "none":
+        return bool(
+            (instrument.bid_number or "").strip() or (instrument.tracks or [])
+        )
+    if instrument.kind != "buyer_pricing_form":
+        return False
+    if float(instrument.confidence or 0) < _BUYER_FORM_MIN_CONFIDENCE:
+        return True
+    identity_keys = {
+        (f.key or "").casefold() for f in (instrument.identity_fields or [])
+    }
+    required_identity = {k for k, _ in _FORM_IDENTITY_LABELS}
+    if not required_identity.issubset(identity_keys):
+        return True
+    tracks = instrument.tracks or []
+    if len(tracks) >= 2 and all(t.nte_annual is None for t in tracks):
+        return True
+    return False
+
+
+def pricing_form_focus_excerpt(rfp_text: str, *, max_chars: int = 14_000) -> str:
+    """Prefer windows around Pricing Form / Bid Number / contact labels."""
+    body = (rfp_text or "").strip()
+    if not body:
+        return ""
+    patterns = (
+        r"proposal\s+pricing\s+form",
+        r"pricing\s+proposal\s+form",
+        r"bid\s+number",
+        r"company\s+name",
+        r"contact\s+person",
+        r"contact\s+email",
+        r"printed\s+name",
+        r"not\s+to\s+exceed",
+    )
+    span = 3500
+    windows: list[tuple[int, int]] = []
+    for pat in patterns:
+        for m in re.finditer(pat, body, flags=re.I):
+            windows.append((max(0, m.start() - span), min(len(body), m.end() + span)))
+    if not windows:
+        return ""
+    windows.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in windows:
+        if merged and start <= merged[-1][1] + 200:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    parts: list[str] = []
+    used = 0
+    for start, end in merged:
+        chunk = body[start:end]
+        if used + len(chunk) > max_chars:
+            chunk = chunk[: max_chars - used]
+        if chunk.strip():
+            parts.append(chunk)
+            used += len(chunk)
+        if used >= max_chars:
+            break
+    return "\n\n---\n\n".join(parts)
+
+
+def apply_buyer_form_confidence_gate(instrument: PricingInstrument) -> PricingInstrument:
+    """Demote weak buyer forms; rescue structurally complete ones.
+
+    If the LLM under-scores confidence but we already have bid + NTE tracks,
+    keep ``buyer_pricing_form`` and floor confidence at the render threshold.
+    """
+    if instrument.kind != "buyer_pricing_form":
+        return instrument
+    conf = float(instrument.confidence or 0)
+    if conf >= _BUYER_FORM_MIN_CONFIDENCE:
+        return instrument
+    tracks = instrument.tracks or []
+    structural = bool(
+        (instrument.bid_number or "").strip()
+        and len(tracks) >= 1
+        and any(t.nte_annual is not None for t in tracks)
+    )
+    if structural:
+        logger.info(
+            "pricing_instrument_confidence structural rescue confidence=%.2f → %.2f "
+            "bid=%s tracks=%s",
+            conf,
+            _BUYER_FORM_MIN_CONFIDENCE,
+            (instrument.bid_number or "")[:40],
+            len(tracks),
+        )
+        return instrument.model_copy(
+            update={"confidence": _BUYER_FORM_MIN_CONFIDENCE}
+        )
     logger.info(
         "pricing_instrument_confidence demote kind=buyer_pricing_form confidence=%.2f",
-        float(instrument.confidence or 0),
+        conf,
     )
     return instrument.model_copy(update={"kind": "none"})
 
@@ -717,7 +969,10 @@ async def extract_pricing_and_delivery_constraints(
         )
         return _empty_failure()
 
-    excerpt = closing_package_excerpt(body, max_chars=18_000) or body[:20_000]
+    excerpt = closing_package_excerpt(body, max_chars=12_000) or body[:12_000]
+    form_focus = pricing_form_focus_excerpt(body, max_chars=10_000)
+    if form_focus:
+        excerpt = (form_focus + "\n\n---\n\n" + excerpt)[:22_000]
     opp_blob = _compact_opportunity_for_prompt(opportunity)
     raw, _provider = await safe_chat_json(
         [
@@ -758,8 +1013,11 @@ async def extract_pricing_and_delivery_constraints(
     instrument = normalize_instrument_payload(inst_raw)
     delivery = normalize_delivery_payload(del_raw)
 
-    # Ground extracted facts to the excerpt (whitespace-normalized substring).
-    instrument = ground_instrument_against_excerpt(instrument, excerpt)
+    # Ground extract facts to RFP excerpt; opportunity ceilings may back NTEs.
+    instrument = ground_instrument_against_excerpt(
+        instrument, excerpt, secondary_corpus=opp_blob
+    )
+    instrument = ensure_buyer_form_completeness(instrument, excerpt)
     instrument = apply_buyer_form_confidence_gate(instrument)
 
     # Align delivery tracks from instrument when delivery empty but instrument has tracks.
@@ -791,11 +1049,15 @@ async def extract_pricing_and_delivery_constraints(
                 }
             )
 
+    # Push delivery NTEs back onto instrument tracks left null by grounding.
+    instrument = merge_delivery_ntes_onto_instrument(instrument, delivery)
+
     logger.info(
-        "%s ok kind=%s confidence=%.2f tracks=%d delivery_tracks=%d",
+        "%s ok kind=%s confidence=%.2f identity=%d tracks=%d delivery_tracks=%d",
         AGENT,
         instrument.kind,
         instrument.confidence,
+        len(instrument.identity_fields or []),
         len(instrument.tracks),
         len(delivery.tracks),
     )

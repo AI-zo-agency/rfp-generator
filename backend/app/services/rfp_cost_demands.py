@@ -841,16 +841,29 @@ async def ensure_rfp_cost_demands_in_budget_markdown(
     budget: ProposalBudget | None = None,
     demands: list[RfpCostDemand] | None = None,
     rewrite: bool = False,
+    pricing_instrument: Any | None = None,
 ) -> tuple[str, list[RfpCostDemand], list[str]]:
     """Extract (unless provided) → audit → grounded fills → optional LLM → stubs.
 
     Runs for every RFP: demand list is LLM-extracted from THAT RFP's cost asks.
     Always restores Fee Detail by Phase from the ledger when present.
+
+    No-op when Cost is already a deterministic Buyer Pricing Form — Fee Detail /
+    cost-demand rewrites must not paint over the official instrument.
     """
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    body = content or ""
+    if is_buyer_pricing_form_instrument(instrument=pricing_instrument) or re.search(
+        r"(?im)^##\s+Buyer Pricing Form\s*$", body
+    ):
+        logger.info("rfp_cost_demands skipped — buyer_pricing_form manuscript")
+        return body, [], ["skipped buyer_pricing_form"]
+
     working = list(demands) if demands is not None else await extract_rfp_cost_demands(
         rfp_text=rfp_text, approach_digest=approach_digest
     )
-    text = strip_rfp_cost_demand_stub_sections(content or "")
+    text = strip_rfp_cost_demand_stub_sections(body)
     logs: list[str] = []
     if budget is not None:
         from app.services.proposal_budget_content import (

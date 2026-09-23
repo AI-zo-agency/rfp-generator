@@ -224,6 +224,27 @@ class RfpCostDemandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(logs)
         self.assertIn("Outstanding Cost confirmations", out)
 
+    async def test_buyer_pricing_form_skips_cost_demand_rewrite(self) -> None:
+        form = (
+            "## Buyer Pricing Form\n\n"
+            "| Field | Response |\n| --- | --- |\n"
+            "| BID NUMBER | 26-088-WIOA |\n"
+            "| CONTACT EMAIL | connect@zo.agency |\n"
+        )
+        with patch(
+            "app.services.rfp_cost_demands.extract_rfp_cost_demands",
+            new=AsyncMock(side_effect=AssertionError("must not extract")),
+        ):
+            out, audited, logs = await ensure_rfp_cost_demands_in_budget_markdown(
+                form,
+                rfp_text="any",
+                rewrite=True,
+            )
+        self.assertEqual(out, form)
+        self.assertEqual(audited, [])
+        self.assertIn("skipped buyer_pricing_form", logs)
+        self.assertNotIn("Fee Detail", out)
+
 
 if __name__ == "__main__":
     unittest.main()

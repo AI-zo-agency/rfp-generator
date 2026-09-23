@@ -3528,6 +3528,7 @@ async def _run_phase3_5_budget_inner(
                 # Stub-only: Stage 3 + incorporate already rewrote; avoid a
                 # second LLM rewrite that can bloat Terms / leak MFILL tokens.
                 rewrite=False,
+                pricing_instrument=research.pricing_instrument if research else None,
             )
             if covered.strip() != cost_body.strip():
                 sections = list(draft.sections)

@@ -3892,36 +3892,47 @@ async def incorporate_budget_into_draft(
         approach_digest=approach_digest,
         pricing_instrument=pricing_instrument,
     )
-    try:
-        from app.services.rfp_cost_demands import (
-            ensure_rfp_cost_demands_in_budget_markdown,
-            pricing_flags_for_rfp_cost_demands,
-        )
+    # Buyer Pricing Form is deterministic — never Fee Detail / cost-demand rewrite.
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
 
-        content, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
-            content,
-            rfp_text=rfp_text or "",
-            approach_digest=approach_digest,
-            budget=budget,
-            rewrite=True,
+    if is_buyer_pricing_form_instrument(instrument=pricing_instrument):
+        logger.info(
+            "incorporate_budget skipped rfp_cost_demands — buyer_pricing_form rfp_id=%s",
+            rfp_id,
         )
-        for line in demand_logs[:12]:
-            logger.info("incorporate_budget rfp_cost_demand: %s", line)
-        demand_flags = pricing_flags_for_rfp_cost_demands(demands)
-        if demand_flags:
-            # Drop prior RFP Cost demand flags, then append current set.
-            prior = [
-                f
-                for f in (budget.pricing_flags or [])
-                if not str(f).startswith("RFP Cost demand [")
-            ]
-            budget = budget.model_copy(
-                update={"pricing_flags": prior + demand_flags}
+    else:
+        try:
+            from app.services.rfp_cost_demands import (
+                ensure_rfp_cost_demands_in_budget_markdown,
+                pricing_flags_for_rfp_cost_demands,
             )
-    except Exception:
-        logger.warning(
-            "incorporate_budget rfp_cost_demands failed rfp_id=%s", rfp_id, exc_info=True
-        )
+
+            content, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
+                content,
+                rfp_text=rfp_text or "",
+                approach_digest=approach_digest,
+                budget=budget,
+                rewrite=True,
+            )
+            for line in demand_logs[:12]:
+                logger.info("incorporate_budget rfp_cost_demand: %s", line)
+            demand_flags = pricing_flags_for_rfp_cost_demands(demands)
+            if demand_flags:
+                # Drop prior RFP Cost demand flags, then append current set.
+                prior = [
+                    f
+                    for f in (budget.pricing_flags or [])
+                    if not str(f).startswith("RFP Cost demand [")
+                ]
+                budget = budget.model_copy(
+                    update={"pricing_flags": prior + demand_flags}
+                )
+        except Exception:
+            logger.warning(
+                "incorporate_budget rfp_cost_demands failed rfp_id=%s",
+                rfp_id,
+                exc_info=True,
+            )
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)

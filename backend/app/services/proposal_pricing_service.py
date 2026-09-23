@@ -1953,13 +1953,16 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     prior_research = await aget_research_cache(rfp_id)
 
-    # Phase 3.5 fallback: extract instrument once if Phase 2 did not persist it.
-    if prior_research is not None and prior_research.pricing_instrument is None:
-        try:
-            from app.services.pricing_instrument_extract import (
-                extract_pricing_and_delivery_constraints,
-            )
+    # Phase 3.5: extract if missing OR incomplete buyer form (stale/partial persist).
+    from app.services.pricing_instrument_extract import (
+        extract_pricing_and_delivery_constraints,
+        instrument_needs_refresh,
+    )
 
+    if prior_research is not None and instrument_needs_refresh(
+        prior_research.pricing_instrument
+    ):
+        try:
             opp = getattr(prior_research, "proposal_execution_plan", None)
             inst, delivery = await extract_pricing_and_delivery_constraints(
                 rfp_context or "",
@@ -1968,14 +1971,18 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             prior_research = prior_research.model_copy(
                 update={
                     "pricing_instrument": inst,
-                    "delivery_constraints": delivery,
+                    "delivery_constraints": delivery
+                    or prior_research.delivery_constraints,
                 }
             )
             logger.info(
-                "Phase 3.5 pricing instrument fallback for %s: kind=%s confidence=%.2f",
+                "Phase 3.5 pricing instrument refresh for %s: kind=%s confidence=%.2f "
+                "identity=%s tracks=%s",
                 rfp_id,
                 inst.kind,
                 inst.confidence,
+                len(inst.identity_fields or []),
+                len(inst.tracks or []),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
