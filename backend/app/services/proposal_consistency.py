@@ -548,6 +548,15 @@ def scan_manuscript_consistency(
                 )
             )
 
+    # DeliveryConstraints post-edit gate (flag-only LLM judge when typed constraints present).
+    from app.services.delivery_constraints_gate import (
+        scan_delivery_constraints_on_draft_sync,
+    )
+
+    issues.extend(
+        scan_delivery_constraints_on_draft_sync(draft=draft, research=research)
+    )
+
     return issues
 
 

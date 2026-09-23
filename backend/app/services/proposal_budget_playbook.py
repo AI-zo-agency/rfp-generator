@@ -1540,6 +1540,18 @@ async def build_budget_repair_context(
         BUDGET_TOOL_ROUTING,
         budget_playbook_prompt_block(research=research, full_budget_detail=True),
     ]
+    try:
+        from app.services.pricing_delivery_context import (
+            format_pricing_delivery_constraints_block,
+        )
+
+        delivery_block = format_pricing_delivery_constraints_block(
+            research, focus="budget"
+        )
+        if delivery_block.strip():
+            parts.insert(0, delivery_block)
+    except Exception:  # noqa: BLE001
+        pass
     if cost_excerpt.strip():
         parts.append(f"=== RFP BUDGET / COST EXCERPT ===\n{cost_excerpt[:14_000]}")
     if guide_text.strip():

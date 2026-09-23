@@ -1585,6 +1585,34 @@ async def finalize_phase2_research_from_plan(
             rfp_id,
         )
 
+    pricing_instrument = None
+    delivery_constraints = None
+    try:
+        from app.services.pricing_instrument_extract import (
+            extract_pricing_and_delivery_constraints,
+        )
+
+        pricing_instrument, delivery_constraints = (
+            await extract_pricing_and_delivery_constraints(
+                rfp_context or "",
+                plan,
+            )
+        )
+        logger.info(
+            "Phase 2 pricing instrument for %s: kind=%s confidence=%.2f",
+            rfp_id,
+            pricing_instrument.kind,
+            pricing_instrument.confidence,
+        )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Phase 2 pricing instrument extract failed for %s (non-fatal): %s",
+            rfp_id,
+            exc,
+        )
+
     now = datetime.now(timezone.utc).isoformat()
     research = ProposalResearchCache(
         rfpId=rfp.id,
@@ -1603,6 +1631,8 @@ async def finalize_phase2_research_from_plan(
         manuscriptLocks=manuscript_locks,
         proposalExecutionPlan=plan,
         budget=prior_research.budget if prior_research else None,
+        pricingInstrument=pricing_instrument,
+        deliveryConstraints=delivery_constraints,
         presubmitReview=prior_research.presubmit_review if prior_research else None,
         pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
         factLedger=prior_research.fact_ledger if prior_research else None,
@@ -2973,11 +3003,27 @@ async def run_phase3_5_budget_reconcile(
     for line in coerce_logs:
         logger.info("Budget reconcile coerce for %s: %s", rfp_id, line)
 
-    budget = prepare_budget_for_client_display(budget)
+    rate_card_obj = None
+    if research and research.pricing_rate_card:
+        try:
+            from app.models.pricing_rate_card import PricingRateCard
+
+            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
+        except Exception:  # noqa: BLE001
+            rate_card_obj = None
+
+    budget = prepare_budget_for_client_display(
+        budget, rate_card=rate_card_obj, pricing_instrument=getattr(research, "pricing_instrument", None) if research else None
+    )
     research = research.model_copy(update={"budget": budget})
     await asave_research_cache(research)
 
-    draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    draft = await incorporate_budget_into_draft(
+        rfp_id,
+        budget,
+        rfp_text=rfp_context,
+        pricing_instrument=getattr(research, "pricing_instrument", None),
+    )
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
@@ -2988,7 +3034,10 @@ async def run_phase3_5_budget_reconcile(
     )
 
     draft, budget, reshaped = apply_rfp_required_budget_instrument(
-        draft, budget, rfp_text=rfp_context
+        draft,
+        budget,
+        rfp_text=rfp_context,
+        pricing_instrument=getattr(research, "pricing_instrument", None),
     )
     if reshaped:
         if research:
@@ -3239,7 +3288,16 @@ async def _run_phase3_5_budget_inner(
         **summarize_budget(budget),
     )
 
-    budget = prepare_budget_for_client_display(budget)
+    from app.models.pricing_rate_card import PricingRateCard
+
+    rate_card_obj = None
+    if research and research.pricing_rate_card:
+        try:
+            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
+        except Exception:  # noqa: BLE001
+            rate_card_obj = None
+
+    budget = prepare_budget_for_client_display(budget, rate_card=rate_card_obj)
     await _assert_proposal_not_reset(rfp_id)
 
     # Principle-based Cost instrument judge — overrides habit phased when confident.
@@ -3283,14 +3341,7 @@ async def _run_phase3_5_budget_inner(
         logger.warning("Budget format judge skipped for %s: %s", rfp_id, exc)
 
     from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
-    from app.models.pricing_rate_card import PricingRateCard
 
-    rate_card_obj = None
-    if research and research.pricing_rate_card:
-        try:
-            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
-        except Exception:  # noqa: BLE001
-            rate_card_obj = None
     budget, coerce_logs = coerce_budget_to_phased_from_guide(
         budget, rate_card_obj, rfp_text=rfp_context
     )
@@ -3303,14 +3354,23 @@ async def _run_phase3_5_budget_inner(
             rfp_context=rfp_context[:28_000],
             rate_card=rate_card_obj,
         )
-        budget = prepare_budget_for_client_display(budget)
+        budget = prepare_budget_for_client_display(
+            budget,
+            rate_card=rate_card_obj,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
 
     if research:
         research = research.model_copy(update={"budget": budget})
         await asave_research_cache(research)
 
     with pipeline_step("incorporate_budget"):
-        draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+        draft = await incorporate_budget_into_draft(
+            rfp_id,
+            budget,
+            rfp_text=rfp_context,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
     if not draft:
         if getattr(app_settings, "budget_before_drafting", False) and not has_manuscript:
             logger.info(
@@ -3338,7 +3398,10 @@ async def _run_phase3_5_budget_inner(
     )
 
     draft, budget, reshaped = apply_rfp_required_budget_instrument(
-        draft, budget, rfp_text=rfp_context
+        draft,
+        budget,
+        rfp_text=rfp_context,
+        pricing_instrument=research.pricing_instrument if research else None,
     )
     if reshaped:
         if research:
@@ -4320,7 +4383,10 @@ async def generate_full_proposal(
                 rfp_ctx = load_rfp_for_proposal(rfp_id)[2]
                 draft = (
                     await incorporate_budget_into_draft(
-                        rfp_id, research.budget, rfp_text=rfp_ctx
+                        rfp_id,
+                        research.budget,
+                        rfp_text=rfp_ctx,
+                        pricing_instrument=research.pricing_instrument,
                     )
                     or draft
                 )

@@ -1,0 +1,105 @@
+{
+  "rates": [
+    {
+      "rateId": "role-hourly-account-manager",
+      "label": "Account Manager",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-agency-director",
+      "label": "Agency Director",
+      "amount": 400.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-art-director",
+      "label": "Art Director",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-contractor",
+      "label": "Contractor",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-copywriter",
+      "label": "Copywriter",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-creative-director",
+      "label": "Creative Director",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-digital-team",
+      "label": "Digital Team",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-programming",
+      "label": "Programming",
+      "amount": 400.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-executive",
+      "label": "Executive",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    },
+    {
+      "rateId": "role-hourly-finance",
+      "label": "Finance",
+      "amount": 275.0,
+      "approvedBy": "KB role billable column",
+      "sourceFile": "00_Guide_Pricing",
+      "effectiveFrom": "",
+      "effectiveTo": null,
+      "notes": "billable rate from KB role/labor table (not internal/floor)"
+    }
+  ],
+  "updatedFrom": "kb_role_billable_extract"
+}

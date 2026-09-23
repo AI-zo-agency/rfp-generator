@@ -212,7 +212,11 @@ class RoleBillableIngestTests(unittest.TestCase):
             formHourlyRate=199.0,  # not on card
         )
         cleaned = scrub_unapproved_form_rates(budget, registry=rates)
-        self.assertIsNone(cleaned.form_hourly_rate)
+        # Unapproved amount cleared, then seeded from role-card mode ($275).
+        self.assertEqual(cleaned.form_hourly_rate, 275.0)
+        self.assertTrue(
+            any("cleared" in (f or "").casefold() for f in (cleaned.pricing_flags or []))
+        )
 
     def test_phased_guide_fees_untouched(self) -> None:
         rates = approved_from_role_billable_text(
@@ -340,6 +344,42 @@ class RoleBillableIngestTests(unittest.TestCase):
         self.assertIsNone(cleaned.form_hourly_rate)
         md = render_buyer_pricing_form_worksheet(cleaned)
         self.assertIn("MANUAL FILL: SONJA", md)
+
+    def test_null_hourly_seeds_from_role_card_mode(self) -> None:
+        rates = approved_from_role_billable_text(
+            _ROLE_TABLE, source_file="Agency Role Rates & Cost Table.docx"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-t",
+            updatedAt=_now(),
+            budgetFormat="blended_rate_form",
+            formHourlyRate=None,
+        )
+        cleaned = scrub_unapproved_form_rates(budget, registry=rates)
+        self.assertEqual(cleaned.form_hourly_rate, 275.0)
+
+    def test_buyer_pricing_form_does_not_seed_form_hourly(self) -> None:
+        from app.models.pricing_instrument import PricingInstrument
+
+        rates = approved_from_role_billable_text(
+            _ROLE_TABLE, source_file="Agency Role Rates & Cost Table.docx"
+        )
+        inst = PricingInstrument(kind="buyer_pricing_form", confidence=0.9)
+        budget = ProposalBudget(
+            rfpId="rfp-t",
+            updatedAt=_now(),
+            budgetFormat="blended_rate_form",
+            formHourlyRate=275.0,
+        )
+        cleaned = scrub_unapproved_form_rates(
+            budget, registry=rates, pricing_instrument=inst
+        )
+        self.assertIsNone(cleaned.form_hourly_rate)
+        # Null form + buyer instrument must not re-seed.
+        again = scrub_unapproved_form_rates(
+            cleaned, registry=rates, pricing_instrument=inst
+        )
+        self.assertIsNone(again.form_hourly_rate)
 
 
 if __name__ == "__main__":

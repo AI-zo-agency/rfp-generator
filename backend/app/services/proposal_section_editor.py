@@ -6788,6 +6788,16 @@ async def _redraft_rfp_section(
             )
         if kpi_block.strip():
             user_block += f"\n\n{kpi_block.strip()}\n"
+        try:
+            from app.services.pricing_delivery_context import (
+                format_pricing_delivery_constraints_block,
+            )
+
+            delivery_ctx = format_pricing_delivery_constraints_block(research)
+            if delivery_ctx.strip():
+                user_block += f"\n\n{delivery_ctx.strip()}\n"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("chat revise pricing delivery block skipped: %s", exc)
         if should_apply_budget_playbook(section, user_message):
             from app.services.proposal_budget_playbook import build_budget_repair_context
 
@@ -7139,6 +7149,84 @@ async def _try_budget_section_rfp_coverage_check(
             updatedAt=datetime.now(timezone.utc).isoformat(),
             provider=provider,
         )
+
+    # Buyer Pricing Form: deterministic re-render only — never freeform Cost rewrite.
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    if is_buyer_pricing_form_instrument(research):
+        from app.services.proposal_common import load_rfp_for_proposal
+        from app.services.rfp_cost_demands import approach_digest_from_draft_sections
+
+        rfp_blob = ""
+        try:
+            from app.services.go_no_go_service import combine_rfp_text
+
+            _rfp, content_info, rfp_ctx = load_rfp_for_proposal(rfp_id)
+            rfp_blob = combine_rfp_text(
+                getattr(content_info, "description", None) or "",
+                getattr(content_info, "pdf_text", None) or "",
+            ) or (rfp_ctx or "")
+        except Exception:
+            logger.warning(
+                "budget_rfp_coverage: could not load RFP text for buyer form %s",
+                rfp_id,
+                exc_info=True,
+            )
+        budget = research.budget
+        if budget is None:
+            return (
+                section,
+                draft,
+                research,
+                provider,
+                (
+                    f"**{section.title}** — buyer Pricing Form is locked to the "
+                    "typed instrument; no canonical ledger to re-render yet."
+                ),
+                False,
+            )
+        content = render_budget_markdown(
+            budget,
+            rfp_text=rfp_blob,
+            approach_digest=approach_digest_from_draft_sections(draft.sections),
+            pricing_instrument=research.pricing_instrument,
+        )
+        before = section.content or ""
+        changed = content.strip() != before.strip()
+        working = section
+        updated_draft = draft
+        if changed:
+            working = section.model_copy(
+                update={"content": content, "status": "generated"}
+            )
+            merged = [working if s.id == section_id else s for s in draft.sections]
+            now = datetime.now(timezone.utc).isoformat()
+            updated_draft = draft.model_copy(
+                update={"sections": merged, "updated_at": now, "provider": provider}
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                    focus_section_id=section_id,
+                )
+                working = _find_draft_section(updated_draft, section_id) or working
+        logger.info(
+            "budget_improve buyer_pricing_form re-render rfp_id=%s changed=%s",
+            rfp_id,
+            changed,
+        )
+        reply = (
+            f"**{section.title}** — re-rendered from the buyer Pricing Form instrument "
+            "(deterministic; no freeform Cost rewrite)."
+            if changed
+            else (
+                f"**{section.title}** — already matches the buyer Pricing Form "
+                "instrument (no freeform rewrite)."
+            )
+        )
+        return working, updated_draft, research, provider, reply, changed
 
     from app.services.proposal_budget_content import (
         ensure_pricing_guide_verbatim_in_budget_markdown,
@@ -7665,6 +7753,90 @@ async def _persist_section_improve_draft(
         "[chat-persist] zero-fabrication guards applied before save",
         flush=True,
     )
+
+    # DeliveryConstraints post-edit gate (flag-only) when chat touched SOW/Timeline.
+    try:
+        from app.services.delivery_constraints_gate import (
+            collect_delivery_constraint_issues,
+            section_title_is_sow_or_timeline,
+        )
+
+        gate_ids: set[str] = set()
+        if focus_section_id:
+            focus = next(
+                (s for s in guarded.sections if s.id == focus_section_id),
+                None,
+            )
+            if focus and section_title_is_sow_or_timeline(focus.title or ""):
+                gate_ids.add(focus_section_id)
+        for sid in voice_ids:
+            sec = next((s for s in guarded.sections if s.id == sid), None)
+            if sec and section_title_is_sow_or_timeline(sec.title or ""):
+                gate_ids.add(sid)
+        if gate_ids:
+            gate_issues = await collect_delivery_constraint_issues(
+                draft=guarded,
+                research=research,
+                section_ids=gate_ids,
+            )
+            if gate_issues:
+                logger.warning(
+                    "chat-persist delivery-gate flag-only issues=%s sample=%s",
+                    len(gate_issues),
+                    (gate_issues[0].message or "")[:160],
+                )
+                print(
+                    f"[chat-persist] delivery-gate flag-only: {len(gate_issues)} issue(s)",
+                    flush=True,
+                )
+                # Durable signal — not print-only.
+                flag_msgs = [
+                    f"[DELIVERY GATE: {i.message}]"[:240]
+                    for i in gate_issues[:6]
+                    if (i.message or "").strip()
+                ]
+                if research and research.budget and flag_msgs:
+                    prior = list(research.budget.pricing_flags or [])
+                    for msg in flag_msgs:
+                        if msg not in prior:
+                            prior.append(msg)
+                    research = research.model_copy(
+                        update={
+                            "budget": research.budget.model_copy(
+                                update={"pricing_flags": prior}
+                            )
+                        }
+                    )
+                # Section designer notes for the gated tabs.
+                sections = list(guarded.sections)
+                changed_notes = False
+                for i, sec in enumerate(sections):
+                    if sec.id not in gate_ids:
+                        continue
+                    sec_issues = [
+                        gi for gi in gate_issues if gi.section_id == sec.id
+                    ] or gate_issues
+                    note = "; ".join(
+                        (gi.message or "")[:120] for gi in sec_issues[:3]
+                    )
+                    if not note:
+                        continue
+                    prior_note = (sec.designer_note or "").strip()
+                    marker = f"[delivery-gate] {note}"
+                    if marker in prior_note:
+                        continue
+                    new_note = (
+                        f"{prior_note} {marker}".strip()
+                        if prior_note
+                        else marker
+                    )[:800]
+                    sections[i] = sec.model_copy(update={"designer_note": new_note})
+                    changed_notes = True
+                if changed_notes:
+                    guarded = guarded.model_copy(update={"sections": sections})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chat-persist delivery-gate skipped: %s", exc)
+
     to_save = push_after_section_edit_snapshot(
         guarded,
         section_title=section_title,
@@ -8017,7 +8189,10 @@ async def _apply_budget_section_canonical_refresh(
 
     approach_digest = approach_digest_from_draft_sections(draft.sections)
     content = render_budget_markdown(
-        budget, rfp_text=rfp_text, approach_digest=approach_digest
+        budget,
+        rfp_text=rfp_text,
+        approach_digest=approach_digest,
+        pricing_instrument=research.pricing_instrument if research else None,
     )
     # LLM Cost-demand audit for THIS RFP (async) — close silent gaps without inventing $.
     try:
@@ -10345,7 +10520,10 @@ async def improve_proposal_section(
         slot_logs: list[str] = []
         if research and research.budget:
             draft, slot_logs = restore_unresolved_budget_token_tabs(
-                draft, research.budget, rfp_text=rfp_context
+                draft,
+                research.budget,
+                rfp_text=rfp_context,
+                pricing_instrument=research.pricing_instrument,
             )
         still = _find_draft_section(draft, section_id)
         merged_away = still is None

@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from app.models.pricing_instrument import PricingInstrument
 from app.models.proposal import BudgetLineItem, ProposalBudget, ProposalDraft, ProposalSection
 from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
 from app.services.proposal_rfp_excerpt import rfp_forbids_quotation_form_changes
@@ -206,9 +207,19 @@ def render_pricing_proposal_form_markdown(
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
+    instrument: PricingInstrument | None = None,
 ) -> str:
-    # Always fail-closed worksheet — never the old NJ-college field set.
+    # Prefer typed buyer form when research extracted one; else fail-closed worksheet.
     _ = rfp_text  # reserved for future instrument-schema extraction
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    if is_buyer_pricing_form_instrument(instrument=instrument):
+        from app.services.pricing_instrument_render import (
+            apply_track_cap_gate,
+            render_pricing_instrument_markdown,
+        )
+
+        return render_pricing_instrument_markdown(apply_track_cap_gate(instrument))
     return render_buyer_pricing_form_worksheet(budget)
 
 
@@ -1342,8 +1353,17 @@ def format_qualifying_language_for_client(
     return "\n\n".join(p for p in parts if p.strip()) or raw
 
 
-def reformat_budget_terms_in_markdown(content: str) -> str:
+def reformat_budget_terms_in_markdown(
+    content: str,
+    *,
+    pricing_instrument: PricingInstrument | None = None,
+) -> str:
     """Rewrite a persisted ## Terms wall into tables + bullets without changing numbers."""
+    # Buyer Pricing Form is deterministic — never paint Fee Detail / Terms polish over it.
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    if is_buyer_pricing_form_instrument(instrument=pricing_instrument):
+        return content or ""
     text = content or ""
     suppress = _text_has_fee_detail_heading(text)
     match = re.search(r"(?im)^##\s+Terms\s*$", text)
@@ -2627,16 +2647,33 @@ def prepare_budget_for_client_display(
     budget: ProposalBudget,
     *,
     rate_card=None,
+    pricing_instrument: PricingInstrument | None = None,
 ) -> ProposalBudget:
     """Dedupe travel, sync totals, scrub internal jargon before manuscript render.
 
     Preserves agency vs pass-through split: agency_revenue / lump_sum = agency fees
     (+ direct); total_client_invoicing = client grand total including pass-through.
     """
-    from app.services.pricing_approved_rates import scrub_unapproved_form_rates
+    from app.services.pricing_approved_rates import (
+        approved_from_pricing_rates,
+        persist_kb_role_billable_cache,
+        scrub_unapproved_form_rates,
+    )
     from app.services.proposal_budget_validation import split_line_item_totals
 
-    budget = scrub_unapproved_form_rates(budget, rate_card=rate_card)
+    # Bridge rate-card role hourlies into the on-disk registry so later render/
+    # derive calls (which load JSON+cache only) still resolve approved $/hr.
+    if rate_card is not None:
+        try:
+            seeded = approved_from_pricing_rates(rate_card.rates or [])
+            if seeded:
+                persist_kb_role_billable_cache(seeded)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("role billable cache seed from rate_card skipped: %s", exc)
+
+    budget = scrub_unapproved_form_rates(
+        budget, rate_card=rate_card, pricing_instrument=pricing_instrument
+    )
     cleaned = dedupe_travel_vs_direct_expenses(budget)
     fees, reimbursables = _professional_fees_and_direct(cleaned)
     table_fees = fee_detail_professional_total(cleaned)
@@ -2931,9 +2968,12 @@ def render_budget_markdown(
     *,
     rfp_text: str = "",
     approach_digest: str = "",
+    pricing_instrument: PricingInstrument | None = None,
 ) -> str:
     """Client-facing budget: one total, phase/deliverable fee table, short terms."""
-    budget = prepare_budget_for_client_display(budget)
+    budget = prepare_budget_for_client_display(
+        budget, pricing_instrument=pricing_instrument
+    )
     # Defensive: personnel_loading with priced fixed lines but no hourly rates
     # must not claim an hourly schedule or suppress Fee Detail.
     from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
@@ -2993,7 +3033,9 @@ def render_budget_markdown(
             rfp_wants_hourly_schedule = rfp_mandates_hourly_rate_schedule(rfp_text)
     elif wants_form:
         lines.append(
-            render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text).rstrip()
+            render_pricing_proposal_form_markdown(
+                budget, rfp_text=rfp_text, instrument=pricing_instrument
+            ).rstrip()
         )
         lines.append("")
         # Form-only instrument: form worksheet only — no Proposed Investment,
@@ -3655,6 +3697,7 @@ def reshape_budget_for_rfp_form(
     budget: ProposalBudget | None,
     *,
     rfp_text: str,
+    pricing_instrument: PricingInstrument | None = None,
 ) -> ProposalDraft | None:
     """Rewrite Budget to lead with the pricing agent's budgetFormat instrument.
 
@@ -3682,13 +3725,16 @@ def reshape_budget_for_rfp_form(
         budget,
         rfp_text=rfp_text,
         approach_digest=approach_digest_from_draft_sections(draft.sections),
+        pricing_instrument=pricing_instrument,
     )
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
     )
     if wants_blended and not wants_personnel:
-        form_md = render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text)
+        form_md = render_pricing_proposal_form_markdown(
+            budget, rfp_text=rfp_text, instrument=pricing_instrument
+        )
         for i, section in enumerate(sections):
             title = (section.title or "").casefold()
             if section.id == "rfp-closing-pricing-form" or "pricing proposal form" in title:
@@ -3709,6 +3755,7 @@ def apply_rfp_required_budget_instrument(
     budget: ProposalBudget,
     *,
     rfp_text: str,
+    pricing_instrument: PricingInstrument | None = None,
 ) -> tuple[ProposalDraft, ProposalBudget, bool]:
     """Render Cost Proposal from the pricing agent's budgetFormat (Generate + Scan).
 
@@ -3717,7 +3764,9 @@ def apply_rfp_required_budget_instrument(
     fmt = (budget.budget_format or "").casefold()
     if fmt not in {"personnel_loading", "blended_rate_form"}:
         return draft, budget, False
-    reshaped = reshape_budget_for_rfp_form(draft, budget, rfp_text=rfp_text)
+    reshaped = reshape_budget_for_rfp_form(
+        draft, budget, rfp_text=rfp_text, pricing_instrument=pricing_instrument
+    )
     if reshaped is None:
         return draft, budget, False
     return reshaped, budget, True
@@ -3729,6 +3778,7 @@ def fill_hollow_pricing_stubs_from_canon_budget(
     budget: ProposalBudget | None,
     *,
     rfp_text: str = "",
+    pricing_instrument: PricingInstrument | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
     """When Senior Editor mints a Rate/Fee stub AFTER Budget phase, fill it now.
 
@@ -3736,8 +3786,18 @@ def fill_hollow_pricing_stubs_from_canon_budget(
     ``PROPOSAL RATE/FEE SCHEDULE`` as MANUAL FILL — so Budget never had a chance
     to write that tab. Copy the best already-filled budgetish body, or render
     from the canonical ProposalBudget.
+
+    No-op when ``pricing_instrument.kind == buyer_pricing_form`` — never paint
+    Fee Detail / phased markdown over a buyer Pricing Form instrument.
     """
     logs: list[str] = []
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    if is_buyer_pricing_form_instrument(instrument=pricing_instrument):
+        logger.info(
+            "hollow_pricing_stub_fill skipped — buyer_pricing_form instrument"
+        )
+        return draft, logs
     if budget is None and not draft.sections:
         return draft, logs
 
@@ -3766,6 +3826,7 @@ def fill_hollow_pricing_stubs_from_canon_budget(
             budget,
             rfp_text=rfp_text or "",
             approach_digest=approach_digest_from_draft_sections(draft.sections),
+            pricing_instrument=pricing_instrument,
         ).strip()
     if not source:
         return draft, logs
@@ -3809,6 +3870,7 @@ async def incorporate_budget_into_draft(
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
+    pricing_instrument: PricingInstrument | None = None,
 ) -> ProposalDraft | None:
     """Write generated budget into the best-matching proposal section (or append one).
 
@@ -3825,7 +3887,10 @@ async def incorporate_budget_into_draft(
 
     approach_digest = approach_digest_from_draft_sections(draft.sections)
     content = render_budget_markdown(
-        budget, rfp_text=rfp_text, approach_digest=approach_digest
+        budget,
+        rfp_text=rfp_text,
+        approach_digest=approach_digest,
+        pricing_instrument=pricing_instrument,
     )
     try:
         from app.services.rfp_cost_demands import (

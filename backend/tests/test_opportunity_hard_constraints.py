@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
+from app.models.delivery_constraints import (
+    DeliveryConstraints,
+    DeliveryHorizon,
+    DeliveryTrack,
+)
+from app.models.pricing_instrument import PricingInstrument
 from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_content import (
     ensure_fee_detail_table_in_budget_markdown,
@@ -15,6 +23,10 @@ from app.services.proposal_opportunity_constraints import (
     budget_format_omits_fee_detail,
     format_opportunity_hard_constraints,
     opportunity_pricing_format_hint,
+)
+
+_DUPAGE_INSTRUMENT = (
+    Path(__file__).resolve().parent / "fixtures" / "dupage_pricing_instrument.json"
 )
 
 
@@ -202,6 +214,112 @@ class OpportunityConstraintsTests(unittest.TestCase):
         md = render_budget_markdown(budget, rfp_text="Submit the Proposal Pricing Form.")
         self.assertNotIn("Fee Detail by Phase", md)
         self.assertNotIn("Supporting Fee Detail", md)
+
+    def test_render_budget_markdown_with_instrument_golden_markers(self) -> None:
+        """E2E Cost path: blended_rate_form + research instrument → DuPage golden."""
+        inst = PricingInstrument.model_validate(
+            json.loads(_DUPAGE_INSTRUMENT.read_text())
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        budget = ProposalBudget(
+            rfpId="rfp-dupage-golden",
+            updatedAt=now,
+            budgetFormat="blended_rate_form",
+            formHourlyRate=None,
+            lumpSumTotal=0.0,
+            agencyRevenueEstimate=0.0,
+            lineItems=[],
+            qualifyingLanguage="Hourly rates as stated on the Proposal Pricing Form.",
+        )
+        md = render_budget_markdown(
+            budget,
+            rfp_text="Submit the Proposal Pricing Form.",
+            pricing_instrument=inst,
+        )
+        self.assertIn("26-088-WIOA", md)
+        self.assertIn("Part 1", md)
+        self.assertIn("Part 2", md)
+        self.assertIn("75,000", md)
+        self.assertIn("100,000", md)
+        self.assertIn("connect@zo.agency", md)
+        self.assertIn("[MANUAL FILL: SONJA]", md)
+        self.assertIn("[SIGN]", md)
+        self.assertNotIn("FEIN", md)
+        self.assertNotIn("Federal Tax", md)
+        self.assertNotIn("Fee Detail by Phase", md)
+
+    def test_phased_instrument_does_not_emit_bid_number(self) -> None:
+        """phased_fee_schedule must not paint Bid Number / Part rows via Cost render."""
+        now = datetime.now(timezone.utc).isoformat()
+        budget = ProposalBudget(
+            rfpId="rfp-phased",
+            updatedAt=now,
+            budgetFormat="phased",
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    category="Discovery",
+                    description="Kickoff and research",
+                    unit="flat",
+                    rate=12000,
+                    quantity=1,
+                    extended=12000,
+                )
+            ],
+            agencyRevenueEstimate=12000.0,
+            lumpSumTotal=12000.0,
+        )
+        inst = PricingInstrument(
+            kind="phased_fee_schedule",
+            bidNumber="26-088-WIOA",
+            confidence=0.8,
+        )
+        md = render_budget_markdown(budget, pricing_instrument=inst)
+        self.assertNotIn("BID NUMBER", md)
+        self.assertNotIn("Bid Number", md)
+        self.assertNotIn("26-088-WIOA", md)
+        self.assertNotIn("Part 1", md)
+        self.assertNotIn("Part 2", md)
+
+    def test_typed_delivery_block_preferred_over_freeform_scope(self) -> None:
+        """When typed packs are on the plan, hard-constraints prefer them."""
+        plan = _dupage_plan()
+        plan["pricingInstrument"] = json.loads(_DUPAGE_INSTRUMENT.read_text())
+        plan["deliveryConstraints"] = DeliveryConstraints(
+            tracks=[
+                DeliveryTrack(
+                    id="part-1",
+                    label="General Marketing",
+                    nteAnnual=75000,
+                    billing="hourly",
+                ),
+                DeliveryTrack(
+                    id="part-2",
+                    label="Young Adult Outreach",
+                    nteAnnual=100000,
+                    billing="hourly",
+                ),
+            ],
+            mandatoryDeliverables=[
+                "Typed-only Young Adult Outreach Campaign",
+            ],
+            outOfScope=["County-wide website redesign"],
+            nonCommingleTracks=True,
+            horizon=DeliveryHorizon(
+                baseTerm="1 year",
+                renewals="up to 3",
+                maxTerm="4 years",
+            ),
+        ).model_dump(by_alias=True)
+
+        block = format_opportunity_hard_constraints(plan, focus="all")
+        self.assertIn("Typed instrument.kind: buyer_pricing_form", block)
+        self.assertIn("Typed tracks / NTEs (authoritative — do not merge)", block)
+        self.assertIn("Typed delivery: tracks must not be commingled", block)
+        self.assertIn("typed DeliveryConstraints", block)
+        self.assertIn("Typed-only Young Adult Outreach Campaign", block)
+        # Freeform scope mandatory that is not in typed pack must not win.
+        self.assertNotIn("Manage Social Media channels", block)
 
 
 if __name__ == "__main__":

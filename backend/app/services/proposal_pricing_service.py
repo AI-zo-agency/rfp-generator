@@ -1926,13 +1926,15 @@ def _contract_horizon_block(prior_research: ProposalResearchCache | None) -> str
 
 
 def _opportunity_constraints_block(prior_research: ProposalResearchCache | None) -> str:
-    """Phase-2 opportunity pack (scope/caps/format/horizon) for Stage 3.5."""
+    """Typed PricingInstrument/DeliveryConstraints, else Phase-2 opportunity pack."""
     try:
-        from app.services.proposal_opportunity_constraints import (
-            format_opportunity_hard_constraints,
+        from app.services.pricing_delivery_context import (
+            format_pricing_delivery_constraints_block,
         )
 
-        block = format_opportunity_hard_constraints(prior_research, focus="budget")
+        block = format_pricing_delivery_constraints_block(
+            prior_research, focus="budget"
+        )
         if block:
             return f"\n{block}\n"
     except Exception as exc:  # noqa: BLE001
@@ -1950,6 +1952,37 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
 
     rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     prior_research = await aget_research_cache(rfp_id)
+
+    # Phase 3.5 fallback: extract instrument once if Phase 2 did not persist it.
+    if prior_research is not None and prior_research.pricing_instrument is None:
+        try:
+            from app.services.pricing_instrument_extract import (
+                extract_pricing_and_delivery_constraints,
+            )
+
+            opp = getattr(prior_research, "proposal_execution_plan", None)
+            inst, delivery = await extract_pricing_and_delivery_constraints(
+                rfp_context or "",
+                opp,
+            )
+            prior_research = prior_research.model_copy(
+                update={
+                    "pricing_instrument": inst,
+                    "delivery_constraints": delivery,
+                }
+            )
+            logger.info(
+                "Phase 3.5 pricing instrument fallback for %s: kind=%s confidence=%.2f",
+                rfp_id,
+                inst.kind,
+                inst.confidence,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Phase 3.5 pricing instrument extract skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
 
     stage_one, stage_one_ready = _stage_one_text(rfp)
     stage_two, stage_two_ready = _structural_map_text(prior_research)
@@ -2333,6 +2366,35 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped during pricing for %s: %s", rfp_id, exc)
 
+    # Typed PricingInstrument wins when confident (≥0.55) and kind != none.
+    # budget_format_for_instrument(none) is still "phased"; do not override a judge
+    # blended_rate_form when the extractor confidently found no instrument.
+    try:
+        from app.services.pricing_instrument_extract import budget_format_for_instrument
+
+        inst = prior_research.pricing_instrument if prior_research else None
+        inst_kind = str(getattr(inst, "kind", "") or "").casefold()
+        if (
+            inst is not None
+            and float(inst.confidence or 0.0) >= 0.55
+            and inst_kind != "none"
+        ):
+            aligned_fmt = budget_format_for_instrument(inst)
+            if aligned_fmt and (forced_format or "phased").casefold() != aligned_fmt:
+                logger.info(
+                    "Pricing budgetFormat instrument %s → %s (confidence=%.2f)",
+                    forced_format,
+                    aligned_fmt,
+                    inst.confidence,
+                )
+                forced_format = aligned_fmt
+                flags.append(
+                    f"[PRICING FLAG: Cost instrument aligned to PricingInstrument "
+                    f"({inst.kind}) → {aligned_fmt}]"
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Instrument format align skipped for %s: %s", rfp_id, exc)
+
     # Phase-2 opportunity can force form/hourly when the LLM still defaults to phased.
     try:
         from app.services.proposal_opportunity_constraints import (
@@ -2608,6 +2670,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                 "budget": budget,
                 "pricing_rate_card": rate_card_payload,
                 "pricing_contract": contract_payload,
+                "pricing_instrument": prior_research.pricing_instrument,
+                "delivery_constraints": prior_research.delivery_constraints,
                 "updated_at": now,
                 "provider": provider,
             }

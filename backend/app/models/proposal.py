@@ -2,6 +2,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.delivery_constraints import DeliveryConstraints
+from app.models.pricing_instrument import PricingInstrument
 from app.models.requirement_ledger import RequirementLedger
 
 if TYPE_CHECKING:
@@ -813,6 +815,16 @@ class ProposalResearchCache(BaseModel):
         alias="prefetchedCaseStudies",
         description="Case study candidates pre-fetched during Go/No-Go (go/review fit).",
     )
+    pricing_instrument: PricingInstrument | None = Field(
+        default=None,
+        alias="pricingInstrument",
+        description="Buyer pricing instrument (form, personnel, phased, or none).",
+    )
+    delivery_constraints: DeliveryConstraints | None = Field(
+        default=None,
+        alias="deliveryConstraints",
+        description="Shared SOW/Timeline/Cost hard facts (tracks, horizon, deliverables).",
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 
@@ -825,6 +837,24 @@ class ProposalResearchCache(BaseModel):
             from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
             return ProposalExecutionPlan.model_validate(value)
+        return value
+
+    @field_validator("pricing_instrument", mode="before")
+    @classmethod
+    def _coerce_pricing_instrument(cls, value: Any) -> Any:
+        if value is None or isinstance(value, PricingInstrument):
+            return value
+        if isinstance(value, dict):
+            return PricingInstrument.model_validate(value)
+        return value
+
+    @field_validator("delivery_constraints", mode="before")
+    @classmethod
+    def _coerce_delivery_constraints(cls, value: Any) -> Any:
+        if value is None or isinstance(value, DeliveryConstraints):
+            return value
+        if isinstance(value, dict):
+            return DeliveryConstraints.model_validate(value)
         return value
 
 

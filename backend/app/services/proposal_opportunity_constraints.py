@@ -231,6 +231,48 @@ def budget_format_omits_fee_detail(budget_format: str | None) -> bool:
     return fmt in {"blended_rate_form", "personnel_loading"}
 
 
+def _typed_delivery_from(obj: Any) -> Any:
+    """Return DeliveryConstraints when research (or dict) carries typed pack."""
+    if obj is None:
+        return None
+    raw = getattr(obj, "delivery_constraints", None)
+    if raw is None and isinstance(obj, dict):
+        raw = obj.get("deliveryConstraints") or obj.get("delivery_constraints")
+    if raw is None:
+        return None
+    if hasattr(raw, "mandatory_deliverables"):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            from app.models.delivery_constraints import DeliveryConstraints
+
+            return DeliveryConstraints.model_validate(raw)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _typed_instrument_from(obj: Any) -> Any:
+    """Return PricingInstrument when research (or dict) carries typed pack."""
+    if obj is None:
+        return None
+    raw = getattr(obj, "pricing_instrument", None)
+    if raw is None and isinstance(obj, dict):
+        raw = obj.get("pricingInstrument") or obj.get("pricing_instrument")
+    if raw is None:
+        return None
+    if hasattr(raw, "kind"):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            from app.models.pricing_instrument import PricingInstrument
+
+            return PricingInstrument.model_validate(raw)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 def format_opportunity_hard_constraints(
     obj: Any,
     *,
@@ -246,6 +288,8 @@ def format_opportunity_hard_constraints(
     want_budget = focus in {"all", "budget"}
     want_sow = focus in {"all", "sow", "budget"}  # budget needs deliverable coverage too
     want_timeline = focus in {"all", "timeline", "budget"}
+    typed_dc = _typed_delivery_from(obj)
+    typed_inst = _typed_instrument_from(obj)
 
     lines: list[str] = [
         "=== OPPORTUNITY HARD CONSTRAINTS (Phase 2 extract — authoritative) ===",
@@ -302,12 +346,37 @@ def format_opportunity_hard_constraints(
         notes = str(scope.get("notes") or "").strip()
         if notes:
             lines.append(f"- Scope notes (caps / tracks / pricing): {notes[:1200]}")
+        # Typed tracks win over freeform ceiling prose when present.
+        typed_tracks = (
+            (typed_inst.tracks if typed_inst and typed_inst.tracks else None)
+            or (typed_dc.tracks if typed_dc and typed_dc.tracks else None)
+        )
+        if typed_tracks:
+            if typed_inst and typed_inst.kind and typed_inst.kind != "none":
+                lines.append(f"- Typed instrument.kind: {typed_inst.kind}")
+            lines.append("- Typed tracks / NTEs (authoritative — do not merge):")
+            for t in typed_tracks:
+                label = getattr(t, "label", "") or getattr(t, "id", "track")
+                nte = getattr(t, "nte_annual", None)
+                nte_s = (
+                    f"${int(nte):,}/yr NTE"
+                    if nte is not None and float(nte).is_integer()
+                    else (f"${nte:,.2f}/yr NTE" if nte is not None else "NTE TBD")
+                )
+                lines.append(f"  • {label} — {nte_s}")
+            if typed_dc and typed_dc.non_commingle_tracks:
+                lines.append("- Typed delivery: tracks must not be commingled.")
         pricing_reqs = _pricing_compliance_lines(compliance)
         if pricing_reqs:
             lines.append("- Compliance pricing / form obligations:")
             for req in pricing_reqs:
                 lines.append(f"  • {req}")
         hint = opportunity_pricing_format_hint(plan)
+        if typed_inst is not None and typed_inst.kind == "buyer_pricing_form":
+            if float(getattr(typed_inst, "confidence", 0) or 0) >= 0.55:
+                hint = hint or "blended_rate_form"
+        elif typed_inst is not None and typed_inst.kind == "personnel_loading":
+            hint = hint or "personnel_loading"
         if hint:
             lines.append(
                 f"- REQUIRED budgetFormat for manuscript Cost: {hint} "
@@ -335,36 +404,70 @@ def format_opportunity_hard_constraints(
                     return val
             return ""
 
-        horizon = _pick(tl, "contractHorizon", "contract_horizon")
-        perf_end = _pick(tl, "performanceEnd", "performance_end")
-        start = _pick(tl, "projectStart", "project_start", "initialTermStart", "initial_term_start")
-        options = _pick(tl, "optionPeriods", "option_periods")
-        sched = _pick(tl, "scheduleAuthority", "schedule_authority")
-        go_live = _pick(tl, "goLive", "go_live")
-        completion = _pick(tl, "completion")
-        if any((horizon, perf_end, start, options, sched, go_live, completion)):
-            lines.append("- Contract / performance timeline (narrate THIS horizon — not a default 10-month cadence):")
-            if start:
-                lines.append(f"  • Start: {start}")
-            if horizon:
-                lines.append(f"  • Horizon: {horizon}")
-            if perf_end:
-                lines.append(f"  • Performance / funding end: {perf_end}")
-            elif completion:
-                lines.append(f"  • Completion: {completion}")
-            if options:
-                lines.append(f"  • Options: {options}")
-            if go_live:
-                lines.append(f"  • Go-live: {go_live}")
-            if sched:
-                lines.append(f"  • Schedule authority: {sched}")
+        typed_horizon = typed_dc.horizon if typed_dc else None
+        if typed_horizon and any(
+            (typed_horizon.base_term, typed_horizon.renewals, typed_horizon.max_term)
+        ):
+            lines.append(
+                "- Contract / performance timeline (typed DeliveryConstraints — "
+                "narrate THIS horizon — not a default 10-month cadence):"
+            )
+            if typed_horizon.base_term:
+                lines.append(f"  • Base term: {typed_horizon.base_term}")
+            if typed_horizon.renewals:
+                lines.append(f"  • Renewals: {typed_horizon.renewals}")
+            if typed_horizon.max_term:
+                lines.append(f"  • Max term: {typed_horizon.max_term}")
+        else:
+            horizon = _pick(tl, "contractHorizon", "contract_horizon")
+            perf_end = _pick(tl, "performanceEnd", "performance_end")
+            start = _pick(
+                tl, "projectStart", "project_start", "initialTermStart", "initial_term_start"
+            )
+            options = _pick(tl, "optionPeriods", "option_periods")
+            sched = _pick(tl, "scheduleAuthority", "schedule_authority")
+            go_live = _pick(tl, "goLive", "go_live")
+            completion = _pick(tl, "completion")
+            if any((horizon, perf_end, start, options, sched, go_live, completion)):
+                lines.append(
+                    "- Contract / performance timeline (narrate THIS horizon — "
+                    "not a default 10-month cadence):"
+                )
+                if start:
+                    lines.append(f"  • Start: {start}")
+                if horizon:
+                    lines.append(f"  • Horizon: {horizon}")
+                if perf_end:
+                    lines.append(f"  • Performance / funding end: {perf_end}")
+                elif completion:
+                    lines.append(f"  • Completion: {completion}")
+                if options:
+                    lines.append(f"  • Options: {options}")
+                if go_live:
+                    lines.append(f"  • Go-live: {go_live}")
+                if sched:
+                    lines.append(f"  • Schedule authority: {sched}")
 
     if want_sow:
-        deliverables = _scope_deliverables(scope)
+        typed_musts = (
+            list(typed_dc.mandatory_deliverables)
+            if typed_dc and typed_dc.mandatory_deliverables
+            else []
+        )
+        deliverables = typed_musts or _scope_deliverables(scope)
         if deliverables:
-            lines.append("- Mandatory SOW deliverables (price and narrate ONLY these; omit County-wide invent):")
-            for i, d in enumerate(deliverables, 1):
-                lines.append(f"  {i}. {d}")
+            lines.append(
+                "- Mandatory SOW deliverables (price and narrate ONLY these; "
+                "omit County-wide invent):"
+            )
+            for i, d in enumerate(deliverables[:18], 1):
+                lines.append(f"  {i}. {str(d).strip()[:350]}")
+        if typed_dc and typed_dc.out_of_scope:
+            lines.append("- Out of scope (typed — do not invent):")
+            for item in typed_dc.out_of_scope[:10]:
+                text = str(item).strip()[:300]
+                if text:
+                    lines.append(f"  • {text}")
         if not want_budget:
             notes = str(scope.get("notes") or "").strip()
             if notes:
@@ -381,6 +484,12 @@ def format_opportunity_hard_constraints(
             lines.append("- Dependencies:")
             for item in deps[:5]:
                 text = str(item).strip()[:250]
+                if text:
+                    lines.append(f"  • {text}")
+        if typed_dc and typed_dc.bidder_proposes:
+            lines.append("- Bidder proposes (typed):")
+            for item in typed_dc.bidder_proposes[:8]:
+                text = str(item).strip()[:300]
                 if text:
                     lines.append(f"  • {text}")
 

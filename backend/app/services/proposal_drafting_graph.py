@@ -299,6 +299,8 @@ class DraftingGraphState(TypedDict, total=False):
     manuscript_locks: dict[str, Any] | None
     fact_ledger: dict[str, Any] | None
     evidence_allocation: dict[str, Any] | None
+    pricing_instrument: dict[str, Any] | None
+    delivery_constraints: dict[str, Any] | None
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -983,10 +985,10 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
     except Exception:
         pass
 
-    # Phase-2 opportunity hard constraints (SOW / timeline / caps) — same pack Cost uses.
+    # PricingInstrument + DeliveryConstraints (typed) — fall back to opportunity pack.
     try:
-        from app.services.proposal_opportunity_constraints import (
-            format_opportunity_hard_constraints,
+        from app.services.pricing_delivery_context import (
+            format_pricing_delivery_constraints_block,
         )
         from app.services.proposal_delivery_package import DeliveryRole
 
@@ -1001,8 +1003,17 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
                 focus = "timeline"
             elif has_price and not has_sub and not has_cal:
                 focus = "budget"
-        hc = format_opportunity_hard_constraints(
-            plan if isinstance(plan, dict) else {},
+        ctx_src: dict[str, Any] = {}
+        if isinstance(plan, dict):
+            ctx_src.update(plan)
+        inst_raw = state.get("pricing_instrument")
+        dc_raw = state.get("delivery_constraints")
+        if inst_raw is not None:
+            ctx_src["pricingInstrument"] = inst_raw
+        if dc_raw is not None:
+            ctx_src["deliveryConstraints"] = dc_raw
+        hc = format_pricing_delivery_constraints_block(
+            ctx_src if ctx_src else (plan if isinstance(plan, dict) else {}),
             focus=focus,  # type: ignore[arg-type]
         )
         if hc:
@@ -2300,6 +2311,29 @@ async def run_drafting_graph(
             doc_word_budget,
         )
 
+    # Typed pricing/delivery pack from research (Phase 2 extract) for SOW/Timeline.
+    pricing_instrument_dict: dict[str, Any] | None = None
+    delivery_constraints_dict: dict[str, Any] | None = None
+    try:
+        from app.services.proposal_repository import get_research_cache
+
+        _research = get_research_cache(rfp_id)
+        if _research is not None:
+            if _research.pricing_instrument is not None:
+                pricing_instrument_dict = _research.pricing_instrument.model_dump(
+                    by_alias=True
+                )
+            if _research.delivery_constraints is not None:
+                delivery_constraints_dict = _research.delivery_constraints.model_dump(
+                    by_alias=True
+                )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "drafting: pricing/delivery constraints load skipped for %s",
+            rfp_id,
+            exc_info=True,
+        )
+
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -2325,6 +2359,8 @@ async def run_drafting_graph(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": ledger_dict if isinstance(ledger_dict, dict) else None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
+        "pricing_instrument": pricing_instrument_dict,
+        "delivery_constraints": delivery_constraints_dict,
         # Seed already-filled RFP tabs so each new draft sees ALREADY COVERED digests.
         "drafted_sections": [
             s.model_dump(by_alias=True)

@@ -142,8 +142,16 @@ def _rate_card_from_research(research: ProposalResearchCache, *, rfp_id: str):
         return None
 
 
-def _sync_budget_section(draft: ProposalDraft, budget: ProposalBudget, *, rfp_text: str) -> ProposalDraft:
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+def _sync_budget_section(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+    *,
+    rfp_text: str,
+    pricing_instrument=None,
+) -> ProposalDraft:
+    content = render_budget_markdown(
+        budget, rfp_text=rfp_text, pricing_instrument=pricing_instrument
+    )
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
     if idx is not None:
@@ -271,7 +279,14 @@ def check_and_repair_budget_for_scan(
         )
         out_research = research.model_copy(update={"budget": reconciled}) if changed else research
         out_draft = (
-            _sync_budget_section(draft, reconciled, rfp_text=rfp_text) if changed else draft
+            _sync_budget_section(
+                draft,
+                reconciled,
+                rfp_text=rfp_text,
+                pricing_instrument=research.pricing_instrument,
+            )
+            if changed
+            else draft
         )
         return BudgetScanCheckResult(
             draft=out_draft,
@@ -301,7 +316,12 @@ def check_and_repair_budget_for_scan(
         "rendered budget prose re-synced to canonical totals"
     ]
     out_research = research.model_copy(update={"budget": repaired})
-    out_draft = _sync_budget_section(draft, repaired, rfp_text=rfp_text)
+    out_draft = _sync_budget_section(
+        draft,
+        repaired,
+        rfp_text=rfp_text,
+        pricing_instrument=research.pricing_instrument,
+    )
     logs.append("Budget check: repaired — " + "; ".join(repaired_notes))
     return BudgetScanCheckResult(
         draft=out_draft,

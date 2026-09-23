@@ -84,6 +84,13 @@ async def apply_senior_editor_section_coverage_audit(
 
     rewritten: list[ProposalSection] = []
     changed = False
+    buyer_form = False
+    pricing_instrument = None
+    if research is not None:
+        from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+        pricing_instrument = research.pricing_instrument
+        buyer_form = is_buyer_pricing_form_instrument(research)
     for section in draft.sections:
         body = section.content or ""
         updated = body
@@ -92,8 +99,10 @@ async def apply_senior_editor_section_coverage_audit(
             token in title_cf
             for token in ("budget", "pricing", "fee", "cost proposal", "price")
         )
-        if is_money_tab:
-            formatted = reformat_budget_terms_in_markdown(updated)
+        if is_money_tab and not buyer_form:
+            formatted = reformat_budget_terms_in_markdown(
+                updated, pricing_instrument=pricing_instrument
+            )
             if formatted != updated:
                 logs.append(f"Reformatted Terms in «{section.title}» to tables/bullets.")
                 updated = formatted
@@ -142,7 +151,12 @@ async def apply_senior_editor_section_coverage_audit(
 
             budget = research.budget if research else None
             draft, fill_logs = fill_hollow_pricing_stubs_from_canon_budget(
-                draft, budget, rfp_text=rfp_text or ""
+                draft,
+                budget,
+                rfp_text=rfp_text or "",
+                pricing_instrument=(
+                    research.pricing_instrument if research else None
+                ),
             )
             logs.extend(fill_logs)
         except Exception as exc:  # noqa: BLE001

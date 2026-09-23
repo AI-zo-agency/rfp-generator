@@ -219,6 +219,7 @@ def restore_unresolved_budget_token_tabs(
     budget: object | None,
     *,
     rfp_text: str = "",
+    pricing_instrument=None,
 ) -> tuple[ProposalDraft, list[str]]:
     """Replace leftover {{budget.*}} Cost/Pricing cells from the canonical fee ledger.
 
@@ -245,7 +246,11 @@ def restore_unresolved_budget_token_tabs(
         leftover = find_unresolved_budget_slots(filled)
         if leftover and budget_section_score(section.title) > 0:
             if markdown is None:
-                markdown = render_budget_markdown(budget, rfp_text=rfp_text)  # type: ignore[arg-type]
+                markdown = render_budget_markdown(
+                    budget,
+                    rfp_text=rfp_text,
+                    pricing_instrument=pricing_instrument,
+                )  # type: ignore[arg-type]
             filled = markdown
         if filled != body:
             sections[idx] = section.model_copy(
@@ -270,7 +275,10 @@ def _apply_unresolved_budget_slot_restore(
     meta: dict[str, Any],
 ) -> ProposalDraft:
     draft, slot_logs = restore_unresolved_budget_token_tabs(
-        draft, research.budget, rfp_text=rfp_text
+        draft,
+        research.budget,
+        rfp_text=rfp_text,
+        pricing_instrument=research.pricing_instrument,
     )
     logs.extend(slot_logs)
     if slot_logs:
@@ -690,7 +698,11 @@ async def run_fulfill_budget_scan(
     )
 
     if needs_manuscript_refresh:
-        content = render_budget_markdown(budget, rfp_text=rfp_text)
+        content = render_budget_markdown(
+            budget,
+            rfp_text=rfp_text,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
         # Signature / cover DESIGNER NOTEs belong on closing tabs — never on fees.
         content = re.sub(
             r"(?is)\[DESIGNER\s+NOTE:[^\]]*\]\s*",
@@ -736,7 +748,12 @@ async def run_fulfill_budget_scan(
         "blended_rate_form",
         "personnel_loading",
     }:
-        reshaped = reshape_budget_for_rfp_form(draft, budget, rfp_text=rfp_text)
+        reshaped = reshape_budget_for_rfp_form(
+            draft,
+            budget,
+            rfp_text=rfp_text,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
         if reshaped is not None:
             draft = reshaped
             logs.append(

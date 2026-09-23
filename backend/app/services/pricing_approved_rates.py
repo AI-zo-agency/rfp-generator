@@ -292,6 +292,37 @@ def ingest_role_billable_from_guide_bundle(
     return rates
 
 
+def primary_approved_hourly(
+    registry: list[ApprovedHourlyRate] | None = None,
+) -> ApprovedHourlyRate | None:
+    """Working form $/hr: mode of approved role billables (not Guide menu SKUs).
+
+    When a buyer form asks for one hourly rate, use the most common billable
+    amount on the role card (typically the production-team band). Prefer a
+    named production role at that amount when several labels share it.
+    """
+    from collections import Counter
+
+    rates = registry if registry is not None else load_approved_hourly_rates()
+    if not rates:
+        return None
+    amounts = [round(float(r.amount), 2) for r in rates]
+    mode_amt, _ = Counter(amounts).most_common(1)[0]
+    preferred = (
+        "digital team",
+        "account manager",
+        "art director",
+        "copywriter",
+        "creative director",
+    )
+    at_mode = [r for r in rates if abs(float(r.amount) - mode_amt) <= 0.01]
+    for label in preferred:
+        for r in at_mode:
+            if label in (r.label or "").casefold():
+                return r
+    return at_mode[0] if at_mode else None
+
+
 def resolve_approved_hourly(
     amount: float | None,
     *,
@@ -334,11 +365,16 @@ def scrub_unapproved_form_rates(
     *,
     registry: list[ApprovedHourlyRate] | None = None,
     rate_card: PricingRateCard | None = None,
+    pricing_instrument: Any | None = None,
 ) -> ProposalBudget:
     """Clear invented form $/hr (and hourly line rates) not in the approved registry.
 
     Guide-backed phased fixed fees are untouched. Form / personnel instruments
     may not ship a dollar rate the registry does not authorize.
+
+    When ``pricing_instrument.kind == buyer_pricing_form`` (confidence ≥ 0.55),
+    do **not** seed ``formHourlyRate`` from the role card — instrument track
+    rows stay MANUAL FILL (rate gate out of scope for buyer forms).
     """
     if not budget_needs_approved_hourly(budget):
         return budget
@@ -355,25 +391,70 @@ def scrub_unapproved_form_rates(
         if msg not in flags:
             flags.append(msg)
 
+    buyer_form = False
+    try:
+        from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+        buyer_form = is_buyer_pricing_form_instrument(instrument=pricing_instrument)
+    except Exception:  # noqa: BLE001
+        buyer_form = False
+
     hourly = budget.form_hourly_rate
-    hit = resolve_approved_hourly(hourly, registry=rates)
-    if hourly is not None and hit is None:
-        logger.info(
-            "scrub_form_rates cleared formHourlyRate=%s (not in approved registry)",
-            hourly,
-        )
-        _flag(
-            "[PRICING FLAG: formHourlyRate cleared — not in approved hourly registry "
-            "(KB role billable table or pricing_approved_hourly_rates.json)]"
-        )
-        updates["form_hourly_rate"] = None
-    elif hourly is not None and hit is not None:
-        notes = (budget.form_rate_notes or "").strip()
-        if not notes:
-            updates["form_rate_notes"] = (
-                f"Hourly from {hit.source_file}: {hit.label or hit.rate_id} "
-                f"(${hit.amount:.2f} billable)."
+    if buyer_form:
+        # Instrument path wins — clear any seeded/legacy form $/hr; tracks stay MANUAL FILL.
+        if hourly is not None:
+            logger.info(
+                "scrub_form_rates cleared formHourlyRate=%s — buyer_pricing_form "
+                "(instrument MANUAL FILL; rate gate out of scope)",
+                hourly,
             )
+            _flag(
+                "[PRICING FLAG: formHourlyRate cleared — buyer Pricing Form uses "
+                "instrument track MANUAL FILL (rate gate out of scope)]"
+            )
+            updates["form_hourly_rate"] = None
+            hourly = None
+        # Skip role-card seeding for buyer forms.
+    else:
+        hit = resolve_approved_hourly(hourly, registry=rates)
+        if hourly is not None and hit is None:
+            logger.info(
+                "scrub_form_rates cleared formHourlyRate=%s (not in approved registry)",
+                hourly,
+            )
+            _flag(
+                "[PRICING FLAG: formHourlyRate cleared — not in approved hourly registry "
+                "(KB role billable table or pricing_approved_hourly_rates.json)]"
+            )
+            updates["form_hourly_rate"] = None
+            hourly = None
+        elif hourly is not None and hit is not None:
+            notes = (budget.form_rate_notes or "").strip()
+            if not notes:
+                updates["form_rate_notes"] = (
+                    f"Hourly from {hit.source_file}: {hit.label or hit.rate_id} "
+                    f"(${hit.amount:.2f} billable)."
+                )
+
+        # When the form needs a $/hr and scrub left it empty, fill from the role
+        # billable mode — never invent outside the approved registry.
+        if hourly is None and rates:
+            primary = primary_approved_hourly(rates)
+            if primary is not None:
+                logger.info(
+                    "scrub_form_rates seeded formHourlyRate=%s from %s (%s)",
+                    primary.amount,
+                    primary.label or primary.rate_id,
+                    primary.source_file,
+                )
+                updates["form_hourly_rate"] = float(primary.amount)
+                notes = (budget.form_rate_notes or "").strip()
+                if not notes:
+                    updates["form_rate_notes"] = (
+                        f"Hourly from {primary.source_file}: "
+                        f"{primary.label or primary.rate_id} "
+                        f"(${primary.amount:.2f} billable)."
+                    )
 
     if budget.form_monthly_rate is not None or budget.form_annual_rate is not None:
         _flag(
