@@ -100,6 +100,11 @@ PHASE 1 — Extract five signals from the RFP and prior stages (align with playb
 3. Budget format: phased | personnel_loading | service_menu | blended_rate_form (match RFP, not habit)
 4. Deliverables from Stage 2 → each becomes a line item (one-time vs recurring per playbook §3)
 5. Travel — add direct expenses line if zö is out of region
+6. CONTRACT / FUNDING HORIZON (any RFP): Read the period of performance, base term, option
+   years, and any fixed funding/performance end date. Price and narrate for THAT horizon —
+   do not assume a one-year engagement when THIS RFP is multi-year (or the reverse). When
+   award start is TBD but money/performance stops on a fixed calendar date, say so in
+   scopeSummary / optionTermNotes and do not invent a rigid Month-N grid past that end.
 
 PHASE 2 — Pick ONE pricing tier (Low / Average / High) for the entire proposal.
 
@@ -399,12 +404,33 @@ CRITICAL — RFP-STATED MINIMUM BUDGET (money left on the table if wrong):
 - A bid far under a stated minimum reads as under-reading the scope. Do not "save the
   buyer money" against a floor they published.
 
+CRITICAL — LARGE NTE + MEDIA / MESSAGING CAMPAIGN (same failure mode as under-minimum):
+- When the RFP requires paid media buying / placement / advertising buy AND states a hard
+  NTE / total contract ceiling (or program media envelope), do NOT emit a thin
+  Discovery → Strategy → Creative professional-fee-only quote that uses a small fraction
+  of the NTE while omitting media and multi-year workstreams.
+- Cover EVERY required workstream across the FULL term (plan, research, creative, video/
+  PSA, toolkit, stakeholder/listening, analytics, PM) as agency_fee rows from the guide.
+- Add traditional + digital media as lineItemType=client_passthrough so
+  agencyRevenueEstimate + clientMediaPassthrough approaches the NTE (typically ≥ ~60%
+  for a statewide multi-year media campaign) and never exceeds it.
+- Use the guide's 85/15 commission model when PricingContract / guide supports it —
+  only the agency share of media is agency revenue; placements stay passthrough.
+- If media dollar volume is not stated, allocate remaining NTE after honest agency fees
+  to media passthrough with [PRICING FLAG: media buy estimate — Sonja confirm] — never
+  omit media when buying/placement is in scope.
+- Still: do not invent guide rates outside bands; do not invent deliverables the RFP
+  does not ask for.
+
 CRITICAL — HARD CAP / YEAR ALLOCATIONS (submission disqualifier if wrong):
 - If the RFP states a maximum compensation / NTE / total proposed price ceiling (e.g. $2,950,000),
   set rfpBudgetCap to that number and keep agencyRevenueEstimate + lumpSumTotal AT OR UNDER it.
+  For media-campaign bids, also keep (agency fees + clientMediaPassthrough) ≤ rfpBudgetCap.
 - Yearly "Annual Allocation Year 1/2/3" (or similar) figures are the BUDGET ENVELOPE, not cost lines.
   NEVER add them as lineItems — that double-counts and exceeds the hard cap.
-- lineItems = billable work only (Discovery, Strategy, Content, Digital, PM, etc.) that SUM to ≤ rfpBudgetCap.
+- lineItems = billable work only (Discovery, Strategy, Content, Digital, PM, etc.) that SUM to ≤ rfpBudgetCap
+  (plus separate client_passthrough media rows when media buying is required — those count toward
+  totalClientInvoicing / NTE but not agencyRevenueEstimate).
 - If scope would exceed the cap, scope DOWN (fewer hours/deliverables) — do not invent extra rows to pad.
 
 rateSource on each lineItem should cite the guide menu item (e.g. "5.3 — 00_Guide_Pricing Average tier")."""
@@ -1557,6 +1583,261 @@ async def repair_budget_to_rfp_minimum(
     return best, logs
 
 
+# --- Phase 3.5c — large NTE + media campaign under-utilization -------------
+# Incident: large hard NTE / multi-year media campaign; Stage 3.5 emitted a
+# professional-fee-only early-phase quote and omitted media buying entirely.
+# Ceiling-only hygiene without utilization pressure.
+
+NTE_UTILIZATION_REPAIR_ATTEMPTS = 2
+_NTE_UTILIZATION_FLOOR = 0.55  # totalClientInvoicing / NTE
+
+_NTE_UTILIZATION_REPAIR_SYSTEM = """You are re-pricing a proposal budget that under-utilizes \
+a large RFP NTE / contract ceiling on a MEDIA or MESSAGING CAMPAIGN engagement.
+
+The prior bid already includes media passthrough rows but still leaves most of the \
+ceiling unused. Re-price so total client invoicing (agency fees + media passthrough) \
+lands near the NTE without exceeding it.
+
+HOW TO CLOSE THE GAP — in this order:
+1. Expand agency_fee phases to cover EVERY RFP-required workstream across the FULL term
+   (plan, research, creative, video/PSA, toolkit, stakeholder/listening, analytics, PM),
+   priced from 00_Guide_Pricing bands.
+2. Scale traditional + digital media lineItemType=client_passthrough so placements are
+   not counted as agency revenue. Prefer the guide's 85/15 commission shape when applicable.
+3. Keep agencyRevenueEstimate = sum(agency_fee) only. totalClientInvoicing ≈ agency fees +
+   media passthrough ≤ NTE, typically ≥ 55% of NTE for statewide multi-year media campaigns.
+
+ABSOLUTE PROHIBITIONS:
+- NEVER invent deliverables the RFP does not ask for.
+- NEVER inflate rates beyond 00_Guide_Pricing bands.
+- NEVER exceed the NTE.
+- NEVER label media placements as agency_fee / professional fees.
+- Do NOT invent a full-NTE media campaign when the ledger is agency-fee-only early phases —
+  that case uses narrative disclosure, not this repair.
+
+Return ONLY JSON:
+{
+  "lineItems": [
+    {"id": "li-1", "category": "labor", "description": "string", "unit": "flat",
+     "quantity": 1, "rate": 0, "extended": 0, "rateSource": "string",
+     "notes": "RFP requirement this line answers",
+     "lineItemType": "agency_fee|client_passthrough"}
+  ],
+  "commissionRate": 0.15,
+  "clientMediaPassthrough": 0,
+  "scopeAdjustments": ["what you deepened and which RFP requirement drove it"]
+}"""
+
+
+def budget_has_media_passthrough(budget: ProposalBudget) -> bool:
+    """True when the ledger already includes client media passthrough dollars/rows."""
+    if budget.client_media_passthrough is not None and float(
+        budget.client_media_passthrough
+    ) > 0:
+        return True
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    for item in budget.line_items or []:
+        if infer_line_item_type(item) == "client_passthrough" and float(
+            item.extended or item.rate or 0
+        ) > 0:
+            return True
+    return False
+
+
+def budget_client_invoicing_total(budget: ProposalBudget) -> float:
+    """Agency fees + media passthrough (or explicit totalClientInvoicing)."""
+    explicit = budget.total_client_invoicing
+    if explicit is not None and float(explicit) > 0:
+        return float(explicit)
+    agency = float(
+        budget.agency_revenue_estimate
+        or budget.agency_fee_subtotal
+        or budget.lump_sum_total
+        or 0
+    )
+    media = float(budget.client_media_passthrough or 0)
+    if media <= 0:
+        from app.services.proposal_budget_validation import infer_line_item_type
+
+        for item in budget.line_items or []:
+            if infer_line_item_type(item) == "client_passthrough":
+                media += float(item.extended or item.rate or 0)
+    return agency + media
+
+
+def budget_underutilizes_large_nte(
+    budget: ProposalBudget,
+    *,
+    rfp_text: str = "",
+    floor_ratio: float = _NTE_UTILIZATION_FLOOR,
+) -> bool:
+    """True when a media-passthrough ledger still leaves most of a large NTE unused.
+
+    Ledger-only (no RFP keyword scan). Agency-fee-only early-phase bids under a large
+    NTE are handled by ``ensure_partial_nte_scope_disclosure``, not force-fill.
+    """
+    del rfp_text  # kept for call-site compatibility; meaning is not regex-scanned
+    if not budget_has_media_passthrough(budget):
+        return False
+    cap = budget.rfp_budget_cap or budget.rfp_media_or_program_envelope
+    if cap is None or float(cap) < 100_000:
+        return False
+    total = budget_client_invoicing_total(budget)
+    return total < float(cap) * float(floor_ratio)
+
+
+def _nte_utilization_repair_prompt(
+    budget: ProposalBudget,
+    *,
+    attempt: int,
+    shortfall: float,
+) -> str:
+    cap = float(budget.rfp_budget_cap or budget.rfp_media_or_program_envelope or 0)
+    total = budget_client_invoicing_total(budget)
+    items = [
+        {
+            "description": li.description,
+            "extended": li.extended,
+            "lineItemType": getattr(li, "line_item_type", None),
+            "rateSource": li.rate_source,
+        }
+        for li in (budget.line_items or [])
+    ]
+    retry = ""
+    if attempt > 1:
+        retry = (
+            f"\nAttempt {attempt} of {NTE_UTILIZATION_REPAIR_ATTEMPTS}. Prior attempt "
+            f"still under-utilized the NTE — deepen RFP-required workstreams and/or "
+            f"media passthrough.\n"
+        )
+    return (
+        f"{retry}"
+        f"RFP NTE / ceiling: ${cap:,.2f}\n"
+        f"Current total client invoicing: ${total:,.2f}\n"
+        f"Shortfall vs ~{int(_NTE_UTILIZATION_FLOOR * 100)}% utilization: "
+        f"${shortfall:,.2f}\n"
+        f"Current clientMediaPassthrough: {budget.client_media_passthrough}\n"
+        f"Current commissionRate: {budget.commission_rate}\n"
+        f"RFP money notes:\n{(budget.rfp_money_constraint_notes or '')[:2000]}\n\n"
+        f"Current line items:\n{items}"
+    )
+
+
+async def repair_budget_toward_nte_utilization(
+    budget: ProposalBudget,
+    *,
+    rfp_id: str,
+    rfp_context: str = "",
+    guide_text: str = "",
+    rate_card: Any = None,
+    rfp_sections: Any = None,
+    max_attempts: int = NTE_UTILIZATION_REPAIR_ATTEMPTS,
+) -> tuple[ProposalBudget, list[str]]:
+    """Re-price thin media-campaign bids so invoicing approaches a large NTE."""
+    logs: list[str] = []
+    if not budget_underutilizes_large_nte(budget, rfp_text=rfp_context):
+        return budget, logs
+    if not llm.is_configured():
+        flag = (
+            "[PRICING FLAG: Bid under-utilizes RFP NTE on a media/messaging campaign — "
+            "rebuild with agency fees + media passthrough toward the ceiling; Sonja review]"
+        )
+        return _append_pricing_flags(budget, [flag]), logs
+
+    cap = float(budget.rfp_budget_cap or budget.rfp_media_or_program_envelope or 0)
+    target = cap * _NTE_UTILIZATION_FLOOR
+    best = budget
+    for attempt in range(1, max_attempts + 1):
+        shortfall = target - budget_client_invoicing_total(best)
+        try:
+            raw, _provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": _NTE_UTILIZATION_REPAIR_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": _nte_utilization_repair_prompt(
+                            best, attempt=attempt, shortfall=shortfall
+                        ),
+                    },
+                ],
+                max_tokens=8192,
+                node_name="budget_nte_utilization_repair",
+                rfp_id=rfp_id,
+                cache_prefix=_minimum_repair_cache_prefix(rfp_context, guide_text),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logs.append(f"nte utilization repair attempt {attempt} failed: {str(exc)[:200]}")
+            break
+
+        line_items = _parse_line_items_from_raw(raw)
+        if not line_items:
+            logs.append(f"nte utilization repair attempt {attempt}: no line items")
+            continue
+
+        updates: dict[str, Any] = {
+            "line_items": line_items,
+            "scope_adjustments": [
+                *(best.scope_adjustments or []),
+                *[
+                    s
+                    for s in (str(x).strip() for x in (raw.get("scopeAdjustments") or []))
+                    if s
+                ],
+            ],
+        }
+        if isinstance(raw.get("commissionRate"), (int, float)):
+            updates["commission_rate"] = float(raw["commissionRate"])
+        if isinstance(raw.get("clientMediaPassthrough"), (int, float)):
+            updates["client_media_passthrough"] = float(raw["clientMediaPassthrough"])
+
+        candidate = best.model_copy(update=updates)
+        try:
+            candidate = run_budget_editor_pass(
+                candidate,
+                rfp_sections=rfp_sections or [],
+                rfp_context=rfp_context,
+                rate_card=rate_card,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logs.append(
+                f"nte utilization repair attempt {attempt} rejected by editor: "
+                f"{str(exc)[:200]}"
+            )
+            continue
+
+        new_total = budget_client_invoicing_total(candidate)
+        if new_total > cap + 0.01:
+            logs.append(
+                f"nte utilization repair attempt {attempt} discarded — "
+                f"${new_total:,.2f} exceeds NTE ${cap:,.2f}"
+            )
+            continue
+        if new_total <= budget_client_invoicing_total(best) + 1.0:
+            logs.append(
+                f"nte utilization repair attempt {attempt} did not raise invoicing"
+            )
+            continue
+
+        best = candidate
+        logs.append(
+            f"nte utilization repair attempt {attempt}: invoicing now ${new_total:,.2f}"
+        )
+        if not budget_underutilizes_large_nte(best, rfp_text=rfp_context):
+            logs.append(f"nte utilization repair met ~{_NTE_UTILIZATION_FLOOR:.0%} of NTE")
+            return best, logs
+
+    if budget_underutilizes_large_nte(best, rfp_text=rfp_context):
+        flag = (
+            f"[PRICING FLAG: After NTE utilization repair, total client invoicing "
+            f"${budget_client_invoicing_total(best):,.2f} is still well under RFP NTE "
+            f"${cap:,.2f} on a media/messaging campaign — Sonja deepen scope or media buy]"
+        )
+        logs.append("nte utilization repair exhausted attempts; still under target")
+        best = _append_pricing_flags(best, [flag])
+    return best, logs
+
+
 def _append_pricing_flags(budget: ProposalBudget, flags: list[str]) -> ProposalBudget:
     existing = list(budget.pricing_flags or [])
     for flag in flags:
@@ -1565,6 +1846,82 @@ def _append_pricing_flags(budget: ProposalBudget, flags: list[str]) -> ProposalB
     if existing == list(budget.pricing_flags or []):
         return budget
     return budget.model_copy(update={"pricing_flags": existing})
+
+
+def _timeline_intel_from_research(
+    prior_research: ProposalResearchCache | None,
+) -> dict[str, Any]:
+    """Pull timelineIntel from Phase 2 plan on the research cache (any RFP)."""
+    if prior_research is None:
+        return {}
+    plan = getattr(prior_research, "proposal_execution_plan", None)
+    if plan is None:
+        return {}
+    try:
+        if hasattr(plan, "model_dump"):
+            data = plan.model_dump(by_alias=True)
+        elif isinstance(plan, dict):
+            data = plan
+        else:
+            return {}
+    except Exception:  # noqa: BLE001
+        return {}
+    opp = data.get("opportunity") if isinstance(data.get("opportunity"), dict) else {}
+    und = (
+        opp.get("understanding")
+        if isinstance(opp.get("understanding"), dict)
+        else {}
+    )
+    tl = und.get("timelineIntel")
+    if isinstance(tl, dict):
+        return tl
+    tl = und.get("timeline_intel")
+    return tl if isinstance(tl, dict) else {}
+
+
+def _contract_horizon_block(prior_research: ProposalResearchCache | None) -> str:
+    """Stage 3.5 prompt slice: price for THIS RFP's stated horizon (generic)."""
+    tl = _timeline_intel_from_research(prior_research)
+    if not tl:
+        return ""
+
+    def _pick(*keys: str) -> str:
+        for key in keys:
+            val = str(tl.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+    horizon = _pick("contractHorizon", "contract_horizon")
+    perf_end = _pick("performanceEnd", "performance_end")
+    sched_auth = _pick("scheduleAuthority", "schedule_authority")
+    options = _pick("optionPeriods", "option_periods")
+    completion = _pick("completion")
+    go_live = _pick("goLive", "go_live")
+
+    lines: list[str] = []
+    if horizon:
+        lines.append(f"- Contract / funding horizon: {horizon}")
+    if perf_end:
+        lines.append(f"- Fixed performance / funding end: {perf_end}")
+    elif completion:
+        lines.append(f"- Stated completion / end: {completion}")
+    if options:
+        lines.append(f"- Option periods: {options}")
+    if go_live:
+        lines.append(f"- Go-live / peak cue: {go_live}")
+    if sched_auth:
+        lines.append(f"- Schedule authority: {sched_auth}")
+    if not lines:
+        return ""
+    return (
+        "\n=== CONTRACT / FUNDING HORIZON (from Phase 2 timelineIntel — any RFP) ===\n"
+        + "\n".join(lines)
+        + "\nPrice and narrate for THIS horizon. Do not assume a one-year engagement "
+        "when the RFP is multi-year (or the reverse). When award start is TBD but "
+        "money/performance stops on a fixed calendar date, say so in scopeSummary / "
+        "optionTermNotes — do not invent a rigid Month-N grid past that end."
+    )
 
 
 async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
@@ -1712,6 +2069,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             f"\n=== 00_Guide_Pricing (KB) ===\n{guide_text}",
             f"\n{contract_prompt}",
             (f"\n{cost_demands_prompt}" if cost_demands_prompt else ""),
+            _contract_horizon_block(prior_research),
             (
                 f"\n=== Manuscript approach + current budget (PRICE MUST FUND THESE PHASES) ===\n"
                 f"{manuscript_digest[:14_000]}"
@@ -2109,6 +2467,26 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             rfp_id=rfp_id,
             rfp_budget_floor=float(budget.rfp_budget_floor or 0),
             attempts=len(minimum_logs),
+            **summarize_budget(budget),
+        )
+
+    budget, nte_logs = await repair_budget_toward_nte_utilization(
+        budget,
+        rfp_id=rfp_id,
+        rfp_context=rfp_context,
+        guide_text=guide_text,
+        rate_card=rate_card,
+        rfp_sections=prior_research.rfp_sections if prior_research else [],
+    )
+    for line in nte_logs:
+        logger.info("Pricing NTE utilization repair for %s: %s", rfp_id, line)
+    if nte_logs:
+        step_trace(
+            "pricing_nte_utilization_repair",
+            rfp_id=rfp_id,
+            rfp_budget_cap=float(budget.rfp_budget_cap or 0),
+            client_invoicing=budget_client_invoicing_total(budget),
+            attempts=len(nte_logs),
             **summarize_budget(budget),
         )
 

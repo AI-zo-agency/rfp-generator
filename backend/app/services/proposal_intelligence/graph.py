@@ -76,12 +76,40 @@ class IntelligenceGraphState(TypedDict, total=False):
 def _load_plan(state: IntelligenceGraphState) -> ProposalExecutionPlan:
     raw = state.get("plan") or {}
     if raw:
-        return ProposalExecutionPlan.model_validate(raw)
-    return ProposalExecutionPlan(rfpId=state.get("rfp_id") or "")
+        plan = ProposalExecutionPlan.model_validate(raw)
+    else:
+        plan = ProposalExecutionPlan(rfpId=state.get("rfp_id") or "")
+    rid = str(state.get("rfp_id") or "").strip()
+    if rid and not (plan.metadata.rfp_id or "").strip():
+        plan.metadata.rfp_id = rid
+    return plan
 
 
 def _dump_plan(plan: ProposalExecutionPlan) -> dict[str, Any]:
     return plan.model_dump(by_alias=True)
+
+
+def _understanding_identity_complete(plan: ProposalExecutionPlan) -> bool:
+    u = plan.opportunity.understanding
+    return bool((u.client or "").strip() and (u.project_type or "").strip())
+
+
+def backfill_understanding_from_rfp_meta(
+    plan: ProposalExecutionPlan,
+    rfp_meta: dict[str, str] | None,
+) -> ProposalExecutionPlan:
+    """Fill blank client/projectType from RFP record fields (never invent scope)."""
+    meta = rfp_meta or {}
+    u = plan.opportunity.understanding
+    if not (u.client or "").strip():
+        meta_client = (meta.get("client") or "").strip()
+        if meta_client:
+            u.client = meta_client
+    if not (u.project_type or "").strip():
+        fill = (meta.get("sector") or meta.get("title") or "").strip()
+        if fill:
+            u.project_type = fill[:160]
+    return plan
 
 
 def _meta(state: IntelligenceGraphState) -> dict[str, str]:
@@ -104,6 +132,7 @@ def _meta(state: IntelligenceGraphState) -> dict[str, str]:
         "client": state.get("rfp_client") or "",
         "sector": state.get("rfp_sector") or "",
         "location": state.get("rfp_location") or "",
+        "rfpId": state.get("rfp_id") or "",
     }
     if page_limit and page_limit > 0:
         meta["pageLimit"] = str(page_limit)
@@ -196,8 +225,19 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
         if state.get("error"):
             return {}
         if name in (state.get("completed_nodes") or []):
-            log_intel_event("node_skip", node=name, reason="checkpoint")
-            return {}
+            # Stale checkpoint: opportunity_extract marked done but identity empty
+            # → Phase 2 validation blocks the whole run. Force a re-extract.
+            if name == "opportunity_extract" and not _understanding_identity_complete(
+                _load_plan(state)
+            ):
+                log_intel_event(
+                    "node_skip_revoked",
+                    node=name,
+                    reason="incomplete_understanding",
+                )
+            else:
+                log_intel_event("node_skip", node=name, reason="checkpoint")
+                return {}
         from app.services.llm_call_context import llm_call_context
 
         log_intel_event("node_enter", node=name, rfp_id=state.get("rfp_id"))
@@ -264,7 +304,8 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
             # LangGraph reducer) are correct here: each node's returned dict
             # fully supersedes the prior completed_nodes list with itself appended.
             completed = list(state.get("completed_nodes") or [])
-            completed.append(name)
+            if name not in completed:
+                completed.append(name)
             result["completed_nodes"] = completed
             await _save_intelligence_checkpoint(
                 str(state.get("rfp_id") or ""),
@@ -291,7 +332,9 @@ async def _assemble(state: IntelligenceGraphState) -> dict[str, Any]:
 async def _validate(state: IntelligenceGraphState) -> dict[str, Any]:
     if state.get("error"):
         return {}
-    plan = run_validate_plan(_load_plan(state))
+    plan = _load_plan(state)
+    plan = backfill_understanding_from_rfp_meta(plan, _meta(state))
+    plan = run_validate_plan(plan)
     return {"plan": _dump_plan(plan)}
 
 

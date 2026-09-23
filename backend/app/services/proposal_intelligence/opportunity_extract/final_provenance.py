@@ -118,7 +118,15 @@ def build_final_provenance(cleaned: dict[str, Any], pack: dict[str, Any]) -> lis
                 rows.append(row)
 
     tl = u.get("timelineIntel") or {}
-    for key in ("questionsDue", "quotesDue", "initialTermStart", "optionPeriods"):
+    for key in (
+        "questionsDue",
+        "quotesDue",
+        "initialTermStart",
+        "optionPeriods",
+        "contractHorizon",
+        "performanceEnd",
+        "scheduleAuthority",
+    ):
         if not tl.get(key):
             continue
         src = _match_source(str(tl.get(key)), pack)

@@ -107,20 +107,30 @@ def instrument_skips_full_narrative_draft(instrument: str | None) -> bool:
 def phase35_budget_gate(
     plan: ProposalExecutionPlan | None,
 ) -> tuple[Literal["proceed", "skip", "block"], str | None]:
-    """Whether Phase 3.5 may generate budget content."""
+    """Whether Phase 3.5 may generate budget content.
+
+    Ambiguous cost/pricing (e.g. TOC lists a cost sheet but operative text is
+    RESERVED, or rates appear only for a staffing matrix) must NOT invent a
+    fee schedule — skip generation and continue the pipeline. Returning
+    ``block`` is reserved for callers that want a hard stop; the generate
+    path treats unresolved pricing ambiguity as skip so Celery does not die
+    on a Sonja clarification item.
+    """
     if plan is None:
         return "proceed", None
     status = plan.writing.cost_requirement_status or "absent"
     if status == "confirmed":
         return "proceed", None
     if status == "ambiguous":
+        detail = "Cost/pricing requirement is ambiguous — skipping budget generation until confirmed."
         for amb in plan.writing.ambiguities:
             if amb.blocks_budget and amb.status != "resolved":
-                return "block", (
+                detail = (
                     amb.recommended_action
                     or f"Unresolved ambiguity: {amb.topic}"
                 )
-        return "block", "Cost/pricing requirement is ambiguous — confirm against buyer attachments before generating budget."
+                break
+        return "skip", detail
     if status == "absent":
         return "skip", "No confirmed cost/pricing submittal in RFP submission authority."
     return "skip", None

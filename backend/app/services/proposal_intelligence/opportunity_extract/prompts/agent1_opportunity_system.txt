@@ -203,6 +203,14 @@ Verify exact meaning of:
 - number of references
 - language counts
 
+For timelineIntel on ANY RFP (judge by meaning, not keyword lists):
+- contractHorizon: plain English period of performance / funding span
+  (base term + options, or through a stated calendar end).
+- performanceEnd: fixed calendar end when money or performance must stop, if stated.
+- scheduleAuthority: how the SOW treats the delivery schedule
+  (e.g. TBD after award — contractor proposes for buyer approval).
+- Prefer stated fixed ends over inventing Month-N from undetermined award start.
+
 Never change:
 "up to six" → "six annually"
 "one of eight" → "plus eight"

@@ -8944,9 +8944,11 @@ async def _try_section_budget_verify_fill(
             provider,
             (
                 f"**{section.title}** still has budget `[VERIFY]` tags, but there is no "
-                "canonical Stage 3.5 budget to pull figures from yet. Open **Cost of "
-                "Base Proposal** (or ask to rebuild that Cost section from the Pricing "
-                "Guide) first — then ask again to fill this section's budget part."
+                "canonical Stage 3.5 fee ledger yet (pricing may have been skipped when "
+                "the RFP left cost/pricing ambiguous — e.g. standalone form vs rates only "
+                "in a staffing matrix).\n\n"
+                "Confirm the buyer wants a fee schedule, then ask to **rebuild Cost / "
+                "Compensation from the Pricing Guide**, or paste the dollar amounts to fill."
             ),
             False,
         )
@@ -10690,7 +10692,7 @@ async def improve_proposal_section(
         from app.services.proposal_generator import run_phase3_5_budget
 
         try:
-            draft, research, budget = await run_phase3_5_budget(rfp_id)
+            draft, research, budget = await run_phase3_5_budget(rfp_id, force=True)
             provider = _provider_name()
             focus = _find_draft_section(draft, section_id) or (
                 draft.sections[0] if draft.sections else section
@@ -10704,10 +10706,21 @@ async def improve_proposal_section(
                 or user_asks_global_cost_rebuild(latest_user_ask)
             ):
                 focus = budget_focus
+            n_lines = len(budget.line_items or [])
+            if n_lines <= 0:
+                reply = (
+                    f"Stage 3.5 ran but produced no fee line items for "
+                    f"**{focus.title}**. Check that 00_Guide_Pricing rates are in the "
+                    "KB, then ask again: **generate budget** or **rebuild budget from "
+                    "the pricing guide**."
+                )
+                return _improve_outcome(
+                    focus, draft, research, provider, reply, False
+                )
             reply = (
                 f"Rebuilt the budget with the Stage 3.5 pricing agent "
                 f"(tier={budget.pricing_tier or '?'}, "
-                f"{len(budget.line_items or [])} line items, "
+                f"{n_lines} line items, "
                 f"total={budget.agency_revenue_estimate}). "
                 "Phase fees are regenerated from 00_Guide_Pricing against the "
                 "approach narrative — review totals and any Sonja flags before submission."

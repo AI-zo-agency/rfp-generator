@@ -19,7 +19,7 @@ from app.services.proposal_submission_authority import (
 
 
 class SubmissionAuthorityApplyTests(unittest.TestCase):
-    def test_cost_contradiction_becomes_clarify_and_blocks_budget(self) -> None:
+    def test_cost_contradiction_becomes_clarify_and_skips_budget(self) -> None:
         plan = ProposalExecutionPlan(
             writing=WritingIntelligence(
                 proposal_outline=ProposalOutline(
@@ -75,8 +75,9 @@ class SubmissionAuthorityApplyTests(unittest.TestCase):
             updated.writing.proposal_outline.sections[0].submission_instrument, "clarify"
         )
         self.assertEqual(updated.writing.cost_requirement_status, "ambiguous")
-        gate, _ = phase35_budget_gate(updated)
-        self.assertEqual(gate, "block")
+        gate, detail = phase35_budget_gate(updated)
+        self.assertEqual(gate, "skip")
+        self.assertIn("OregonBuys", detail or "")
 
     def test_confirmed_cost_proceeds(self) -> None:
         plan = ProposalExecutionPlan(

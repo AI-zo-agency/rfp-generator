@@ -131,6 +131,13 @@ class TimelineIntel(BaseModel):
     quotes_due: str | None = Field(default=None, alias="quotesDue")
     initial_term_start: str | None = Field(default=None, alias="initialTermStart")
     option_periods: str | None = Field(default=None, alias="optionPeriods")
+    # Plain-English contract / funding horizon for budget + calendar (any RFP).
+    # Examples: "through <calendar end>", "12-month base + 4 option years".
+    contract_horizon: str | None = Field(default=None, alias="contractHorizon")
+    # Fixed calendar end when money or performance must stop (beats Month-N from award).
+    performance_end: str | None = Field(default=None, alias="performanceEnd")
+    # How the SOW treats the schedule: e.g. "TBD after award — contractor proposes".
+    schedule_authority: str | None = Field(default=None, alias="scheduleAuthority")
     milestones: list[str] = Field(default_factory=list)
     notes: str = ""
 

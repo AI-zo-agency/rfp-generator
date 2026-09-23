@@ -117,6 +117,46 @@ class BuildAndFormatPackageTests(unittest.TestCase):
         )
         self.assertEqual(package["goLive"], "Aug 2027")
 
+    def test_build_emits_generic_horizon_fields_from_timeline_intel(self) -> None:
+        plan = {
+            "opportunity": {
+                "understanding": {
+                    "timelineIntel": {
+                        "contractHorizon": "12-month base + 2 option years",
+                        "performanceEnd": "June 30, 2030",
+                        "scheduleAuthority": "TBD after award — contractor proposes",
+                    }
+                }
+            },
+            "delivery": {
+                "methodology": {"phases": [], "confidence": 0.5},
+                "timeline": {
+                    "milestones": [],
+                    "goLive": "",
+                    "reviewCycles": "",
+                    "confidence": 0.5,
+                },
+            },
+        }
+        package = build_delivery_package(plan)
+        self.assertEqual(package["contractHorizon"], "12-month base + 2 option years")
+        self.assertEqual(package["performanceEnd"], "June 30, 2030")
+        self.assertEqual(
+            package["scheduleAuthority"],
+            "TBD after award — contractor proposes",
+        )
+        block = format_delivery_package_block(
+            frozenset({DeliveryRole.CALENDAR}),
+            package,
+            section_title="Project Schedule",
+        )
+        self.assertIn("12-month base + 2 option years", block)
+        self.assertIn("June 30, 2030", block)
+        self.assertIn("PROPOSED schedule", block)
+        self.assertIn("Month-N", block)
+        self.assertNotIn("Montana", block)
+        self.assertNotIn("May 31", block)
+
     def test_substance_block_from_roles(self) -> None:
         package = {
             "workstreams": [

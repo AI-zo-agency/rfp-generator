@@ -508,6 +508,10 @@ _DEDICATED_BUDGET_TITLE_RE = re.compile(
     r"price\s+proposal|"
     r"pricing\s+proposal|"
     r"compensation\s+schedule|"
+    # Buyer fee tabs often title this "Compensation and Payment Schedule"
+    # (not workers' compensation — that returns score 0 above).
+    r"compensation\s+and\s+payment(?:\s+schedule)?|"
+    r"payment\s+and\s+compensation(?:\s+schedule)?|"
     r"budget\s*(?:&|and)\s*pricing|"
     r"budget\s+and\s+fees|"
     r"fees?\s*(?:&|and)\s*budget|"
@@ -2754,7 +2758,7 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
                 ),
             }
         )
-        return cleaned
+        return ensure_partial_nte_scope_disclosure(cleaned)
     cleaned = cleaned.model_copy(update=updates)
     cleaned = cleaned.model_copy(
         update={
@@ -2767,7 +2771,86 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             ),
         }
     )
-    return cleaned
+    return ensure_partial_nte_scope_disclosure(cleaned)
+
+
+# Idempotency marker for the sentence we inject (not RFP keyword matching).
+_PARTIAL_NTE_DISCLOSURE_MARKER = "not a proposal against the full"
+
+
+def _phase_labels_for_disclosure(budget: ProposalBudget) -> str:
+    """Short phase list for partial-NTE disclosure from line descriptions."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in budget.line_items or []:
+        if float(item.extended or item.rate or 0) <= 0:
+            continue
+        raw = (item.description or "").strip()
+        if not raw or raw.startswith("[MANUAL FILL"):
+            continue
+        head = raw
+        for sep in (":", ".", "—", "–", "("):
+            if sep in head:
+                head = head.split(sep, 1)[0].strip()
+                break
+        low = head.casefold()
+        if low.startswith("phase ") and len(head) > 6 and head[6:7].isdigit():
+            # "Phase 1 Discovery" → drop the Phase N prefix when a name follows.
+            rest = head[6:].lstrip()
+            if rest[:1].isdigit():
+                rest = rest[1:].lstrip(" .)(-–—")
+            if rest:
+                head = rest
+        if len(head) > 48:
+            head = head[:45].rstrip() + "…"
+        key = head.casefold()
+        if key in seen or len(head) < 3:
+            continue
+        seen.add(key)
+        labels.append(head)
+        if len(labels) >= 5:
+            break
+    if not labels:
+        return "the initial priced phases"
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def ensure_partial_nte_scope_disclosure(budget: ProposalBudget) -> ProposalBudget:
+    """When fees are a small slice of a large NTE, say so explicitly in scopeSummary.
+
+    Prevents skimming a small early-phase fee total against a large NTE ceiling
+    as a full-scope lowball when the bid intentionally prices early phases only.
+    Trigger is ledger math only.
+    """
+    cap = budget.rfp_budget_cap or budget.rfp_media_or_program_envelope
+    if cap is None or float(cap) < 100_000:
+        return budget
+    fees = float(
+        budget.agency_fee_subtotal
+        or budget.agency_revenue_estimate
+        or budget.lump_sum_total
+        or 0
+    )
+    if fees <= 0:
+        return budget
+    if fees >= float(cap) * 0.40:
+        return budget
+    scope = (budget.scope_summary or "").strip()
+    if _PARTIAL_NTE_DISCLOSURE_MARKER in scope.casefold():
+        return budget
+    phase_bit = _phase_labels_for_disclosure(budget)
+    sentence = (
+        f"These figures cover {phase_bit} only — {_PARTIAL_NTE_DISCLOSURE_MARKER} "
+        f"{_usd(float(cap))} NTE / contract ceiling. Remaining workstreams "
+        f"(including media buying and later-phase execution, as applicable) will be "
+        f"submitted as buyer-approved estimates as that work is authorized."
+    )
+    new_scope = f"{sentence} {scope}".strip() if scope else sentence
+    return budget.model_copy(update={"scope_summary": new_scope[:2000]})
 
 
 def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:

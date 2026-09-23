@@ -101,19 +101,71 @@ class LoadIntelligenceCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed, [])
 
 
+class BackfillUnderstandingTests(unittest.TestCase):
+    def test_fills_blank_client_and_project_type_from_meta(self) -> None:
+        plan = ProposalExecutionPlan(rfpId="rfp-1")
+        filled = graph_mod.backfill_understanding_from_rfp_meta(
+            plan,
+            {"client": "DuPage County", "title": "Marketing Communications RFP", "sector": ""},
+        )
+        self.assertEqual(filled.opportunity.understanding.client, "DuPage County")
+        self.assertEqual(
+            filled.opportunity.understanding.project_type,
+            "Marketing Communications RFP",
+        )
+
+    def test_does_not_overwrite_existing_identity(self) -> None:
+        plan = ProposalExecutionPlan(rfpId="rfp-1")
+        plan.opportunity.understanding.client = "Already Set"
+        plan.opportunity.understanding.project_type = "Website Redesign"
+        filled = graph_mod.backfill_understanding_from_rfp_meta(
+            plan,
+            {"client": "Other", "title": "Other Title", "sector": "Gov"},
+        )
+        self.assertEqual(filled.opportunity.understanding.client, "Already Set")
+        self.assertEqual(
+            filled.opportunity.understanding.project_type, "Website Redesign"
+        )
+
+
 class WrapCheckpointBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_node_skips_fn_call(self) -> None:
         fn = AsyncMock()
         node = graph_mod._wrap("opportunity_extract", fn)
+        plan = ProposalExecutionPlan(rfpId="rfp-1")
+        plan.opportunity.understanding.client = "City of Test"
+        plan.opportunity.understanding.project_type = "Marketing services"
         state: graph_mod.IntelligenceGraphState = {
             "rfp_id": "rfp-1",
             "rfp_context": "some rfp text",
-            "plan": ProposalExecutionPlan(rfpId="rfp-1").model_dump(by_alias=True),
+            "plan": plan.model_dump(by_alias=True),
             "completed_nodes": ["opportunity_extract"],
         }
         result = await node(state)
         fn.assert_not_awaited()
         self.assertEqual(result, {})
+
+    async def test_completed_extract_reruns_when_understanding_incomplete(self) -> None:
+        """Stale checkpoint must not skip extract if client/projectType are empty."""
+        returned = ProposalExecutionPlan(rfpId="rfp-1")
+        returned.opportunity.understanding.client = "DuPage"
+        returned.opportunity.understanding.project_type = "Marketing"
+        fn = AsyncMock(return_value=returned)
+        node = graph_mod._wrap("opportunity_extract", fn)
+        state: graph_mod.IntelligenceGraphState = {
+            "rfp_id": "rfp-1",
+            "rfp_context": "some rfp text",
+            "rfp_client": "DuPage",
+            "rfp_title": "Marketing RFP",
+            "plan": ProposalExecutionPlan(rfpId="rfp-1").model_dump(by_alias=True),
+            "completed_nodes": ["opportunity_extract"],
+        }
+        with patch.object(
+            graph_mod, "_save_intelligence_checkpoint", new=AsyncMock()
+        ):
+            result = await node(state)
+        fn.assert_awaited_once()
+        self.assertEqual(result["completed_nodes"], ["opportunity_extract"])
 
     async def test_pending_node_calls_fn_and_records_completion(self) -> None:
         returned_plan = ProposalExecutionPlan(rfpId="rfp-1")
@@ -202,10 +254,13 @@ class WrapProgressActivityTests(unittest.IsolatedAsyncioTestCase):
     async def test_skipped_node_emits_no_activity(self) -> None:
         fn = AsyncMock()
         node = graph_mod._wrap("opportunity_extract", fn)
+        plan = ProposalExecutionPlan(rfpId="rfp-1")
+        plan.opportunity.understanding.client = "City of Test"
+        plan.opportunity.understanding.project_type = "Marketing services"
         state: graph_mod.IntelligenceGraphState = {
             "rfp_id": "rfp-1",
             "rfp_context": "some rfp text",
-            "plan": ProposalExecutionPlan(rfpId="rfp-1").model_dump(by_alias=True),
+            "plan": plan.model_dump(by_alias=True),
             "completed_nodes": ["opportunity_extract"],
         }
         with patch(

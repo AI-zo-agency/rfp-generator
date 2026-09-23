@@ -193,7 +193,9 @@ _AGENCY_REQ_TITLE_RE = re.compile(
 _PRICING_TITLE_RE = re.compile(
     r"\b("
     r"price|pricing|fee\s+schedule|cost\s+proposal|quotation\s+form|"
-    r"hourly\s+rates?|labor\s+categor"
+    r"hourly\s+rates?|labor\s+categor|"
+    r"compensation\s+and\s+payment|payment\s+and\s+compensation|"
+    r"compensation\s+schedule"
     r")\b",
     re.IGNORECASE,
 )

@@ -229,7 +229,19 @@ Rules (strict):
 42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones. NEVER assert past technical deliveries (specific platforms, integrations, audit workflows) that the included case studies / bios / companyfacts do not evidence — use adjacent verified experience or [VERIFY].
 44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
-45. SCHEDULE / TIMELINE: Fit award→launch / contract windows stated in the RFP. Dates and milestones in a markdown pipe table (| Phase | Activities | Timing |) — methodology lives in Approach. Every Timing cell must have a week-from-award range. Never leave Timing blank. Never put spaces between every letter in headers (write PHASE not P H A S E). Never put | between individual letters. Use 4–6 columns max; wrap long cell text with normal sentences, not line breaks mid-row. Never put writer instructions in the tab ("do not restate…"). Missing calendar dates from the RFP → weeks from award, not [VERIFY] tags.
+45. SCHEDULE / TIMELINE: Fit award→launch / contract / funding windows stated in THIS RFP.
+   Dates and milestones in a markdown pipe table (| Phase | Activities | Timing |) —
+   methodology lives in Approach. Every Timing cell must have a week-from-award range
+   OR a calendar date/month tied to a stated RFP end (prefer fixed funding /
+   performance end dates when present — back-calculate; never invent Month-N from an
+   undetermined award start that could overrun a hard funding/performance end).
+   When the SOW says the schedule is TBD / contractor proposes after selection: write
+   "proposed schedule, subject to buyer approval" — never "binds" or settled-agreement
+   language. Never leave Timing blank. Never put spaces between every letter in headers
+   (write PHASE not P H A S E). Never put | between individual letters. Use 4–6 columns
+   max; wrap long cell text with normal sentences, not line breaks mid-row. Never put
+   writer instructions in the tab ("do not restate…"). Missing calendar dates from the
+   RFP → weeks from award labeled as proposed, not [VERIFY] tags.
 46. COVER LETTER / TRANSMITTAL (Rev 6 signed passage · RFP format first · won form second):
    Structure and required fields follow THIS RFP's cover-letter / letter-of-transmittal
    instructions and submission package (addressee, required statements, page limits,
@@ -1604,10 +1616,13 @@ def _build_draft_prompt_zones(
                 zone_c += (
                     f"DELIVERY CALENDAR ROLE on {payload.get('sectionId')} "
                     f"({payload.get('title')}): Dates / milestones / owners with Timing "
-                    "filled (week-from-award or calendar month). Bind names to the "
-                    "DELIVERY PACKAGE. Prefer week-from-award when the RFP gives a window; "
-                    "use [VERIFY] only when the RFP gives no window and no event dates. "
-                    "Do not restate full methodology prose.\n\n"
+                    "filled (week-from-award or calendar date from RFP). Bind names to the "
+                    "DELIVERY PACKAGE. Frame as PROPOSED schedule subject to buyer "
+                    "approval when the SOW leaves the schedule TBD after selection — "
+                    "never claim it 'binds' workstreams. Prefer fixed funding/"
+                    "performance end dates from THIS RFP (back-calculate); do not invent "
+                    "Month-N from undetermined award start past a hard funding/"
+                    "performance end. Do not restate full methodology prose.\n\n"
                 )
             elif any(
                 k in title_lower

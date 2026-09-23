@@ -194,9 +194,9 @@ async def run_opportunity_extract(
     )
 
     rfp_id = str(
-        plan.rfp_id
-        or getattr(getattr(plan, "metadata", None), "rfp_id", None)
+        getattr(getattr(plan, "metadata", None), "rfp_id", None)
         or rfp_meta.get("rfpId")
+        or rfp_meta.get("rfp_id")
         or ""
     ).strip()
     try:

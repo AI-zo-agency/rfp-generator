@@ -3052,8 +3052,14 @@ async def _assert_proposal_not_reset(rfp_id: str) -> None:
 
 async def run_phase3_5_budget(
     rfp_id: str,
+    *,
+    force: bool = False,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
-    """Phase 3.5: Stage 3 budget from 00_Guide_Pricing, incorporate into manuscript, sync fee narrative."""
+    """Phase 3.5: Stage 3 budget from 00_Guide_Pricing, incorporate into manuscript, sync fee narrative.
+
+    ``force=True`` (chat-initiated rebuild) runs Pricing Guide generation even when
+    submission authority marked cost/pricing ambiguous — Sonja explicitly asked.
+    """
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
@@ -3069,7 +3075,7 @@ async def run_phase3_5_budget(
             status_code=400,
         )
 
-    logger.info("Phase 3.5 budget starting for %s", rfp_id)
+    logger.info("Phase 3.5 budget starting for %s force=%s", rfp_id, force)
     with pipeline_phase(
         "phase-3-5-budget",
         rfp_id=rfp_id,
@@ -3081,6 +3087,7 @@ async def run_phase3_5_budget(
             rfp_id,
             app_settings=app_settings,
             has_manuscript=has_manuscript,
+            force=force,
         )
 
 
@@ -3089,12 +3096,14 @@ async def _run_phase3_5_budget_inner(
     *,
     app_settings: object,
     has_manuscript: bool,
+    force: bool = False,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
     step_trace(
         "phase3_5_budget_start",
         rfp_id=rfp_id,
         budget_before_drafting=bool(getattr(app_settings, "budget_before_drafting", False)),
         has_manuscript=has_manuscript,
+        force=force,
     )
     research = await aget_research_cache(rfp_id)
     from app.services.proposal_submission_authority import phase35_budget_gate
@@ -3110,6 +3119,20 @@ async def _run_phase3_5_budget_inner(
             except Exception:  # noqa: BLE001
                 plan = None
     gate, gate_detail = phase35_budget_gate(plan)
+    if gate in {"skip", "block"} and force:
+        logger.info(
+            "Phase 3.5 budget force-run for %s (gate was %s: %s)",
+            rfp_id,
+            gate,
+            (gate_detail or "")[:200],
+        )
+        step_trace(
+            "phase3_5_budget_force_override",
+            rfp_id=rfp_id,
+            prior_gate=gate,
+            reason=(gate_detail or "")[:300],
+        )
+        gate = "proceed"
     if gate == "skip":
         logger.info("Phase 3.5 budget skipped for %s: %s", rfp_id, gate_detail)
         step_trace(
@@ -3125,12 +3148,13 @@ async def _run_phase3_5_budget_inner(
             )
         from app.models.proposal import ProposalBudget
 
+        now = datetime.now(timezone.utc).isoformat()
         budget = (
             research.budget
             if research and research.budget
-            else ProposalBudget(rfpId=rfp_id)
+            else ProposalBudget(rfpId=rfp_id, updatedAt=now)
         )
-        return draft, research or ProposalResearchCache(rfpId=rfp_id), budget
+        return draft, research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now), budget
     if gate == "block":
         step_trace(
             "phase3_5_budget_blocked",

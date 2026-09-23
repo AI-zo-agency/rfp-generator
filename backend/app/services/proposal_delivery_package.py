@@ -69,6 +69,23 @@ def build_delivery_package(execution_plan: dict[str, Any] | None) -> dict[str, A
         delivery.get("methodology") if isinstance(delivery.get("methodology"), dict) else {}
     )
     timeline = delivery.get("timeline") if isinstance(delivery.get("timeline"), dict) else {}
+    opportunity = (
+        plan.get("opportunity") if isinstance(plan.get("opportunity"), dict) else {}
+    )
+    understanding = (
+        opportunity.get("understanding")
+        if isinstance(opportunity.get("understanding"), dict)
+        else {}
+    )
+    tl_intel = (
+        understanding.get("timelineIntel")
+        if isinstance(understanding.get("timelineIntel"), dict)
+        else (
+            understanding.get("timeline_intel")
+            if isinstance(understanding.get("timeline_intel"), dict)
+            else {}
+        )
+    )
 
     workstreams: list[dict[str, Any]] = []
     for phase in methodology.get("phases") or []:
@@ -115,6 +132,15 @@ def build_delivery_package(execution_plan: dict[str, Any] | None) -> dict[str, A
         ).strip(),
         "methodologyConfidence": methodology.get("confidence"),
         "timelineConfidence": timeline.get("confidence"),
+        "contractHorizon": str(
+            tl_intel.get("contractHorizon") or tl_intel.get("contract_horizon") or ""
+        ).strip(),
+        "performanceEnd": str(
+            tl_intel.get("performanceEnd") or tl_intel.get("performance_end") or ""
+        ).strip(),
+        "scheduleAuthority": str(
+            tl_intel.get("scheduleAuthority") or tl_intel.get("schedule_authority") or ""
+        ).strip(),
     }
 
 
@@ -245,10 +271,19 @@ def format_delivery_package_block(
             lines.append(f"- {name}: {offset}")
     go_live = str(pkg.get("goLive") or "").strip()
     reviews = str(pkg.get("reviewCycles") or "").strip()
+    horizon = str(pkg.get("contractHorizon") or "").strip()
+    perf_end = str(pkg.get("performanceEnd") or "").strip()
+    sched_auth = str(pkg.get("scheduleAuthority") or "").strip()
     if go_live:
         lines.append(f"Go-live / peak: {go_live}")
     if reviews:
         lines.append(f"Review cadence: {reviews}")
+    if horizon:
+        lines.append(f"Contract / funding horizon (from RFP): {horizon}")
+    if perf_end:
+        lines.append(f"Fixed performance / funding end (from RFP): {perf_end}")
+    if sched_auth:
+        lines.append(f"Schedule authority (from RFP): {sched_auth}")
 
     if DeliveryRole.SUBSTANCE in role_set:
         lines.extend(
@@ -267,10 +302,17 @@ def format_delivery_package_block(
             [
                 "CALENDAR ROLE (this tab owns timing):",
                 "Dates / milestones / owners only — do not restate full methodology prose.",
-                "Every Timing cell must use week-from-award or calendar month from the RFP window.",
+                "Frame as a PROPOSED schedule subject to buyer approval when the SOW says "
+                "the schedule is TBD or determined after contractor selection. "
+                "Never claim the table 'binds' workstreams or is already agreed.",
+                "Every Timing cell must use week-from-award OR a calendar date / month "
+                "tied to the RFP window — prefer FIXED funding or performance end dates "
+                "stated in THIS RFP and back-calculate. Do NOT invent a rigid "
+                "Month-N / full-term-from-award grid when award start is TBD and money "
+                "or performance stops on a fixed calendar date.",
                 "Bind rows to the same workstream names as substance (no parallel renamed phases).",
-                "Missing RFP dates → week-from-award from award; use [VERIFY] only when the "
-                "RFP gives no window and no event dates.",
+                "Missing RFP dates → week-from-award from award (labeled proposed); use "
+                "[VERIFY] only when the RFP gives no window, no event dates, and no end date.",
             ]
         )
     if DeliveryRole.PRICE in role_set:

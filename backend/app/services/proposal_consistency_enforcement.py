@@ -425,18 +425,21 @@ def _schedule_calendar_stub(
     )
     if window_weeks and window_weeks >= 4:
         lead = (
-            f"Workstreams overlap so launch lands in the RFP window "
-            f"({window_weeks} weeks from award). Phase method lives in {approach_title}."
+            f"Proposed schedule (subject to buyer approval) — workstreams "
+            f"overlap so launch lands in the RFP window ({window_weeks} weeks from award). "
+            f"Phase method lives in {approach_title}."
         )
     else:
         lead = (
-            f"Timing is weeks from award through the RFP launch date. "
+            f"Proposed schedule (subject to buyer approval). "
+            f"Timing is weeks from award through the RFP launch / performance window. "
             f"Phase method lives in {approach_title}."
         )
     note = (
         "[DESIGNER NOTE: Typeset as a calendar table. Columns: Phase | Timing | "
-        "Milestone. Timing is weeks from award — never leave Timing blank. "
-        "Keep Phase names aligned with the approach / scope tab.]"
+        "Milestone. Timing is weeks from award or fixed RFP end dates — never leave "
+        "Timing blank. Keep Phase names aligned with the approach / scope tab. "
+        "Label as proposed when the SOW schedule is TBD.]"
     )
     return f"## {title}\n\n{lead}\n\n{table}\n{note}\n"
 
@@ -575,10 +578,18 @@ def format_rfp_calendar_constraint(
         "## RFP CALENDAR CONSTRAINT (mandatory)",
         "- Schedule/Timeline tabs: dates, milestones, owners ONLY — do NOT rewrite "
         "Approach/methodology phase essays.",
-        "- Fit the plan inside the RFP award → launch / contract window. If that window "
-        "is short (weeks, not months), do NOT invent a sequential multi-month plan that "
-        "overruns launch unless you explicitly state concurrent workstreams or "
-        "post-launch phases. Never invent dates or durations absent from the RFP.",
+        "- Frame as a PROPOSED schedule subject to buyer approval when the "
+        "SOW says timing is TBD or determined after contractor selection. Never claim "
+        "the table binds workstreams or is already agreed.",
+        "- Fit the plan inside the RFP award → launch / contract / funding window. If "
+        "that window is short (weeks, not months), do NOT invent a sequential multi-month "
+        "plan that overruns launch unless you explicitly state concurrent workstreams or "
+        "post-launch phases.",
+        "- Prefer FIXED funding or performance end dates stated in THIS RFP "
+        "(expended by / support through / period ends on …) and back-calculate "
+        "milestones. Do NOT invent a rigid Month-N / full-term-from-award grid when "
+        "award start is TBD and money or performance stops on a fixed calendar date.",
+        "- Never invent dates or durations absent from the RFP.",
     ]
     if rfp_due_date:
         lines.append(f"- Proposal submission due date: {rfp_due_date}")
