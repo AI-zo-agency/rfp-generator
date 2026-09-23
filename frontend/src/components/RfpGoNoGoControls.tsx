@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
+import { BidScopePicker } from "@/components/BidScopePicker";
 import { DeleteRfpButton } from "@/components/DeleteRfpButton";
 import { GoNoGoAnalysisPanel } from "@/components/GoNoGoAnalysisPanel";
 import { GoSign } from "@/components/GoSign";
@@ -27,6 +28,8 @@ interface RfpGoNoGoControlsProps {
   goNoGo: GoNoGoAnalysis["recommendation"] | null;
   goNoGoAnalysis?: GoNoGoAnalysis | null;
   lastActivityNote?: string | null;
+  selectedTracks?: string[];
+  bidScopeLockedAt?: string | null;
 }
 
 export function RfpGoNoGoControls({
@@ -44,8 +47,20 @@ export function RfpGoNoGoControls({
   goNoGo,
   goNoGoAnalysis,
   lastActivityNote,
+  selectedTracks: selectedTracksProp = [],
+  bidScopeLockedAt: bidScopeLockedAtProp = null,
 }: RfpGoNoGoControlsProps) {
   const [analyzing, setAnalyzing] = useState(false);
+  const [selectedTracks, setSelectedTracks] = useState(selectedTracksProp);
+  const [bidScopeLockedAt, setBidScopeLockedAt] = useState(bidScopeLockedAtProp);
+
+  const onBidScopeLocked = useCallback(
+    (payload: { selectedTracks: string[]; bidScopeLockedAt: string | null }) => {
+      setSelectedTracks(payload.selectedTracks);
+      setBidScopeLockedAt(payload.bidScopeLockedAt);
+    },
+    [],
+  );
 
   // While re-running, hide the previous analysis so stale GO scores never linger.
   const showAnalysis = Boolean(goNoGoAnalysis) && !analyzing;
@@ -158,12 +173,21 @@ export function RfpGoNoGoControls({
       )}
 
       {showAnalysis && goNoGoAnalysis && (
-        <GoNoGoAnalysisPanel
-          analysis={goNoGoAnalysis}
-          fitScore={displayFit}
-          worthScore={displayWorth}
-          recommendation={displayGoNoGo}
-        />
+        <>
+          <GoNoGoAnalysisPanel
+            analysis={goNoGoAnalysis}
+            fitScore={displayFit}
+            worthScore={displayWorth}
+            recommendation={displayGoNoGo}
+          />
+          <BidScopePicker
+            rfpId={rfpId}
+            analysis={goNoGoAnalysis}
+            selectedTracks={selectedTracks}
+            bidScopeLockedAt={bidScopeLockedAt}
+            onLocked={onBidScopeLocked}
+          />
+        </>
       )}
     </>
   );

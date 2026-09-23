@@ -78,6 +78,10 @@ import {
 import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
+import {
+  availableTracksFromAnalysis,
+  bidScopeIsReady,
+} from "@/lib/bid-scope";
 import { ProposalSectionTree, reorderSectionsById } from "./ProposalSectionTree";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
 import { ManuscriptSelectionBubble } from "./ManuscriptSelectionBubble";
@@ -2936,6 +2940,13 @@ function ProposalDraftWorkspaceInner({
     startAfterSections1to3?: boolean;
     startFromCaseStudies?: boolean;
   }) => {
+    const tracks = availableTracksFromAnalysis(rfp.goNoGoAnalysis);
+    if (!bidScopeIsReady(tracks, rfp.bidScopeLockedAt, rfp.selectedTracks)) {
+      window.alert(
+        "Lock bid scope first. This RFP has multiple roles/tracks — choose which to bid on the RFP detail page, then Build.",
+      );
+      return;
+    }
     // A duplicate invocation while one is already in flight (double-click, a
     // second call sharing this same handler) used to silently abort the
     // running request via fullProposalAbortRef below — the run would look
