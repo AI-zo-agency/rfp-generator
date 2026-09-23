@@ -1997,10 +1997,8 @@ def _rollup_phase_fee_rows(
         if "reference only" in phase_cf or "(reference)" in phase_cf:
             continue
         descs = list(data["descs"])  # type: ignore[arg-type]
-        if len(descs) > 4:
-            scope = _scope_sentence(phase, descs[:4]) + f" Plus {len(descs) - 4} more."
-        else:
-            scope = _scope_sentence(phase, descs)
+        # Full scope list — never truncate with "Plus N more" (leaks into client copy).
+        scope = _scope_sentence(phase, descs)
         if not data["has_amount"]:
             continue
         amount = round(float(data["amount"]), 2)  # type: ignore[arg-type]
@@ -2078,9 +2076,32 @@ def ensure_fee_detail_table_in_budget_markdown(
     """Re-inject Fee Detail by Phase when an LLM rewrite dropped the table.
 
     Keeps Cost client-ready: narrative alone is not a budget table.
+    Skipped when budgetFormat is the official hourly / Pricing Form instrument.
     """
     text = content or ""
     if budget is None or not (budget.line_items or []):
+        return text
+    from app.services.proposal_opportunity_constraints import budget_format_omits_fee_detail
+
+    fmt = (budget.budget_format or "").casefold()
+    if budget_format_omits_fee_detail(fmt):
+        # Remove a leaked Fee Detail table rather than restoring it.
+        if re.search(r"(?im)^##\s+Fee Detail by Phase\s*$", text) or re.search(
+            r"(?im)^##\s+Supporting Fee Detail\s*$", text
+        ):
+            match = re.search(
+                r"(?im)^##\s+(?:Fee Detail by Phase|Supporting Fee Detail)\s*$",
+                text,
+            )
+            if match:
+                rest = text[match.end() :]
+                next_h = re.search(r"(?im)^##\s+\S", rest)
+                end = match.end() + (next_h.start() if next_h else len(rest))
+                text = (text[: match.start()] + text[end:].lstrip()).strip() + "\n"
+                logger.info(
+                    "ensure_fee_detail: stripped Fee Detail (format=%s)",
+                    fmt,
+                )
         return text
     table = render_fee_detail_by_phase_markdown(budget)
     if not table.strip() or "| Phase |" not in table:
@@ -2962,9 +2983,17 @@ def render_budget_markdown(
     )
     # When RFP also prices phases / fixed fees, keep Fee Detail alongside the
     # hourly instrument (strict per-section: both asks → both blocks).
+    # Official Pricing Form / personnel_loading alone → suppress Fee Detail by Phase.
+    from app.services.proposal_opportunity_constraints import budget_format_omits_fee_detail
+
     also_wants_fee_detail = bool(budget.line_items) and (
         not wants_personnel or _has_priced_fixed_fees()
     )
+    if budget_format_omits_fee_detail(fmt):
+        if wants_form:
+            also_wants_fee_detail = False
+        elif wants_personnel and not _has_priced_fixed_fees():
+            also_wants_fee_detail = False
 
     if wants_personnel:
         personnel_md = render_personnel_loading_form_markdown(

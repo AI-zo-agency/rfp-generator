@@ -944,8 +944,10 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         )
         lines.append(json.dumps(budget_plan, indent=2)[:3000])
 
+    roles: frozenset = frozenset()
     try:
         from app.services.proposal_delivery_package import (
+            DeliveryRole,
             build_delivery_package,
             format_delivery_package_block,
             roles_from_execution_plan,
@@ -964,7 +966,7 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
             if block:
                 lines.append(block)
     except Exception:
-        pass
+        roles = frozenset()
 
     try:
         from app.services.proposal_consistency_enforcement import (
@@ -978,6 +980,33 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         )
         if cal:
             lines.append(cal)
+    except Exception:
+        pass
+
+    # Phase-2 opportunity hard constraints (SOW / timeline / caps) — same pack Cost uses.
+    try:
+        from app.services.proposal_opportunity_constraints import (
+            format_opportunity_hard_constraints,
+        )
+        from app.services.proposal_delivery_package import DeliveryRole
+
+        focus = "all"
+        if roles:
+            has_sub = DeliveryRole.SUBSTANCE in roles
+            has_cal = DeliveryRole.CALENDAR in roles
+            has_price = DeliveryRole.PRICE in roles
+            if has_sub and not has_cal and not has_price:
+                focus = "sow"
+            elif has_cal and not has_sub:
+                focus = "timeline"
+            elif has_price and not has_sub and not has_cal:
+                focus = "budget"
+        hc = format_opportunity_hard_constraints(
+            plan if isinstance(plan, dict) else {},
+            focus=focus,  # type: ignore[arg-type]
+        )
+        if hc:
+            lines.append(hc)
     except Exception:
         pass
 

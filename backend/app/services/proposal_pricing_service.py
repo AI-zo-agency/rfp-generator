@@ -111,7 +111,8 @@ PHASE 2 — Pick ONE pricing tier (Low / Average / High) for the entire proposal
 PHASE 3 — Map every RFP deliverable to a Pricing Guide line item as a PHASE / DELIVERABLE row:
 - CRITICAL: You MUST include every single requirement and deliverable requested in the RFP. If you cannot find a matching Pricing Guide item in the KB for an RFP requirement, DO NOT omit it. You MUST include it as a line item, set `isManualFill=true` or use a `[VERIFY: Missing pricing]` tag, and add a pricing flag. Never silently skip a requirement.
 - description MUST name the phase + deliverable (e.g. "Phase 1 Discovery — Stakeholder interviews
-  (RFP §6.2 Item 1)"). NEVER use bare "Strategy Lead — Name" as the only description.
+  covering the RFP communications-plan ask"). NEVER invent "RFP §X Item Y" citations.
+  NEVER use bare "Strategy Lead — Name" as the only description.
 - category = phase name (Discovery / Strategy / Tactical Plan / Roadmap / etc.)
 - namedPerson / roleTitle are optional staffing notes — not a substitute for the deliverable label.
 - Prefer budgetFormat=phased (or service_menu) UNLESS THIS RFP explicitly requires:
@@ -1924,6 +1925,22 @@ def _contract_horizon_block(prior_research: ProposalResearchCache | None) -> str
     )
 
 
+def _opportunity_constraints_block(prior_research: ProposalResearchCache | None) -> str:
+    """Phase-2 opportunity pack (scope/caps/format/horizon) for Stage 3.5."""
+    try:
+        from app.services.proposal_opportunity_constraints import (
+            format_opportunity_hard_constraints,
+        )
+
+        block = format_opportunity_hard_constraints(prior_research, focus="budget")
+        if block:
+            return f"\n{block}\n"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Opportunity hard constraints skipped: %s", exc)
+    # Fallback: horizon-only (pre-opportunity wiring behavior).
+    return _contract_horizon_block(prior_research)
+
+
 async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
     """Stage 3 budget: Stage 1 + Stage 2 + 00_Guide_Pricing + RFP excerpt → single LLM pass."""
     if not llm.is_configured():
@@ -2069,7 +2086,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             f"\n=== 00_Guide_Pricing (KB) ===\n{guide_text}",
             f"\n{contract_prompt}",
             (f"\n{cost_demands_prompt}" if cost_demands_prompt else ""),
-            _contract_horizon_block(prior_research),
+            _opportunity_constraints_block(prior_research),
             (
                 f"\n=== Manuscript approach + current budget (PRICE MUST FUND THESE PHASES) ===\n"
                 f"{manuscript_digest[:14_000]}"
@@ -2078,6 +2095,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             ),
             f"\n=== RFP excerpt ===\n{rfp_context[:28_000]}",
             "\n=== CRITICAL REMINDERS ===\n"
+            "- OPPORTUNITY HARD CONSTRAINTS above beat Pricing Guide menu defaults "
+            "(scope, caps, format, horizon).\n"
             "- Do NOT double-count the same guide line across two phases.\n"
             "- Phase fees must fund the depth described in Technical Ability / approach.\n"
             "- Satisfy every RFP COST DEMAND above (or emit MANUAL FILL) — scopes differ by RFP.\n"
@@ -2287,6 +2306,26 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped during pricing for %s: %s", rfp_id, exc)
+
+    # Phase-2 opportunity can force form/hourly when the LLM still defaults to phased.
+    try:
+        from app.services.proposal_opportunity_constraints import (
+            opportunity_pricing_format_hint,
+        )
+
+        opp_hint = opportunity_pricing_format_hint(prior_research)
+        if opp_hint and (forced_format or "phased").casefold() == "phased":
+            logger.info(
+                "Pricing budgetFormat opportunity hint %s → %s",
+                forced_format,
+                opp_hint,
+            )
+            forced_format = opp_hint
+            flags.append(
+                f"[PRICING FLAG: Cost instrument aligned to Phase-2 opportunity → {opp_hint}]"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Opportunity format hint skipped for %s: %s", rfp_id, exc)
 
     money_constraints = await extract_rfp_money_constraints_with_llm_fallback(rfp_context)
     budget = ProposalBudget(
