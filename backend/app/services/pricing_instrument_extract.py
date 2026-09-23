@@ -114,7 +114,9 @@ Rules:
 - Every non-null bidNumber, NTE, and form field MUST have an evidence quote from THIS excerpt.
 - Align delivery.tracks ids/labels with instrument.tracks when both exist.
 - mandatoryDeliverables: when THIS RFP lists a numbered Scope of Services / Scope of Work /
-  services list, copy EACH line (full list — do not truncate or summarize mid-list).
+  services list, copy EACH line in order (full list — do not truncate or summarize mid-list).
+  Numbered lists often continue after a repeated section header or page break — keep
+  collecting until the consecutive numbering ends (e.g. 1…14, not stop at 12).
 - buyerOwnsDeliverables: true when Draft Agreement / contract says deliverables / work
   product are the buyer's exclusive property (or equivalent work-for-hire ownership).
 - letterProposalGate: true when work starts only after a Letter Proposal / task order /
@@ -855,6 +857,146 @@ def pricing_form_focus_excerpt(rfp_text: str, *, max_chars: int = 14_000) -> str
     return "\n\n---\n\n".join(parts)
 
 
+def scope_services_focus_excerpt(rfp_text: str, *, max_chars: int = 12_000) -> str:
+    """Prefer the Scope of Services / Work window with the longest 1..N list.
+
+    RFPs often repeat the section header across a page break mid-list; score each
+    hit by consecutive numbered lines so trailing items (past a form-feed) win
+    over short contract boilerplate that also says "Scope of Services".
+    """
+    body = (rfp_text or "").strip()
+    if not body:
+        return ""
+    patterns = (
+        r"scope\s+of\s+services",
+        r"scope\s+of\s+work",
+        r"services\s+to\s+be\s+performed",
+    )
+    back, forward = 400, 9_000
+    best = ""
+    best_score = -1
+    seen_starts: set[int] = set()
+    for pat in patterns:
+        for m in re.finditer(pat, body, flags=re.I):
+            start = max(0, m.start() - back)
+            if start in seen_starts:
+                continue
+            seen_starts.add(start)
+            end = min(len(body), m.end() + forward)
+            chunk = body[start:end]
+            if len(chunk) > max_chars:
+                chunk = chunk[:max_chars]
+            score = len(harvest_numbered_scope_lines(chunk))
+            if score > best_score:
+                best_score = score
+                best = chunk
+    return best
+
+
+_NUMBERED_SCOPE_LINE_RE = re.compile(
+    r"(?m)^\s*(\d{1,2})[.)]\s+(\S.+?)\s*$"
+)
+
+
+def harvest_numbered_scope_lines(text: str, *, max_items: int = 40) -> list[str]:
+    """Longest consecutive 1..N numbered list from Scope windows (structure only).
+
+    Prefer this over a truncated / paraphrased LLM mandatoryDeliverables list when
+    the harvest is longer. Not capability synonym matching — verbatim line text.
+    """
+    body = text or ""
+    if not body.strip():
+        return []
+    # Collect (n, text) in document order; keep first occurrence of each n.
+    seen: dict[int, str] = {}
+    order: list[int] = []
+    for m in _NUMBERED_SCOPE_LINE_RE.finditer(body):
+        n = int(m.group(1))
+        if n < 1 or n > max_items:
+            continue
+        line = re.sub(r"\s+", " ", m.group(2)).strip()
+        if len(line) < 8:
+            continue
+        # Skip checklist / cert noise that starts mid-doc with 1. after Scope.
+        if n == 1 and order and max(order) >= 3:
+            # Start of a new list — evaluate later if longer than current run.
+            pass
+        if n not in seen:
+            seen[n] = line[:350]
+            order.append(n)
+
+    # Find longest run starting at 1 with consecutive integers.
+    best: list[str] = []
+    if 1 in seen:
+        run = [seen[1]]
+        i = 2
+        while i in seen:
+            run.append(seen[i])
+            i += 1
+        best = run
+    return best[:max_items]
+
+
+def prefer_harvested_mandatory(
+    delivery: DeliveryConstraints,
+    *,
+    scope_excerpt: str,
+) -> DeliveryConstraints:
+    """Prefer consecutive numbered Scope lines from the RFP when they cover more."""
+    harvested = harvest_numbered_scope_lines(scope_excerpt)
+    current = list(delivery.mandatory_deliverables or [])
+    if not harvested:
+        return delivery
+    if len(harvested) >= max(len(current), 1):
+        if harvested != current:
+            logger.info(
+                "pricing_instrument_extract mandatory harvest len=%s (was llm len=%s)",
+                len(harvested),
+                len(current),
+            )
+            return delivery.model_copy(update={"mandatory_deliverables": harvested})
+    return delivery
+
+
+_BUYER_OWNS_SIGNALS = (
+    "exclusive property",
+    "sole property of",
+    "shall be the property of",
+    "become the property of",
+    "work product shall belong",
+    "deliverables shall be owned",
+    "all rights, title and interest",
+    "all right, title and interest",
+)
+
+
+def infer_ownership_and_letter_gate(
+    delivery: DeliveryConstraints,
+    *,
+    rfp_excerpt: str,
+) -> DeliveryConstraints:
+    """Fill buyerOwns / letterProposalGate from contract wording when LLM misses them."""
+    body = (rfp_excerpt or "").casefold()
+    if not body:
+        return delivery
+    updates: dict[str, bool] = {}
+    if not delivery.buyer_owns_deliverables and any(s in body for s in _BUYER_OWNS_SIGNALS):
+        updates["buyer_owns_deliverables"] = True
+    if not delivery.letter_proposal_gate and (
+        "letter proposal" in body
+        or "no services shall be provided until" in body
+        or ("task order" in body and "authoriz" in body)
+    ):
+        updates["letter_proposal_gate"] = True
+    if not updates:
+        return delivery
+    logger.info(
+        "pricing_instrument_extract inferred flags %s",
+        ",".join(updates),
+    )
+    return delivery.model_copy(update=updates)
+
+
 def apply_buyer_form_confidence_gate(instrument: PricingInstrument) -> PricingInstrument:
     """Demote weak buyer forms; rescue structurally complete ones.
 
@@ -909,7 +1051,7 @@ def _compact_opportunity_for_prompt(opportunity: Any | None, *, max_chars: int =
     if isinstance(mandatory, list) and mandatory:
         blobs.append(
             "mandatory: "
-            + "; ".join(str(m)[:120] for m in mandatory[:12] if str(m).strip())
+            + "; ".join(str(m)[:120] for m in mandatory[:40] if str(m).strip())
         )
     optional = scope.get("optional") or []
     if isinstance(optional, list) and optional:
@@ -986,8 +1128,10 @@ async def extract_pricing_and_delivery_constraints(
 
     excerpt = closing_package_excerpt(body, max_chars=12_000) or body[:12_000]
     form_focus = pricing_form_focus_excerpt(body, max_chars=10_000)
-    if form_focus:
-        excerpt = (form_focus + "\n\n---\n\n" + excerpt)[:22_000]
+    scope_focus = scope_services_focus_excerpt(body, max_chars=12_000)
+    prefix_parts = [p for p in (scope_focus, form_focus) if p]
+    if prefix_parts:
+        excerpt = ("\n\n---\n\n".join(prefix_parts) + "\n\n---\n\n" + excerpt)[:28_000]
     opp_blob = _compact_opportunity_for_prompt(opportunity)
     raw, _provider = await safe_chat_json(
         [
@@ -1027,6 +1171,11 @@ async def extract_pricing_and_delivery_constraints(
 
     instrument = normalize_instrument_payload(inst_raw)
     delivery = normalize_delivery_payload(del_raw)
+    # Harvest from Scope windows only — full excerpt mixes cert/checklist "1." noise.
+    delivery = prefer_harvested_mandatory(
+        delivery, scope_excerpt=scope_focus or excerpt
+    )
+    delivery = infer_ownership_and_letter_gate(delivery, rfp_excerpt=excerpt)
 
     # Ground extract facts to RFP excerpt; opportunity ceilings may back NTEs.
     instrument = ground_instrument_against_excerpt(

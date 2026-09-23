@@ -478,13 +478,24 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
                 )
             raise HTTPException(status_code=409, detail=detail)
 
+        # Guard: open-tab autosave must not clobber a newer server write
+        # (e.g. scripted Approach re-paint while the editor still holds old prose).
+        ex_t = _parse_draft_updated_at(existing.updated_at)
+        in_t = _parse_draft_updated_at(draft.updated_at)
+        if ex_t and in_t and in_t < ex_t:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Stale draft autosave — server has a newer manuscript. "
+                    "Reload the draft to pick up the latest sections."
+                ),
+            )
+
         # Guard: stale autosave must not drop sections the server just added (chat add-bio).
         existing_ids = {s.id for s in existing.sections}
         incoming_ids = {s.id for s in draft.sections}
         dropped = existing_ids - incoming_ids
         if dropped:
-            ex_t = _parse_draft_updated_at(existing.updated_at)
-            in_t = _parse_draft_updated_at(draft.updated_at)
             if not (ex_t and in_t and in_t > ex_t):
                 raise HTTPException(
                     status_code=409,

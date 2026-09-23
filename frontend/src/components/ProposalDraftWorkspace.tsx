@@ -1256,7 +1256,19 @@ function ProposalDraftWorkspaceInner({
           setPresubmitReview(null);
         }
         // Keep Key Personas badge honest with the server (Clear / Reset / other tab).
+        // Also adopt newer manuscript prose so a background re-paint is not
+        // immediately overwritten by this tab's stale autosave.
         if (snap.draft) {
+          const serverAt = Date.parse(snap.draft.updatedAt || "");
+          const localAt = Date.parse(outlineRef.current.updatedAt || "");
+          if (
+            Number.isFinite(serverAt) &&
+            Number.isFinite(localAt) &&
+            serverAt > localAt
+          ) {
+            applyOutlineFromServer(snap.draft);
+            return;
+          }
           const serverIds = snap.draft.selectedKeyPersonas ?? [];
           setOutline((prev) => {
             const localIds = prev.selectedKeyPersonas ?? [];
@@ -1273,7 +1285,7 @@ function ProposalDraftWorkspaceInner({
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [rfp.id, hydrated]);
+  }, [rfp.id, hydrated, applyOutlineFromServer]);
 
   const manualFillFlags = useMemo(
     () =>

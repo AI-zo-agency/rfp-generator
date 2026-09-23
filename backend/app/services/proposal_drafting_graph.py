@@ -2340,27 +2340,9 @@ async def run_drafting_graph(
         )
 
     # Typed pricing/delivery pack from research (Phase 2 extract) for SOW/Timeline.
-    pricing_instrument_dict: dict[str, Any] | None = None
-    delivery_constraints_dict: dict[str, Any] | None = None
-    try:
-        from app.services.proposal_repository import get_research_cache
-
-        _research = get_research_cache(rfp_id)
-        if _research is not None:
-            if _research.pricing_instrument is not None:
-                pricing_instrument_dict = _research.pricing_instrument.model_dump(
-                    by_alias=True
-                )
-            if _research.delivery_constraints is not None:
-                delivery_constraints_dict = _research.delivery_constraints.model_dump(
-                    by_alias=True
-                )
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "drafting: pricing/delivery constraints load skipped for %s",
-            rfp_id,
-            exc_info=True,
-        )
+    pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
+        rfp_id
+    )
 
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
@@ -2427,6 +2409,36 @@ async def run_drafting_graph(
     return drafted, provider, jit_corpus
 
 
+def _load_pricing_delivery_dicts(
+    rfp_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Typed PricingInstrument + DeliveryConstraints from research (Phase 2 extract)."""
+    try:
+        from app.services.proposal_repository import get_research_cache
+
+        research = get_research_cache(rfp_id)
+        if research is None:
+            return None, None
+        inst = (
+            research.pricing_instrument.model_dump(by_alias=True)
+            if research.pricing_instrument is not None
+            else None
+        )
+        delivery = (
+            research.delivery_constraints.model_dump(by_alias=True)
+            if research.delivery_constraints is not None
+            else None
+        )
+        return inst, delivery
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "drafting: pricing/delivery constraints load skipped for %s",
+            rfp_id,
+            exc_info=True,
+        )
+        return None, None
+
+
 async def draft_single_rfp_section_phase3(
     *,
     rfp_id: str,
@@ -2481,6 +2493,10 @@ async def draft_single_rfp_section_phase3(
         if (s.content or "").strip() and s.id != section.id
     ]
 
+    pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
+        rfp_id
+    )
+
     state: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -2504,6 +2520,8 @@ async def draft_single_rfp_section_phase3(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
+        "pricing_instrument": pricing_instrument_dict,
+        "delivery_constraints": delivery_constraints_dict,
         "drafted_sections": prior,
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }

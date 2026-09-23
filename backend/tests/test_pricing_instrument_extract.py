@@ -110,6 +110,67 @@ class ExtractNormalizeTests(unittest.TestCase):
         self.assertEqual(dc.horizon.base_term, "1 year")
         self.assertEqual(dc.mandatory_deliverables, ["Website refresh"])
 
+    def test_scope_services_focus_keeps_page_break_continuation(self) -> None:
+        from app.services.pricing_instrument_extract import (
+            harvest_numbered_scope_lines,
+            prefer_harvested_mandatory,
+            scope_services_focus_excerpt,
+        )
+        from app.models.delivery_constraints import DeliveryConstraints
+
+        # Simulate mid-list form-feed + repeated header (common PDF extract).
+        body = (
+            "SCOPE OF SERVICES\n"
+            "   11. Social media graphics\n"
+            "   12. Research and measurement\n"
+            "\fSCOPE OF SERVICES\n"
+            "   13. Quick-turn communications support\n"
+            "   14. Other related communications services\n"
+            "EVALUATION CRITERIA\n"
+        )
+        focus = scope_services_focus_excerpt(body, max_chars=5000)
+        self.assertIn("13. Quick-turn", focus)
+        self.assertIn("14. Other related", focus)
+
+        full = (
+            "SCOPE OF SERVICES\n"
+            "1. Alpha service line here\n"
+            "2. Bravo service line here\n"
+            "3. Charlie service line here\n"
+            "\fSCOPE OF SERVICES\n"
+            "4. Delta service line here\n"
+        )
+        harvested = harvest_numbered_scope_lines(full)
+        self.assertEqual(len(harvested), 4)
+        self.assertTrue(harvested[-1].startswith("Delta"))
+
+        # Prefer harvest over paraphrased LLM tail of same length.
+        llm = DeliveryConstraints(
+            mandatoryDeliverables=[
+                "Alpha service line here",
+                "Bravo service line here",
+                "Charlie service line here",
+                "Work collaboratively with City staff on standards",
+            ]
+        )
+        fixed = prefer_harvested_mandatory(llm, scope_excerpt=full)
+        self.assertEqual(fixed.mandatory_deliverables[-1], "Delta service line here")
+
+    def test_infer_buyer_owns_from_contract_language(self) -> None:
+        from app.services.pricing_instrument_extract import infer_ownership_and_letter_gate
+        from app.models.delivery_constraints import DeliveryConstraints
+
+        dc = DeliveryConstraints()
+        filled = infer_ownership_and_letter_gate(
+            dc,
+            rfp_excerpt=(
+                "All work product shall be the exclusive property of the City. "
+                "No Services shall be provided until a Letter Proposal is accepted."
+            ),
+        )
+        self.assertTrue(filled.buyer_owns_deliverables)
+        self.assertTrue(filled.letter_proposal_gate)
+
     def test_personnel_maps_to_personnel_loading(self) -> None:
         inst = normalize_instrument_payload(
             {"kind": "personnel_loading", "confidence": 0.8}
