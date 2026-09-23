@@ -3715,8 +3715,12 @@ def reshape_budget_for_rfp_form(
     if idx is None:
         return None
     target = draft.sections[idx]
-    if section_looks_like_official_pricing_form(target) and official_pricing_form_is_filled(
-        target.content or ""
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    if (
+        not is_buyer_pricing_form_instrument(instrument=pricing_instrument)
+        and section_looks_like_official_pricing_form(target)
+        and official_pricing_form_is_filled(target.content or "")
     ):
         return None
     from app.services.rfp_cost_demands import approach_digest_from_draft_sections
@@ -3951,9 +3955,18 @@ async def incorporate_budget_into_draft(
 
     if idx is not None:
         target = sections[idx]
-        if section_looks_like_official_pricing_form(target) and official_pricing_form_is_filled(
-            target.content or ""
-        ):
+        from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+        # Typed buyer form → always overwrite the Pricing Form tab. The "filled
+        # official form" protect path exists to stop Fee Detail narrative from
+        # wiping a buyer form — not to block deterministic instrument re-render
+        # (or leave a stale FEIN worksheet in place).
+        protect_filled_form = (
+            not is_buyer_pricing_form_instrument(instrument=pricing_instrument)
+            and section_looks_like_official_pricing_form(target)
+            and official_pricing_form_is_filled(target.content or "")
+        )
+        if protect_filled_form:
             # Keep the buyer form; write narrative into Budget & Pricing sibling.
             narrative_idx = next(
                 (
