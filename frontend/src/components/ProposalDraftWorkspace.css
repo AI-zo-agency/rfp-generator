@@ -590,16 +590,131 @@
   flex-direction: column;
 }
 
+/* Desktop-only pane chrome — hidden on slide-over / stacked layouts.
+   Must come BEFORE the @container show rule or display:none wins by source order. */
+.proposal-pane-collapse,
+.proposal-pane-resize,
+.proposal-pane-expand {
+  display: none;
+}
+
+.proposal-pane-collapse {
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--zo-text-muted, rgba(17, 24, 39, 0.55));
+  cursor: pointer;
+}
+
+.proposal-pane-collapse:hover {
+  background: rgba(17, 24, 39, 0.05);
+  color: var(--zo-text-secondary, #374151);
+}
+
+.proposal-pane-collapse--assistant {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 3;
+}
+
+.proposal-pane-resize {
+  position: absolute;
+  top: 0;
+  z-index: 4;
+  width: 10px;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.proposal-pane-resize--sections {
+  right: -5px;
+}
+
+.proposal-pane-resize--assistant {
+  left: -5px;
+}
+
+.proposal-pane-resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 3px;
+  height: 2.75rem;
+  margin-top: -1.375rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zo-border, #d1d5db) 80%, #111827);
+  opacity: 0.7;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.proposal-pane-resize:hover::after,
+.proposal-pane-resize:focus-visible::after,
+.proposal-outline-layout[data-resizing] .proposal-pane-resize::after {
+  opacity: 1;
+  background: #ef5018;
+}
+
+.proposal-pane-expand {
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  align-items: center;
+  justify-content: center;
+  /* Span the grid so expand tabs are not auto-placed into new tracks. */
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  width: 1.35rem;
+  height: 2.5rem;
+  margin-top: -1.25rem;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  background: #fff;
+  color: var(--zo-text-secondary, #374151);
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(10, 15, 26, 0.08);
+}
+
+.proposal-pane-expand--left {
+  left: 0;
+  border-radius: 0 0.4rem 0.4rem 0;
+  border-left: 0;
+}
+
+.proposal-pane-expand--right {
+  right: 0;
+  border-radius: 0.4rem 0 0 0.4rem;
+  border-right: 0;
+}
+
+.proposal-pane-expand:hover {
+  color: #c2410c;
+  background: #fff7ed;
+}
+
 /* Laptop + sidebar is often 960–1100px of workspace, not a phone.
    Keep sections + workflow on screen there (same as the wide layout).
-   Slide-overs stay below 960px. */
+   Slide-overs stay below 960px. Column widths come from --proposal-outline-cols
+   (set in JS) so users can resize / collapse sidebars. */
 @container proposal-workspace (min-width: 960px) {
   .proposal-mobile-panel-toggle {
     display: none !important;
   }
 
   .proposal-outline-layout {
-    grid-template-columns: minmax(12rem, 14.5rem) minmax(0, 1fr) minmax(14.5rem, 18rem) !important;
+    grid-template-columns: var(
+      --proposal-outline-cols,
+      minmax(12rem, 14.5rem) minmax(0, 1fr) minmax(14.5rem, 18rem)
+    ) !important;
     grid-template-rows: minmax(0, 1fr) !important;
     gap: 0.65rem;
     padding: 0.5rem;
@@ -608,7 +723,7 @@
 
   .proposal-outline-layout .proposal-section-list,
   .proposal-outline-layout .proposal-assistant-pane {
-    position: static !important;
+    position: relative !important;
     top: auto;
     right: auto;
     bottom: auto;
@@ -638,9 +753,63 @@
     background: #fff;
   }
 
+  /* Collapsed panes leave the grid — remaining columns auto-place. */
+  .proposal-outline-layout[data-sections-collapsed="true"] .proposal-section-list {
+    display: none !important;
+  }
+
+  .proposal-outline-layout[data-assistant-collapsed="true"] .proposal-assistant-pane {
+    display: none !important;
+  }
+
+  .proposal-outline-layout[data-sections-collapsed="true"] .proposal-editor-pane,
+  .proposal-outline-layout[data-assistant-collapsed="true"] .proposal-editor-pane,
+  .proposal-outline-layout[data-sections-collapsed="true"] .proposal-assistant-pane {
+    grid-column: auto;
+  }
+
+  .proposal-outline-layout[data-sections-collapsed="true"]:not(
+      [data-assistant-collapsed="true"]
+    )
+    .proposal-editor-pane {
+    grid-column: 1;
+  }
+
+  .proposal-outline-layout[data-sections-collapsed="true"]:not(
+      [data-assistant-collapsed="true"]
+    )
+    .proposal-assistant-pane {
+    grid-column: 2;
+  }
+
+  .proposal-outline-layout[data-assistant-collapsed="true"]:not(
+      [data-sections-collapsed="true"]
+    )
+    .proposal-section-list {
+    grid-column: 1;
+  }
+
+  .proposal-outline-layout[data-assistant-collapsed="true"]:not(
+      [data-sections-collapsed="true"]
+    )
+    .proposal-editor-pane {
+    grid-column: 2;
+  }
+
+  .proposal-outline-layout[data-sections-collapsed="true"][data-assistant-collapsed="true"]
+    .proposal-editor-pane {
+    grid-column: 1;
+  }
+
   .proposal-mobile-panel-scrim,
   .proposal-mobile-panel-scrim.is-open {
     display: none;
+  }
+
+  .proposal-pane-collapse,
+  .proposal-pane-resize,
+  .proposal-pane-expand {
+    display: inline-flex;
   }
 
   .proposal-workflow-layout {
@@ -657,7 +826,6 @@
 
 @container proposal-workspace (min-width: 1100px) {
   .proposal-outline-layout {
-    grid-template-columns: minmax(13rem, 15.5rem) minmax(0, 1fr) minmax(15rem, 20rem) !important;
     gap: 0.75rem;
     padding: 0.65rem;
   }

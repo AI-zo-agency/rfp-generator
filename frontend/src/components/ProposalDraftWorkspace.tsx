@@ -9,6 +9,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -339,6 +341,77 @@ function WordDocIcon() {
   );
 }
 
+/** Desktop outline sidebars — widths + collapse, persisted locally. */
+type OutlinePanePrefs = {
+  sectionsWidth: number;
+  assistantWidth: number;
+  sectionsCollapsed: boolean;
+  assistantCollapsed: boolean;
+};
+
+const OUTLINE_PANE_STORAGE_KEY = "zo_proposal_outline_panes";
+const DEFAULT_SECTIONS_WIDTH = 232;
+const DEFAULT_ASSISTANT_WIDTH = 288;
+const MIN_SECTIONS_WIDTH = 160;
+const MAX_SECTIONS_WIDTH = 420;
+const MIN_ASSISTANT_WIDTH = 200;
+const MAX_ASSISTANT_WIDTH = 520;
+
+const DEFAULT_OUTLINE_PANE_PREFS: OutlinePanePrefs = {
+  sectionsWidth: DEFAULT_SECTIONS_WIDTH,
+  assistantWidth: DEFAULT_ASSISTANT_WIDTH,
+  sectionsCollapsed: false,
+  assistantCollapsed: false,
+};
+
+function clampPaneWidth(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readOutlinePanePrefs(): OutlinePanePrefs {
+  if (typeof window === "undefined") return DEFAULT_OUTLINE_PANE_PREFS;
+  try {
+    const raw = window.localStorage.getItem(OUTLINE_PANE_STORAGE_KEY);
+    if (!raw) return DEFAULT_OUTLINE_PANE_PREFS;
+    const parsed = JSON.parse(raw) as Partial<OutlinePanePrefs>;
+    return {
+      sectionsWidth: clampPaneWidth(
+        Number(parsed.sectionsWidth) || DEFAULT_SECTIONS_WIDTH,
+        MIN_SECTIONS_WIDTH,
+        MAX_SECTIONS_WIDTH,
+      ),
+      assistantWidth: clampPaneWidth(
+        Number(parsed.assistantWidth) || DEFAULT_ASSISTANT_WIDTH,
+        MIN_ASSISTANT_WIDTH,
+        MAX_ASSISTANT_WIDTH,
+      ),
+      sectionsCollapsed: Boolean(parsed.sectionsCollapsed),
+      assistantCollapsed: Boolean(parsed.assistantCollapsed),
+    };
+  } catch {
+    return DEFAULT_OUTLINE_PANE_PREFS;
+  }
+}
+
+function persistOutlinePanePrefs(prefs: OutlinePanePrefs): void {
+  try {
+    window.localStorage.setItem(OUTLINE_PANE_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function outlineColsCss(prefs: OutlinePanePrefs): string {
+  const left = `${prefs.sectionsWidth}px`;
+  const right = `${prefs.assistantWidth}px`;
+  if (prefs.sectionsCollapsed && prefs.assistantCollapsed) {
+    return "minmax(0, 1fr)";
+  }
+  if (prefs.sectionsCollapsed) return `minmax(0, 1fr) ${right}`;
+  if (prefs.assistantCollapsed) return `${left} minmax(0, 1fr)`;
+  return `${left} minmax(0, 1fr) ${right}`;
+}
+
 interface ProposalDraftWorkspaceProps {
   rfp: RfpRecord;
   goRfpCount?: number;
@@ -426,10 +499,22 @@ function ProposalDraftWorkspaceInner({
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);
+  /** Outline-mode picker under Build my proposal (not the toolbar). */
+  const [buildModePickerOpen, setBuildModePickerOpen] = useState(false);
+  const buildModePickerRef = useRef<HTMLDivElement | null>(null);
   /** ON = Zo Sections 1–3 template; OFF = strict RFP outline. */
   const [useZoTemplate, setUseZoTemplate] = useState(true);
   const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  /** Desktop sidebar widths / collapse for the Build outline layout. */
+  const [outlinePanePrefs, setOutlinePanePrefs] = useState<OutlinePanePrefs>(
+    readOutlinePanePrefs,
+  );
+  const [outlineResizing, setOutlineResizing] = useState<
+    "sections" | "assistant" | null
+  >(null);
+  const outlinePanePrefsRef = useRef(outlinePanePrefs);
+  outlinePanePrefsRef.current = outlinePanePrefs;
   const [sectionListQuery, setSectionListQuery] = useState("");
   const [addingSection, setAddingSection] = useState(false);
   const [editorPreview, setEditorPreview] = useState(true);
@@ -523,6 +608,24 @@ function ProposalDraftWorkspaceInner({
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [advancedMenuOpen]);
+
+  useEffect(() => {
+    if (!buildModePickerOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!buildModePickerRef.current?.contains(event.target as Node)) {
+        setBuildModePickerOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBuildModePickerOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [buildModePickerOpen]);
 
   useEffect(() => {
     if (!mobileSectionsOpen && !mobileChatOpen) return;
@@ -669,6 +772,12 @@ function ProposalDraftWorkspaceInner({
 
   const openSectionChat = useCallback((request?: SectionChatReference | null) => {
     setMobileChatOpen(true);
+    setOutlinePanePrefs((prev) => {
+      if (!prev.assistantCollapsed) return prev;
+      const next = { ...prev, assistantCollapsed: false };
+      persistOutlinePanePrefs(next);
+      return next;
+    });
     if (request) {
       setSectionChatReference(request);
       window.setTimeout(() => {
@@ -681,6 +790,67 @@ function ProposalDraftWorkspaceInner({
       setSectionChatReference(null);
     }
   }, []);
+
+  const patchOutlinePanePrefs = useCallback(
+    (patch: Partial<OutlinePanePrefs>) => {
+      setOutlinePanePrefs((prev) => {
+        const next = { ...prev, ...patch };
+        persistOutlinePanePrefs(next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const startOutlinePaneResize = useCallback(
+    (side: "sections" | "assistant", event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startW =
+        side === "sections"
+          ? outlinePanePrefsRef.current.sectionsWidth
+          : outlinePanePrefsRef.current.assistantWidth;
+      setOutlineResizing(side);
+      const prevCursor = document.body.style.cursor;
+      const prevUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      let latest = outlinePanePrefsRef.current;
+
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const nextW =
+          side === "sections"
+            ? clampPaneWidth(
+                startW + dx,
+                MIN_SECTIONS_WIDTH,
+                MAX_SECTIONS_WIDTH,
+              )
+            : clampPaneWidth(
+                startW - dx,
+                MIN_ASSISTANT_WIDTH,
+                MAX_ASSISTANT_WIDTH,
+              );
+        latest =
+          side === "sections"
+            ? { ...latest, sectionsWidth: nextW }
+            : { ...latest, assistantWidth: nextW };
+        outlinePanePrefsRef.current = latest;
+        setOutlinePanePrefs(latest);
+      };
+      const onUp = () => {
+        setOutlineResizing(null);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevUserSelect;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        persistOutlinePanePrefs(latest);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [],
+  );
 
   const applyOutlineFromServer = useCallback((draft: ProposalOutline) => {
     saveGenerationRef.current += 1;
@@ -2951,6 +3121,7 @@ function ProposalDraftWorkspaceInner({
   const handleGenerateFullProposal = useCallback(async (options?: {
     startAfterSections1to3?: boolean;
     startFromCaseStudies?: boolean;
+    outlineMode?: "zo_template" | "strict_rfp";
   }) => {
     const tracks = availableTracksFromAnalysis(rfp.goNoGoAnalysis);
     if (!bidScopeIsReady(tracks, rfp.bidScopeLockedAt, rfp.selectedTracks)) {
@@ -2976,6 +3147,11 @@ function ProposalDraftWorkspaceInner({
     // startFromCaseStudies = keep Company + Bios, re-extract Our Work, then Phase 2+.
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
     const startFromCaseStudies = Boolean(options?.startFromCaseStudies);
+    const outlineMode =
+      options?.outlineMode ?? (useZoTemplate ? "zo_template" : "strict_rfp");
+    if (options?.outlineMode) {
+      setUseZoTemplate(options.outlineMode === "zo_template");
+    }
     const hasManuscriptContent = countSectionsWithContent(outline) > 0;
     // Never "resume" an empty outline — that is always a forceRestart generate.
     const shouldResume =
@@ -3001,7 +3177,7 @@ function ProposalDraftWorkspaceInner({
     } else if (startAfterSections1to3) {
       const intelligenceOk = await confirm({
         title: "Start from Intelligence?",
-        description: useZoTemplate
+        description: outlineMode === "zo_template"
           ? "This DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\n\nSections 1–3 are kept."
           : "This DELETES existing Intelligence, RFP tabs, Budget, Review, and Zo Sections 1–3 — then rebuilds a strict RFP outline from Phase 2.",
         confirmLabel: "Start from Intelligence",
@@ -3060,8 +3236,6 @@ function ProposalDraftWorkspaceInner({
     setFullProposalProgress(null);
     setGenerateError(null);
     setGenerateNotice(null);
-
-    const outlineMode = useZoTemplate ? "zo_template" : "strict_rfp";
 
     // Fresh start: clear the editor immediately so old manuscript cannot flash
     // while the server soft-regenerates Sections 1–3 in place (no DB wipe).
@@ -3462,12 +3636,16 @@ function ProposalDraftWorkspaceInner({
     }
   }, [rfp, applyOutlineFromServer, handleLiveDraftUpdate]);
 
-  const handlePrimaryPipeline = useCallback(async () => {
+  const handlePrimaryPipeline = useCallback(async (
+    outlineMode?: "zo_template" | "strict_rfp",
+  ) => {
     if (manuscriptRecoveryNeeded) {
       await handleRecoverManuscript();
       return;
     }
-    await handleGenerateFullProposal();
+    await handleGenerateFullProposal(
+      outlineMode ? { outlineMode } : undefined,
+    );
   }, [manuscriptRecoveryNeeded, handleRecoverManuscript, handleGenerateFullProposal]);
 
   const primaryPipelineLabel = useMemo(() => {
@@ -3847,30 +4025,88 @@ function ProposalDraftWorkspaceInner({
                       ? ` Bidding: ${rfp.selectedTracks!.join(", ")}.`
                       : ""}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
-                    disabled={
-                      anyPipelineRunning ||
-                      !bidScopeIsReady(
-                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
-                        rfp.bidScopeLockedAt,
-                        rfp.selectedTracks,
-                      )
-                    }
-                    title={
-                      bidScopeIsReady(
-                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
-                        rfp.bidScopeLockedAt,
-                        rfp.selectedTracks,
-                      )
-                        ? undefined
-                        : "Lock bid scope on the RFP detail page first"
-                    }
-                    className="proposal-status-build"
-                  >
-                    {primaryPipelineLabel}
-                  </button>
+                  <div ref={buildModePickerRef}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Resume / recover already know the outline mode.
+                        if (manuscriptRecoveryNeeded || canResumePipeline) {
+                          requireKeyPersonas(() => void handlePrimaryPipeline());
+                          return;
+                        }
+                        setBuildModePickerOpen((open) => !open);
+                      }}
+                      disabled={
+                        anyPipelineRunning ||
+                        !bidScopeIsReady(
+                          availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                          rfp.bidScopeLockedAt,
+                          rfp.selectedTracks,
+                        )
+                      }
+                      title={
+                        bidScopeIsReady(
+                          availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                          rfp.bidScopeLockedAt,
+                          rfp.selectedTracks,
+                        )
+                          ? undefined
+                          : "Lock bid scope on the RFP detail page first"
+                      }
+                      className="proposal-status-build"
+                      aria-haspopup="menu"
+                      aria-expanded={buildModePickerOpen}
+                    >
+                      {primaryPipelineLabel}
+                    </button>
+                    {buildModePickerOpen ? (
+                      <div
+                        className="mt-2 w-full max-w-[16.5rem] rounded-lg border border-zo-border/80 bg-[#fafbfc] p-1.5"
+                        role="menu"
+                        aria-label="Proposal outline mode"
+                      >
+                        <p className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-zo-text-muted">
+                          Choose outline mode
+                        </p>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="block w-full rounded-md px-2.5 py-2 text-left hover:bg-[#fff1e8]"
+                          onClick={() => {
+                            setBuildModePickerOpen(false);
+                            requireKeyPersonas(() =>
+                              void handlePrimaryPipeline("zo_template"),
+                            );
+                          }}
+                        >
+                          <span className="block text-xs font-semibold text-foreground">
+                            Zo template
+                          </span>
+                          <span className="mt-0.5 block text-[10px] leading-snug text-zo-text-muted">
+                            Sections 1–3 first, then RFP tabs
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="block w-full rounded-md px-2.5 py-2 text-left hover:bg-[#fff1e8]"
+                          onClick={() => {
+                            setBuildModePickerOpen(false);
+                            requireKeyPersonas(() =>
+                              void handlePrimaryPipeline("strict_rfp"),
+                            );
+                          }}
+                        >
+                          <span className="block text-xs font-semibold text-foreground">
+                            Strict RFP
+                          </span>
+                          <span className="mt-0.5 block text-[10px] leading-snug text-zo-text-muted">
+                            Exact TOC + evaluation asks only
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 </>
               )}
             </div>
@@ -4373,43 +4609,6 @@ function ProposalDraftWorkspaceInner({
                 </div>
               ) : null}
             </div>
-            <div
-              className="inline-flex shrink-0 items-center rounded-lg border border-zo-border/80 bg-white p-0.5"
-              role="group"
-              aria-label="Proposal outline mode"
-              title={
-                useZoTemplate
-                  ? "Zo template: Sections 1–3 first, then RFP tabs"
-                  : "Strict RFP: exact TOC + evaluation asks only"
-              }
-            >
-              <button
-                type="button"
-                disabled={anyPipelineRunning}
-                aria-pressed={useZoTemplate}
-                onClick={() => setUseZoTemplate(true)}
-                className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                  useZoTemplate
-                    ? "bg-[#fff1e8] text-[#c2410c]"
-                    : "text-zo-text-muted hover:text-zo-text-secondary"
-                }`}
-              >
-                Zo template
-              </button>
-              <button
-                type="button"
-                disabled={anyPipelineRunning}
-                aria-pressed={!useZoTemplate}
-                onClick={() => setUseZoTemplate(false)}
-                className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                  !useZoTemplate
-                    ? "bg-[#fff1e8] text-[#c2410c]"
-                    : "text-zo-text-muted hover:text-zo-text-secondary"
-                }`}
-              >
-                Strict RFP
-              </button>
-            </div>
             <CapabilityHoverTip id="keyPersonas" side="bottom">
               <span className="inline-flex">
                 <KeyPersonasBox
@@ -4436,18 +4635,79 @@ function ProposalDraftWorkspaceInner({
 
           <div
             className="proposal-outline-layout grid min-h-0 min-w-0 flex-1 overflow-hidden"
+            data-sections-collapsed={
+              outlinePanePrefs.sectionsCollapsed ? "true" : undefined
+            }
+            data-assistant-collapsed={
+              outlinePanePrefs.assistantCollapsed ? "true" : undefined
+            }
+            data-resizing={outlineResizing || undefined}
+            style={
+              {
+                ["--proposal-outline-cols" as string]:
+                  outlineColsCss(outlinePanePrefs),
+              } as CSSProperties
+            }
           >
+          {outlinePanePrefs.sectionsCollapsed ? (
+            <button
+              type="button"
+              className="proposal-pane-expand proposal-pane-expand--left"
+              aria-label="Expand sections"
+              title="Expand sections"
+              onClick={() => patchOutlinePanePrefs({ sectionsCollapsed: false })}
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2} aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          ) : null}
+          {outlinePanePrefs.assistantCollapsed ? (
+            <button
+              type="button"
+              className="proposal-pane-expand proposal-pane-expand--right"
+              aria-label="Expand Ask Ralph"
+              title="Expand Ask Ralph"
+              onClick={() =>
+                patchOutlinePanePrefs({ assistantCollapsed: false })
+              }
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2} aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          ) : null}
           <div
             className={`proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80 ${mobileSectionsOpen ? "is-mobile-open" : ""}`}
           >
+            <button
+              type="button"
+              className="proposal-pane-resize proposal-pane-resize--sections"
+              aria-label="Resize sections panel"
+              title="Drag to resize"
+              onPointerDown={(e) => startOutlinePaneResize("sections", e)}
+            />
             <div className="proposal-sections-head">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+              <div className="flex items-center gap-2">
+                <p className="min-w-0 flex-1 text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                   Sections
                 </p>
                 <span className="proposal-sections-count">
                   {manuscriptProgress.complete} / {manuscriptProgress.total}
                 </span>
+                <button
+                  type="button"
+                  className="proposal-pane-collapse"
+                  aria-label="Collapse sections"
+                  title="Collapse sections"
+                  onClick={() =>
+                    patchOutlinePanePrefs({ sectionsCollapsed: true })
+                  }
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
                 <button
                   type="button"
                   className="proposal-mobile-panel-toggle items-center justify-center rounded-md p-1 text-zo-text-secondary hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
@@ -4720,6 +4980,28 @@ function ProposalDraftWorkspaceInner({
           >
             <button
               type="button"
+              className="proposal-pane-resize proposal-pane-resize--assistant"
+              aria-label="Resize Ask Ralph panel"
+              title="Drag to resize"
+              onPointerDown={(e) => startOutlinePaneResize("assistant", e)}
+            />
+            {anyPipelineRunning || isStopping ? (
+              <button
+                type="button"
+                className="proposal-pane-collapse proposal-pane-collapse--assistant"
+                aria-label="Collapse Ask Ralph"
+                title="Collapse Ask Ralph"
+                onClick={() =>
+                  patchOutlinePanePrefs({ assistantCollapsed: true })
+                }
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2} aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            ) : null}
+            <button
+              type="button"
               className="proposal-mobile-panel-toggle proposal-ralph-mobile-close"
               onClick={() => setMobileChatOpen(false)}
               aria-label="Close panel"
@@ -4761,6 +5043,10 @@ function ProposalDraftWorkspaceInner({
               onBusyChange={setSectionChatBusy}
               statusLine={sectionChatStatusLine}
               onStatusLineChange={setSectionChatStatusLine}
+              showClose
+              onClose={() =>
+                patchOutlinePanePrefs({ assistantCollapsed: true })
+              }
             />
             </div>
             {anyPipelineRunning || isStopping ? (
