@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { GoNoGoRecommendation } from "@/types/rfp";
+import { trackClick } from "@/lib/zo-analytics";
 
 interface MarkGoButtonProps {
   rfpId: string;
@@ -16,6 +17,11 @@ export function MarkGoButton({ rfpId, current }: MarkGoButtonProps) {
 
   async function handleMarkGo() {
     setLoading(true);
+    trackClick("rfp.mark_go", {
+      path: `/rfps/${rfpId}`,
+      entity_type: "rfp",
+      entity_id: rfpId,
+    });
     try {
       const res = await fetch(`/api/rfps/${rfpId}/go`, { method: "POST" });
       if (res.ok) {

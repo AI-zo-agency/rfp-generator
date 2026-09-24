@@ -106,6 +106,14 @@ export function KeyPersonasModal({
         if (result.ok) {
           setSaveSuccess(true);
           window.setTimeout(() => setSaveSuccess(false), 2000);
+          void import("@/lib/zo-analytics").then(({ trackClick }) => {
+            trackClick("proposal.personas_save", {
+              path: "/proposals",
+              entity_type: "rfp",
+              entity_id: rfpId,
+              funnel: true,
+            });
+          });
         }
         if (result.draft && result.biosSynced) {
           onDraftSynced?.(result.draft);

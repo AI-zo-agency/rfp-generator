@@ -143,6 +143,12 @@ export function useClientMap() {
     importSheet: () =>
       mutate<Record<string, number>>("client_map_import", "/import-sheet", { method: "POST" }),
     findLinks: async () => {
+      const { trackClick } = await import("@/lib/zo-analytics");
+      trackClick("financial.client_map_link", {
+        path: "/financial-insights",
+        tab: "agency",
+        funnel: true,
+      });
       const result = await mutate<LinkResult>("client_map_link", "/link", {
         method: "POST",
         body: JSON.stringify({ include_ai: true }),

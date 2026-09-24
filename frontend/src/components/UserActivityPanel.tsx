@@ -49,7 +49,7 @@ export function UserActivityPanel({
   workspace,
   tone,
   title = "User Activity",
-  subtitle = "Who did what in this workspace",
+  subtitle = "Audit log — durable mutations (uploads, syncs, exports, Mark Go). Not pageviews.",
   className = "",
 }: UserActivityPanelProps) {
   const skin = TONE_STYLES[tone ?? workspace];

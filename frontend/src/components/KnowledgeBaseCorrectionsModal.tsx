@@ -100,6 +100,8 @@ export function KnowledgeBaseCorrectionsModal({
       setError(body.detail ?? body.error ?? "Could not save the correction.");
       return;
     }
+    const { trackClick } = await import("@/lib/zo-analytics");
+    trackClick("kb.correction_save", { path: "/knowledge-base", funnel: true });
     setDraft(null);
     await load();
     onChanged?.();

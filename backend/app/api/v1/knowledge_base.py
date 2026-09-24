@@ -292,6 +292,21 @@ async def delete_knowledge_base_document(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except supermemory.SupermemoryError as exc:
         raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="kb.doc_deleted",
+            summary=f"Deleted KB document “{document_id[:80]}”",
+            entity_type="kb_doc",
+            entity_id=document_id[:200],
+            entity_label=document_id[:300],
+            metadata={"custom_id": custom_id or None},
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"deleted": document_id}
 
 

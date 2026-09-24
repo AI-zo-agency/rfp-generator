@@ -81,6 +81,9 @@ export function UploadKnowledgeDocModal({
         return;
       }
 
+      const { trackClick } = await import("@/lib/zo-analytics");
+      trackClick("kb.upload", { path: "/knowledge-base", funnel: true });
+
       if (data.noteError) {
         setNotice(`Document uploaded, but the note was not saved: ${data.noteError}`);
         form.reset();

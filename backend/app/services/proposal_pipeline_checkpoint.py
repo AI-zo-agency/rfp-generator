@@ -375,6 +375,44 @@ def fulfill_resume_step(research: ProposalResearchCache | None) -> int:
     return 1
 
 
+def _emit_pipeline_outcome(
+    rfp_id: str,
+    *,
+    phase: str,
+    outcome: str,
+    summary: str,
+    error: str | None = None,
+) -> None:
+    """Best-effort audit for phase completed / failed / stopped."""
+    try:
+        from app.services.rfp_repository import get_rfp
+        from app.services.user_activity import emit_activity
+
+        rfp = get_rfp(rfp_id)
+        label = (rfp.title if rfp else None) or rfp_id
+        phase_label = phase.replace("_", " ").replace("-", " ")
+        meta: dict[str, object] = {"phase": phase}
+        if error:
+            meta["error"] = error[:500]
+        action = {
+            "completed": "proposal.phase_completed",
+            "failed": "proposal.phase_failed",
+            "cancelled": "proposal.phase_stopped",
+        }.get(outcome, f"proposal.phase_{outcome}")
+        emit_activity(
+            workspace="rfp",
+            action=action,
+            summary=summary or f"{phase_label}: {outcome}",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=str(label)[:300],
+            metadata=meta,
+            outcome=outcome,  # type: ignore[arg-type]
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("pipeline activity emit skipped for %s/%s", rfp_id, phase, exc_info=True)
+
+
 async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) -> None:
     """Scan finished — drop resume pointer so the next run starts fresh.
 
@@ -413,6 +451,12 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
         # because it is persisted here by the Celery task, not in a browser.
         updates["last_clean_fulfill_scan_at"] = _now_iso()
     await _save_checkpoint(rfp_id, cp.model_copy(update=updates))
+    _emit_pipeline_outcome(
+        rfp_id,
+        phase="fulfill-scan",
+        outcome="completed",
+        summary="Completed Review & fix (fulfill-scan)",
+    )
 
 
 TARGETED_FIX_PROFILE = "targeted_fix"
@@ -674,6 +718,12 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
                 ),
             )
         logger.info("Pipeline checkpoint: %s completed align-rfp-outline", rfp_id)
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase=phase,
+            outcome="completed",
+            summary="Completed Align to RFP outline",
+        )
         return
 
     if phase == "packet-redistribute":
@@ -698,6 +748,12 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
                 ),
             )
         logger.info("Pipeline checkpoint: %s completed packet-redistribute", rfp_id)
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase=phase,
+            outcome="completed",
+            summary="Completed Place content (packet redistribute)",
+        )
         return
 
     if phase == "sections-1-3":
@@ -746,6 +802,13 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
     )
     await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s completed %s (next=%s)", rfp_id, phase, next_phase)
+    phase_label = phase.replace("_", " ").replace("-", " ")
+    _emit_pipeline_outcome(
+        rfp_id,
+        phase=phase,
+        outcome="completed",
+        summary=f"Completed proposal phase: {phase_label}",
+    )
 
 
 async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
@@ -776,6 +839,13 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
             rfp_id,
             error[:200],
         )
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase=phase,
+            outcome="failed",
+            summary="Failed Align to RFP outline",
+            error=error,
+        )
         return
     if phase == "packet-redistribute":
         checkpoint = ProposalPipelineCheckpoint(
@@ -801,6 +871,13 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
             rfp_id,
             error[:200],
         )
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase=phase,
+            outcome="failed",
+            summary="Failed Place content (packet redistribute)",
+            error=error,
+        )
         return
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
@@ -821,6 +898,14 @@ async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
     )
     await _save_checkpoint(rfp_id, checkpoint)
     logger.warning("Pipeline checkpoint: %s failed at %s — %s", rfp_id, phase, error[:200])
+    phase_label = phase.replace("_", " ").replace("-", " ")
+    _emit_pipeline_outcome(
+        rfp_id,
+        phase=phase,
+        outcome="failed",
+        summary=f"Failed proposal phase: {phase_label}",
+        error=error,
+    )
 
 
 async def clear_pipeline_checkpoint(rfp_id: str) -> None:
@@ -866,6 +951,12 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
         )
         await _save_checkpoint(rfp_id, checkpoint)
         logger.info("Pipeline checkpoint: %s stopped during align-rfp-outline", rfp_id)
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase="align-rfp-outline",
+            outcome="cancelled",
+            summary="Stopped Align to RFP outline",
+        )
         return
     if active == "packet-redistribute" or (
         prior is not None and prior.in_progress_phase == "packet-redistribute"
@@ -889,6 +980,12 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
         )
         await _save_checkpoint(rfp_id, checkpoint)
         logger.info("Pipeline checkpoint: %s stopped during packet-redistribute", rfp_id)
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase="packet-redistribute",
+            outcome="cancelled",
+            summary="Stopped Place content",
+        )
         return
     if active == "fulfill-scan" or (
         prior is not None
@@ -936,6 +1033,12 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
             rfp_id,
             resume_step,
         )
+        _emit_pipeline_outcome(
+            rfp_id,
+            phase="fulfill-scan",
+            outcome="cancelled",
+            summary="Stopped Review & fix",
+        )
         return
     resume: str | None = None
     if active in PIPELINE_PHASES:
@@ -971,6 +1074,14 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     )
     await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s stopped during %s (resume=%s)", rfp_id, active, resume)
+    stopped_phase = active or resume or "unknown"
+    phase_label = str(stopped_phase).replace("_", " ").replace("-", " ")
+    _emit_pipeline_outcome(
+        rfp_id,
+        phase=str(stopped_phase),
+        outcome="cancelled",
+        summary=f"Stopped proposal phase: {phase_label}",
+    )
 
 
 @asynccontextmanager

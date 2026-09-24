@@ -162,6 +162,8 @@ export function FinancialInsightsClient({
     setActiveTab(id);
     persistFinancialNav({ tab: id });
     setAnalyticsContext({ path: "/financial-insights", tab: id });
+    // Opening the Activity UAT tab pauses product analytics (self-tracking).
+    if (id === "activity") return;
     trackTabView(id, { path: "/financial-insights" });
     trackClick("financial.tab", { path: "/financial-insights", tab: id, funnel: true });
   };
@@ -199,6 +201,12 @@ export function FinancialInsightsClient({
 
   const handleResolveAuditItem = async (id: string, action: string) => {
     try {
+      const { trackClick } = await import("@/lib/zo-analytics");
+      trackClick("financial.audit_resolve", {
+        path: "/financial-insights",
+        tab: "iworker",
+        funnel: true,
+      });
       await fetch(`${API_BASE}/api/v1/financials/audit-queue/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -245,6 +245,12 @@ export function AgencyJobsDemo({
   const pagedOrphans = paginate(data?.billed_without_project ?? [], orphanPage, INVOICES_PER_PAGE);
   const toggle = (id: string) => setOpenIds((old) => { const next = new Set(old); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const resolveInvoice = async (payload: InvoiceResolutionPayload) => {
+    const { trackClick } = await import("@/lib/zo-analytics");
+    trackClick("financial.invoice_resolve", {
+      path: "/financial-insights",
+      tab: "agency",
+      funnel: true,
+    });
     const response = await fetch(`${API_BASE}/api/v1/financials/agency/invoice-resolutions`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) { const body = await response.json().catch(() => null) as { detail?: string } | null; throw new Error(body?.detail || `Invoice resolution returned ${response.status}`); }
     const outcome = getInvoiceResolutionOutcome(await load()); if (outcome) setError(outcome);

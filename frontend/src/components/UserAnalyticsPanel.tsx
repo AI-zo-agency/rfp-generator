@@ -88,8 +88,10 @@ export function UserAnalyticsPanel({
           <h2 className="font-heading text-lg font-semibold text-foreground">
             Product analytics
           </h2>
-          <p className="mt-1 text-xs text-zo-text-muted">
-            Time spent, most-used features, and funnels (last 14 days)
+          <p className="mt-1 max-w-xl text-xs text-zo-text-muted">
+            Visible + engaged time, feature clicks, and funnels across all users
+            (last 14 days). This Activity/Analytics surface is excluded from
+            tracking. Dwell pauses when the browser tab is hidden.
           </p>
         </div>
         <form

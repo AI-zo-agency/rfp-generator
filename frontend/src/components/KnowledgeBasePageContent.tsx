@@ -9,6 +9,7 @@ import { KnowledgeBaseGrid } from "@/components/KnowledgeBaseGrid";
 import { UploadKnowledgeDocButton } from "@/components/UploadKnowledgeDocButton";
 import type { KnowledgeBaseStatus } from "@/lib/knowledge-base-api";
 import { kbBtnSecondary } from "@/lib/kb-brand";
+import { trackClick, trackPageView } from "@/lib/zo-analytics";
 
 interface PageStats {
   documentCount: number;
@@ -34,6 +35,11 @@ export function KnowledgeBasePageContent() {
   useEffect(() => {
     void loadCorrectionCount();
   }, [loadCorrectionCount, reloadToken]);
+
+  useEffect(() => {
+    trackPageView("/knowledge-base");
+    trackClick("kb.enter", { path: "/knowledge-base", funnel: true });
+  }, []);
 
   const bumpDocuments = useCallback(() => {
     setReloadToken((token) => token + 1);

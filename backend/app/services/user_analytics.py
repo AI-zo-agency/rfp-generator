@@ -34,6 +34,21 @@ FUNNELS: dict[str, list[dict[str, str]]] = {
             "label": "RFP → Proposal → Export",
             "steps": "rfp.open,proposal.open,proposal.build,proposal.exported",
         },
+        {
+            "id": "gonogo_to_go",
+            "label": "Go/No-Go → Mark Go",
+            "steps": "rfp.gonogo_run,rfp.mark_go",
+        },
+        {
+            "id": "personas_to_build",
+            "label": "Key personas → Build",
+            "steps": "proposal.personas_save,proposal.build",
+        },
+        {
+            "id": "build_to_scan",
+            "label": "Build → Review & fix",
+            "steps": "proposal.build,proposal.review_fix",
+        },
     ],
     "financial": [
         {
@@ -45,8 +60,8 @@ FUNNELS: dict[str, list[dict[str, str]]] = {
     "leads": [
         {
             "id": "lead_prep",
-            "label": "Open → Enrich → Prep → Ready/Copy",
-            "steps": "lead.open,lead.enrich,lead.prep_generate,lead.prep_complete",
+            "label": "Open → Enrich → Prep → Ready",
+            "steps": "lead.open,lead.enrich,lead.prep_generate,lead.outreach_ready",
         },
     ],
 }
@@ -283,7 +298,21 @@ def summarize(
 
     users_by_feature: dict[str, set[str]] = defaultdict(set)
 
+    def _is_self_uat_row(r: dict[str, Any]) -> bool:
+        path = str(r.get("path") or "").split("?")[0].rstrip("/") or "/"
+        tab = str(r.get("tab") or "").strip().lower()
+        view = str(r.get("view") or "").strip().lower()
+        if path == "/activity":
+            return True
+        if tab == "activity":
+            return True
+        if view in ("activity", "analytics", "audit"):
+            return True
+        return False
+
     for r in rows:
+        if _is_self_uat_row(r):
+            continue
         email = str(r.get("actor_email") or "system")
         et = str(r.get("event_type") or "")
         u = _user(email)

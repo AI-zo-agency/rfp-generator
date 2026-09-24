@@ -1,6 +1,10 @@
 /**
  * First-party product analytics tracker (pageviews, clicks, dwell).
  * Batches to POST /api/v1/analytics/ingest. Allowlisted features only.
+ *
+ * Does NOT track Activity / Product analytics surfaces (self-referential).
+ * Heartbeats pause when the browser tab is hidden (switch away) and resume
+ * when visible again; closing the tab flushes the queue via pagehide.
  */
 
 import { getAuthUserEmail, withAuthUserEmail } from "@/lib/auth-user-email";
@@ -15,6 +19,11 @@ const BACKEND =
 const HEARTBEAT_MS = 15_000;
 const FLUSH_MS = 8_000;
 const ENGAGED_WINDOW_MS = 60_000;
+
+/** Paths / tabs / views that are the analytics product itself — never track. */
+const EXCLUDED_PATHS = new Set(["/activity"]);
+const EXCLUDED_TABS = new Set(["activity"]);
+const EXCLUDED_VIEWS = new Set(["activity", "analytics", "audit"]);
 
 type QueuedEvent = {
   event_type: "page_view" | "tab_view" | "ui_click" | "heartbeat" | "funnel_step";
@@ -42,6 +51,32 @@ let currentPath = "";
 let currentTab = "";
 let currentView = "";
 let started = false;
+/** When true, no pageviews / clicks / heartbeats are recorded. */
+let paused = false;
+
+export function isAnalyticsExcludedSurface(opts: {
+  path?: string | null;
+  tab?: string | null;
+  view?: string | null;
+}): boolean {
+  const path = (opts.path || "").split("?")[0].replace(/\/$/, "") || "/";
+  if (EXCLUDED_PATHS.has(path)) return true;
+  // RFP pipeline /analytics KPI page is product usage — keep it.
+  // Only exclude Activity UAT surfaces and in-app Audit/Analytics modes.
+  const tab = (opts.tab || "").trim().toLowerCase();
+  const view = (opts.view || "").trim().toLowerCase();
+  if (tab && EXCLUDED_TABS.has(tab)) return true;
+  if (view && EXCLUDED_VIEWS.has(view)) return true;
+  return false;
+}
+
+function syncPausedFromContext() {
+  paused = isAnalyticsExcludedSurface({
+    path: currentPath,
+    tab: currentTab,
+    view: currentView,
+  });
+}
 
 function ensureSession(): string {
   if (typeof window === "undefined") return "";
@@ -65,7 +100,16 @@ function markEngaged() {
 }
 
 function push(partial: Omit<QueuedEvent, "session_id" | "client_ts" | "actor_email">) {
-  if (!workspace || typeof window === "undefined") return;
+  if (!workspace || typeof window === "undefined" || paused) return;
+  if (
+    isAnalyticsExcludedSurface({
+      path: partial.path ?? currentPath,
+      tab: partial.tab ?? currentTab,
+      view: partial.view ?? currentView,
+    })
+  ) {
+    return;
+  }
   queue.push({
     ...partial,
     session_id: ensureSession(),
@@ -98,6 +142,7 @@ async function flush() {
 }
 
 function onHeartbeat() {
+  if (paused) return;
   if (typeof document !== "undefined" && document.visibilityState !== "visible") {
     return;
   }
@@ -114,10 +159,19 @@ function onHeartbeat() {
 
 function bindEngageListeners() {
   if (typeof window === "undefined") return;
-  const handler = () => markEngaged();
+  const handler = () => {
+    if (!paused) markEngaged();
+  };
   window.addEventListener("pointerdown", handler, { passive: true });
   window.addEventListener("keydown", handler, { passive: true });
   window.addEventListener("scroll", handler, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    // When user returns to the tab, mark engaged and resume heartbeats
+    // (interval already no-ops while hidden).
+    if (document.visibilityState === "visible" && !paused) {
+      markEngaged();
+    }
+  });
 }
 
 /** Start (or switch) analytics for a workspace shell. */
@@ -131,6 +185,7 @@ export function startWorkspaceAnalytics(
   currentPath = opts?.path || window.location.pathname;
   currentTab = opts?.tab || "";
   currentView = opts?.view || "";
+  syncPausedFromContext();
   markEngaged();
 
   if (!started) {
@@ -143,7 +198,9 @@ export function startWorkspaceAnalytics(
     });
   }
 
-  trackPageView(currentPath, { tab: currentTab, view: currentView });
+  if (!paused) {
+    trackPageView(currentPath, { tab: currentTab, view: currentView });
+  }
 }
 
 export function trackPageView(
@@ -153,6 +210,8 @@ export function trackPageView(
   currentPath = path;
   if (opts?.tab !== undefined) currentTab = opts.tab;
   if (opts?.view !== undefined) currentView = opts.view;
+  syncPausedFromContext();
+  if (paused) return;
   push({
     event_type: "page_view",
     path,
@@ -165,6 +224,8 @@ export function trackTabView(tab: string, opts?: { path?: string; view?: string 
   currentTab = tab;
   if (opts?.path) currentPath = opts.path;
   if (opts?.view !== undefined) currentView = opts.view;
+  syncPausedFromContext();
+  if (paused) return;
   push({
     event_type: "tab_view",
     path: currentPath || undefined,
@@ -184,6 +245,23 @@ export function trackClick(
     funnel?: boolean;
   },
 ) {
+  // Never record clicks that only open the UAT surfaces themselves.
+  if (
+    feature === "nav.click" &&
+    isAnalyticsExcludedSurface({ path: opts?.path })
+  ) {
+    return;
+  }
+  if (paused && !opts?.path) return;
+  if (
+    isAnalyticsExcludedSurface({
+      path: opts?.path ?? currentPath,
+      tab: opts?.tab ?? currentTab,
+      view: opts?.view ?? currentView,
+    })
+  ) {
+    return;
+  }
   markEngaged();
   push({
     event_type: opts?.funnel ? "funnel_step" : "ui_click",
@@ -194,10 +272,6 @@ export function trackClick(
     entity_type: opts?.entity_type,
     entity_id: opts?.entity_id,
   });
-  // Also emit funnel_step for known funnel features when marked
-  if (opts?.funnel) {
-    /* already funnel_step */
-  }
 }
 
 export function setAnalyticsContext(opts: {
@@ -208,4 +282,5 @@ export function setAnalyticsContext(opts: {
   if (opts.path !== undefined) currentPath = opts.path;
   if (opts.tab !== undefined) currentTab = opts.tab;
   if (opts.view !== undefined) currentView = opts.view;
+  syncPausedFromContext();
 }

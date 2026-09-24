@@ -141,6 +141,16 @@ export function AiIntelligenceDrawer({
     if (open) composer.current?.focus();
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    void import("@/lib/zo-analytics").then(({ trackClick }) => {
+      trackClick("financial.ai_open", {
+        path: "/financial-insights",
+        funnel: true,
+      });
+    });
+  }, [open]);
+
   const startResize = (e: ReactPointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -177,6 +187,12 @@ export function AiIntelligenceDrawer({
   if (!open) return null;
 
   const ask = (text: string) => {
+    void import("@/lib/zo-analytics").then(({ trackClick }) => {
+      trackClick("financial.ai_chat", {
+        path: "/financial-insights",
+        funnel: true,
+      });
+    });
     void chat.send(text, pinned?.id ?? null);
     setDraft("");
     setPinned(null);
@@ -249,7 +265,15 @@ export function AiIntelligenceDrawer({
             <button
               type="button"
               className="qb-ai-icon-btn"
-              onClick={() => void regenerate()}
+              onClick={() => {
+                void import("@/lib/zo-analytics").then(({ trackClick }) => {
+                  trackClick("financial.ai_regenerate", {
+                    path: "/financial-insights",
+                    funnel: true,
+                  });
+                });
+                void regenerate();
+              }}
               disabled={busy}
             >
               <RotateCcw size={13} strokeWidth={2.25} aria-hidden />

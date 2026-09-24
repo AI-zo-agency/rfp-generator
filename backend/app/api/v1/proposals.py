@@ -1476,6 +1476,21 @@ async def confirm_chat_preview_endpoint(
                 break
     if focus is None:
         raise HTTPException(status_code=400, detail="Draft has no sections.")
+    try:
+        from app.services.user_activity import emit_activity
+
+        rfp_rec = get_rfp(rfp_id)
+        emit_activity(
+            workspace="rfp",
+            action="proposal.section_chat_applied",
+            summary=f"Applied confirmed chat preview on “{(focus.title if focus else '') or focus.id}”",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=((rfp_rec.title if rfp_rec else None) or rfp_id)[:300],
+            metadata={"section_id": focus.id, "via": "confirm-preview"},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return ProposalSectionImproveResponse(
         section=focus,
         draft=guarded,

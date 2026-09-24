@@ -7,6 +7,7 @@ import { TopBar } from "./TopBar";
 import { GlobalJobStatusWidget } from "./GlobalJobStatusWidget";
 import { ZoAmuletLoader } from "./ZoAmuletLoader";
 import {
+  setAnalyticsContext,
   startWorkspaceAnalytics,
   trackClick,
   trackPageView,
@@ -31,11 +32,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isAuthenticated) return;
+    // Activity / Product analytics pages must not pollute UAT metrics.
+    if (pathname === "/activity" || pathname.startsWith("/activity/")) {
+      setAnalyticsContext({ path: pathname, tab: "", view: "" });
+      return;
+    }
     startWorkspaceAnalytics("rfp", { path: pathname });
   }, [isAuthenticated, pathname]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
+    if (pathname === "/activity" || pathname.startsWith("/activity/")) return;
     trackPageView(pathname);
     if (pathname.startsWith("/rfps/") && pathname !== "/rfps") {
       const id = pathname.split("/")[2];

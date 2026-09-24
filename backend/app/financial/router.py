@@ -1365,6 +1365,24 @@ async def link_client_map(payload: ClientMapLinkBody):
         result.get("confirmed"),
         result.get("suggested"),
     )
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="financial",
+            action="financial.client_map_linked",
+            summary="Ran client-map link (QB ↔ Teamwork)",
+            entity_type="client_map",
+            entity_label="Client map",
+            metadata={
+                "include_ai": payload.include_ai,
+                "confirmed": result.get("confirmed"),
+                "suggested": result.get("suggested"),
+            },
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
