@@ -34,6 +34,20 @@ def run_validate_plan(plan: ProposalExecutionPlan) -> ProposalExecutionPlan:
     elif plan.writing.retrieval_plan.entries:
         checks.append("retrieval_plan.non_empty")
 
+    for amb in plan.writing.ambiguities:
+        if amb.status == "resolved":
+            continue
+        msg = f"RFP ambiguity: {amb.topic} — {amb.recommended_action or 'needs review'}"
+        if amb.blocks_drafting:
+            blockers.append(msg)
+        else:
+            warnings.append(msg)
+
+    if plan.writing.cost_requirement_status == "ambiguous":
+        warnings.append(
+            "Cost/pricing submittal is ambiguous — confirm buyer attachments before budget build."
+        )
+
     artifact_scores: list[tuple[str, float]] = [
         ("opportunity.understanding", u.confidence),
         ("opportunity.strategy", plan.opportunity.strategy.confidence),

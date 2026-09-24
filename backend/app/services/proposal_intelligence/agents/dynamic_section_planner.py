@@ -150,6 +150,12 @@ Rules:
   include signed compliance forms and attachment list items as outline sections
   (forms may be checklist + [MANUAL FILL]).
 - Do NOT copy another client's outline. Do NOT write section prose.
+- Do NOT emit parent/container tabs when child submittals already exist (e.g. a section
+  titled only "Offers Content Requirements" while 3.4.1–3.4.4 are separate tabs).
+- Do NOT emit global submission rules as tabs (page limit, signature, copy count, deadline).
+- When TOC and operative attachment lists conflict on pricing/cost (e.g. Cost Sheet in TOC
+  but Attachment E RESERVED in the authoritative list), stamp submissionInstrument "clarify"
+  — never required=true cost without operative submission text.
 - Mark required=true only for mandatory submission items; use conditionalReason for optional ones.
 - When an evaluation criterion clearly matches a section, set evaluationWeight to that criterion's points.
 - Set protectFromCap=true for mandatory submission instruments the buyer must receive
@@ -163,6 +169,17 @@ Rules:
   scored Cost deliverable. Use "disclosure" for AI / generative-AI disclosures.
   Use "references" for reference forms. Use "form" for other signed compliance forms.
   Use "narrative" for approach / experience essays. Leave null only when unsure.
+- Set deliveryRoles by MEANING for THIS RFP tab (judge the buyer's ask — never by title
+  keyword lists). Zero or more of: "substance" | "calendar" | "price".
+  * substance = the plan of work / how we will deliver (whatever the buyer named it)
+  * calendar = timing / stages / weeks-months / milestones (standalone OR combined with substance)
+  * price = fees / cost / rates / budget dollars
+  Leave [] for bios, case studies, cover letters, references, forms/attachments, checklists.
+  One tab may carry both substance and calendar when the RFP combines them.
+- When BID SCOPE / AVAILABLE TRACKS labels are provided, stamp each section's "track"
+  with the EXACT buyer label that section answers, or "" for shared package tabs
+  (cover, forms, insurance, submission rules). Never invent labels not listed in
+  AVAILABLE TRACKS.
 
 Return JSON only:
 {
@@ -178,7 +195,9 @@ Return JSON only:
       "dependencies": [],
       "evaluationWeight": null,
       "protectFromCap": false,
-      "submissionInstrument": null
+      "submissionInstrument": null,
+      "deliveryRoles": [],
+      "track": ""
     }
   ],
   "confidence": 0.0
@@ -245,6 +264,35 @@ def _parse_page_limit(rfp_meta: dict[str, str] | None) -> int | None:
     return value if value > 0 else None
 
 
+def _merge_align_outline_tabs(
+    planner_sections: list[OutlineSection],
+    align_sections: list[OutlineSection],
+) -> list[OutlineSection]:
+    """Union Align packet/TOC tabs into planner output (title near-dup only).
+
+    Align extract alone used to replace the planner and often returned forms
+    only. Planner alone can miss Attachments. Merge keeps both.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    if not align_sections:
+        return list(planner_sections)
+    out = list(planner_sections)
+    for tab in align_sections:
+        title = (tab.title or "").strip()
+        if not title:
+            continue
+        if any(
+            outline_titles_near_duplicate(title, (existing.title or "").strip())
+            for existing in out
+            if (existing.title or "").strip()
+        ):
+            continue
+        order = len(out) + 1
+        out.append(tab.model_copy(update={"order": order, "protect_from_cap": True}))
+    return out
+
+
 async def run_dynamic_section_planner(
     *,
     plan: ProposalExecutionPlan,
@@ -297,11 +345,10 @@ async def run_dynamic_section_planner(
     )
 
     rfp_title = str((rfp_meta or {}).get("title") or "").strip()
-    # One Align read (submission-format / packet layout) — NOT the full
-    # format+scored+completeness stack, and NOT stacked on top of the planner.
-    # When this returns tabs, it *replaces* the planner LLM. Scored criteria
-    # coverage below is free (already on the plan). Completeness still runs
-    # once against the outline actually produced.
+    # Align extract (submission/closing-biased) often returns forms/attachments
+    # only. Never use it as a full outline replacement — always run the planner
+    # LLM for Proposal Content / scored narrative tabs. Missing Align deliverables
+    # are merged later via align_outline_sections_to_rfp_specs.
     structure_specs = await extract_rfp_submission_format_specs(
         rfp_context,
         rfp_title=rfp_title,
@@ -309,90 +356,105 @@ async def run_dynamic_section_planner(
             [] if skip_static else static_company_block_titles()
         ),
     )
-    used_align_extract = False
-    provider = ""
     if structure_specs:
-        from_specs = outline_sections_from_rfp_specs(
+        preview = outline_sections_from_rfp_specs(
             structure_specs,
             section_factory=lambda raw: OutlineSection.model_validate(raw),
             skip_static_dedupe=skip_static,
         )
-        if from_specs:
-            used_align_extract = True
-            logger.info(
-                "%s using Align submission-format extract as outline (%d tabs) "
-                "— skipping planner LLM",
-                AGENT,
-                len(from_specs),
-            )
-            outline = ProposalOutline(sections=from_specs, confidence=0.85)
-    if not used_align_extract:
-        raw, provider = await safe_chat_json(
-            [
-                {"role": "system", "content": _planner_system_prompt(mode)},
-                {
-                    "role": "user",
-                    "content": (
-                        f"{scoreboard}\n\n"
-                        f"{char_limit_line}\n"
-                        f"{eval_shape_rule}\n"
-                        f"OUTLINE MODE: {mode}.\n"
-                        + (
-                            f"HARD MAXIMUM outline tabs (full manuscript — no Zo 1–3 shell): {section_cap}. "
-                            if skip_static
-                            else f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
-                        )
-                        + f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
-                        f"Page limit from RFP: {page_limit if page_limit else 'not stated'}. "
-                        f"Under a tight page budget, emit ONLY the buyer's required Proposal "
-                        f"Content / submission-package tabs in their stated order — no rubric "
-                        f"duplicates, no optional padding.\n\n"
-                        f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
-                        f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
-                        f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
-                        f"Scope:\n{plan.opportunity.scope.model_dump_json()}\n"
-                        f"RFP excerpt (structure/TOC/submission forms):\n{rfp_context[:50000]}\n\n"
-                        f"Submission checklist excerpt (documents to return — read even if TOC is elsewhere):\n"
-                        f"{submission_documents_excerpt(rfp_context)[:20000]}\n\n"
-                        f"Closing / forms / attachments excerpt (must select these when present):\n"
-                        f"{closing_package_excerpt(rfp_context)[:20000]}"
-                    ),
-                },
-            ],
-            max_tokens=3072,
-            agent_name=AGENT,
+        logger.info(
+            "%s Align submission-format extract ready (%d tabs) — "
+            "running planner LLM (merge Align later)",
+            AGENT,
+            len(preview),
         )
-        try:
-            outline = ProposalOutline.model_validate(raw or {})
-        except Exception as exc:
-            logger.warning("%s validation failed: %s", AGENT, exc)
-            outline = ProposalOutline(confidence=0.2)
-        if not outline.sections:
-            # Prefer submission-format titles over inventing a scoreboard outline.
-            titles: list[str] = []
-            if response_form:
-                for crit in plan.opportunity.evaluation.criteria[:6]:
-                    name = (crit.name or "").strip()
-                    if name and name.casefold() not in {t.casefold() for t in titles}:
-                        titles.append(name)
-            if not titles:
-                titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
-            outline = ProposalOutline(
-                sections=[
-                    OutlineSection(
-                        id=f"rfp-sec-{i}",
-                        title=title,
-                        order=i,
-                        required=True,
-                        conditionalReason=(
+    else:
+        preview = []
+    provider = ""
+    raw, provider = await safe_chat_json(
+        [
+            {"role": "system", "content": _planner_system_prompt(mode)},
+            {
+                "role": "user",
+                "content": (
+                    f"{scoreboard}\n\n"
+                    f"{char_limit_line}\n"
+                    f"{eval_shape_rule}\n"
+                    f"OUTLINE MODE: {mode}.\n"
+                    + (
+                        f"HARD MAXIMUM outline tabs (full manuscript — no Zo 1–3 shell): {section_cap}. "
+                        if skip_static
+                        else f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
+                    )
+                    + f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
+                    f"Page limit from RFP: {page_limit if page_limit else 'not stated'}. "
+                    f"Under a tight page budget, emit ONLY the buyer's required Proposal "
+                    f"Content / submission-package tabs in their stated order — no rubric "
+                    f"duplicates, no optional padding.\n\n"
+                    f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
+                    f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
+                    f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
+                    f"Scope:\n{plan.opportunity.scope.model_dump_json()}\n"
+                    f"RFP excerpt (structure/TOC/submission forms):\n{rfp_context[:50000]}\n\n"
+                    f"Submission checklist excerpt (documents to return — read even if TOC is elsewhere):\n"
+                    f"{submission_documents_excerpt(rfp_context)[:20000]}\n\n"
+                    f"Closing / forms / attachments excerpt (must select these when present):\n"
+                    f"{closing_package_excerpt(rfp_context)[:20000]}"
+                ),
+            },
+        ],
+        max_tokens=3072,
+        agent_name=AGENT,
+    )
+    try:
+        outline = ProposalOutline.model_validate(raw or {})
+    except Exception as exc:
+        logger.warning("%s validation failed: %s", AGENT, exc)
+        outline = ProposalOutline(confidence=0.2)
+    if not outline.sections:
+        # Prefer submission-format titles over inventing a scoreboard outline.
+        titles: list[str] = []
+        if preview:
+            titles = [s.title for s in preview if (s.title or "").strip()][:section_cap]
+        if not titles and response_form:
+            for crit in plan.opportunity.evaluation.criteria[:6]:
+                name = (crit.name or "").strip()
+                if name and name.casefold() not in {t.casefold() for t in titles}:
+                    titles.append(name)
+        if not titles:
+            titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
+        outline = ProposalOutline(
+            sections=[
+                OutlineSection(
+                    id=f"rfp-sec-{i}",
+                    title=title,
+                    order=i,
+                    required=True,
+                    conditionalReason=(
+                        "Fallback from Align submission-format extract — confirm against RFP TOC"
+                        if preview
+                        else (
                             "Fallback from evaluation response form — confirm against RFP TOC"
                             if response_form
                             else "Fallback outline — confirm against RFP TOC"
-                        ),
-                    )
-                    for i, title in enumerate(titles, start=1)
-                ],
-                confidence=0.35,
+                        )
+                    ),
+                    protectFromCap=True,
+                )
+                for i, title in enumerate(titles, start=1)
+            ],
+            confidence=0.35,
+        )
+    if preview:
+        before_n = len(outline.sections)
+        outline.sections = _merge_align_outline_tabs(list(outline.sections), preview)
+        merged_n = len(outline.sections) - before_n
+        if merged_n:
+            logger.info(
+                "%s merged %d Align tab(s) into planner outline (now %d)",
+                AGENT,
+                merged_n,
+                len(outline.sections),
             )
     outline.confidence = clamp_confidence(outline.confidence)
     from app.services.proposal_outline_dedup import (
@@ -611,12 +673,8 @@ async def run_dynamic_section_planner(
         ),
         reason=(
             "Dynamic section plan from THIS RFP "
-            + (
-                "Align submission-format extract"
-                if used_align_extract
-                else "structure"
-            )
-            + " + evaluation + closing package "
+            "planner LLM + Align submission-format merge "
+            "+ evaluation + closing package "
             "(lean prompt + near-dup hygiene + hard section cap)"
         ),
         confidence=outline.confidence,

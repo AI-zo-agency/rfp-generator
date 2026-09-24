@@ -576,6 +576,7 @@ async def _patch_section(
     content: str,
     ticket: GateTicket,
     packed_evidence: str = "",
+    research: ProposalResearchCache | None = None,
 ) -> tuple[str, str]:
     """Retrieve, then patch. Returns (new_content, note).
 
@@ -599,6 +600,24 @@ async def _patch_section(
         fetch_packed_section_kb_evidence,
         inject_packed_evidence_into_instruction,
     )
+
+    # Canonical PricingInstrument + DeliveryConstraints for Scan QA patches.
+    if research is None and getattr(rfp, "id", None):
+        try:
+            from app.services.proposal_repository import aget_research_cache
+
+            research = await aget_research_cache(rfp.id)
+        except Exception:  # noqa: BLE001
+            logger.debug("gate patch research aget skipped", exc_info=True)
+            research = None
+
+    from app.services.proposal_self_edit_loop import (
+        _DELIVERY_CONSTRAINT_REMINDER,
+        _pricing_delivery_block_for_repair,
+        _section_title_is_sow_or_timeline,
+    )
+
+    delivery_block = _pricing_delivery_block_for_repair(research)
 
     evidence = (packed_evidence or "").strip()
     if ticket.requires_evidence and not evidence:
@@ -624,6 +643,13 @@ async def _patch_section(
         f"Return JSON: {{\"content\": \"<the full corrected section>\"}}\n\n"
         f"SECTION:\n{content}"
     )
+    if delivery_block:
+        instruction = f"{delivery_block}\n\n{instruction}"
+    # SOW/Timeline Scan patches: remind locked delivery facts (same text as
+    # expand/restructure self-edit tickets).
+    if _section_title_is_sow_or_timeline(section_title):
+        if "CONSTRAINT REMINDER" not in instruction:
+            instruction = f"{instruction.rstrip()}\n\n{_DELIVERY_CONSTRAINT_REMINDER}"
     if evidence:
         instruction = inject_packed_evidence_into_instruction(instruction, evidence)
 
@@ -655,6 +681,25 @@ async def run_quality_gate(
     """
     report = QualityGateReport()
     max_rounds = _configured_max_rounds()
+
+    if research and research.proposal_execution_plan is not None:
+        from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+        from app.services.proposal_submission_authority import outline_routing_quality_tickets
+
+        raw_plan = research.proposal_execution_plan
+        plan_obj: ProposalExecutionPlan | None = None
+        if isinstance(raw_plan, ProposalExecutionPlan):
+            plan_obj = raw_plan
+        elif isinstance(raw_plan, dict):
+            try:
+                plan_obj = ProposalExecutionPlan.model_validate(raw_plan)
+            except Exception:  # noqa: BLE001
+                plan_obj = None
+        for item in outline_routing_quality_tickets(plan_obj):
+            report.changes.append(
+                f"Outline routing ({item.get('code')}): {item.get('topic')} — "
+                f"{item.get('detail', '')[:200]}"
+            )
 
     async def _checkpoint() -> None:
         if ensure_not_stopped is not None:
@@ -730,6 +775,7 @@ async def run_quality_gate(
                     content=before,
                     ticket=ticket,
                     packed_evidence=evidence_map.get(section.id, ""),
+                    research=research,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("gate patch failed %s/%s: %s", section.id, ticket.code, exc)

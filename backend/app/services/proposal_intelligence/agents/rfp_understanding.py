@@ -58,6 +58,13 @@ Return JSON ONLY matching:
     "projectStart": "string or null",
     "completion": "string or null",
     "goLive": "string or null",
+    "questionsDue": "string or null",
+    "quotesDue": "string or null",
+    "initialTermStart": "string or null",
+    "optionPeriods": "string or null",
+    "contractHorizon": "plain English period of performance / funding span, or null",
+    "performanceEnd": "fixed calendar end when money or performance must stop, or null",
+    "scheduleAuthority": "how SOW treats schedule (e.g. TBD after award — contractor proposes), or null",
     "milestones": ["string"],
     "notes": "string"
   },

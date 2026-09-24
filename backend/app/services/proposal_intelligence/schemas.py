@@ -43,6 +43,33 @@ class ProposalMemory(BaseModel):
     confidence: float = 1.0
 
 
+CostRequirementStatus = Literal["confirmed", "absent", "ambiguous"]
+
+
+class SubmissionConstraint(BaseModel):
+    """Global submission rule — not a manuscript tab."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str = "other"
+    text: str = ""
+    required: bool = True
+    source_text: str = Field(default="", alias="sourceText")
+    source_section: str = Field(default="", alias="sourceSection")
+
+
+class PlanAmbiguity(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    topic: str
+    status: Literal["unresolved", "resolved"] = "unresolved"
+    evidence_for: str = Field(default="", alias="evidenceFor")
+    evidence_against: str = Field(default="", alias="evidenceAgainst")
+    recommended_action: str = Field(default="", alias="recommendedAction")
+    blocks_drafting: bool = Field(default=False, alias="blocksDrafting")
+    blocks_budget: bool = Field(default=False, alias="blocksBudget")
+
+
 class PlanValidation(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -85,6 +112,12 @@ class BudgetIntel(BaseModel):
     ceiling: str | None = None
     pricing_model_hint: str | None = Field(default=None, alias="pricingModelHint")
     contract_type: str | None = Field(default=None, alias="contractType")
+    disclosed_budget: str | None = Field(default=None, alias="disclosedBudget")
+    maximum_agreement_amount: str | None = Field(default=None, alias="maximumAgreementAmount")
+    base_pricing_model: str | None = Field(default=None, alias="basePricingModel")
+    task_order_pricing_models: list[str] = Field(
+        default_factory=list, alias="taskOrderPricingModels"
+    )
     notes: str = ""
 
 
@@ -94,6 +127,17 @@ class TimelineIntel(BaseModel):
     project_start: str | None = Field(default=None, alias="projectStart")
     completion: str | None = None
     go_live: str | None = Field(default=None, alias="goLive")
+    questions_due: str | None = Field(default=None, alias="questionsDue")
+    quotes_due: str | None = Field(default=None, alias="quotesDue")
+    initial_term_start: str | None = Field(default=None, alias="initialTermStart")
+    option_periods: str | None = Field(default=None, alias="optionPeriods")
+    # Plain-English contract / funding horizon for budget + calendar (any RFP).
+    # Examples: "through <calendar end>", "12-month base + 4 option years".
+    contract_horizon: str | None = Field(default=None, alias="contractHorizon")
+    # Fixed calendar end when money or performance must stop (beats Month-N from award).
+    performance_end: str | None = Field(default=None, alias="performanceEnd")
+    # How the SOW treats the schedule: e.g. "TBD after award — contractor proposes".
+    schedule_authority: str | None = Field(default=None, alias="scheduleAuthority")
     milestones: list[str] = Field(default_factory=list)
     notes: str = ""
 
@@ -110,8 +154,10 @@ class OpportunityUnderstanding(BaseModel):
     pain_points: list[str] = Field(default_factory=list, alias="painPoints")
     desired_outcomes: list[str] = Field(default_factory=list, alias="desiredOutcomes")
     complexity: str = ""
+    contract_structure: str = Field(default="", alias="contractStructure")
     budget_intel: BudgetIntel = Field(default_factory=BudgetIntel, alias="budgetIntel")
     timeline_intel: TimelineIntel = Field(default_factory=TimelineIntel, alias="timelineIntel")
+    memory_facts: dict[str, str] = Field(default_factory=dict, alias="memoryFacts")
     confidence: float = 0.0
 
 
@@ -143,6 +189,7 @@ class ScopeAnalysis(BaseModel):
     future_phases: list[str] = Field(default_factory=list, alias="futurePhases")
     out_of_scope: list[str] = Field(default_factory=list, alias="outOfScope")
     dependencies: list[str] = Field(default_factory=list)
+    notes: str = ""
     confidence: float = 0.0
 
 
@@ -424,10 +471,15 @@ class OutlineSection(BaseModel):
     # Agent-stamped: never drop for hard-cap / lean filler hygiene.
     protect_from_cap: bool = Field(default=False, alias="protectFromCap")
     # Agent-stamped instrument kind for near-dup + protect (not title synonym regex).
-    # cost | form | disclosure | references | narrative | null
+    # cost | form | disclosure | references | narrative | clarify | null
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )
+    # LLM-judged delivery roles for THIS tab (by meaning, not title synonyms).
+    # Allowed values: substance | calendar | price. Empty = not a delivery tab.
+    delivery_roles: list[str] = Field(default_factory=list, alias="deliveryRoles")
+    # Exact Fit / buyer lot label this tab answers; "" = shared package (cover, forms…).
+    track: str = ""
 
 
 class ProposalOutline(BaseModel):
@@ -476,6 +528,9 @@ class SectionPlan(BaseModel):
     winning_pattern: WinningPattern = Field(
         default_factory=WinningPattern, alias="winningPattern"
     )
+    # Copied/confirmed from outline; LLM may refine by meaning.
+    # Allowed: substance | calendar | price.
+    delivery_roles: list[str] = Field(default_factory=list, alias="deliveryRoles")
 
 
 class SectionPlans(BaseModel):
@@ -513,6 +568,13 @@ class WritingIntelligence(BaseModel):
     section_plans: SectionPlans = Field(default_factory=SectionPlans, alias="sectionPlans")
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan, alias="retrievalPlan")
     reviewer_personas: Any | None = Field(default=None, alias="reviewerPersonas")
+    submission_constraints: list[SubmissionConstraint] = Field(
+        default_factory=list, alias="submissionConstraints"
+    )
+    ambiguities: list[PlanAmbiguity] = Field(default_factory=list)
+    cost_requirement_status: CostRequirementStatus = Field(
+        default="absent", alias="costRequirementStatus"
+    )
 
 
 class ProposalExecutionPlan(BaseModel):

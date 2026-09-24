@@ -37,21 +37,124 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
                 BudgetLineItem(
                     id="li-1",
                     category="labor",
-                    description="Media Buyer — paid social",
-                    roleTitle="Media Buyer",
+                    description="Account Manager — paid social",
+                    roleTitle="Account Manager",
                     unit="hours",
                     quantity=1,
-                    rate=165,
-                    extended=165,
+                    rate=275,
+                    extended=275,
                     lineItemType="agency_fee",
                 ),
             ],
         )
         md = render_budget_markdown(budget, rfp_text=rfp)
         self.assertIn("Hourly Rate Schedule", md)
-        self.assertIn("Media Buyer", md)
-        self.assertIn("$165", md)
+        self.assertIn("Account Manager", md)
+        self.assertIn("$275", md)
         self.assertNotIn("Fee Detail by Phase", md)
+        self.assertNotIn("Proposed Investment", md)
+
+    def test_on_call_tm_schedule_billing_no_flat_phase(self) -> None:
+        rfp = (
+            "Provide a Cost Proposal / Schedule of Billing Rates as a separate Cost File.\n"
+            "City shall pay Consultant on a time and expense not-to-exceed basis.\n"
+            "Consultant shall provide a Letter Proposal for Services requested.\n"
+            "No billing rate changes shall be made during the term of this Agreement.\n"
+            "Any reimbursable items shall be included and identified.\n"
+        )
+        budget = ProposalBudget(
+            rfpId="r1",
+            updatedAt="t",
+            budgetFormat="personnel_loading",
+            lumpSumTotal=3000,
+            lineItems=[
+                BudgetLineItem(
+                    id="li-1",
+                    category="labor",
+                    description="Account Manager",
+                    roleTitle="Account Manager",
+                    unit="hour",
+                    quantity=1,
+                    rate=275,
+                    extended=275,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="li-2",
+                    category="labor",
+                    description="Programming",
+                    roleTitle="Programming",
+                    unit="hour",
+                    quantity=1,
+                    rate=400,
+                    extended=400,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="li-3",
+                    category="labor",
+                    description="Contractor",
+                    roleTitle="Contractor",
+                    unit="hour",
+                    quantity=1,
+                    rate=275,
+                    extended=275,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="li-4",
+                    category="labor",
+                    description="Executive",
+                    roleTitle="Executive",
+                    unit="hour",
+                    quantity=1,
+                    rate=275,
+                    extended=275,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="li-5",
+                    category="labor",
+                    description="Finance",
+                    roleTitle="Finance",
+                    unit="hour",
+                    quantity=1,
+                    rate=275,
+                    extended=275,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="li-6",
+                    category="reimbursable",
+                    description=(
+                        "Travel, location fees/permits for photography/videography, "
+                        "specialized software licenses, and stock media"
+                    ),
+                    unit="project",
+                    quantity=0,
+                    rate=0,
+                    extended=0,
+                    lineItemType="direct_expense",
+                ),
+            ],
+        )
+        md = render_budget_markdown(budget, rfp_text=rfp)
+        self.assertIn("Hourly Rate Schedule", md)
+        self.assertIn("Account Manager", md)
+        self.assertIn("Senior Web Developer", md)
+        self.assertIn("$400", md)
+        self.assertNotIn("Contractor", md)
+        self.assertNotIn("| Executive |", md)
+        self.assertNotIn("| Finance |", md)
+        self.assertNotIn("Proposed Investment", md)
+        self.assertNotIn("$3,000", md)
+        self.assertNotIn("Fee Detail", md)
+        self.assertNotIn("flat phase", md.casefold())
+        self.assertIn("Letter Proposal", md)
+        self.assertIn("billed monthly", md.casefold())
+        self.assertIn("held for the full contract term", md.casefold())
+        self.assertIn("Reimbursable Expenses", md)
+        self.assertIn("Travel", md)
 
     def test_phased_format_keeps_phase_table(self) -> None:
         budget = ProposalBudget(
@@ -95,11 +198,12 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
                 BudgetLineItem(
                     id="li-1",
                     category="labor",
-                    description="Strategist",
+                    description="Account Manager",
+                    roleTitle="Account Manager",
                     unit="hours",
                     quantity=1,
-                    rate=150,
-                    extended=150,
+                    rate=275,
+                    extended=275,
                     lineItemType="agency_fee",
                 )
             ],
@@ -129,12 +233,12 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
                 BudgetLineItem(
                     id="li-1",
                     category="labor",
-                    description="Account Director",
-                    roleTitle="Account Director",
+                    description="Account Manager",
+                    roleTitle="Account Manager",
                     unit="hours",
                     quantity=1,
-                    rate=200,
-                    extended=200,
+                    rate=275,
+                    extended=275,
                     lineItemType="agency_fee",
                 )
             ],

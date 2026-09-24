@@ -99,6 +99,50 @@ Please clarify what improvements you would like:
         self.assertIn("issues", parsed)
         self.assertEqual(parsed["issues"][0]["code"], "other")
 
+    def test_does_not_clobber_strategy_delivery_with_budget_salvage(self) -> None:
+        """Valid strategy_delivery JSON must not be replaced by Stage-3 budget
+        salvage just because it lacks top-level sections/lineItems and mentions
+        budgetFormat (e.g. nested under budget)."""
+        raw = """{
+  "strategy": {"winningTheme": "Local CBSM", "confidence": 0.8},
+  "deliveryPattern": {"patternsObserved": ["hybrid"], "confidence": 0.7},
+  "deliveryModel": {"type": "Hybrid", "confidence": 0.7},
+  "methodology": {"phases": [], "confidence": 0.5},
+  "budget": {
+    "pricingStrategy": "value",
+    "pricingModel": "Fixed Fee",
+    "pricingTiers": "Average",
+    "budgetFormat": "phased",
+    "confidence": 0.6
+  },
+  "risk": {"risks": [], "confidence": 0.5},
+  "qa": {"approach": "x", "gates": [], "confidence": 0.5},
+  "communication": {"cadence": "weekly", "channels": [], "reportingPlan": "", "confidence": 0.5},
+  "training": {"trainingPlan": "", "transitionPlan": "", "confidence": 0.5}
+}"""
+        parsed = _parse_json_response(raw)
+        self.assertEqual(parsed["strategy"]["winningTheme"], "Local CBSM")
+        self.assertEqual(parsed["deliveryModel"]["type"], "Hybrid")
+        self.assertNotIn("budgetFormat", parsed)  # must stay nested, not top-level wipe
+
+    def test_classification_salvage_skips_truncated_opportunity_json(self) -> None:
+        """Truncated opportunity JSON mentions industry but must not become a
+        classification stub — that wiped Agent 1 and caused missing client 502s."""
+        from app.services.llm import _salvage_classification_payload
+
+        raw = '''{
+  "understanding": {
+    "client": "County of Example",
+    "industry": "Public Sector",
+    "projectType": "Website
+'''
+        self.assertIsNone(_salvage_classification_payload(raw))
+        # Truncation closer may still recover a partial object — that's fine as
+        # long as it isn't replaced by {industry, servicesRequested} only.
+        parsed = _parse_json_response(raw)
+        self.assertIn("understanding", parsed)
+        self.assertNotIn("servicesRequested", parsed)
+
 
 if __name__ == "__main__":
     unittest.main()

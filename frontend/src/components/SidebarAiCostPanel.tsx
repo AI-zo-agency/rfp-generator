@@ -12,7 +12,7 @@ function fmtUsd(n: number): string {
 }
 
 /**
- * Left-sidebar monthly + weekly AI spend (Proposals / Finance split).
+ * Left-sidebar monthly + daily + weekly AI spend (Proposals / Finance split).
  * Per-person breakdown lives on Analytics.
  */
 export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
@@ -20,6 +20,9 @@ export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
   if (!budget?.enabled || budget.limitUsd <= 0) return null;
 
   const monthPct = Math.min(100, Math.round((budget.spentUsd / budget.limitUsd) * 100));
+  const dayLimit = budget.dayLimitUsd > 0 ? budget.dayLimitUsd : 5;
+  const dayPct = Math.min(100, Math.round((budget.daySpentUsd / dayLimit) * 100));
+  const dayOver = budget.daySpentUsd >= dayLimit;
 
   if (collapsed) {
     return (
@@ -30,14 +33,14 @@ export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
             ? "color-mix(in srgb, var(--zo-orange) 55%, var(--zo-border))"
             : "var(--shell-border, var(--zo-border))",
         }}
-        title={`Month ${fmtUsd(budget.spentUsd)} / ${fmtUsd(budget.limitUsd)} · Week ${fmtUsd(budget.weekSpentUsd)}`}
+        title={`Month ${fmtUsd(budget.spentUsd)} / ${fmtUsd(budget.limitUsd)} · Today ${fmtUsd(budget.daySpentUsd)} / ${fmtUsd(dayLimit)} · Week ${fmtUsd(budget.weekSpentUsd)}`}
       >
         <p className="text-[10px] font-bold uppercase tracking-wider text-zo-text-muted">AI</p>
         <p className="mt-1 text-xs font-semibold tabular-nums text-foreground">
           {fmtUsd(budget.spentUsd)}
         </p>
         <p className="mt-0.5 text-[10px] tabular-nums text-zo-text-muted">
-          w {fmtUsd(budget.weekSpentUsd)}
+          d {fmtUsd(budget.daySpentUsd)}
         </p>
       </div>
     );
@@ -51,7 +54,7 @@ export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
           ? "color-mix(in srgb, var(--zo-orange) 55%, var(--zo-border))"
           : "var(--shell-border, var(--zo-border))",
       }}
-      aria-label={`Monthly AI ${fmtUsd(budget.spentUsd)} of ${fmtUsd(budget.limitUsd)}. Weekly ${fmtUsd(budget.weekSpentUsd)}.`}
+      aria-label={`Monthly AI ${fmtUsd(budget.spentUsd)} of ${fmtUsd(budget.limitUsd)}. Today ${fmtUsd(budget.daySpentUsd)} of ${fmtUsd(dayLimit)}. Weekly ${fmtUsd(budget.weekSpentUsd)}.`}
     >
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-zo-text-muted">
@@ -95,6 +98,40 @@ export function SidebarAiCostPanel({ collapsed }: { collapsed: boolean }) {
             </span>
             <span>
               Fin <span className="text-foreground">{fmtUsd(budget.financialSpentUsd)}</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="border-t border-[var(--shell-border,var(--zo-border))] pt-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-medium text-zo-text-secondary">Today</span>
+            <span className="text-sm font-semibold tabular-nums text-foreground">
+              {fmtUsd(budget.daySpentUsd)}
+              <span className="text-xs font-medium text-zo-text-secondary">
+                {" "}
+                / {fmtUsd(dayLimit)}
+              </span>
+            </span>
+          </div>
+          <div
+            className="mt-1.5 h-1.5 overflow-hidden rounded-full"
+            style={{ background: "var(--zo-surface-secondary, #eceae4)" }}
+            aria-hidden
+          >
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${dayPct}%`,
+                background: dayOver ? "var(--zo-orange)" : "var(--zo-teal, #0d9488)",
+              }}
+            />
+          </div>
+          <div className="mt-1.5 flex justify-between gap-2 text-[11px] tabular-nums text-zo-text-muted">
+            <span>
+              Prop <span className="text-foreground">{fmtUsd(budget.dayProposalSpentUsd)}</span>
+            </span>
+            <span>
+              Fin <span className="text-foreground">{fmtUsd(budget.dayFinancialSpentUsd)}</span>
             </span>
           </div>
         </div>

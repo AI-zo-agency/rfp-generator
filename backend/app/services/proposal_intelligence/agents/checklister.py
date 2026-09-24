@@ -1,51 +1,20 @@
-"""Proposal Intelligence Checklister Agent — verification of dynamic RFP outline completeness."""
+"""Proposal Checklister — same completeness path as dynamic_section_planner.
+
+Uses targeted submission/closing excerpts + dual-sampled missing-submittals
+check (not a blind head-truncate of the RFP). Demo outline and Phase 2 both
+call this.
+"""
 
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any
 
-from app.services.proposal_intelligence.agent_base import safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision
 from app.services.proposal_intelligence.schemas import OutlineSection, ProposalExecutionPlan
 from app.services.proposal_outline_dedup import humanize_outline_title
 
 logger = logging.getLogger(__name__)
 AGENT = "proposal_checklister"
-
-_CHECKLISTER_SYSTEM = """You are zö agency's Proposal Checklister Agent.
-Your single job is to compare the RFP document text with the proposed section outline
-and verify that ALL dynamic RFP requirements, sub-asks, attachments, forms, insurance tables,
-and specific required narrative topics are represented as outline tabs.
-
-Check specifically for:
-1. Required Attachments & Forms (e.g., Lobbying Certification, Debarment/Suspension Certification, Non-Collusion, W-9, COI attachment).
-2. Required Insurance Tables (when RFP lists general liability, auto, E&O, umbrella, workers comp, etc.).
-3. Specific Required Narrative Topics (e.g. §I.D.6 Project Management and Scheduling Expertise, Cost/Budget Control, Quality Assurance).
-4. Specific evaluation response forms / required submittal packages.
-
-If any required topic or form is missing from the existing section outline titles, emit a new section entry for it.
-
-Existing Section Titles:
-{existing_titles}
-
-Return JSON ONLY:
-{{
-  "missing_sections": [
-    {{
-      "title": "SHORT tab heading — a noun phrase, roughly 8 words or fewer, e.g. 'Attachment B — Lobbying Certification'. NEVER a sentence copied from the RFP.",
-      "requirementText": "Full RFP requirement, verbatim or closely paraphrased, as long as needed (e.g. 'Attachment B — Certification Regarding Lobbying: Offeror shall certify...')",
-      "required": true,
-      "conditionalReason": "",
-      "evaluationWeight": null,
-      "protectFromCap": true,
-      "submissionInstrument": "form|references|cost|disclosure|narrative"
-    }}
-  ],
-  "reasoning": "brief summary of checked vs missing items"
-}}
-"""
 
 
 async def run_proposal_checklister(
@@ -54,99 +23,72 @@ async def run_proposal_checklister(
     rfp_context: str,
     rfp_meta: dict[str, str] | None = None,
 ) -> ProposalExecutionPlan:
-    """Audit proposal outline against full RFP text to ensure 100% dynamic section coverage."""
+    """Audit outline for missing required submittals (forms / exhibits / attachments)."""
+    _ = rfp_meta
     if not plan.writing.proposal_outline.sections:
         return plan
 
-    existing_sections = plan.writing.proposal_outline.sections
-    existing_titles = [s.title for s in existing_sections if s.title]
-    existing_titles_blob = "\n".join(f"- {t}" for t in existing_titles)
-
-    prompt = _CHECKLISTER_SYSTEM.format(existing_titles=existing_titles_blob)
-    user_msg = f"RFP EXCERPT:\n{rfp_context[:25_000]}"
-
-    # safe_chat_json takes the messages list POSITIONALLY and returns
-    # (payload, provider) — same idiom as dynamic_section_planner.
-    res, _provider = await safe_chat_json(
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.1,
-        agent_name=AGENT,
+    from app.services.proposal_evaluation_coverage import ensure_missing_submittals_coverage
+    from app.services.proposal_fulfill_rfp_structure import (
+        title_is_rfp_instruction_not_deliverable,
     )
 
-    missing_items = (res or {}).get("missing_sections") or []
-    if not missing_items:
-        plan = append_decision(
-            plan,
-            agent=AGENT,
-            decision_text="Checklister audit complete: 0 missing dynamic sections detected.",
-            reason="Existing outline covers all required RFP forms, attachments, and narratives.",
-            confidence=1.0,
-        )
-        return plan
+    before_ids = {s.id for s in plan.writing.proposal_outline.sections}
+    kept, added_titles = await ensure_missing_submittals_coverage(
+        list(plan.writing.proposal_outline.sections),
+        rfp_context,
+        section_factory=lambda raw: OutlineSection.model_validate(raw),
+    )
 
-    added_count = 0
-    start_order = len(existing_sections) + 1
-    new_sections = list(existing_sections)
-    existing_titles_cf = {t.casefold() for t in existing_titles}
-
-    for idx, item in enumerate(missing_items):
-        original_title = (item.get("title") or "").strip()
-        if not original_title:
+    # Drop instruction-shaped injections; humanize long RFP headings on new tabs.
+    cleaned: list[OutlineSection] = []
+    kept_added = 0
+    for sec in kept:
+        if sec.id in before_ids:
+            cleaned.append(sec)
             continue
-        from app.services.proposal_fulfill_rfp_structure import (
-            title_is_rfp_instruction_not_deliverable,
-        )
-
-        if title_is_rfp_instruction_not_deliverable(original_title):
+        original = (sec.title or "").strip()
+        if not original or title_is_rfp_instruction_not_deliverable(original):
+            logger.info("%s dropped instruction-shaped tab %r", AGENT, original[:80])
             continue
-        title = humanize_outline_title(original_title)
-        if not title:
-            continue
-        # Deduplication check
-        if title.casefold() in existing_titles_cf or any(title.casefold() in t.casefold() for t in existing_titles_cf):
-            continue
-
-        sec_id = f"rfp-checklister-{start_order + idx}"
-        instrument = item.get("submissionInstrument")
-        if instrument not in ("cost", "form", "disclosure", "references", "narrative"):
-            instrument = "form" if "certification" in title.casefold() or "attachment" in title.casefold() else "narrative"
-
-        conditional_reason = item.get("conditionalReason") or ""
-        requirement_text = (item.get("requirementText") or "").strip() or original_title
-        if title != original_title:
-            full_requirement = f"Full RFP requirement: {requirement_text}"
-            conditional_reason = (
-                f"{full_requirement}\n\n{conditional_reason}".strip()
-                if conditional_reason
-                else full_requirement
+        short = humanize_outline_title(original) or original
+        if short != original:
+            reason = (sec.conditional_reason or "").strip()
+            full = f"Full RFP requirement: {original}"
+            sec = sec.model_copy(
+                update={
+                    "title": short,
+                    "conditional_reason": (
+                        f"{full}\n\n{reason}".strip() if reason else full
+                    ),
+                }
             )
+        cleaned.append(sec)
+        kept_added += 1
 
-        new_sec = OutlineSection(
-            id=sec_id,
-            title=title,
-            order=start_order + idx,
-            required=bool(item.get("required", True)),
-            conditionalReason=conditional_reason,
-            evaluationWeight=item.get("evaluationWeight"),
-            protectFromCap=bool(item.get("protectFromCap", True)),
-            submissionInstrument=instrument,
+    plan.writing.proposal_outline.sections = cleaned
+    if kept_added:
+        logger.info(
+            "%s injected %d missing submittal tab(s) via completeness excerpts: %s",
+            AGENT,
+            kept_added,
+            added_titles[:12],
         )
-        new_sections.append(new_sec)
-        existing_titles_cf.add(title.casefold())
-        added_count += 1
-
-    if added_count > 0:
-        plan.writing.proposal_outline.sections = new_sections
-        logger.info("%s injected %d missing dynamic RFP section(s)", AGENT, added_count)
 
     plan = append_decision(
         plan,
         agent=AGENT,
-        decision_text=f"Checklister audit complete: added {added_count} missing section(s).",
-        reason=(res or {}).get("reasoning") or f"Injected {added_count} dynamic sections required by RFP.",
-        confidence=0.95,
+        decision_text=(
+            f"Checklister completeness: added {kept_added} missing submittal(s)."
+            if kept_added
+            else "Checklister completeness: 0 missing submittals detected."
+        ),
+        reason=(
+            "Submission/closing excerpt dual-sample (same as ensure_missing_submittals_coverage)."
+        ),
+        confidence=0.95 if kept_added else 1.0,
     )
+    from app.services.proposal_submission_authority import apply_submission_authority_pass
+
+    plan = await apply_submission_authority_pass(plan, rfp_context)
     return plan

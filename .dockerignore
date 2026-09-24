@@ -1,0 +1,14 @@
+# Used when building demo/rfp-two-agents/Dockerfile with repo-root context.
+.git
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+frontend
+backend/data
+backend/logs
+backend/audit_logs
+backend/tests
+demo/rfp-two-agents/tests
+**/.env
+**/.env.*

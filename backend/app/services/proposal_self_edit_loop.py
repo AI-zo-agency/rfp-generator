@@ -171,6 +171,124 @@ def _locks_brief_for_repair(research: ProposalResearchCache | None) -> str:
     return format_manuscript_locks_block(research.manuscript_locks)
 
 
+def _pricing_delivery_block_for_repair(
+    research: ProposalResearchCache | None,
+    *,
+    focus: str = "all",
+) -> str:
+    """Canonical PricingInstrument + DeliveryConstraints block for repair agents."""
+    if research is None:
+        return ""
+    from app.services.pricing_delivery_context import (
+        format_pricing_delivery_constraints_block,
+    )
+
+    try:
+        return format_pricing_delivery_constraints_block(research, focus=focus)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        logger.debug("pricing delivery block for repair skipped", exc_info=True)
+        return ""
+
+
+_SOW_TIMELINE_TITLE_HINTS = (
+    "statement of work",
+    "scope of work",
+    "scope of services",
+    "work plan",
+    "methodology",
+    "approach",
+    "timeline",
+    "schedule",
+    "project plan",
+    "implementation plan",
+)
+
+_EXPAND_RESTRUCTURE_HINTS = (
+    "expand",
+    "restructure",
+    "broaden",
+    "enlarge",
+    "reorganize",
+    "add scope",
+    "add phases",
+    "more phases",
+)
+
+_DELIVERY_CONSTRAINT_REMINDER = (
+    "CONSTRAINT REMINDER: Polish prose only — do not expand scope, restructure "
+    "locked tracks/horizon, merge NTEs, or invent out-of-scope work. "
+    "Locked delivery facts stay locked."
+)
+
+
+def _section_title_is_sow_or_timeline(title: str) -> bool:
+    t = (title or "").casefold()
+    return any(h in t for h in _SOW_TIMELINE_TITLE_HINTS)
+
+
+def _ticket_has_expand_restructure_intent(text: str) -> bool:
+    blob = (text or "").casefold()
+    return any(h in blob for h in _EXPAND_RESTRUCTURE_HINTS)
+
+
+def _maybe_append_delivery_constraint_reminder(
+    message: str,
+    *,
+    section_title: str,
+) -> str:
+    """SOW/Timeline expand/restructure tickets keep the section but remind locks."""
+    if not message or not _section_title_is_sow_or_timeline(section_title):
+        return message
+    if not _ticket_has_expand_restructure_intent(message):
+        return message
+    if "CONSTRAINT REMINDER" in message:
+        return message
+    return f"{message.rstrip()}\n\n{_DELIVERY_CONSTRAINT_REMINDER}"
+
+
+async def _append_delivery_gate_flag(
+    *,
+    section: ProposalSection,
+    research: ProposalResearchCache | None,
+    detail: str,
+) -> str:
+    """v1 flag-only: keep persisted edit; append delivery-gate note when drift found."""
+    try:
+        from app.services.delivery_constraints_gate import flag_delivery_drift_after_edit
+
+        issues = await flag_delivery_drift_after_edit(
+            section=section, research=research
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delivery_constraints_gate after repair skipped section=%s: %s",
+            section.id,
+            str(exc)[:160],
+        )
+        return detail
+    if not issues:
+        return detail
+    sample = "; ".join((i.message or "")[:100] for i in issues[:2])
+    logger.warning(
+        "delivery-gate flag-only section=%s title=%s issues=%s",
+        section.id,
+        section.title,
+        len(issues),
+    )
+    # Durable signal on research.budget.pricing_flags when available.
+    if research is not None and research.budget is not None:
+        prior = list(research.budget.pricing_flags or [])
+        for issue in issues[:6]:
+            msg = f"[DELIVERY GATE: {issue.message}]"[:240]
+            if msg and msg not in prior:
+                prior.append(msg)
+        if prior != list(research.budget.pricing_flags or []):
+            research.budget = research.budget.model_copy(
+                update={"pricing_flags": prior}
+            )
+    return f"{detail} | delivery-gate flag-only: {len(issues)} issue(s): {sample}"
+
+
 def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int = 35_000) -> str:
     """Full TOC first (never truncated away), then per-tab excerpts until the budget."""
     toc_lines = [
@@ -556,6 +674,11 @@ async def _apply_senior_editor_tickets(
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
         brief = _ticket_rewrite_brief(ticket)
+        section_for_title = next((s for s in draft.sections if s.id == sid), None)
+        brief = _maybe_append_delivery_constraint_reminder(
+            brief,
+            section_title=(section_for_title.title if section_for_title else "") or "",
+        )
         is_dedupe = ticket in dedupe and ticket not in coverage and ticket not in compliance
         needs_full_redraft = (not is_dedupe) and _section_is_stub_for_ticket(draft, sid)
         if is_dedupe or not needs_full_redraft:
@@ -906,6 +1029,10 @@ async def _repair_one_section(
     else:
         message = AUTO_REPAIR_MESSAGE
 
+    message = _maybe_append_delivery_constraint_reminder(
+        message, section_title=before.title or ""
+    )
+
     evidence_block = ""
     if research and research.evidence_corpus:
         tagged = [e for e in research.evidence_corpus if section_id in e.section_ids]
@@ -934,14 +1061,18 @@ async def _repair_one_section(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Budget repair context skipped for %s: %s", section_id, exc)
 
+    delivery_block = _pricing_delivery_block_for_repair(research)
+    locks_block = _locks_brief_for_repair(research)
+
     user_content = (
         f"Client: {rfp_client}\nRFP: {rfp_title}\n"
         f"Section: {before.title}\nWord target: {before.word_target}\n"
         f"Requirements:\n" + "\n".join(f"- {r}" for r in requirements)
         + f"\n\nRepair task:\n{message}\n\n"
         + (f"{budget_context}\n\n" if budget_context else "")
-        + f"{_locks_brief_for_repair(research)}\n\n"
-        f"{_dedup_brief_for_repair(draft, section_id=section_id)}\n\n"
+        + (f"{delivery_block}\n\n" if delivery_block else "")
+        + (f"{locks_block}\n\n" if locks_block else "")
+        + f"{_dedup_brief_for_repair(draft, section_id=section_id)}\n\n"
         f"Previous draft:\n{before.content[:5000]}\n\n"
         f"Evidence corpus (cite as [E#]):\n{evidence_block or '(search tools for more)'}"
     )
@@ -1026,12 +1157,14 @@ async def _repair_one_section(
     ):
         await asave_proposal_draft(updated_draft)
         tools_note = f" tools={','.join(tool_log[:4])}" if tool_log else ""
-        return (
-            section_id,
-            True,
+        detail = (
             f"verify {verify_count(before.content)}→{verify_count(after.content)} "
-            f"words {word_count(before.content)}→{word_count(after.content)}{tools_note}",
+            f"words {word_count(before.content)}→{word_count(after.content)}{tools_note}"
         )
+        detail = await _append_delivery_gate_flag(
+            section=after, research=research, detail=detail
+        )
+        return (section_id, True, detail)
 
     if designer_compact:
         from app.services.proposal_consistency import introduces_unauthorized_dollars
@@ -1043,11 +1176,14 @@ async def _repair_one_section(
                 and introduces_unauthorized_dollars(after.content or "", typed_budget)
             ):
                 await asave_proposal_draft(updated_draft)
-                return (
-                    section_id,
-                    True,
-                    f"designer-compact {word_count(before.content)}→{word_count(after.content)}w",
+                detail = (
+                    f"designer-compact {word_count(before.content)}→"
+                    f"{word_count(after.content)}w"
                 )
+                detail = await _append_delivery_gate_flag(
+                    section=after, research=research, detail=detail
+                )
+                return (section_id, True, detail)
 
     after_draft = updated_draft
     after_blockers = len(
@@ -1066,27 +1202,27 @@ async def _repair_one_section(
     )
     if after_blockers < before_blockers:
         await asave_proposal_draft(updated_draft)
-        return (
-            section_id,
-            True,
-            f"submission blockers {before_blockers}→{after_blockers}",
+        detail = f"submission blockers {before_blockers}→{after_blockers}"
+        detail = await _append_delivery_gate_flag(
+            section=after, research=research, detail=detail
         )
+        return (section_id, True, detail)
     if after_compliance < before_compliance:
         await asave_proposal_draft(updated_draft)
-        return (
-            section_id,
-            True,
-            f"compliance gaps {before_compliance}→{after_compliance}",
+        detail = f"compliance gaps {before_compliance}→{after_compliance}"
+        detail = await _append_delivery_gate_flag(
+            section=after, research=research, detail=detail
         )
+        return (section_id, True, detail)
     before_weakness = weakness_score(before)
     after_weakness = weakness_score(after)
     if after_weakness < before_weakness:
         await asave_proposal_draft(updated_draft)
-        return (
-            section_id,
-            True,
-            f"weakness score {before_weakness}→{after_weakness}",
+        detail = f"weakness score {before_weakness}→{after_weakness}"
+        detail = await _append_delivery_gate_flag(
+            section=after, research=research, detail=detail
         )
+        return (section_id, True, detail)
 
     return section_id, False, "reverted (no improvement)"
 
@@ -1124,11 +1260,16 @@ async def _fallback_improve_section(
             await asave_proposal_draft(updated_draft)
             if updated_research:
                 await asave_research_cache(updated_research)
-            return (
-                section_id,
-                True,
-                f"fallback improve verify {verify_count(before.content)}→{verify_count(after.content)}",
+            detail = (
+                f"fallback improve verify "
+                f"{verify_count(before.content)}→{verify_count(after.content)}"
             )
+            detail = await _append_delivery_gate_flag(
+                section=after,
+                research=updated_research,
+                detail=detail,
+            )
+            return (section_id, True, detail)
         return section_id, False, f"fallback no improvement: {detail[:80]}"
     except Exception as fallback_exc:
         return section_id, False, f"fallback failed: {fallback_exc}"
@@ -1778,6 +1919,43 @@ async def run_self_edit_loop(
             rfp_id,
             len(remaining_locks),
             summary,
+        )
+
+    # DeliveryConstraints post-edit gate — v1 flag-only (keep edits; surface issues).
+    try:
+        from app.services.delivery_constraints_gate import (
+            collect_delivery_constraint_issues,
+        )
+
+        delivery_issues = await collect_delivery_constraint_issues(
+            draft=draft, research=research
+        )
+        if delivery_issues:
+            for issue in delivery_issues[:8]:
+                report.section_logs.append(
+                    {
+                        "section": issue.section_title or "delivery-constraints",
+                        "sectionId": issue.section_id or "",
+                        "detail": f"delivery-gate flag-only: {issue.message}",
+                    }
+                )
+            logger.warning(
+                "Senior editor delivery-gate flag-only rfp_id=%s issues=%s sample=%s",
+                rfp_id,
+                len(delivery_issues),
+                (delivery_issues[0].message or "")[:160],
+            )
+            step_trace(
+                "senior_editor_delivery_gate",
+                rfp_id=rfp_id,
+                issue_count=len(delivery_issues),
+                samples=[(i.message or "")[:120] for i in delivery_issues[:4]],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delivery_constraints_gate skipped after self-edit rfp_id=%s: %s",
+            rfp_id,
+            str(exc)[:200],
         )
 
     verify_after = sum(count_verify_tags(s.content or "") for s in draft.sections)

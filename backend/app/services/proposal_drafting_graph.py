@@ -229,7 +229,47 @@ Rules (strict):
 42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones. NEVER assert past technical deliveries (specific platforms, integrations, audit workflows) that the included case studies / bios / companyfacts do not evidence — use adjacent verified experience or [VERIFY].
 44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
-45. SCHEDULE / TIMELINE: Fit award→launch / contract windows stated in the RFP. Dates and milestones in a markdown pipe table (| Phase | Activities | Timing |) — methodology lives in Approach. Every Timing cell must have a week-from-award range. Never leave Timing blank. Never put spaces between every letter in headers (write PHASE not P H A S E). Never put | between individual letters. Use 4–6 columns max; wrap long cell text with normal sentences, not line breaks mid-row. Never put writer instructions in the tab ("do not restate…"). Missing calendar dates from the RFP → weeks from award, not [VERIFY] tags.
+45. SCHEDULE / TIMELINE: Fit award→launch / contract / funding windows stated in THIS RFP.
+   Dates and milestones in a markdown pipe table (| Phase | Activities | Timing |) —
+   methodology lives in Approach. Every Timing cell must have a week-from-award range
+   OR a calendar date/month tied to a stated RFP end (prefer fixed funding /
+   performance end dates when present — back-calculate; never invent Month-N from an
+   undetermined award start that could overrun a hard funding/performance end).
+   When the SOW says the schedule is TBD / contractor proposes after selection: write
+   "proposed schedule, subject to buyer approval" — never "binds" or settled-agreement
+   language. Never leave Timing blank. Never put spaces between every letter in headers
+   (write PHASE not P H A S E). Never put | between individual letters. Use 4–6 columns
+   max; wrap long cell text with normal sentences, not line breaks mid-row. Never put
+   writer instructions in the tab ("do not restate…"). Missing calendar dates from the
+   RFP → weeks from award labeled as proposed, not [VERIFY] tags.
+   On-call / Letter Proposal contracts: do NOT fill every schedule row with "per
+   assignment." Prefer a short post-award onboarding timeline (kickoff, brand/standards
+   intake, compliance portals, first Letter Proposal) then note that each later
+   assignment sets its own schedule in writing.
+47. APPROACH / METHOD / SCOPE OF SERVICES tabs (every RFP — principle-based):
+   (a) SCOPE COVERAGE: When Delivery Constraints / RFP list numbered Scope of Services
+       lines, confirm EACH line (table or bullets). Never drop the last items.
+   (b) NO OVERCLAIM: "We perform every listed service line" is OK. Never claim
+       "nothing out of reach" / "no gaps." Soften capabilities not evidenced in KB
+       (e.g. traditional media buying, specialized production) with Letter Proposal /
+       [VERIFY: capability owner] — do not invent credentials.
+   (c) OWNERSHIP: When Delivery Constraints say buyerOwnsDeliverables (or the Draft
+       Agreement gives the buyer exclusive ownership of work product), say final files
+       transfer to the buyer with stock/music/font licenses documented — NEVER "agreed
+       usage rights" that imply shared ownership.
+   (d) THIS CLIENT: Use locality / org facts from THIS RFP (geography, government form,
+       scale, multi-department demand). A section that could be sent to any city fails.
+   (e) EVIDENCE: Anchor the workflow with named KB case studies when present; otherwise
+       capability language without invented clients.
+   (f) REMOTE / ON-SITE: If the agency delivers remotely and the RFP implies shoots,
+       events, or on-site work, say how travel works and that it is authorized in the
+       Letter Proposal / reimbursables — stay consistent with Cost.
+   (g) NO UNVERIFIED SLAs: Never invent "same-day" / "often same-day" turnaround.
+       Use [VERIFY: Sonja — turnaround tiers] or omit.
+   (h) PROTOCOLS HEADING: If claiming full scope, do not title a block "outside this
+       scope." Prefer "Working within buyer protocols" for media-buy / publish gates.
+   (i) ACCESSIBILITY: Name a standard (e.g. WCAG) ONLY if KB/companyfacts support it;
+       otherwise [VERIFY] or describe a compliance review without a fake standard.
 46. COVER LETTER / TRANSMITTAL (Rev 6 signed passage · RFP format first · won form second):
    Structure and required fields follow THIS RFP's cover-letter / letter-of-transmittal
    instructions and submission package (addressee, required statements, page limits,
@@ -287,6 +327,8 @@ class DraftingGraphState(TypedDict, total=False):
     manuscript_locks: dict[str, Any] | None
     fact_ledger: dict[str, Any] | None
     evidence_allocation: dict[str, Any] | None
+    pricing_instrument: dict[str, Any] | None
+    delivery_constraints: dict[str, Any] | None
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -589,6 +631,52 @@ def partition_phase3_sections(
             )
             continue
 
+        from app.services.proposal_submission_authority import (
+            attachment_checklist_stub,
+            clarify_blocker_stub,
+            instrument_is_checklist,
+            instrument_skips_full_narrative_draft,
+        )
+
+        instrument = getattr(mapped, "submission_instrument", None)
+        if instrument_skips_full_narrative_draft(instrument):
+            prior = existing_by_id.get(mapped.id)
+            if prior is None or not _phase3_content_is_usable(prior.content):
+                reason = (mapped.requirements or [""])[0]
+                if instrument == "clarify":
+                    body = clarify_blocker_stub(mapped.title or "", reason)
+                elif str(instrument or "").casefold() == "cost":
+                    body = (
+                        f"## {mapped.title or 'Pricing'}\n\n"
+                        "Pricing/fee content is produced in Phase 3.5 when the RFP "
+                        "requires a confirmed cost deliverable."
+                    )
+                elif instrument_is_checklist(instrument):
+                    body = attachment_checklist_stub(
+                        mapped.title or "", str(instrument or "form")
+                    )
+                else:
+                    body = attachment_checklist_stub(mapped.title or "", "form")
+                already.append(
+                    ProposalSection(
+                        id=mapped.id,
+                        title=mapped.title,
+                        content=body,
+                        status="generated",
+                        source="generated",
+                        mode="write",
+                        required=True,
+                    )
+                )
+            elif prior is not None:
+                already.append(prior)
+            logger.info(
+                "Phase 3 routing stub (not full narrative) instrument=%s title=%r",
+                instrument,
+                mapped.title,
+            )
+            continue
+
         to_draft.append(mapped)
     return to_draft, already
 
@@ -886,6 +974,30 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         )
         lines.append(json.dumps(budget_plan, indent=2)[:3000])
 
+    roles: frozenset = frozenset()
+    try:
+        from app.services.proposal_delivery_package import (
+            DeliveryRole,
+            build_delivery_package,
+            format_delivery_package_block,
+            roles_from_execution_plan,
+        )
+
+        roles = roles_from_execution_plan(
+            plan if isinstance(plan, dict) else {},
+            section_id=str(section_id or ""),
+            section_title=section_title or str(section_id),
+        )
+        if roles:
+            package = build_delivery_package(plan if isinstance(plan, dict) else {})
+            block = format_delivery_package_block(
+                roles, package, section_title=section_title or str(section_id)
+            )
+            if block:
+                lines.append(block)
+    except Exception:
+        roles = frozenset()
+
     try:
         from app.services.proposal_consistency_enforcement import (
             format_rfp_calendar_constraint,
@@ -898,6 +1010,42 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         )
         if cal:
             lines.append(cal)
+    except Exception:
+        pass
+
+    # PricingInstrument + DeliveryConstraints (typed) — fall back to opportunity pack.
+    try:
+        from app.services.pricing_delivery_context import (
+            format_pricing_delivery_constraints_block,
+        )
+        from app.services.proposal_delivery_package import DeliveryRole
+
+        focus = "all"
+        if roles:
+            has_sub = DeliveryRole.SUBSTANCE in roles
+            has_cal = DeliveryRole.CALENDAR in roles
+            has_price = DeliveryRole.PRICE in roles
+            if has_sub and not has_cal and not has_price:
+                focus = "sow"
+            elif has_cal and not has_sub:
+                focus = "timeline"
+            elif has_price and not has_sub and not has_cal:
+                focus = "budget"
+        ctx_src: dict[str, Any] = {}
+        if isinstance(plan, dict):
+            ctx_src.update(plan)
+        inst_raw = state.get("pricing_instrument")
+        dc_raw = state.get("delivery_constraints")
+        if inst_raw is not None:
+            ctx_src["pricingInstrument"] = inst_raw
+        if dc_raw is not None:
+            ctx_src["deliveryConstraints"] = dc_raw
+        hc = format_pricing_delivery_constraints_block(
+            ctx_src if ctx_src else (plan if isinstance(plan, dict) else {}),
+            focus=focus,  # type: ignore[arg-type]
+        )
+        if hc:
+            lines.append(hc)
     except Exception:
         pass
 
@@ -1493,14 +1641,58 @@ def _build_draft_prompt_zones(
                     "[VERIFY: percent time] — never invent 10%/35%/25% grids or reuse "
                     "static tables from other proposals.\n\n"
                 )
-            if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
+            # Delivery roles come from Phase 2 LLM stamps (meaning), not title synonyms.
+            try:
+                from app.services.proposal_delivery_package import (
+                    DeliveryRole,
+                    roles_from_execution_plan,
+                )
+
+                _roles = roles_from_execution_plan(
+                    state.get("execution_plan")
+                    if isinstance(state.get("execution_plan"), dict)
+                    else {},
+                    section_id=str(payload.get("sectionId") or ""),
+                    section_title=str(payload.get("title") or ""),
+                )
+                _has_substance = DeliveryRole.SUBSTANCE in _roles
+                _has_calendar = DeliveryRole.CALENDAR in _roles
+                _has_price = DeliveryRole.PRICE in _roles
+            except Exception:
+                _has_substance = False
+                _has_calendar = False
+                _has_price = False
+
+            if _has_price:
+                zone_c += (
+                    f"DELIVERY PRICE ROLE on {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Transparency / model / allocation only. "
+                    "Do not invent agency fee line-item tables (Phase 3.5 owns dollars). "
+                    "Map future fee lines to DELIVERY PACKAGE workstream names — "
+                    "no parallel phase taxonomy.\n\n"
+                )
+            elif any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
+                # Legacy fallback only when Phase 2 did not stamp deliveryRoles.
                 zone_c += (
                     f"BUDGET NARRATIVE REQUIRED for {payload.get('sectionId')}: "
                     "Write transparency, pass-through media buys, compensation model, and "
                     "allocation rationale using RFP spend figures from requirements/plan. "
                     "Do not invent agency fee line-item tables. Do not return empty content.\n\n"
                 )
-            if any(
+
+            if _has_calendar:
+                zone_c += (
+                    f"DELIVERY CALENDAR ROLE on {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Dates / milestones / owners with Timing "
+                    "filled (week-from-award or calendar date from RFP). Bind names to the "
+                    "DELIVERY PACKAGE. Frame as PROPOSED schedule subject to buyer "
+                    "approval when the SOW leaves the schedule TBD after selection — "
+                    "never claim it 'binds' workstreams. Prefer fixed funding/"
+                    "performance end dates from THIS RFP (back-calculate); do not invent "
+                    "Month-N from undetermined award start past a hard funding/"
+                    "performance end. Do not restate full methodology prose.\n\n"
+                )
+            elif any(
                 k in title_lower
                 for k in (
                     "schedule",
@@ -1516,6 +1708,16 @@ def _build_draft_prompt_zones(
                     "Fit entirely inside the RFP award→launch / contract window from RFP "
                     "context / Delivery Timeline Plan. Never invent a longer sequential "
                     "plan than the RFP allows. Missing dates → [VERIFY: …], never fabricate.\n\n"
+                )
+
+            if _has_substance and not _has_price:
+                zone_c += (
+                    f"DELIVERY SUBSTANCE SECTION {payload.get('sectionId')} "
+                    f"({payload.get('title')}): Keep the buyer tab title. Write one complete "
+                    "defendable plan (thesis + named workstreams + checkpoints + out-of-scope). "
+                    "Do not ship a partial angle that needs a second draft to complete. "
+                    "Reuse DELIVERY PACKAGE workstream names when present. "
+                    "If this tab also owns calendar, include Timing with the same names.\n\n"
                 )
             if any(
                 k in title_lower
@@ -2137,6 +2339,11 @@ async def run_drafting_graph(
             doc_word_budget,
         )
 
+    # Typed pricing/delivery pack from research (Phase 2 extract) for SOW/Timeline.
+    pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
+        rfp_id
+    )
+
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -2162,6 +2369,8 @@ async def run_drafting_graph(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": ledger_dict if isinstance(ledger_dict, dict) else None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
+        "pricing_instrument": pricing_instrument_dict,
+        "delivery_constraints": delivery_constraints_dict,
         # Seed already-filled RFP tabs so each new draft sees ALREADY COVERED digests.
         "drafted_sections": [
             s.model_dump(by_alias=True)
@@ -2198,6 +2407,36 @@ async def run_drafting_graph(
         len(jit_corpus),
     )
     return drafted, provider, jit_corpus
+
+
+def _load_pricing_delivery_dicts(
+    rfp_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Typed PricingInstrument + DeliveryConstraints from research (Phase 2 extract)."""
+    try:
+        from app.services.proposal_repository import get_research_cache
+
+        research = get_research_cache(rfp_id)
+        if research is None:
+            return None, None
+        inst = (
+            research.pricing_instrument.model_dump(by_alias=True)
+            if research.pricing_instrument is not None
+            else None
+        )
+        delivery = (
+            research.delivery_constraints.model_dump(by_alias=True)
+            if research.delivery_constraints is not None
+            else None
+        )
+        return inst, delivery
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "drafting: pricing/delivery constraints load skipped for %s",
+            rfp_id,
+            exc_info=True,
+        )
+        return None, None
 
 
 async def draft_single_rfp_section_phase3(
@@ -2254,6 +2493,10 @@ async def draft_single_rfp_section_phase3(
         if (s.content or "").strip() and s.id != section.id
     ]
 
+    pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
+        rfp_id
+    )
+
     state: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -2277,6 +2520,8 @@ async def draft_single_rfp_section_phase3(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
+        "pricing_instrument": pricing_instrument_dict,
+        "delivery_constraints": delivery_constraints_dict,
         "drafted_sections": prior,
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }

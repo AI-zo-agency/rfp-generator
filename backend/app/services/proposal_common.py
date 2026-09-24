@@ -31,6 +31,17 @@ def load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
     content = _assess_rfp_content(rfp)
     rfp_context = _build_rfp_context(rfp, content)
     try:
+        from app.services.proposal_bid_scope import bid_scope_prompt_block
+
+        if getattr(rfp, "bid_scope_locked_at", None) and getattr(
+            rfp, "selected_tracks", None
+        ):
+            block = bid_scope_prompt_block(list(rfp.selected_tracks or []))
+            if block:
+                rfp_context = f"{block}\n{rfp_context}"
+    except Exception:
+        pass
+    try:
         from app.services.evidence_trust.rfp_hard_facts import (
             extract_rfp_hard_facts,
             format_hard_facts_block,

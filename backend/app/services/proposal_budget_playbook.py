@@ -264,9 +264,22 @@ def user_asks_budget_summary_reconcile(text: str) -> bool:
     )
 
 
+def _normalize_budget_ask_typos(text: str) -> str:
+    """Fix common misspellings so Stage 3.5 rebuild routing still fires."""
+    raw = text or ""
+    # generate / regenerate (geenrate, genereate, regenerat, …)
+    raw = re.sub(
+        r"(?i)\b(?:re[\s-]?)?g+e+n+e*r+a*t+e?\b",
+        lambda m: "regenerate" if m.group(0).casefold().startswith("re") else "generate",
+        raw,
+    )
+    raw = re.sub(r"(?i)\brebui+ld\b", "rebuild", raw)
+    return raw
+
+
 def user_asks_budget_rebuild(text: str) -> bool:
     """True when the user wants Cost/budget filled or rebuilt from the Pricing Guide."""
-    raw = text or ""
+    raw = _normalize_budget_ask_typos(text or "")
     if not user_message_targets_budget(raw):
         return False
     # Summary-paragraph reconcile must never look like a Stage 3.5 rebuild ask.
@@ -279,12 +292,12 @@ def user_asks_budget_rebuild(text: str) -> bool:
             r"re-?run|rerun|redo|add|paint|write|seed|generate|create|put"
             r")\b.{0,60}\b("
             r"budget|pricing|cost(?:\s+of)?(?:\s+base)?(?:\s+proposal)?|fee\s+table|"
-            r"line\s+items?|cost\s+proposal"
+            r"line\s+items?|cost\s+proposal|compensation"
             r")\b"
             r"|"
             r"\b("
             r"budget|pricing|cost(?:\s+of)?(?:\s+base)?(?:\s+proposal)?|fee\s+table|"
-            r"cost\s+proposal"
+            r"cost\s+proposal|compensation"
             r")\b.{0,60}\b("
             r"fill|complete|reconcile|rebuild|regenerate|finish|fix|update|"
             r"add|paint|write|seed|generate|create"
@@ -391,7 +404,7 @@ def user_asks_section_budget_fill(text: str) -> bool:
 
 def user_asks_global_cost_rebuild(text: str) -> bool:
     """Rebuild the Cost of Base Proposal / fee table (Stage 3.5) — proposal-wide."""
-    raw = text or ""
+    raw = _normalize_budget_ask_typos(text or "")
     if not user_message_targets_budget(raw):
         return False
     # Narrative summary reconcile keeps the existing fee table — never Stage 3.5.
@@ -407,7 +420,8 @@ def user_asks_global_cost_rebuild(text: str) -> bool:
         r"(?i)\b("
         r"cost\s+of\s+(?:the\s+)?base|cost\s+proposal|"
         r"stage\s*3\.?5|pricing\s+agent|rebuild\s+(?:the\s+)?(?:budget|pricing|cost)|"
-        r"regenerate\s+(?:the\s+)?(?:budget|pricing|fee)"
+        r"regenerate\s+(?:the\s+)?(?:budget|pricing|fee)|"
+        r"generate\s+(?:the\s+)?(?:budget|pricing|fee|cost)"
         r")\b",
         raw,
     ):
@@ -1279,8 +1293,8 @@ def refuse_noncompliant_budget_edit(
         return (
             "That edit would introduce dollar amounts that are not in the current "
             f"Cost section or the Stage 3.5 fee ledger ({sample}). "
-            "Ask to rebuild Fee Detail from the ledger, or rebuild Cost from the "
-            "pricing guide — chat will not invent fees."
+            "Say **generate budget** or **rebuild budget from the pricing guide** "
+            "— chat will not invent fees outside Stage 3.5."
         )
     return None
 
@@ -1526,6 +1540,18 @@ async def build_budget_repair_context(
         BUDGET_TOOL_ROUTING,
         budget_playbook_prompt_block(research=research, full_budget_detail=True),
     ]
+    try:
+        from app.services.pricing_delivery_context import (
+            format_pricing_delivery_constraints_block,
+        )
+
+        delivery_block = format_pricing_delivery_constraints_block(
+            research, focus="budget"
+        )
+        if delivery_block.strip():
+            parts.insert(0, delivery_block)
+    except Exception:  # noqa: BLE001
+        pass
     if cost_excerpt.strip():
         parts.append(f"=== RFP BUDGET / COST EXCERPT ===\n{cost_excerpt[:14_000]}")
     if guide_text.strip():

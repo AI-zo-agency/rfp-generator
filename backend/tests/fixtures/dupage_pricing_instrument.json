@@ -1,0 +1,37 @@
+{
+  "kind": "buyer_pricing_form",
+  "bidNumber": "26-088-WIOA",
+  "identityFields": [
+    {"key": "company_name", "label": "COMPANY NAME", "valueSource": "companyfacts"},
+    {"key": "contact_person", "label": "CONTACT PERSON", "valueSource": "companyfacts"},
+    {"key": "contact_email", "label": "CONTACT EMAIL", "valueSource": "companyfacts"}
+  ],
+  "tracks": [
+    {
+      "id": "part-1",
+      "label": "Part 1 — General Marketing",
+      "nteAnnual": 75000,
+      "asksHourly": true,
+      "asksHours": false,
+      "rate": null,
+      "hours": null
+    },
+    {
+      "id": "part-2",
+      "label": "Part 2 — Young Adult Outreach",
+      "nteAnnual": 100000,
+      "asksHourly": true,
+      "asksHours": true,
+      "rate": null,
+      "hours": null
+    }
+  ],
+  "signature": {
+    "printedNameRequired": true,
+    "titleRequired": true,
+    "signatureRequired": true,
+    "dateRequired": true
+  },
+  "confidence": 0.9,
+  "internalNoteRules": ["one_hourly_per_track", "do_not_commingle_ntes"]
+}

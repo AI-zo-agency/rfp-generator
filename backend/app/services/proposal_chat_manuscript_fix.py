@@ -481,7 +481,7 @@ async def _run_full_budget_agent(
     try:
         from app.services.proposal_generator import run_phase3_5_budget
 
-        new_draft, new_research, budget = await run_phase3_5_budget(rfp_id)
+        new_draft, new_research, budget = await run_phase3_5_budget(rfp_id, force=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Full budget agent failed for %s: %s", rfp_id, exc)
         return draft, research, False, f"budget agent failed: {exc}"

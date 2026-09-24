@@ -29,14 +29,15 @@ _SYSTEM = """You judge which Cost / Pricing INSTRUMENT THIS RFP requires vendors
 
 Pick exactly one budgetFormat:
 - personnel_loading — role-by-role / labor-category hourly rate table (often Year-2/Year-3 % increases)
-- blended_rate_form — single hourly + monthly + annual (or official Pricing Proposal Form with those three)
+- blended_rate_form — official Proposal Pricing Form / Quotation form with hourly (and optional monthly/annual), OR Part 1 rate + Part 2 rate×hours
 - service_menu — menu of fixed service packages / à-la-carte line prices
 - phased — phase/deliverable fee schedule or retainer narrative (default ONLY when no form instrument)
 
 Rules:
 - Match THIS RFP's scored Cost Proposal / Pricing form / Quotation form — not marketing habit.
 - If the RFP asks for hourly rates BY ROLE or labor category → personnel_loading.
-- If the RFP asks for one blended hourly/monthly/annual block → blended_rate_form.
+- If the RFP asks for a Proposal Pricing Form, Quotation form, or one blended hourly/monthly/annual block → blended_rate_form.
+- Separate Part 1 / Part 2 budgets priced hourly (even with NTE caps) → blended_rate_form, NOT phased Fee Detail.
 - Mention of "budget" alone is not enough for personnel_loading.
 - Do NOT invent requirements.
 

@@ -79,6 +79,13 @@ export interface GoNoGoAnalysis {
   deadline?: GoNoGoDeadlineInfo | null;
   actionFlags?: string[];
   provider?: string;
+  availableTracks?: string[];
+  capabilityMatrix?: Array<{
+    requirement: string;
+    status?: string;
+    track?: string;
+    isCore?: boolean;
+  }>;
 }
 
 export type RfpPriority = "critical" | "high" | "medium" | "low";
@@ -113,6 +120,8 @@ export interface RfpRecord {
   syncedAt?: string;
   goNoGoAnalysis?: GoNoGoAnalysis | null;
   googleDocUrl?: string;
+  selectedTracks?: string[];
+  bidScopeLockedAt?: string | null;
 }
 
 export interface ActivityItem {

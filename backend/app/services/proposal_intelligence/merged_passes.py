@@ -15,14 +15,15 @@ from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.agents.rfp_understanding import (
-    AGENT as UNDERSTANDING_AGENT,
     UNDERSTANDING_FORBIDDEN_KEYS,
 )
+from app.services.proposal_intelligence.opportunity_extract import load_agent_prompt
 from app.services.proposal_evaluation_coverage import (
     backfill_evaluation_response_limits,
     sanitize_evaluation_criteria_names,
     evaluation_extraction_looks_degenerate,
 )
+from app.services.proposal_delivery_package import methodology_retrieval_query
 from app.services.proposal_intelligence.agents.section_strategy_planner import (
     apply_section_strategy_from_raw,
 )
@@ -51,7 +52,6 @@ from app.services.proposal_intelligence.schemas import (
     EvaluationAnalysis,
     MethodologyPlan,
     OpportunityStrategy,
-    OpportunityUnderstanding,
     ProposalExecutionPlan,
     QaPlan,
     ResourcePlan,
@@ -68,196 +68,9 @@ logger = logging.getLogger(__name__)
 _PLAYBOOK_REASON = "Planned via playbooks intelligence"
 _STANDARDS_REASON = "Planned via standards intelligence"
 
-_OPPORTUNITY_SYSTEM = """You are zö agency's Opportunity Intelligence agent.
-Read the RFP once. Extract structured opportunity intel. Do NOT write proposal prose.
-Do NOT invent methodology, budget tables, or section drafts.
-Never include keys: content, proposalText, executiveSummary, marketingCopy, draft.
-
-Return JSON ONLY:
-{
-  "understanding": {
-    "client": "string",
-    "industry": "string",
-    "orgType": "Municipality|County|State|Nonprofit|Corporate|Other",
-    "projectType": "string",
-    "services": ["string"],
-    "businessGoals": ["string"],
-    "painPoints": ["string"],
-    "desiredOutcomes": ["string"],
-    "complexity": "low|medium|high",
-    "budgetIntel": {
-      "ceiling": "string or null",
-      "pricingModelHint": "string or null",
-      "contractType": "string or null",
-      "notes": "string"
-    },
-    "timelineIntel": {
-      "projectStart": "string or null",
-      "completion": "string or null",
-      "goLive": "string or null",
-      "milestones": ["string"],
-      "notes": "string"
-    },
-    "confidence": 0.0,
-    "memoryFacts": {
-      "clientName": "string",
-      "organizationType": "string"
-    }
-  },
-  "compliance": {
-    "items": [
-      {
-        "id": "comp-1",
-        "requirement": "string",
-        "mandatory": true,
-        "sourceRef": "string",
-        "targetSection": "string",
-        "evidenceNeeded": "string",
-        "status": "open",
-        "owner": "string"
-      }
-    ],
-    "confidence": 0.0
-  },
-  "scope": {
-    "mandatory": ["string"],
-    "optional": ["string"],
-    "futurePhases": ["string"],
-    "outOfScope": ["string"],
-    "dependencies": ["string"],
-    "confidence": 0.0
-  },
-  "evaluation": {
-    "scoredResponseForm": true,
-    "totalPoints": 1000,
-    "responseCharLimit": 4000,
-    "emphasis": ["Methodology", "Experience"],
-    "writingStyle": "executive|technical|mixed",
-    "confidence": 0.0,
-    "criteria": [
-      {
-        "name": "Strategic Planning",
-        "itemCode": "SECTION III",
-        "weight": 160,
-        "priorityRank": 1,
-        "responseCharLimit": 4000,
-        "items": [
-          {"itemCode": "III.1", "ask": "verbatim scored ask", "weight": 40, "responseCharLimit": 4000}
-        ]
-      }
-    ]
-  },
-  "successCriteria": {
-    "items": [{"criterion": "string", "why": "string", "recurringTheme": true}],
-    "confidence": 0.0
-  }
-}
-
-Compliance: include the FULL submission checklist — documents to submit, forms to return,
-vendor qualification narratives, addenda acknowledgement, financial stability, awards,
-references, pricing attachment format.
-Evaluation — THE SCOREBOARD. This drives the proposal outline, so extract it completely:
-- Transcribe the RFP's scoring table / evaluation-criteria response form EXACTLY as published.
-  One "criteria" entry per SCORED PARENT SECTION (the buyer's own heading — "SECTION III
-  Strategic Planning", "Tab 4 — Technical Approach"), carrying that section's TOTAL points.
-- Put the buyer's section label in itemCode ("SECTION III", "Tab 4", "B.2"); leave "" when
-  the RFP does not number its criteria.
-- Every numbered sub-ask under a parent goes in "items" with its own itemCode ("III.1"),
-  its points, and "ask" = the RFP's OWN wording of what to describe (verbatim, not a
-  paraphrase). These are what the writer must answer one by one — losing them loses points.
-- Set scoredResponseForm true when the RFP publishes a criteria response form whose sections
-  ARE the required proposal sections. Set totalPoints to the stated maximum.
-- responseCharLimit: the per-response field cap the RFP states ("each form field allows a
-  maximum of 4,000 characters"). Put it at the level the RFP states it — package-wide,
-  per criterion, or per item. Omit when the RFP states no character cap.
-- List EVERY scored section, including pricing/economy sections. Never merge two scored
-  sections into one entry and never drop a section because it looks administrative.
-- weight: use stated points when given, else the stated percentage. Never invent weights.
-Success: mark recurringTheme true for themes that should echo across the proposal.
-Scope: separate mandatory vs optional vs out-of-scope. No proposal prose.
-"""
-
-_STRATEGY_DELIVERY_SYSTEM = """You are zö agency's Strategy + Delivery Intelligence agent.
-Decide how to win AND how work is delivered. Do NOT write proposal sections.
-
-Return JSON ONLY:
-{
-  "strategy": {
-    "winningTheme": "string",
-    "coreMessage": "string",
-    "differentiators": ["string"],
-    "trustBuilders": ["string"],
-    "riskMitigation": ["string"],
-    "proofStrategy": "string",
-    "tone": "string",
-    "keyMessages": ["string"],
-    "primaryEvaluatorConcerns": ["string"],
-    "competitivePosition": "string",
-    "whyUs": "string",
-    "executiveNarrative": "string — strategic arc only, not full exec summary prose",
-    "confidence": 0.0
-  },
-  "deliveryPattern": {
-    "patternsObserved": ["string"],
-    "sourceWonProposals": ["filename or id"],
-    "staffingShape": "string",
-    "phaseShape": "string",
-    "confidence": 0.0
-  },
-  "deliveryModel": {
-    "type": "Agile|Waterfall|Hybrid",
-    "governance": "string",
-    "cadence": "string",
-    "clientEngagement": "string",
-    "reviewModel": "string",
-    "decisionMaking": "string",
-    "confidence": 0.0
-  },
-  "methodology": {
-    "phases": [{"name": "Discovery", "activities": ["string"], "governance": "string"}],
-    "confidence": 0.0
-  },
-  "budget": {
-    "pricingStrategy": "string",
-    "pricingModel": "Fixed Fee|T&M|Hybrid|Other",
-    "pricingTier": "string",
-    "contractType": "string",
-    "ceiling": "string",
-    "constraints": ["string"],
-    "costWeight": 20,
-    "pricingValidation": "string",
-    "roleEffort": [{"role": "string", "hours": 10, "notes": "string"}],
-    "confidence": 0.0
-  },
-  "risk": {
-    "risks": [{"risk": "", "likelihood": "", "impact": "", "mitigation": ""}],
-    "confidence": 0.0
-  },
-  "qa": {
-    "approach": "string",
-    "gates": ["string"],
-    "confidence": 0.0
-  },
-  "communication": {
-    "cadence": "string",
-    "channels": ["string"],
-    "reportingPlan": "string",
-    "confidence": 0.0
-  },
-  "training": {
-    "trainingPlan": "string",
-    "transitionPlan": "string",
-    "confidence": 0.0
-  }
-}
-
-Rules:
-- deliveryModel = HOW work happens (Agile/cadence). Do not list Discovery/UX phases there.
-- methodology = WHAT work happens (phases). Typical: Discovery, UX, Design, Development, QA, Training, Launch.
-- pricingStrategy ≠ pricingModel. Never invent exact dollar awards.
-- deliveryPattern comes from won-proposal excerpts (patterns only — never copy marketing prose).
-- No proposal prose.
-"""
+# Baked prompts from approved demo Agent 1 / Agent 2.
+_OPPORTUNITY_SYSTEM = load_agent_prompt("agent1")
+_STRATEGY_DELIVERY_SYSTEM = load_agent_prompt("agent2")
 
 _EXECUTION_SYSTEM = """You are zö agency's Execution Planner.
 Decompose delivery into work packages, timeline, and role allocations.
@@ -371,97 +184,58 @@ async def run_opportunity_extract(
     rfp_context: str,
     rfp_meta: dict[str, str],
 ) -> ProposalExecutionPlan:
-    """One call: understanding + compliance + scope + evaluation + success."""
+    """LangExtract + tools + validators → opportunity JSON (approved Agent 1)."""
+    from app.services.proposal_intelligence.opportunity_extract import (
+        rfp_doc_from_plan_context,
+    )
+    from app.services.proposal_intelligence.opportunity_extract.agent1_tools import (
+        apply_opportunity_to_plan,
+        extract_opportunity_with_tools,
+    )
+
+    rfp_id = str(
+        getattr(getattr(plan, "metadata", None), "rfp_id", None)
+        or rfp_meta.get("rfpId")
+        or rfp_meta.get("rfp_id")
+        or ""
+    ).strip()
     try:
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": _OPPORTUNITY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Title: {rfp_meta.get('title', '')}\n"
-                        f"Client: {rfp_meta.get('client', '')}\n"
-                        f"Sector: {rfp_meta.get('sector', '')}\n"
-                        f"Location: {rfp_meta.get('location') or 'N/A'}\n\n"
-                        f"Full RFP text:\n{rfp_context[:100000]}"
-                    ),
-                },
-            ],
-            # Understanding + compliance + scope + evaluation + success in one
-            # response. The evaluation block alone can now run to 25+ verbatim
-            # scored asks, so the old 8192 truncated the JSON mid-array.
-            max_tokens=16384,
-            temperature=0.1,
+        doc = rfp_doc_from_plan_context(rfp_id=rfp_id, rfp_context=rfp_context or "")
+    except ValueError as exc:
+        raise IntelligenceError(f"Opportunity extract failed: {exc}") from exc
+
+    logger.info(
+        "Opportunity extract tool-path start rfp_id=%s pages=%s context_chars=%s",
+        rfp_id or "(none)",
+        doc.page_count,
+        len(rfp_context or ""),
+    )
+    try:
+        opportunity, tool_trace, _provenance = await extract_opportunity_with_tools(
+            doc=doc,
+            system_prompt=_OPPORTUNITY_SYSTEM,
+            rfp_meta=rfp_meta,
             node_name="opportunity_extract",
         )
+    except IntelligenceError:
+        raise
     except LlmError as exc:
         raise IntelligenceError(f"Opportunity extract failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
         raise IntelligenceError(f"Opportunity extract failed: {exc}") from exc
 
-    if not isinstance(raw, dict) or not raw:
+    if not isinstance(opportunity, dict) or not opportunity:
         raise IntelligenceError("Opportunity extract returned empty JSON")
 
-    understanding_raw = _as_dict(raw, "understanding") or {
-        k: v for k, v in raw.items() if k not in {
-            "compliance", "scope", "evaluation", "successCriteria", "success_criteria"
-        }
-    }
-    for key in UNDERSTANDING_FORBIDDEN_KEYS:
-        understanding_raw.pop(key, None)
-    memory_facts = (
-        understanding_raw.pop("memoryFacts", None)
-        or understanding_raw.pop("memory_facts", None)
-        or {}
+    logger.info(
+        "Opportunity extract tool-path done rfp_id=%s trace=%s",
+        rfp_id or "(none)",
+        (tool_trace or [])[:6],
     )
-    try:
-        understanding = OpportunityUnderstanding.model_validate(understanding_raw)
-    except Exception as exc:
-        logger.warning("OpportunityUnderstanding validation failed: %s", exc)
-        understanding = OpportunityUnderstanding(
-            client=str(rfp_meta.get("client") or ""),
-            industry=str(rfp_meta.get("sector") or ""),
-            projectType="unknown",
-            confidence=0.3,
-        )
-    understanding.confidence = clamp_confidence(understanding.confidence)
-    if not understanding.client:
-        understanding.client = str(rfp_meta.get("client") or "")
-    if not understanding.client or not understanding.project_type:
-        raise IntelligenceError(
-            "Opportunity extract missing required client or projectType"
-        )
+    plan = await apply_opportunity_to_plan(plan=plan, raw=opportunity)
 
-    plan.opportunity.understanding = understanding
-    plan = set_provider(plan, provider)
-    facts = {
-        "clientName": understanding.client,
-        "organizationType": understanding.org_type,
-        "projectType": understanding.project_type,
-        "industry": understanding.industry,
-    }
-    if isinstance(memory_facts, dict):
-        for key, value in memory_facts.items():
-            if value:
-                facts[str(key)] = str(value)
-    plan = merge_memory(plan, UNDERSTANDING_AGENT, facts)
-    plan = append_decision(
-        plan,
-        agent="opportunity_extract",
-        decision_text=f"Normalized opportunity for {understanding.client}",
-        reason=f"projectType={understanding.project_type}; complexity={understanding.complexity}",
-        confidence=understanding.confidence,
-    )
-
-    plan = _apply_opportunity_slices(plan, raw, provider)
-
-    # This one call carries understanding + compliance + scope + evaluation +
-    # success. When it runs long the evaluation block is what degrades, and it
-    # degrades silently: a 1,000-point seven-section criteria form came back as
-    # a single criterion named "Evaluation Criteria Response Form" with no
-    # points, so every downstream guarantee correctly found nothing to protect
-    # and the scored sections vanished. Re-extract with the focused agent —
-    # one extra call, and only on a detected collapse.
+    # Same post-pass safety net as the old one-shot path: silent eval collapse
+    # → focused re-extract, then character-limit / name sanitizers.
     if evaluation_extraction_looks_degenerate(plan.opportunity.evaluation, rfp_context):
         logger.warning(
             "Evaluation extraction looks degenerate for %s (criteria=%d) — "
@@ -482,12 +256,8 @@ async def run_opportunity_extract(
                 len(plan.opportunity.evaluation.criteria),
             )
         except Exception as exc:  # noqa: BLE001
-            # A failed retry must not sink the whole opportunity pass — the
-            # degraded evaluation is still better than no plan at all.
             logger.warning("Evaluation re-extraction failed: %s", exc)
 
-    # The extractor reads the whole RFP but reports one blob; a per-field
-    # character cap stated in the submission instructions is routinely dropped.
     backfill_evaluation_response_limits(plan.opportunity.evaluation, rfp_context)
     sanitize_evaluation_criteria_names(plan.opportunity.evaluation)
     return plan
@@ -566,7 +336,12 @@ async def run_strategy_delivery(
         ),
         retrieve_intelligence(
             "methodology",
-            query=f"{u.project_type} website methodology delivery phases",
+            query=methodology_retrieval_query(
+                project_type=u.project_type,
+                industry=u.industry,
+                org_type=u.org_type,
+                sector=str(rfp_meta.get("sector") or ""),
+            ),
             limit=5,
         ),
         retrieve_intelligence(
@@ -804,6 +579,7 @@ async def run_writing_briefs(
     from app.services.proposal_intelligence.agents.section_strategy_planner import (
         _parse_page_limit,
     )
+    from app.services.proposal_submission_authority import page_limit_from_constraints
 
     hits = await retrieve_intelligence("won_patterns", query=_query_for_plan(plan), limit=5)
     excerpts = [
@@ -813,7 +589,7 @@ async def run_writing_briefs(
     source_names = [
         str(h.get("source") or "").strip() for h in hits if str(h.get("source") or "").strip()
     ]
-    page_limit = _parse_page_limit(rfp_meta)
+    page_limit = page_limit_from_constraints(plan) or _parse_page_limit(rfp_meta)
     page_limit_line = (
         f"Proposal page limit from RFP: {page_limit} pages "
         f"(~{page_limit * 350} narrative words total including static Sections 1–3). "

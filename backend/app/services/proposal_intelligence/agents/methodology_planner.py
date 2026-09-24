@@ -13,17 +13,21 @@ from app.services.proposal_intelligence.schemas import MethodologyPlan, Proposal
 logger = logging.getLogger(__name__)
 AGENT = "methodology_planner"
 
-_SYSTEM = """You are the Methodology Planner. Design delivery PHASES (what work happens).
+_SYSTEM = """You are the Methodology Planner. Design delivery WORKSTREAMS / PHASES (what work happens).
 Do not redefine deliveryModel (Agile/cadence) — that already exists.
 Return JSON only:
 {
   "phases": [
-    {"name": "Discovery", "activities": ["string"], "governance": "string"}
+    {"name": "Workstream or phase name from THIS RFP", "activities": ["string"], "governance": "string"}
   ],
   "confidence": 0.0
 }
-Typical phases may include Discovery, UX, Design, Development, QA, Training, Launch.
-No proposal prose.
+Rules:
+- Name phases for THIS RFP's actual work (sponsorship, social, festival ops, brand,
+  paid media, website build, etc.) — never default to website UX/Dev phases unless
+  the scope is clearly a site redesign/build.
+- Prefer 4–6 substantive workstreams the Budget and Timeline can reuse verbatim.
+- No proposal prose.
 """
 
 
@@ -32,10 +36,18 @@ async def run_methodology_planner(
     plan: ProposalExecutionPlan,
     rfp_meta: dict[str, str] | None = None,
 ) -> ProposalExecutionPlan:
+    from app.services.proposal_delivery_package import methodology_retrieval_query
+
     u = plan.opportunity.understanding
+    meta = rfp_meta or {}
     hits = await retrieve_intelligence(
         "methodology",
-        query=f"{u.project_type} website methodology delivery phases",
+        query=methodology_retrieval_query(
+            project_type=u.project_type,
+            industry=u.industry,
+            org_type=u.org_type,
+            sector=str(meta.get("sector") or ""),
+        ),
         limit=5,
     )
     raw, provider = await safe_chat_json(

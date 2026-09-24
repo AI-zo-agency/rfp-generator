@@ -113,6 +113,8 @@ def init_db() -> None:
             """
         )
         _ensure_column(conn, "rfps", "go_no_go_analysis", "TEXT")
+        _ensure_column(conn, "rfps", "selected_tracks", "TEXT")
+        _ensure_column(conn, "rfps", "bid_scope_locked_at", "TEXT")
 
 
 def _ensure_column(
@@ -138,9 +140,30 @@ def _parse_analysis_json(raw: str | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _parse_selected_tracks_sqlite(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        label = str(item or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
+
+
 def _row_to_rfp(row: sqlite3.Row) -> RfpRecord:
     rfp_id = row["id"]
     pdf_path = row["pdf_path"]
+    keys = row.keys()
     return RfpRecord(
         id=rfp_id,
         externalId=row["external_id"],
@@ -169,7 +192,13 @@ def _row_to_rfp(row: sqlite3.Row) -> RfpRecord:
         justwinDetailUrl=row["justwin_detail_url"],
         syncedAt=row["synced_at"],
         goNoGoAnalysis=_parse_analysis_json(
-            row["go_no_go_analysis"] if "go_no_go_analysis" in row.keys() else None
+            row["go_no_go_analysis"] if "go_no_go_analysis" in keys else None
+        ),
+        selectedTracks=_parse_selected_tracks_sqlite(
+            row["selected_tracks"] if "selected_tracks" in keys else None
+        ),
+        bidScopeLockedAt=(
+            row["bid_scope_locked_at"] if "bid_scope_locked_at" in keys else None
         ),
         pdfUrl=None,
     )
@@ -558,6 +587,47 @@ def clear_go_no_go_analysis(rfp_id: str) -> RfpRecord | None:
         if cursor.rowcount == 0:
             return None
 
+    return get_rfp(rfp_id)
+
+
+def save_rfp_bid_scope(
+    rfp_id: str,
+    selected_tracks: list[str],
+    *,
+    locked_at: str | None,
+) -> RfpRecord | None:
+    if _use_supabase():
+        return sb.save_rfp_bid_scope(rfp_id, selected_tracks, locked_at=locked_at)
+
+    now = datetime.now(timezone.utc).isoformat()
+    note = (
+        f"Bid scope locked: {', '.join(selected_tracks)}"
+        if locked_at
+        else "Bid scope cleared"
+    )
+    with _connect() as conn:
+        _ensure_column(conn, "rfps", "selected_tracks", "TEXT")
+        _ensure_column(conn, "rfps", "bid_scope_locked_at", "TEXT")
+        cursor = conn.execute(
+            """
+            UPDATE rfps
+            SET selected_tracks = ?,
+                bid_scope_locked_at = ?,
+                last_activity = ?,
+                last_activity_note = ?
+            WHERE id = ? OR external_id = ?
+            """,
+            (
+                json.dumps(list(selected_tracks)),
+                locked_at,
+                now,
+                note,
+                rfp_id,
+                rfp_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
     return get_rfp(rfp_id)
 
 

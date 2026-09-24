@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from celery import Celery
 
@@ -22,20 +23,27 @@ celery_app = Celery(
     broker=settings.redis_url or "redis://localhost:6379/0",
     backend=settings.redis_url or "redis://localhost:6379/0",
 )
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="UTC",
-    enable_utc=True,
-    task_track_started=True,
+
+_conf: dict = {
+    "task_serializer": "json",
+    "accept_content": ["json"],
+    "result_serializer": "json",
+    "timezone": "UTC",
+    "enable_utc": True,
+    "task_track_started": True,
     # Hard kill + graceful warning. Replaces the ad-hoc 60min asyncio.wait_for
     # that used to wrap only the fulfill-scan endpoint (proposals.py) — this
     # now applies uniformly to every phase dispatched through Celery.
-    task_time_limit=3600,
-    task_soft_time_limit=3540,
-    worker_prefetch_multiplier=1,
-)
+    "task_time_limit": 3600,
+    "task_soft_time_limit": 3540,
+    "worker_prefetch_multiplier": 1,
+}
+# Prefork + billiard on macOS/Python 3.14 leaves `_localized` empty in child
+# workers → ValueError: not enough values to unpack (expected 3, got 0) on
+# every task. Solo pool is single-process and reliable for local generate.
+if sys.platform == "darwin":
+    _conf["worker_pool"] = "solo"
+celery_app.conf.update(**_conf)
 
 
 # Phase string -> (module path, function name) for the proposal pipeline.

@@ -2056,6 +2056,19 @@ def _salvage_manuscript_locks_payload(text: str) -> dict[str, Any] | None:
 
 def _salvage_classification_payload(text: str) -> dict[str, Any] | None:
     """Recover ProposalContext-style fields when classification JSON truncates."""
+    # Opportunity / strategy payloads also mention "industry" — never hijack them.
+    if any(
+        marker in text
+        for marker in (
+            '"understanding"',
+            '"compliance"',
+            '"successCriteria"',
+            '"deliveryPattern"',
+            '"winningTheme"',
+            '"scope"',
+        )
+    ):
+        return None
     if '"industry"' not in text and '"servicesRequested"' not in text:
         return None
     payload: dict[str, Any] = {}
@@ -2632,19 +2645,25 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
         raise LlmError(f"LLM returned invalid JSON: {raw[:200]}")
 
     parsed = _unwrap_nested_json(parsed)
+    # Only replace a successful parse when salvage recovers the *missing*
+    # top-level shape (sections / lineItems). Never clobber rich agent
+    # payloads (e.g. strategy_delivery) that happen to mention budgetFormat.
     if "sections" not in parsed and "lineItems" not in parsed:
         for salvager, label in (
             (_salvage_sections_payload, "section(s)"),
             (_salvage_budget_payload, "budget field(s)"),
         ):
             salvaged = salvager(text)
-            if salvaged:
-                count = len(salvaged.get("sections") or salvaged.get("lineItems") or [1])
-                logger.warning(
-                    "Salvaged %d %s after unwrap — missing expected keys",
-                    count,
-                    label,
-                )
-                return salvaged
+            if not salvaged:
+                continue
+            if "sections" not in salvaged and "lineItems" not in salvaged:
+                continue
+            count = len(salvaged.get("sections") or salvaged.get("lineItems") or [])
+            logger.warning(
+                "Salvaged %d %s after unwrap — missing expected keys",
+                count,
+                label,
+            )
+            return salvaged
 
     return parsed

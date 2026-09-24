@@ -40,6 +40,17 @@ class BudgetSectionTargetingTests(unittest.TestCase):
         self.assertGreaterEqual(budget_section_score("Fee Schedule"), 6)
         self.assertGreaterEqual(budget_section_score("Budget & Pricing"), 6)
         self.assertGreaterEqual(budget_section_score("Cost of the Base Bid"), 6)
+        self.assertGreaterEqual(
+            budget_section_score("10.0 Compensation and Payment Schedule"), 8
+        )
+        from app.services.proposal_budget_playbook import section_is_budget_related
+
+        self.assertTrue(
+            section_is_budget_related(
+                _sec("c", "10.0 Compensation and Payment Schedule")
+            )
+        )
+        self.assertEqual(budget_section_score("WORKER'S COMPENSATION CERTIFICATE"), 0)
 
     def test_incidental_budgets_list_scores_low_or_zero(self) -> None:
         self.assertLessEqual(

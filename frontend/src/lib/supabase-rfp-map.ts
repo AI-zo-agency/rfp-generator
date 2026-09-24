@@ -72,5 +72,25 @@ export function mapSupabaseRfpRow(row: Record<string, unknown>): RfpRecord {
     syncedAt: typeof row.synced_at === "string" ? row.synced_at : undefined,
     pdfPath,
     goNoGoAnalysis: parseAnalysis(row.go_no_go_analysis),
+    selectedTracks: Array.isArray(row.selected_tracks)
+      ? (row.selected_tracks as unknown[])
+          .map((t) => String(t ?? "").trim())
+          .filter(Boolean)
+      : typeof row.selected_tracks === "string"
+        ? (() => {
+            try {
+              const parsed = JSON.parse(row.selected_tracks) as unknown;
+              return Array.isArray(parsed)
+                ? parsed.map((t) => String(t ?? "").trim()).filter(Boolean)
+                : [];
+            } catch {
+              return [];
+            }
+          })()
+        : [],
+    bidScopeLockedAt:
+      typeof row.bid_scope_locked_at === "string"
+        ? row.bid_scope_locked_at
+        : null,
   };
 }

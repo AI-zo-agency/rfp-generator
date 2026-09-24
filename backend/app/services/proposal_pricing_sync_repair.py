@@ -92,6 +92,7 @@ def rerender_budget_section_from_canon(
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
+    pricing_instrument=None,
 ) -> ProposalDraft:
     """Replace the budget section with the canonical budget rendering."""
     from app.services.proposal_budget_content import (
@@ -102,7 +103,9 @@ def rerender_budget_section_from_canon(
     idx = find_budget_section_index(draft.sections)
     if idx is None:
         return draft
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    content = render_budget_markdown(
+        budget, rfp_text=rfp_text, pricing_instrument=pricing_instrument
+    )
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
@@ -270,8 +273,16 @@ async def run_pricing_sync_repair_or_handoff(
         # "Consultant Fees $240k" in qualifying_language otherwise survives.
         from app.services.proposal_budget_content import prepare_budget_for_client_display
 
-        budget = prepare_budget_for_client_display(budget)
-        draft = rerender_budget_section_from_canon(draft, budget, rfp_text=rfp_text)
+        budget = prepare_budget_for_client_display(
+            budget,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
+        draft = rerender_budget_section_from_canon(
+            draft,
+            budget,
+            rfp_text=rfp_text,
+            pricing_instrument=research.pricing_instrument if research else None,
+        )
         draft, reconciled_count = reconcile_draft_budget_summaries(draft, budget)
         from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
 

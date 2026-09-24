@@ -12,9 +12,21 @@ logger = logging.getLogger(__name__)
 AGENT = "timeline_planner"
 
 _SYSTEM = """Timeline Planner. Sequence phases and milestones using project constraints.
+
+Rules (any RFP — judge by meaning from timelineIntel + methodology, not keyword lists):
+- If the SOW says the schedule is TBD / determined after selection / contractor proposes
+  for buyer approval: offsets are PROPOSED only — never write as settled or binding.
+- Prefer FIXED calendar / funding / performance end dates stated in THIS RFP over
+  counting forward "Month N" from an undetermined award start. Back-calculate from
+  that end when start is TBD.
+- If only a multi-year term is stated with a known start, use that horizon honestly.
+- When award start is TBD and a hard end date exists, put the end date in goLive /
+  milestone offsets (or "by <date>") — do not invent a rigid Month-N grid past the
+  funding or performance end.
+
 Return JSON only:
 {
-  "milestones": [{"name": "string", "offset": "Week 2", "dependsOn": ["string"]}],
+  "milestones": [{"name": "string", "offset": "Week 2 | by <RFP end date> | proposed Month 6", "dependsOn": ["string"]}],
   "goLive": "string",
   "reviewCycles": "string",
   "confidence": 0.0

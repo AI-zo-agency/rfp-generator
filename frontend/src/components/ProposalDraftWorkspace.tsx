@@ -78,6 +78,10 @@ import {
 import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
+import {
+  availableTracksFromAnalysis,
+  bidScopeIsReady,
+} from "@/lib/bid-scope";
 import { ProposalSectionTree, reorderSectionsById } from "./ProposalSectionTree";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
 import { ManuscriptSelectionBubble } from "./ManuscriptSelectionBubble";
@@ -1252,7 +1256,19 @@ function ProposalDraftWorkspaceInner({
           setPresubmitReview(null);
         }
         // Keep Key Personas badge honest with the server (Clear / Reset / other tab).
+        // Also adopt newer manuscript prose so a background re-paint is not
+        // immediately overwritten by this tab's stale autosave.
         if (snap.draft) {
+          const serverAt = Date.parse(snap.draft.updatedAt || "");
+          const localAt = Date.parse(outlineRef.current.updatedAt || "");
+          if (
+            Number.isFinite(serverAt) &&
+            Number.isFinite(localAt) &&
+            serverAt > localAt
+          ) {
+            applyOutlineFromServer(snap.draft);
+            return;
+          }
           const serverIds = snap.draft.selectedKeyPersonas ?? [];
           setOutline((prev) => {
             const localIds = prev.selectedKeyPersonas ?? [];
@@ -1269,7 +1285,7 @@ function ProposalDraftWorkspaceInner({
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [rfp.id, hydrated]);
+  }, [rfp.id, hydrated, applyOutlineFromServer]);
 
   const manualFillFlags = useMemo(
     () =>
@@ -2944,6 +2960,13 @@ function ProposalDraftWorkspaceInner({
     startAfterSections1to3?: boolean;
     startFromCaseStudies?: boolean;
   }) => {
+    const tracks = availableTracksFromAnalysis(rfp.goNoGoAnalysis);
+    if (!bidScopeIsReady(tracks, rfp.bidScopeLockedAt, rfp.selectedTracks)) {
+      window.alert(
+        "Lock bid scope first. This RFP has multiple roles/tracks — choose which to bid on the RFP detail page, then Build.",
+      );
+      return;
+    }
     // A duplicate invocation while one is already in flight (double-click, a
     // second call sharing this same handler) used to silently abort the
     // running request via fullProposalAbortRef below — the run would look
@@ -3843,11 +3866,30 @@ function ProposalDraftWorkspaceInner({
                   <p className="proposal-status-card-title">Build this proposal</p>
                   <p className="proposal-status-card-meta">
                     Start the draft or continue from the last saved checkpoint.
+                    {rfp.bidScopeLockedAt && (rfp.selectedTracks?.length ?? 0) > 0
+                      ? ` Bidding: ${rfp.selectedTracks!.join(", ")}.`
+                      : ""}
                   </p>
                   <button
                     type="button"
                     onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
-                    disabled={anyPipelineRunning}
+                    disabled={
+                      anyPipelineRunning ||
+                      !bidScopeIsReady(
+                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                        rfp.bidScopeLockedAt,
+                        rfp.selectedTracks,
+                      )
+                    }
+                    title={
+                      bidScopeIsReady(
+                        availableTracksFromAnalysis(rfp.goNoGoAnalysis),
+                        rfp.bidScopeLockedAt,
+                        rfp.selectedTracks,
+                      )
+                        ? undefined
+                        : "Lock bid scope on the RFP detail page first"
+                    }
                     className="proposal-status-build"
                   >
                     {primaryPipelineLabel}

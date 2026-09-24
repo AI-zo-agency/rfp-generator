@@ -701,8 +701,13 @@ Hard rules:
 - «MFILL_N» tokens already in the manuscript are PROTECTED — copy unchanged.
 - When the RFP requires all-in fees: DELETE "### Reimbursable Expenses" that says
   expenses will be billed at cost.
-- Align billing narrative with flat phase fees (not hours×rate invoicing).
-- One Fee Detail table only. Keep Investment Framing / Scope Protection / Revision
+- Align billing narrative with the manuscript instrument: when "## Fee Detail by
+  Phase" / Proposed Investment fixed fees are present, use flat phase fees (not
+  open hours×rate invoicing). When only an Hourly Rate Schedule / Schedule of
+  Billing Rates is present (personnel_loading / Letter Proposal T&M), keep
+  monthly hourly invoicing against each Letter Proposal NTE — do NOT invent
+  flat phase fees or a Fee Detail section.
+- One Fee Detail table only when that instrument applies. Keep Investment Framing / Scope Protection / Revision
   Rounds once (no duplicated Terms).
 - Return the FULL revised markdown (not a diff).
 
@@ -841,16 +846,53 @@ async def ensure_rfp_cost_demands_in_budget_markdown(
     budget: ProposalBudget | None = None,
     demands: list[RfpCostDemand] | None = None,
     rewrite: bool = False,
+    pricing_instrument: Any | None = None,
 ) -> tuple[str, list[RfpCostDemand], list[str]]:
     """Extract (unless provided) → audit → grounded fills → optional LLM → stubs.
 
     Runs for every RFP: demand list is LLM-extracted from THAT RFP's cost asks.
     Always restores Fee Detail by Phase from the ledger when present.
+
+    No-op when Cost is already a deterministic Buyer Pricing Form — Fee Detail /
+    cost-demand rewrites must not paint over the official instrument.
     """
+    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
+
+    body = content or ""
+    if is_buyer_pricing_form_instrument(instrument=pricing_instrument) or re.search(
+        r"(?im)^##\s+Buyer Pricing Form\s*$", body
+    ):
+        logger.info("rfp_cost_demands skipped — buyer_pricing_form manuscript")
+        return body, [], ["skipped buyer_pricing_form"]
+
+    # Schedule-only personnel Cost File — flat-phase / Fee Detail rewrite contradicts
+    # Draft Agreement time-and-expense + Letter Proposal NTE language.
+    if budget is not None and (budget.budget_format or "").casefold() == "personnel_loading":
+        from app.services.proposal_budget_validation import infer_line_item_type
+
+        has_fixed = False
+        for item in budget.line_items or []:
+            unit = (item.unit or "").casefold()
+            if unit in {"hour", "hours", "hr", "hrs"}:
+                continue
+            if infer_line_item_type(item) in {"direct_expense", "client_passthrough"}:
+                continue
+            if float(item.extended or 0) > 0 or (
+                float(item.rate or 0) > 0 and float(item.quantity or 0) > 0
+            ):
+                has_fixed = True
+                break
+        if not has_fixed and re.search(
+            r"(?im)^##\s+(?:Cost Proposal\s*[—\-–]?\s*)?Hourly Rate Schedule",
+            body,
+        ):
+            logger.info("rfp_cost_demands skipped — personnel_loading schedule manuscript")
+            return body, [], ["skipped personnel_loading schedule"]
+
     working = list(demands) if demands is not None else await extract_rfp_cost_demands(
         rfp_text=rfp_text, approach_digest=approach_digest
     )
-    text = strip_rfp_cost_demand_stub_sections(content or "")
+    text = strip_rfp_cost_demand_stub_sections(body)
     logs: list[str] = []
     if budget is not None:
         from app.services.proposal_budget_content import (

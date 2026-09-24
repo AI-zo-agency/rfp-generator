@@ -2,10 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
-import { JUSTWIN_SYNC_ENABLED } from "@/lib/justwin-config";
 import { listActiveProposalJobs, type ActiveProposalJob } from "@/lib/proposal-api";
-
-const JUSTWIN_JOB_RFP_ID = "justwin-sync";
 
 const POLL_MS = 2000;
 const POSITION_KEY = "zo-job-widget-position";
@@ -43,34 +40,9 @@ function dismissKey(job: TrackedJob): string {
 // page is where Go/No-Go actually lives; every other job type is a proposal
 // pipeline phase, which does belong in the workspace.
 function jobHref(job: ActiveProposalJob): string {
-  if (job.jobType === "justwin-sync") return "/rfps";
   return job.jobType === "go-no-go"
     ? `/rfps/${encodeURIComponent(job.rfpId)}`
     : `/proposals?rfp=${encodeURIComponent(job.rfpId)}`;
-}
-
-async function fetchActiveJustWinJob(): Promise<ActiveProposalJob | null> {
-  if (!JUSTWIN_SYNC_ENABLED) return null;
-  try {
-    const res = await fetch("/api/justwin/status", { cache: "no-store" });
-    if (!res.ok) return null;
-    const job = (await res.json()) as {
-      id?: string;
-      status?: string;
-      startedAt?: string;
-    };
-    if (job.status !== "running" || !job.id) return null;
-    return {
-      rfpId: JUSTWIN_JOB_RFP_ID,
-      title: "JustWin sync",
-      jobType: "justwin-sync",
-      jobLabel: "Syncing RFPs from JustWin",
-      status: "running",
-      startedAt: job.startedAt || new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
 }
 
 function clampX(x: number): number {
@@ -147,15 +119,13 @@ export function GlobalJobStatusWidget() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const [active, justwin] = await Promise.all([
-        listActiveProposalJobs({ includeGoNoGo: true }),
-        fetchActiveJustWinJob(),
-      ]);
+      // Proposal / Go-No-Go only — JustWin sync status is polled by SyncJustWinModal
+      // when the user opens it, not on this global 2s ticker.
+      const active = await listActiveProposalJobs({ includeGoNoGo: true });
       if (cancelled) return;
-      const combined = justwin ? [...active, justwin] : active;
       startTransition(() => {
         setTracked((prev) => {
-          const activeKeys = new Set(combined.map(jobKey));
+          const activeKeys = new Set(active.map(jobKey));
           const next = new Map(prev);
           // A previously-running job no longer in the active list has finished
           // — keep its last-known data (title/label) instead of dropping it.
@@ -165,7 +135,7 @@ export function GlobalJobStatusWidget() {
             }
           }
           // Fresh data always wins for whatever's running right now.
-          for (const job of combined) {
+          for (const job of active) {
             next.set(jobKey(job), { ...job, state: "running" });
           }
           return next;

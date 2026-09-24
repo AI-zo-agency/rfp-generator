@@ -55,6 +55,8 @@ export async function RfpDetailContent({ id }: RfpDetailContentProps) {
         goNoGo={rfp.goNoGo}
         goNoGoAnalysis={rfp.goNoGoAnalysis}
         lastActivityNote={rfp.lastActivityNote}
+        selectedTracks={rfp.selectedTracks}
+        bidScopeLockedAt={rfp.bidScopeLockedAt}
       />
     </>
   );

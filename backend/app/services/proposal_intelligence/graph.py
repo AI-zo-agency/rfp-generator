@@ -66,6 +66,7 @@ class IntelligenceGraphState(TypedDict, total=False):
     rfp_context: str
     page_limit: int | None
     outline_mode: str
+    selected_tracks: list[str]
     plan: dict[str, Any]
     legacy: dict[str, Any]
     provider: str
@@ -76,12 +77,40 @@ class IntelligenceGraphState(TypedDict, total=False):
 def _load_plan(state: IntelligenceGraphState) -> ProposalExecutionPlan:
     raw = state.get("plan") or {}
     if raw:
-        return ProposalExecutionPlan.model_validate(raw)
-    return ProposalExecutionPlan(rfpId=state.get("rfp_id") or "")
+        plan = ProposalExecutionPlan.model_validate(raw)
+    else:
+        plan = ProposalExecutionPlan(rfpId=state.get("rfp_id") or "")
+    rid = str(state.get("rfp_id") or "").strip()
+    if rid and not (plan.metadata.rfp_id or "").strip():
+        plan.metadata.rfp_id = rid
+    return plan
 
 
 def _dump_plan(plan: ProposalExecutionPlan) -> dict[str, Any]:
     return plan.model_dump(by_alias=True)
+
+
+def _understanding_identity_complete(plan: ProposalExecutionPlan) -> bool:
+    u = plan.opportunity.understanding
+    return bool((u.client or "").strip() and (u.project_type or "").strip())
+
+
+def backfill_understanding_from_rfp_meta(
+    plan: ProposalExecutionPlan,
+    rfp_meta: dict[str, str] | None,
+) -> ProposalExecutionPlan:
+    """Fill blank client/projectType from RFP record fields (never invent scope)."""
+    meta = rfp_meta or {}
+    u = plan.opportunity.understanding
+    if not (u.client or "").strip():
+        meta_client = (meta.get("client") or "").strip()
+        if meta_client:
+            u.client = meta_client
+    if not (u.project_type or "").strip():
+        fill = (meta.get("sector") or meta.get("title") or "").strip()
+        if fill:
+            u.project_type = fill[:160]
+    return plan
 
 
 def _meta(state: IntelligenceGraphState) -> dict[str, str]:
@@ -104,6 +133,7 @@ def _meta(state: IntelligenceGraphState) -> dict[str, str]:
         "client": state.get("rfp_client") or "",
         "sector": state.get("rfp_sector") or "",
         "location": state.get("rfp_location") or "",
+        "rfpId": state.get("rfp_id") or "",
     }
     if page_limit and page_limit > 0:
         meta["pageLimit"] = str(page_limit)
@@ -196,8 +226,19 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
         if state.get("error"):
             return {}
         if name in (state.get("completed_nodes") or []):
-            log_intel_event("node_skip", node=name, reason="checkpoint")
-            return {}
+            # Stale checkpoint: opportunity_extract marked done but identity empty
+            # → Phase 2 validation blocks the whole run. Force a re-extract.
+            if name == "opportunity_extract" and not _understanding_identity_complete(
+                _load_plan(state)
+            ):
+                log_intel_event(
+                    "node_skip_revoked",
+                    node=name,
+                    reason="incomplete_understanding",
+                )
+            else:
+                log_intel_event("node_skip", node=name, reason="checkpoint")
+                return {}
         from app.services.llm_call_context import llm_call_context
 
         log_intel_event("node_enter", node=name, rfp_id=state.get("rfp_id"))
@@ -235,7 +276,7 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
         if "rfp_meta" in accepted:
             call_kwargs["rfp_meta"] = _meta(state)
         if "outline_mode" in accepted:
-            call_kwargs["outline_mode"] = state.get("outline_mode") or "zo_template"
+            call_kwargs["outline_mode"] = state.get("outline_mode") or "strict_rfp"
         succeeded = False
         try:
             with llm_call_context(
@@ -264,7 +305,8 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
             # LangGraph reducer) are correct here: each node's returned dict
             # fully supersedes the prior completed_nodes list with itself appended.
             completed = list(state.get("completed_nodes") or [])
-            completed.append(name)
+            if name not in completed:
+                completed.append(name)
             result["completed_nodes"] = completed
             await _save_intelligence_checkpoint(
                 str(state.get("rfp_id") or ""),
@@ -291,7 +333,9 @@ async def _assemble(state: IntelligenceGraphState) -> dict[str, Any]:
 async def _validate(state: IntelligenceGraphState) -> dict[str, Any]:
     if state.get("error"):
         return {}
-    plan = run_validate_plan(_load_plan(state))
+    plan = _load_plan(state)
+    plan = backfill_understanding_from_rfp_meta(plan, _meta(state))
+    plan = run_validate_plan(plan)
     return {"plan": _dump_plan(plan)}
 
 
@@ -307,7 +351,8 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
     legacy = derive_legacy_fields(
         plan,
         page_limit=page_limit_int,
-        outline_mode=str(state.get("outline_mode") or "zo_template"),
+        outline_mode=str(state.get("outline_mode") or "strict_rfp"),
+        selected_tracks=list(state.get("selected_tracks") or []) or None,
     )
     sections = legacy.get("rfpSections") or []
     log_intel_event(
@@ -384,7 +429,8 @@ async def run_intelligence_graph(
     rfp_location: str | None,
     rfp_context: str,
     page_limit: int | None = None,
-    outline_mode: str = "zo_template",
+    outline_mode: str = "strict_rfp",
+    selected_tracks: list[str] | None = None,
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
     from app.services.llm import LlmError
@@ -410,10 +456,11 @@ async def run_intelligence_graph(
         completed=completed_nodes,
     )
 
-    mode = (outline_mode or "zo_template").strip().lower()
+    mode = (outline_mode or "strict_rfp").strip().lower()
     if mode not in {"zo_template", "strict_rfp"}:
-        mode = "zo_template"
+        mode = "strict_rfp"
 
+    tracks = [t for t in (selected_tracks or []) if (t or "").strip()]
     initial: IntelligenceGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -423,6 +470,7 @@ async def run_intelligence_graph(
         "rfp_context": rfp_context,
         "page_limit": page_limit,
         "outline_mode": mode,
+        "selected_tracks": tracks,
         "plan": checkpoint_plan or ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
         "legacy": {},
         "completed_nodes": completed_nodes,
@@ -434,7 +482,10 @@ async def run_intelligence_graph(
 
     plan = ProposalExecutionPlan.model_validate(final.get("plan") or {})
     legacy = final.get("legacy") or derive_legacy_fields(
-        plan, page_limit=page_limit, outline_mode=mode
+        plan,
+        page_limit=page_limit,
+        outline_mode=mode,
+        selected_tracks=tracks or None,
     )
     log_intel_event(
         "graph_end",

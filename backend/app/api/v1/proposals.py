@@ -497,13 +497,24 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
                 )
             raise HTTPException(status_code=409, detail=detail)
 
+        # Guard: open-tab autosave must not clobber a newer server write
+        # (e.g. scripted Approach re-paint while the editor still holds old prose).
+        ex_t = _parse_draft_updated_at(existing.updated_at)
+        in_t = _parse_draft_updated_at(draft.updated_at)
+        if ex_t and in_t and in_t < ex_t:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Stale draft autosave — server has a newer manuscript. "
+                    "Reload the draft to pick up the latest sections."
+                ),
+            )
+
         # Guard: stale autosave must not drop sections the server just added (chat add-bio).
         existing_ids = {s.id for s in existing.sections}
         incoming_ids = {s.id for s in draft.sections}
         dropped = existing_ids - incoming_ids
         if dropped:
-            ex_t = _parse_draft_updated_at(existing.updated_at)
-            in_t = _parse_draft_updated_at(draft.updated_at)
             if not (ex_t and in_t and in_t > ex_t):
                 raise HTTPException(
                     status_code=409,
@@ -596,6 +607,18 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
         logging.getLogger(__name__).exception(
             "Failed to archive draft before reset for %s", rfp_id
         )
+    await clear_proposal_artifacts_for_rfp(rfp_id)
+    return {
+        "ok": True,
+        "message": (
+            "Proposal draft and all checkpoints cleared from database. "
+            "A filled manuscript was archived first when one existed."
+        ),
+    }
+
+
+async def clear_proposal_artifacts_for_rfp(rfp_id: str) -> None:
+    """Delete draft, research cache, pipeline checkpoint, and generation cancel flag."""
     try:
         await adelete_proposal_draft(rfp_id)
     except Exception:
@@ -608,13 +631,6 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
     from app.services.proposal_generation_cancel import clear_generation_cancel
 
     clear_generation_cancel(rfp_id)
-    return {
-        "ok": True,
-        "message": (
-            "Proposal draft and all checkpoints cleared from database. "
-            "A filled manuscript was archived first when one existed."
-        ),
-    }
 
 
 class OutlineModeRequest(BaseModel):
@@ -869,8 +885,16 @@ async def clear_proposal_stop_flag_endpoint(rfp_id: str) -> dict[str, bool]:
 async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate full proposal: static Sections 1–3 + RFP-mapped sections from evidence."""
     from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_bid_scope import enforce_bid_scope_for_rfp
 
     raise_http_if_monthly_budget_blocked()
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        enforce_bid_scope_for_rfp(rfp)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:
@@ -895,8 +919,16 @@ async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
 async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Same as POST /generate — static Sections 1–3 then RFP-varying sections."""
     from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_bid_scope import enforce_bid_scope_for_rfp
 
     raise_http_if_monthly_budget_blocked()
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        enforce_bid_scope_for_rfp(rfp)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         draft, brand_voice, research = await generate_full_proposal(rfp_id)
     except ProposalError as exc:
