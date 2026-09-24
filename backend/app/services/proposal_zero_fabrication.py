@@ -363,6 +363,35 @@ def apply_zero_fabrication_guards(
         logger.warning("%s fabricated personnel scrub skipped: %s", label, exc)
 
     try:
+        from app.services.pricing_approved_rates import (
+            scrub_unapproved_manuscript_hourly_claims,
+        )
+        from app.services.proposal_budget_content import section_is_budgetish
+
+        fee_sections: list = []
+        fee_changed = False
+        for section in draft.sections or []:
+            if not section_is_budgetish(section):
+                fee_sections.append(section)
+                continue
+            cleaned, fee_logs = scrub_unapproved_manuscript_hourly_claims(
+                section.content or ""
+            )
+            if fee_logs:
+                fee_changed = True
+                for line in fee_logs:
+                    report.logs.append(f"{label}: fee hourly — {line}")
+                fee_sections.append(
+                    section.model_copy(update={"content": cleaned})
+                )
+            else:
+                fee_sections.append(section)
+        if fee_changed:
+            draft = draft.model_copy(update={"sections": fee_sections})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s unapproved fee hourly scrub skipped: %s", label, exc)
+
+    try:
         from app.services.evidence_trust.legal_attestation_gate import (
             apply_legal_attestation_gates,
         )

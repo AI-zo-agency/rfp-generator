@@ -1988,6 +1988,11 @@ def _scrub_internal_budget_jargon(text: str) -> str:
     out = re.sub(r"(?i)\(base year\)", "", out)
     out = re.sub(r"(?i), not agency revenue", "", out)
     out = re.sub(r"(?i)not agency revenue", "not professional fees", out)
+    out = re.sub(
+        r"(?i)\binternal\s+(?:billable(?:\s+rate)?|rate(?:\s+model)?)\b",
+        "agency billable rate",
+        out,
+    )
     out = re.sub(r"\[PRICING FLAG:[^\]]+\]", "", out, flags=re.I)
     out = _drop_internal_cost_mix_lines(out)
     out = re.sub(r"\n{3,}", "\n\n", out)
@@ -3052,6 +3057,52 @@ def ensure_partial_nte_scope_disclosure(budget: ProposalBudget) -> ProposalBudge
     return budget.model_copy(update={"scope_summary": new_scope[:2000]})
 
 
+def primary_instrument_nte(pricing_instrument: PricingInstrument | None) -> float | None:
+    """Largest positive track NTE on the instrument, if any."""
+    if pricing_instrument is None:
+        return None
+    best: float | None = None
+    for track in pricing_instrument.tracks or []:
+        nte = getattr(track, "nte_annual", None)
+        try:
+            nte_f = float(nte) if nte is not None else 0.0
+        except (TypeError, ValueError):
+            continue
+        if nte_f <= 0:
+            continue
+        if best is None or nte_f > best:
+            best = nte_f
+    return best
+
+
+def ensure_instrument_nte_total_block(
+    content: str,
+    pricing_instrument: PricingInstrument | None,
+) -> tuple[str, list[str]]:
+    """Append an explicit Total Not-to-Exceed line from the instrument when missing.
+
+    SOW compensation tabs must show the ceiling even if the Stage 3 model omitted
+    a totals row. Idempotent when a matching NTE / not-to-exceed already appears.
+    """
+    logs: list[str] = []
+    nte = primary_instrument_nte(pricing_instrument)
+    if nte is None:
+        return content or "", logs
+    body = (content or "").rstrip()
+    nte_usd = _usd(nte)
+    # Already states this ceiling (table cell or prose).
+    has_nte_phrase = bool(re.search(r"(?i)not[\s-]?to[\s-]?exceed|\bNTE\b", body))
+    if nte_usd in body and has_nte_phrase:
+        return body, logs
+    block = (
+        "\n\n| | |\n| --- | --- |\n"
+        f"| **Total Not-to-Exceed** | **{nte_usd}** |\n"
+    )
+    logs.append(f"appended instrument NTE total {nte_usd}")
+    logger.info("ensure_instrument_nte_total_block nte=%s", nte_usd)
+    return (body + block).strip(), logs
+
+
 def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     """Return (delivery phase, deliverable label) for the client fee table.
 
@@ -4066,6 +4117,9 @@ async def incorporate_budget_into_draft(
         approach_digest=approach_digest,
         pricing_instrument=pricing_instrument,
     )
+    content, nte_logs = ensure_instrument_nte_total_block(content, pricing_instrument)
+    for line in nte_logs:
+        logger.info("incorporate_budget NTE ensure rfp_id=%s: %s", rfp_id, line)
     # Buyer Pricing Form is deterministic — never Fee Detail / cost-demand rewrite.
     from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
 

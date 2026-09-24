@@ -532,3 +532,57 @@ def scrub_unapproved_form_rates(
     if not updates:
         return budget
     return budget.model_copy(update=updates)
+
+
+_HOURLY_RANGE_RE = re.compile(
+    r"\$\s*\d[\d,]*(?:\.\d+)?\s*[-–—]\s*\$?\s*\d[\d,]*(?:\.\d+)?\s*/\s*h(?:r|our)\b",
+    re.I,
+)
+_HOURLY_SINGLE_RE = re.compile(
+    r"\$\s*(?P<amt>\d[\d,]*(?:\.\d+)?)\s*/\s*h(?:r|our)\b",
+    re.I,
+)
+_MANUAL_HOURLY_FILL = "[MANUAL FILL: SONJA — approved hourly rate required]"
+
+
+def scrub_unapproved_manuscript_hourly_claims(
+    content: str,
+    *,
+    registry: list[ApprovedHourlyRate] | None = None,
+) -> tuple[str, list[str]]:
+    """Replace invented $/hr ranges and unregistered singles with MANUAL FILL.
+
+    Fee narrative must not ship Guide-SKU blends ($150–$250/hr) or lone rates
+    the Labor Cost / approved registry does not authorize.
+    """
+    logs: list[str] = []
+    body = content or ""
+    if not body:
+        return body, logs
+    rates = registry if registry is not None else load_approved_hourly_rates()
+
+    def _range_repl(_m: re.Match[str]) -> str:
+        logs.append("scrubbed unapproved hourly range → MANUAL FILL")
+        return _MANUAL_HOURLY_FILL
+
+    out = _HOURLY_RANGE_RE.sub(_range_repl, body)
+
+    def _single_repl(match: re.Match[str]) -> str:
+        raw = (match.group("amt") or "").replace(",", "")
+        try:
+            amount = float(raw)
+        except ValueError:
+            logs.append("scrubbed unparseable hourly → MANUAL FILL")
+            return _MANUAL_HOURLY_FILL
+        if resolve_approved_hourly(amount, registry=rates) is not None:
+            return match.group(0)
+        logs.append(f"scrubbed unapproved ${amount:g}/hr → MANUAL FILL")
+        return _MANUAL_HOURLY_FILL
+
+    out = _HOURLY_SINGLE_RE.sub(_single_repl, out)
+    if logs:
+        logger.info(
+            "scrub_unapproved_manuscript_hourly_claims count=%s",
+            len(logs),
+        )
+    return out, logs

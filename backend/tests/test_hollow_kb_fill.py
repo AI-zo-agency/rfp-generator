@@ -440,5 +440,40 @@ class InstructionalChecklistRejectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Cover Letter", result)
 
 
+class BudgetishHollowSkipTests(unittest.TestCase):
+    def test_compensation_section_not_inventoried(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-fee",
+            updatedAt="2026-08-21T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="rfp-comp",
+                    title="10.0 Compensation and Payment Schedule",
+                    content=(
+                        "## Compensation\n\n"
+                        "[MANUAL FILL: SONJA — approved hourly rate required]\n"
+                    ),
+                ),
+                ProposalSection(
+                    id="rfp-team",
+                    title="Project Team",
+                    content=(
+                        "## Project Team\n\n"
+                        "**Lead**\n"
+                        "- Role: oversight\n"
+                        "- Qualifications:\n"
+                        "- Relevant projects:\n"
+                    ),
+                ),
+            ],
+        )
+        gaps = inventory_missing_answers(draft)
+        ids = {g.section_id for g in gaps}
+        self.assertNotIn("rfp-comp", ids)
+        self.assertIn("rfp-team", ids)
+        targets = list_sections_needing_answer_fill(draft)
+        self.assertNotIn("rfp-comp", {s.id for s in targets})
+
+
 if __name__ == "__main__":
     unittest.main()

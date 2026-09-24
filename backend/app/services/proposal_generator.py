@@ -3183,7 +3183,21 @@ async def _run_phase3_5_budget_inner(
                 plan = ProposalExecutionPlan.model_validate(raw_plan)
             except Exception:  # noqa: BLE001
                 plan = None
-    gate, gate_detail = phase35_budget_gate(plan)
+    pricing_instrument = None
+    if research is not None:
+        pricing_instrument = getattr(research, "pricing_instrument", None)
+    gate, gate_detail = phase35_budget_gate(plan, pricing_instrument)
+    if gate == "proceed" and gate_detail and "instrument asks hourly" in (gate_detail or ""):
+        logger.info(
+            "Phase 3.5 budget proceed despite ambiguous cost for %s: %s",
+            rfp_id,
+            (gate_detail or "")[:200],
+        )
+        step_trace(
+            "phase3_5_budget_proceed_despite_ambiguous",
+            rfp_id=rfp_id,
+            reason=(gate_detail or "")[:300],
+        )
     if gate in {"skip", "block"} and force:
         logger.info(
             "Phase 3.5 budget force-run for %s (gate was %s: %s)",

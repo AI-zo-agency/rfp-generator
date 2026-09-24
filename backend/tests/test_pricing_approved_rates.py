@@ -382,5 +382,35 @@ class RoleBillableIngestTests(unittest.TestCase):
         self.assertIsNone(again.form_hourly_rate)
 
 
+class ManuscriptHourlyClaimScrubTests(unittest.TestCase):
+    def test_range_and_unapproved_single_become_manual_fill(self) -> None:
+        from app.services.pricing_approved_rates import (
+            scrub_unapproved_manuscript_hourly_claims,
+        )
+
+        registry = [
+            ApprovedHourlyRate(
+                rateId="am",
+                amount=145.0,
+                label="Account Manager",
+                approvedBy="KB",
+                sourceFile="Labor Cost",
+            )
+        ]
+        body = (
+            "Strategy work runs $150-$250/hr. "
+            "Account Manager at $145/hr. "
+            "Blended creative at $175/hr."
+        )
+        out, logs = scrub_unapproved_manuscript_hourly_claims(
+            body, registry=registry
+        )
+        self.assertIn("$145/hr", out)
+        self.assertNotIn("$150-$250/hr", out)
+        self.assertNotIn("$175/hr", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertTrue(logs)
+
+
 if __name__ == "__main__":
     unittest.main()

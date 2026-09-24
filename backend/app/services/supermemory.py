@@ -306,6 +306,35 @@ async def find_document_by_file_name(file_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _document_title_candidates(doc: dict[str, Any]) -> list[str]:
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    values = [
+        doc.get("title"),
+        metadata.get("title"),
+        metadata.get("categoryTitle"),
+        metadata.get("name"),
+    ]
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+async def find_document_by_title(title: str) -> dict[str, Any] | None:
+    """Find a container document whose title / metadata title matches (casefold)."""
+    target = " ".join(title.strip().casefold().split())
+    if not target:
+        return None
+    docs = await list_all_container_documents()
+    for doc in docs:
+        for candidate in _document_title_candidates(doc):
+            if " ".join(candidate.casefold().split()) == target:
+                return doc
+    return None
+
+
 async def list_connections() -> list[dict[str, Any]]:
     body: dict[str, Any] = {
         "provider": "google-drive",

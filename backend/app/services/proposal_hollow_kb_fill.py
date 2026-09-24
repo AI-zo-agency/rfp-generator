@@ -86,6 +86,11 @@ def _skip_section(section: ProposalSection) -> bool:
         return True
     if sid.startswith("section-2-bio-"):
         return True
+    # Fee / compensation tabs are owned by Phase 3.5 — never hollow-fill dollars.
+    from app.services.proposal_budget_content import section_is_budgetish
+
+    if section_is_budgetish(section):
+        return True
     if sid.startswith("section-3-"):
         from app.services.proposal_bio_stub import looks_like_bio_stub_body
         from app.services.proposal_case_study_stub import (

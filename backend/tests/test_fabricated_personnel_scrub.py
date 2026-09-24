@@ -173,3 +173,37 @@ class UnverifiedOrgChartRosterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ella Lindau", body)
         self.assertTrue(any("Jane Invented" in line for line in logs))
 
+
+class RosterRoleRefillTests(unittest.TestCase):
+    def test_creative_director_refills_to_curt(self) -> None:
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="staffing",
+                    title="Staffing",
+                    content="Creative Director: Brittany Frazier leads visual.",
+                )
+            ],
+        )
+        updated, logs = scrub_fabricated_personnel_from_draft(draft)
+        body = updated.sections[0].content or ""
+        self.assertNotIn("Brittany Frazier", body)
+        self.assertIn("Curt Schultz", body)
+        self.assertIn("Creative Director", body)
+        self.assertTrue(any("refilled" in line.casefold() for line in logs))
+
+    def test_paren_form_also_refills(self) -> None:
+        from app.services.evidence_trust.personnel_grounding import (
+            refill_roster_roles_after_fabrication_scrub,
+        )
+
+        body = (
+            "[MANUAL FILL: Sonja — assign verified team member; "
+            "fabricated name removed] (Creative Director)"
+        )
+        out, logs = refill_roster_roles_after_fabrication_scrub(body)
+        self.assertEqual(out, "Curt Schultz (Creative Director)")
+        self.assertTrue(logs)
+

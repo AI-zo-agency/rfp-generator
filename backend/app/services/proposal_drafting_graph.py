@@ -225,7 +225,7 @@ Rules (strict):
 38. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
 39. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%". When cost/price is ≥25% of total points, narrative must not claim Average tier — Low tier is required by the Pricing Guide Decision Guide.
 40. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
-41. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
+41. HOURLY RATES: Never invent individual ZO member $/hr or blended $/hr ranges. Prefer Billable rates from the === LABOR COST (pinned role billable card) === block when present; otherwise labor-category / work rates from 00_Guide_Pricing evidence; else [MANUAL FILL: SONJA — approved hourly rate — {role}]. namedPerson is a staffing note only. Never put Internal Rate / Raw Floor / "internal billable" figures in client-facing copy.
 42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones. NEVER assert past technical deliveries (specific platforms, integrations, audit workflows) that the included case studies / bios / companyfacts do not evidence — use adjacent verified experience or [VERIFY].
 44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
@@ -1153,6 +1153,7 @@ async def _ensure_jit_evidence(
     is_budget_section = (
         gate.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET
         or any(k in section_title.lower() for k in ("budget", "pricing", "fees", "cost"))
+        or ("compensation" in section_title.lower() and "worker" not in section_title.lower())
     )
 
     from app.services.proposal_draft_structure_stubs import is_cover_letter_section_title
@@ -2243,6 +2244,24 @@ def _zo_sections_context(sections: list[ProposalSection], *, max_chars_each: int
     return "\n\n".join(blocks)
 
 
+def resolve_display_client_name(
+    rfp_client: str,
+    plan_dict: dict[str, Any] | None,
+) -> str:
+    """Prefer Opportunity Memory legal clientName over short intake aliases."""
+    display = (rfp_client or "").strip()
+    try:
+        facts = ((plan_dict or {}).get("proposalMemory") or {}).get("facts") or {}
+        memory_client = str(
+            facts.get("clientName") or facts.get("client_name") or ""
+        ).strip()
+        if memory_client and len(memory_client) >= len(display):
+            return memory_client
+    except Exception:  # noqa: BLE001
+        pass
+    return display
+
+
 async def run_drafting_graph(
     *,
     rfp_id: str,
@@ -2344,10 +2363,13 @@ async def run_drafting_graph(
         rfp_id
     )
 
+    # Prefer Opportunity Memory legal client name over short intake aliases.
+    display_client = resolve_display_client_name(rfp_client, plan_dict)
+
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
-        "rfp_client": rfp_client,
+        "rfp_client": display_client or rfp_client,
         "rfp_sector": rfp_sector,
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,

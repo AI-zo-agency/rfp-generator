@@ -62,9 +62,65 @@ _PERSONNEL_MANUAL_FILL = (
     "[MANUAL FILL: Sonja — assign verified team member; fabricated name removed]"
 )
 
+# After scrubbing a fabricated name from a known roster seat, refill from the
+# documented team when the role is unambiguous (principle: one canonical CD).
+_ROLE_ROSTER_REFILL: tuple[tuple[str, str], ...] = (
+    ("creative director", "Curt Schultz"),
+)
+
+_MANUAL_FILL_TAG = (
+    r"\[MANUAL FILL:\s*Sonja\s*[—,]\s*assign verified team member;\s*"
+    r"fabricated name removed\]"
+)
+# "Name (Role)" after scrub → MANUAL FILL (Role)
+_ROLE_REFILL_PAREN_RE = re.compile(
+    _MANUAL_FILL_TAG + r"\s*\((?P<role>[^)]+)\)",
+    re.I,
+)
+# "Creative Director: Name" after scrub → Role: MANUAL FILL
+_ROLE_REFILL_LABEL_RE = re.compile(
+    r"(?P<label>(?P<role>Creative\s+Director)\s*:\s*)" + _MANUAL_FILL_TAG,
+    re.I,
+)
+
 _RETIRED_MANUAL_FILL = (
     "[MANUAL FILL: Sonja — assign current staff; retired team member removed]"
 )
+
+
+def refill_roster_roles_after_fabrication_scrub(content: str) -> tuple[str, list[str]]:
+    """Replace vacated MANUAL FILL seats with documented roster names for known roles."""
+    logs: list[str] = []
+    if not content or "[MANUAL FILL" not in content:
+        return content, logs
+    roster = {n.casefold(): n for n in DOCUMENTED_TEAM_PERSONNEL}
+    role_to_name = {
+        role.casefold(): name
+        for role, name in _ROLE_ROSTER_REFILL
+        if name.casefold() in roster
+    }
+    if not role_to_name:
+        return content, logs
+
+    def _paren_repl(match: re.Match[str]) -> str:
+        role = (match.group("role") or "").strip()
+        name = role_to_name.get(role.casefold())
+        if not name:
+            return match.group(0)
+        logs.append(f"refilled {role} → {name}")
+        return f"{name} ({role})"
+
+    def _label_repl(match: re.Match[str]) -> str:
+        role = (match.group("role") or "").strip()
+        name = role_to_name.get(role.casefold())
+        if not name:
+            return match.group(0)
+        logs.append(f"refilled {role} → {name}")
+        return f"{match.group('label')}{name}"
+
+    updated = _ROLE_REFILL_PAREN_RE.sub(_paren_repl, content)
+    updated = _ROLE_REFILL_LABEL_RE.sub(_label_repl, updated)
+    return updated, logs
 
 
 def _folded(text: str) -> str:
@@ -329,6 +385,12 @@ def scrub_fabricated_personnel_from_draft(
             )
             new_title = replace_listed_names(
                 new_title, KNOWN_FABRICATED_PERSONNEL, "Team Member (assign)"
+            )
+            new_content, refill_logs = refill_roster_roles_after_fabrication_scrub(
+                new_content
+            )
+            logs.extend(
+                f"{title or section.id}: {msg}" for msg in refill_logs
             )
         if retired_hit:
             new_content = replace_listed_names(

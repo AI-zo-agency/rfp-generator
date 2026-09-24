@@ -104,17 +104,50 @@ def instrument_skips_full_narrative_draft(instrument: str | None) -> bool:
     return False
 
 
+def instrument_supports_budget_build(pricing_instrument: Any | None) -> bool:
+    """True when the extract already asks for rates/hours under a positive NTE.
+
+    Principle-based: hourly (or hours) loading plus a track ceiling means Phase
+    3.5 should build a SOW-shaped ledger even if the cost *form* is still labeled
+    ambiguous (TOC vs RESERVED, post-award invoicing language, etc.).
+    """
+    if pricing_instrument is None:
+        return False
+    tracks = getattr(pricing_instrument, "tracks", None)
+    if tracks is None and isinstance(pricing_instrument, dict):
+        tracks = pricing_instrument.get("tracks") or pricing_instrument.get("Tracks")
+    if not isinstance(tracks, list) or not tracks:
+        return False
+    for track in tracks:
+        if isinstance(track, dict):
+            asks_hourly = bool(track.get("asksHourly") or track.get("asks_hourly"))
+            asks_hours = bool(track.get("asksHours") or track.get("asks_hours"))
+            nte = track.get("nteAnnual")
+            if nte is None:
+                nte = track.get("nte_annual")
+        else:
+            asks_hourly = bool(getattr(track, "asks_hourly", False))
+            asks_hours = bool(getattr(track, "asks_hours", False))
+            nte = getattr(track, "nte_annual", None)
+        try:
+            nte_f = float(nte) if nte is not None else 0.0
+        except (TypeError, ValueError):
+            nte_f = 0.0
+        if (asks_hourly or asks_hours) and nte_f > 0:
+            return True
+    return False
+
+
 def phase35_budget_gate(
     plan: ProposalExecutionPlan | None,
+    pricing_instrument: Any | None = None,
 ) -> tuple[Literal["proceed", "skip", "block"], str | None]:
     """Whether Phase 3.5 may generate budget content.
 
     Ambiguous cost/pricing (e.g. TOC lists a cost sheet but operative text is
-    RESERVED, or rates appear only for a staffing matrix) must NOT invent a
-    fee schedule — skip generation and continue the pipeline. Returning
-    ``block`` is reserved for callers that want a hard stop; the generate
-    path treats unresolved pricing ambiguity as skip so Celery does not die
-    on a Sonja clarification item.
+    RESERVED) normally skips so we do not invent a fee form. Exception: when the
+    pricing instrument already extracted hourly/hours asks plus a positive NTE,
+    proceed — the SOW still needs Task IDs × rates and an NTE total.
     """
     if plan is None:
         return "proceed", None
@@ -122,6 +155,11 @@ def phase35_budget_gate(
     if status == "confirmed":
         return "proceed", None
     if status == "ambiguous":
+        if instrument_supports_budget_build(pricing_instrument):
+            return (
+                "proceed",
+                "ambiguous cost form, but instrument asks hourly/hours under NTE — building ledger",
+            )
         detail = "Cost/pricing requirement is ambiguous — skipping budget generation until confirmed."
         for amb in plan.writing.ambiguities:
             if amb.blocks_budget and amb.status != "resolved":

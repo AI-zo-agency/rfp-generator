@@ -42,6 +42,17 @@ PRICING_GUIDE_FILE_NAMES: tuple[str, ...] = (
     "00_Guide_Pricing.pdf",
     "00_Guide_Pricing.md",
 )
+# Role billable card — pin by Supermemory *title* first (UI: Labor Cost).
+LABOR_RATE_CARD_TITLES: tuple[str, ...] = (
+    "Labor Cost",
+    "Labor Costs",
+)
+# Filename fallback when title lookup misses (rename / (1) variants).
+LABOR_RATE_CARD_FILE_NAMES: tuple[str, ...] = (
+    "Agency Role Rates & Cost Table. (1).docx",
+    "Agency Role Rates & Cost Table.docx",
+)
+PINNED_LABOR_CHAR_LIMIT = 40_000
 # When the guide is present but extraction yields essentially nothing usable,
 # fail closed instead of shipping an all-manual budget from a junk rate card.
 _MIN_USABLE_RATE_CARD_RATES = 2
@@ -110,6 +121,9 @@ PHASE 2 — Pick ONE pricing tier (Low / Average / High) for the entire proposal
 
 PHASE 3 — Map every RFP deliverable to a Pricing Guide line item as a PHASE / DELIVERABLE row:
 - CRITICAL: You MUST include every single requirement and deliverable requested in the RFP. If you cannot find a matching Pricing Guide item in the KB for an RFP requirement, DO NOT omit it. You MUST include it as a line item, set `isManualFill=true` or use a `[VERIFY: Missing pricing]` tag, and add a pricing flag. Never silently skip a requirement.
+- Map by meaning to Guide menu ids. Prefer Category 02 messaging / campaign strategy rows over
+  Category 05 website / digital retainers when the RFP asks for campaign strategy & messaging.
+  Do NOT collapse distinct video + print + digital production asks into one SKU.
 - description MUST name the phase + deliverable (e.g. "Phase 1 Discovery — Stakeholder interviews
   covering the RFP communications-plan ask"). NEVER invent "RFP §X Item Y" citations.
   NEVER use bare "Strategy Lead — Name" as the only description.
@@ -209,17 +223,22 @@ ZERO-DOLLAR PROHIBITION (submission disqualifier):
 
 STAFF HOURS (when RFP Section D requires hours and billing rates):
 - Add a "## Staff Hours" table: Labor category / classification | Task/Scope line | Hours | Rate | Extended
-- Use WORK / labor-category hourly rates from 00_Guide_Pricing rate card only.
-- NEVER invent individual ZO team-member hourly rates (Sonja, Curt, Justin, etc. $/hr are NOT in KB).
-- namedPerson may appear as a staffing note only — the rate MUST cite a guide labor category / menu id, not a person.
+- Use WORK / labor-category hourly rates from the === LABOR COST (pinned role billable card) ===
+  block (Billable column only) when present; otherwise 00_Guide_Pricing labor-category rows.
+- NEVER invent individual ZO team-member hourly rates or "blended" $/hr ranges.
+- NEVER use Guide menu SKUs (e.g. 4.1, 5.1 deliverable tiers) as person/role hourly rates.
+- NEVER put Internal Rate / Raw Floor / "internal billable" figures in client-facing copy.
+- namedPerson may appear as a staffing note only — the rate MUST cite a Labor Cost / guide labor category, not a person.
 - If the RFP demands named-person loaded rates and KB has none: leave rate as
   [PRICING FLAG: Sonja approve loaded rate — {role}] or [VERIFY: named person hourly rate — not in KB]
   — do NOT fabricate verifiedRates.hourlyRate for a personName.
 - Commission-model RFPs STILL need this transparency table — commission is total compensation but evaluators require hours
 
 NAMED-PERSON RATES BAN:
-- verifiedRates should be EMPTY unless a source string cites 00_Guide_Pricing labor-category text verbatim.
+- verifiedRates should be EMPTY unless a source string cites LABOR COST / labor-category Billable text verbatim.
 - Do not pull burdened person rates from 07_FIN prior proposals.
+- When Guide 6.1 Traditional Media (85/15) is in the pricing excerpts, use that verified commission —
+  do NOT VERIFY a media buy commission that the Guide already states.
 
 Category 07 — Implementation & Launch
 - 7.1 Pilot Social Media Campaign (Avg: $6,000–$9,000)
@@ -536,6 +555,82 @@ async def _fetch_pinned_pricing_guide() -> tuple[str, list[str]] | None:
     return None
 
 
+async def _fetch_pinned_labor_rate_card() -> tuple[str, list[str]] | None:
+    """Load the Agency Role Rates / Labor Cost card (full text) for billable $/hr.
+
+    Prefer Supermemory document *title* (Labor Cost). Fall back to known
+    filenames so renames still resolve. Result is injected into Stage 3 context
+    as an explicit retrieve chunk — not fuzzy-search-only.
+    """
+    if not supermemory.is_configured():
+        return None
+
+    async def _content_from_doc(document: dict, *, label: str) -> tuple[str, str] | None:
+        custom_id = supermemory.document_fetch_key(document)
+        if not custom_id:
+            logger.warning("labor_rate_card_pin_missing_fetch_key label=%s", label)
+            return None
+        content = await supermemory.get_document_content(custom_id=custom_id)
+        if not (content or "").strip():
+            logger.warning(
+                "labor_rate_card_pin_empty_content label=%s custom_id=%s",
+                label,
+                custom_id,
+            )
+            return None
+        text = content.strip()
+        if len(text) > PINNED_LABOR_CHAR_LIMIT:
+            text = text[:PINNED_LABOR_CHAR_LIMIT]
+        return text, label
+
+    for title in LABOR_RATE_CARD_TITLES:
+        try:
+            document = await supermemory.find_document_by_title(title)
+            if not document:
+                continue
+            loaded = await _content_from_doc(document, label=title)
+            if loaded is None:
+                continue
+            text, label = loaded
+            logger.info(
+                "labor_rate_card_pinned_by_title title=%s chars=%s",
+                label,
+                len(text),
+            )
+            return text, [label]
+        except supermemory.SupermemoryError as exc:
+            logger.warning(
+                "labor_rate_card_title_pin_failed title=%s error=%s",
+                title,
+                exc,
+            )
+
+    for file_name in LABOR_RATE_CARD_FILE_NAMES:
+        try:
+            document = await supermemory.find_document_by_file_name(file_name)
+            if not document:
+                continue
+            loaded = await _content_from_doc(document, label=file_name)
+            if loaded is None:
+                continue
+            text, label = loaded
+            logger.info(
+                "labor_rate_card_pinned_by_filename file_name=%s chars=%s",
+                label,
+                len(text),
+            )
+            return text, [label]
+        except supermemory.SupermemoryError as exc:
+            logger.warning(
+                "labor_rate_card_filename_pin_failed file_name=%s error=%s",
+                file_name,
+                exc,
+            )
+
+    logger.warning("labor_rate_card_pin_miss — no Labor Cost title/filename hit")
+    return None
+
+
 async def _fetch_labor_role_rate_context(
     rfp: RfpRecord,
     *,
@@ -706,8 +801,22 @@ async def _fetch_guide_context(
         if not guide_text.strip():
             guide_text = "(No 00_Guide_Pricing content in KB — ingest pricing guide.)"
 
-    # Always search the whole KB for classification / role billable hours — the
-    # pinned menu guide alone does not satisfy RFP hourly-rate-schedule asks.
+    # Pin Labor Cost / Agency Role Rates card into the retrieve bundle first so
+    # billable $/hr is always present for parse + Stage 3 (not fuzzy-only).
+    pinned_labor = await _fetch_pinned_labor_rate_card()
+    if pinned_labor is not None:
+        labor_pin_text, labor_pin_srcs = pinned_labor
+        guide_text = (
+            f"{guide_text.rstrip()}\n\n"
+            "=== LABOR COST (pinned role billable card) ===\n"
+            f"{labor_pin_text.strip()}"
+        )
+        for src in labor_pin_srcs:
+            if src not in sources:
+                sources.append(src)
+
+    # Supplement with KB search for classification / role billable hours when
+    # the pin is thin or missing alternate role tables.
     labor_text, labor_srcs = await _fetch_labor_role_rate_context(
         rfp, focus_hint=focus_hint or stage_two[:200]
     )

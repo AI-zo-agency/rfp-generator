@@ -34,13 +34,23 @@ class PricingGuidePinFetchTests(unittest.IsolatedAsyncioTestCase):
             "**5.3 Monthly Social Media Management (3 Platforms)**\n\n"
             "| **Average** | $3,200 to $4,800 | x |\n"
         )
+        async def _find_file(name: str):
+            if name == "00_Guide_Pricing.docx":
+                return fake_doc
+            return None
+
         with (
             mock.patch.object(pps.supermemory, "is_configured", return_value=True),
             mock.patch.object(
                 pps.supermemory,
                 "find_document_by_file_name",
-                new=mock.AsyncMock(return_value=fake_doc),
+                new=mock.AsyncMock(side_effect=_find_file),
             ) as find_mock,
+            mock.patch.object(
+                pps.supermemory,
+                "find_document_by_title",
+                new=mock.AsyncMock(return_value=None),
+            ),
             mock.patch.object(
                 pps.supermemory,
                 "document_fetch_key",
@@ -57,6 +67,11 @@ class PricingGuidePinFetchTests(unittest.IsolatedAsyncioTestCase):
                 new=mock.AsyncMock(
                     side_effect=AssertionError("search must not run when pin works")
                 ),
+            ),
+            mock.patch.object(
+                pps,
+                "_fetch_labor_role_rate_context",
+                new=mock.AsyncMock(return_value=("", [])),
             ),
         ):
             text, sources = await pps._fetch_guide_context(_rfp(), "")
