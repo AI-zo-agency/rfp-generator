@@ -124,6 +124,49 @@ class RfpCostDemandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audited[0].satisfaction, "grounded")
         self.assertNotIn("## RFP Cost demand", out)
 
+    def test_grounded_nte_prefers_rfp_cap_on_personnel_loading(self) -> None:
+        budget = _budget(("Labor", "AM hours", 2050)).model_copy(
+            update={
+                "budget_format": "personnel_loading",
+                "rfp_budget_cap": 950_000.0,
+                "agency_revenue_estimate": 2050.0,
+            }
+        )
+        demands = [
+            RfpCostDemand(
+                id="not_to_exceed_total",
+                kind="disclosure",
+                requirement="State NTE",
+                rfpQuote="not to exceed",
+                satisfaction="missing",
+            )
+        ]
+        out, _, logs = apply_grounded_demand_fills("## Cost\n", demands, budget=budget)
+        self.assertTrue(logs)
+        self.assertIn("950,000", out)
+        self.assertNotIn("2,050", out)
+        self.assertIn("Hourly Rate Schedule", out)
+        self.assertNotIn("Fee Detail by Phase", out)
+
+    def test_grounded_media_fill_format_aware(self) -> None:
+        budget = _budget(("Labor", "AM", 275)).model_copy(
+            update={"budget_format": "personnel_loading"}
+        )
+        demands = [
+            RfpCostDemand(
+                id="media_planning",
+                kind="disclosure",
+                requirement="Disclose media buying fee treatment",
+                rfpQuote="media buying commission or pass-through",
+                satisfaction="missing",
+            )
+        ]
+        out, _, logs = apply_grounded_demand_fills("## Cost\n", demands, budget=budget)
+        self.assertTrue(logs)
+        self.assertIn("Media Planning", out)
+        self.assertIn("Hourly Rate Schedule", out)
+        self.assertNotIn("Fee Detail by Phase", out)
+
     def test_workstream_ask_becomes_fee_table_row(self) -> None:
         body = (
             "## Fee Detail by Phase\n\n"

@@ -1012,8 +1012,25 @@ def _clean_schedule_name_cell(cell: str) -> str:
     return "—"
 
 
+def _clean_schedule_role_label(cell: str) -> str:
+    """Role column: strip LLM mapping chrome; keep labor-category name only."""
+    text = (cell or "").strip()
+    if not text:
+        return ""
+    text = re.split(r"\s*[—–]\s*", text, maxsplit=1)[0].strip()
+    text = re.sub(r"\s*\([^)]*$", "", text).strip()
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+    text = re.sub(r"(?i)\s+classification\s*$", "", text).strip()
+    text = re.sub(
+        r"(?i)\s*\(?(?:closest\s+)?(?:kb|guide)\s+labor(?:\s+categor(?:y|ies))?\)?\s*$",
+        "",
+        text,
+    ).strip()
+    return text.strip(" -–—·•|,;")
+
+
 def _looks_like_labor_role(value: str) -> bool:
-    s = (value or "").strip()
+    s = _clean_schedule_role_label(value)
     if not s or len(s) > 60:
         return False
     low = s.casefold()
@@ -1026,6 +1043,8 @@ def _looks_like_labor_role(value: str) -> bool:
             "verify",
             "engagement",
             "needs your input",
+            "closest kb",
+            "labor categor",
         )
     ):
         # Allow short roles that happen to include none of the junk phrases above
@@ -1035,7 +1054,11 @@ def _looks_like_labor_role(value: str) -> bool:
             return False
         if "confirm" in low or "manual fill" in low or "verify" in low:
             return False
+        if "closest kb" in low or "labor categor" in low:
+            return False
     if "$" in s or s.startswith("|"):
+        return False
+    if low.endswith(("(", "categor", "category")):
         return False
     return True
 
@@ -1137,6 +1160,10 @@ def normalize_hourly_rate_schedule_table(
         role = cells[role_i] if role_i < len(cells) else ""
         rate_cell = cells[rate_i] if rate_i < len(cells) else ""
         rate_val = _rate_from_cell(rate_cell)
+        cleaned_role = _clean_schedule_role_label(role)
+        if cleaned_role != (role or "").strip():
+            role = cleaned_role
+            changed = True
         if not _looks_like_labor_role(role):
             repaired = None
             if rate_val is not None:

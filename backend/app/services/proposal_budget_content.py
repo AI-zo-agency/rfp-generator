@@ -253,11 +253,61 @@ def render_personnel_loading_form_markdown(
         "programming": "Senior Web Developer",
     }
 
+    def _sanitize_role_label(label: str) -> str:
+        """Strip LLM meta-chrome; keep clean labor-category names only."""
+        text = (label or "").strip()
+        if not text:
+            return ""
+        # Truncate at em/en dash narrative tails ("Role — day-to-day…").
+        text = re.split(r"\s*[—–]\s*", text, maxsplit=1)[0].strip()
+        # Drop parenthetical KB/meta notes ("… (closest KB labor category").
+        text = re.sub(r"\s*\([^)]*$", "", text).strip()
+        text = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+        # Drop trailing "classification" chrome the model adds when mapping roles.
+        text = re.sub(r"(?i)\s+classification\s*$", "", text).strip()
+        text = re.sub(
+            r"(?i)\s*\(?(?:closest\s+)?(?:kb|guide)\s+labor(?:\s+categor(?:y|ies))?\)?\s*$",
+            "",
+            text,
+        ).strip()
+        # Unbalanced junk from truncated cells.
+        text = text.strip(" -–—·•|,;")
+        return text
+
     def _display_role(label: str) -> str | None:
-        key = (label or "").casefold().strip()
+        cleaned = _sanitize_role_label(label)
+        key = cleaned.casefold().strip()
         if not key or key in _skip_roles:
             return None
-        return _display_alias.get(key, label.strip())
+        # Reject labels that are still meta / incomplete after sanitize.
+        if len(key) < 3 or key.endswith(("(", "categor", "category")):
+            return None
+        if any(
+            tok in key
+            for tok in (
+                "closest kb",
+                "labor categor",
+                "manual fill",
+                "verify:",
+            )
+        ):
+            return None
+        return _display_alias.get(key, cleaned)
+
+    def _roles_from_verified() -> list[str]:
+        """Prefer Labor Cost / verifiedRates labels — clean, deduped, KB-grounded."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for vr in budget.verified_rates or []:
+            shown = _display_role(vr.role or "")
+            if not shown or not (vr.hourly_rate or 0):
+                continue
+            key = shown.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(shown)
+        return out
 
     def _priced_hourly_roles() -> list[str]:
         out: list[str] = []
@@ -268,8 +318,9 @@ def render_personnel_loading_form_markdown(
                 continue
             if item.rate is None and not (item.extended or 0):
                 continue
-            label = (item.role_title or item.description or "").strip()
-            shown = _display_role(label.split("—")[0].split("-")[0].strip()[:60])
+            # Prefer role_title — description often carries LLM mapping chrome.
+            label = (item.role_title or "").strip() or (item.description or "").strip()
+            shown = _display_role(label)
             if not shown:
                 continue
             key = shown.casefold()
@@ -279,14 +330,17 @@ def render_personnel_loading_form_markdown(
             out.append(shown)
         return out
 
-    # Prefer priced hourly line items (KB role card) over noisy RFP TOC "roles".
+    # Prefer verifiedRates (Labor Cost pin) over noisy priced line descriptions.
+    verified = _roles_from_verified()
     priced = _priced_hourly_roles()
-    if len(priced) >= 2:
+    if len(verified) >= 2:
+        roles = verified
+    elif len(priced) >= 2:
         roles = priced
     else:
         roles = extract_rfp_labor_role_labels(rfp_text)
         if len(roles) < 3:
-            for shown in priced:
+            for shown in [*verified, *priced]:
                 if shown.casefold() not in {r.casefold() for r in roles}:
                     roles.append(shown)
         roles = [r for r in (_display_role(x) or "" for x in roles) if r]
@@ -559,7 +613,11 @@ def render_kb_classification_rate_schedule_markdown(
             rate_val = float(item.rate)
         if rate_val is None or rate_val <= 0:
             continue
-        role = (item.role_title or item.description or "").strip()
+        role = (item.role_title or "").strip() or (item.description or "").strip()
+        # Strip LLM mapping chrome before client schedule.
+        role = re.split(r"\s*[—–]\s*", role, maxsplit=1)[0].strip()
+        role = re.sub(r"(?i)\s+classification\s*$", "", role).strip()
+        role = re.sub(r"\s*\([^)]*$", "", role).strip()
         if not role:
             continue
         key = role.casefold()
@@ -2816,12 +2874,38 @@ def prepare_budget_for_client_display(
     (+ direct); total_client_invoicing = client grand total including pass-through.
     """
     from app.services.pricing_approved_rates import (
+        ApprovedHourlyRate,
+        load_approved_hourly_rates,
+        merge_approved_hourly_rates,
         scrub_unapproved_form_rates,
     )
     from app.services.proposal_budget_validation import split_line_item_totals
 
+    # Approve hourlies from this-run rate card and/or verifiedRates (Labor Cost
+    # pin) — never a stale disk cache.
+    registry = load_approved_hourly_rates(rate_card=rate_card)
+    if budget.verified_rates:
+        from_vr = [
+            ApprovedHourlyRate(
+                rateId=f"vr-{(vr.role or '').strip().casefold().replace(' ', '-') or i}",
+                label=(vr.role or "").strip(),
+                amount=float(vr.hourly_rate),
+                approvedBy="verifiedRates",
+                sourceFile=(vr.source or "Labor Cost").strip() or "Labor Cost",
+            )
+            for i, vr in enumerate(budget.verified_rates)
+            if (vr.role or "").strip()
+            and vr.hourly_rate is not None
+            and float(vr.hourly_rate) > 0
+        ]
+        if from_vr:
+            registry = merge_approved_hourly_rates(registry, from_vr)
+
     budget = scrub_unapproved_form_rates(
-        budget, rate_card=rate_card, pricing_instrument=pricing_instrument
+        budget,
+        registry=registry,
+        rate_card=rate_card,
+        pricing_instrument=pricing_instrument,
     )
     cleaned = dedupe_travel_vs_direct_expenses(budget)
     fees, reimbursables = _professional_fees_and_direct(cleaned)

@@ -2593,6 +2593,22 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     )
     # Deterministic RFP money authority wins over LLM-invented caps matching own total.
     budget = apply_constraints_to_budget_fields(budget, money_constraints)
+    # Pricing instrument track NTE fills rfp_budget_cap when money extract missed it
+    # (hourly task-order ceilings often live on the instrument, not prose alone).
+    try:
+        from app.services.proposal_budget_content import primary_instrument_nte
+
+        inst = prior_research.pricing_instrument if prior_research else None
+        nte = primary_instrument_nte(inst)
+        if nte and (not budget.rfp_budget_cap or float(budget.rfp_budget_cap or 0) <= 0):
+            budget = budget.model_copy(update={"rfp_budget_cap": float(nte)})
+            logger.info(
+                "budget_cap_from_instrument_nte rfp_id=%s nte=%s",
+                rfp_id,
+                nte,
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("instrument NTE → rfp_budget_cap seed skipped", exc_info=True)
 
     # Decision Guide: cost ≥25% → Low tier (never leave Average on a 35% price RFP).
     try:

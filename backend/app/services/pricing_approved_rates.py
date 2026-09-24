@@ -388,8 +388,8 @@ def scrub_unapproved_form_rates(
             hourly = None
         # Skip role-card seeding for buyer forms.
     else:
-        hit = resolve_approved_hourly(hourly, registry=rates)
-        if hourly is not None and hit is None:
+        hit = resolve_approved_hourly(hourly, registry=rates) if rates else None
+        if hourly is not None and (not rates or hit is None):
             logger.info(
                 "scrub_form_rates cleared formHourlyRate=%s (not in approved registry)",
                 hourly,
@@ -427,6 +427,23 @@ def scrub_unapproved_form_rates(
                         f"{primary.label or primary.rate_id} "
                         f"(${primary.amount:.2f} billable)."
                     )
+
+    # No role registry this run: do not blank personnel line hourlies (nothing to
+    # validate against). Form hourly already handled above.
+    if not rates:
+        logger.info("scrub_form_rates line_items skipped — empty approved registry")
+        if budget.form_monthly_rate is not None or budget.form_annual_rate is not None:
+            _flag(
+                "[PRICING FLAG: form monthly/annual cleared — only emit when THIS RFP's "
+                "form schema requires those fields]"
+            )
+            updates["form_monthly_rate"] = None
+            updates["form_annual_rate"] = None
+        if flags != list(budget.pricing_flags or []):
+            updates["pricing_flags"] = flags
+        if not updates:
+            return budget
+        return budget.model_copy(update=updates)
 
     if budget.form_monthly_rate is not None or budget.form_annual_rate is not None:
         _flag(
@@ -504,6 +521,7 @@ def scrub_unapproved_form_rates(
     if not updates:
         return budget
     return budget.model_copy(update=updates)
+
 
 
 _HOURLY_RANGE_RE = re.compile(

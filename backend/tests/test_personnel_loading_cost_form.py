@@ -26,6 +26,63 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
         self.assertIn("Account Director", roles)
         self.assertIn("Senior Strategist", roles)
 
+    def test_schedule_prefers_verified_rates_over_noisy_descriptions(self) -> None:
+        from app.models.proposal import VerifiedRate
+        from app.services.proposal_budget_content import (
+            render_personnel_loading_form_markdown,
+        )
+
+        budget = ProposalBudget(
+            rfpId="r1",
+            updatedAt="t",
+            budgetFormat="personnel_loading",
+            verifiedRates=[
+                VerifiedRate(
+                    personName="",
+                    role="Account Manager",
+                    hourlyRate=275.0,
+                    source="Labor Cost",
+                ),
+                VerifiedRate(
+                    personName="",
+                    role="Creative Director",
+                    hourlyRate=275.0,
+                    source="Labor Cost",
+                ),
+            ],
+            lineItems=[
+                BudgetLineItem(
+                    id="li-1",
+                    category="labor",
+                    description=(
+                        "Copywriter classification (closest KB labor category"
+                    ),
+                    roleTitle="Copywriter classification (closest KB labor category",
+                    unit="hour",
+                    rate=275.0,
+                    quantity=1,
+                    extended=275.0,
+                ),
+                BudgetLineItem(
+                    id="li-2",
+                    category="labor",
+                    description="Account Manager classification",
+                    roleTitle="Account Manager classification",
+                    unit="hour",
+                    rate=275.0,
+                    quantity=1,
+                    extended=275.0,
+                ),
+            ],
+        )
+        md = render_personnel_loading_form_markdown(budget)
+        self.assertIn("| Account Manager | $275 |", md)
+        self.assertIn("| Creative Director | $275 |", md)
+        self.assertNotIn("closest KB", md)
+        self.assertNotIn("classification", md)
+        # One clean AM row — not duplicated from noisy line item.
+        self.assertEqual(md.count("| Account Manager |"), 1)
+
     def test_render_uses_budget_format_not_rfp_scan(self) -> None:
         rfp = "Optional narrative budget only — no hourly table required."
         budget = ProposalBudget(

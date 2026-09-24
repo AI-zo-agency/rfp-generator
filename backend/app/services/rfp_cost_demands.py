@@ -388,6 +388,40 @@ def _usd_plain(amount: float) -> str:
     return f"${amount:,.2f}"
 
 
+def _fee_structure_phrase(budget: ProposalBudget | None) -> str:
+    """Where fees live in THIS manuscript — never force Fee Detail on hourly forms."""
+    fmt = (getattr(budget, "budget_format", None) or "").casefold().replace("-", "_")
+    if fmt == "personnel_loading":
+        return (
+            "the Cost Proposal Hourly Rate Schedule and task-authorization costs"
+        )
+    if fmt in {"blended_rate_form", "hourly_rate_form"}:
+        return "the Pricing Form / rate schedule"
+    return "Fee Detail by Phase"
+
+
+def _nte_ceiling_usd(budget: ProposalBudget | None) -> float | None:
+    """Contract / RFP ceiling for NTE prose — not the professional-fee subtotal.
+
+    Prefer an explicit RFP budget cap on the ledger. Never treat agency fee
+    totals as the not-to-exceed when a separate ceiling exists or when the
+    instrument is hourly task-order (fees ≪ ceiling).
+    """
+    if budget is None:
+        return None
+    for attr in ("rfp_budget_cap", "rfp_media_or_program_envelope"):
+        cap = getattr(budget, attr, None)
+        if cap is None:
+            continue
+        try:
+            cap_f = float(cap)
+        except (TypeError, ValueError):
+            continue
+        if cap_f > 0:
+            return cap_f
+    return None
+
+
 def apply_grounded_demand_fills(
     content: str,
     demands: list[RfpCostDemand],
@@ -404,7 +438,16 @@ def apply_grounded_demand_fills(
     updated: list[RfpCostDemand] = []
     fees = _professional_fee_total(budget)
     fee_phrase = _usd_plain(fees) if fees else None
+    fee_home = _fee_structure_phrase(budget)
+    nte_cap = _nte_ceiling_usd(budget)
+    nte_phrase = _usd_plain(nte_cap) if nte_cap else None
     blocks: list[str] = []
+    fmt = (getattr(budget, "budget_format", None) or "").casefold().replace("-", "_")
+    is_hourly_instrument = fmt in {
+        "personnel_loading",
+        "blended_rate_form",
+        "hourly_rate_form",
+    }
 
     for demand in demands:
         if demand.satisfaction == "grounded":
@@ -418,17 +461,34 @@ def apply_grounded_demand_fills(
         paragraph = ""
 
         if any(k in blob for k in ("not_to_exceed", "nte", "total contract amount", "not to exceed")):
-            if fee_phrase:
-                paragraph = (
-                    f"### Not-to-Exceed Total Contract Amount\n\n"
-                    f"zö agency proposes a not-to-exceed total contract amount of "
-                    f"**{fee_phrase}** for the annualized professional-fee scope in "
-                    f"Fee Detail by Phase (inclusive of all professional fees shown). "
-                    f"Media buy dollars directed by the client, if any, are pass-through "
-                    f"at cost and are not included in this professional-fee ceiling. "
-                    f"Any material change in scope will be documented in a scope addendum "
-                    f"before work proceeds."
-                )
+            # Prefer RFP/instrument ceiling. Never sell professional-fee subtotal
+            # as the contract NTE on hourly / task-order instruments.
+            ceiling = nte_phrase
+            if ceiling is None and fee_phrase and not is_hourly_instrument:
+                ceiling = fee_phrase
+            if ceiling:
+                if nte_phrase:
+                    paragraph = (
+                        f"### Not-to-Exceed Total Contract Amount\n\n"
+                        f"zö agency's not-to-exceed figure for this engagement is "
+                        f"**{ceiling}**, the budget ceiling stated for this work. "
+                        f"Invoicing follows {fee_home}. "
+                        f"Media buy dollars directed by the client, if any, are "
+                        f"pass-through at cost and sit inside that same ceiling, "
+                        f"not on top of it. Any material change in scope will be "
+                        f"documented in a scope addendum before work proceeds."
+                    )
+                else:
+                    paragraph = (
+                        f"### Not-to-Exceed Total Contract Amount\n\n"
+                        f"zö agency proposes a not-to-exceed total contract amount of "
+                        f"**{ceiling}** for the professional-fee scope in {fee_home} "
+                        f"(inclusive of all professional fees shown). "
+                        f"Media buy dollars directed by the client, if any, are "
+                        f"pass-through at cost and are not included in this "
+                        f"professional-fee ceiling. Any material change in scope "
+                        f"will be documented in a scope addendum before work proceeds."
+                    )
                 if any(
                     k in blob
                     for k in ("two-year", "two year", "option year", "option-year", "year 2")
@@ -446,9 +506,9 @@ def apply_grounded_demand_fills(
         ):
             paragraph = (
                 "### Oral Presentation Expense\n\n"
-                "If USD requires an oral presentation during selection, zö agency will "
+                "If the buyer requires an oral presentation during selection, zö agency will "
                 "make that presentation at its own expense; those costs are not billed "
-                "to USD under this proposal or any resulting contract."
+                "under this proposal or any resulting contract."
             )
             filled = True
 
@@ -459,11 +519,11 @@ def apply_grounded_demand_fills(
             fee_bit = f" totaling {fee_phrase}" if fee_phrase else ""
             paragraph = (
                 "### Cost Effectiveness\n\n"
-                "USD evaluates proposals for best overall value, including cost "
+                "Proposals are evaluated for best overall value, including cost "
                 "effectiveness alongside qualifications, experience, strategic approach, "
-                "and demonstrated results. zö agency's transparent, flat phase-fee "
-                f"structure{fee_bit} maps fees to the RFP scope items in Fee Detail by "
-                "Phase so USD can judge cost effectiveness against clear deliverables — "
+                "and demonstrated results. zö agency's transparent fee "
+                f"structure{fee_bit} maps fees to the RFP scope via {fee_home} so "
+                "evaluators can judge cost effectiveness against clear deliverables — "
                 "without separate expense add-ons."
             )
             filled = True
@@ -480,25 +540,49 @@ def apply_grounded_demand_fills(
                 "markup",
             )
         ) and demand.kind in {"disclosure", "workstream_funding", "other"}:
-            paragraph = (
-                "### Media Planning & Buying — Fee Treatment\n\n"
-                "Media planning and buying labor for the annual scope is included in the "
-                "professional phase fees in Fee Detail by Phase (not a separate media "
-                "commission line). Client-directed media placement dollars, if any, are "
-                "passed through at cost and are not marked up in this proposal; they are "
-                "outside the professional-fee total unless USD authorizes a different "
-                "arrangement in a scope addendum."
-            )
+            # Prefer ledger commission when present; else pass-through disclosure
+            # without inventing a rate. Never cite Fee Detail on hourly instruments.
+            commission = getattr(budget, "commission_rate", None) if budget else None
+            if commission is not None:
+                try:
+                    rate_pct = float(commission) * (
+                        100.0 if float(commission) <= 1.0 else 1.0
+                    )
+                except (TypeError, ValueError):
+                    rate_pct = None
+            else:
+                rate_pct = None
+            if rate_pct is not None and rate_pct > 0:
+                agency_share = rate_pct if rate_pct <= 50 else (100.0 - rate_pct)
+                client_share = 100.0 - agency_share
+                paragraph = (
+                    "### Media Planning & Buying — Fee Treatment\n\n"
+                    f"Media buying follows the agency's documented commission model "
+                    f"({client_share:.0f}% placements / {agency_share:.0f}% agency). "
+                    f"Client-directed media placement dollars are pass-through; "
+                    f"agency commission and planning labor are disclosed separately "
+                    f"from placement spend. Invoicing aligns with {fee_home}."
+                )
+            else:
+                paragraph = (
+                    "### Media Planning & Buying — Fee Treatment\n\n"
+                    "Media planning and buying labor for the scope is included with "
+                    f"professional fees under {fee_home} (not a separate unmarked "
+                    "commission line inventing a rate). Client-directed media "
+                    "placement dollars, if any, are passed through at cost and are "
+                    "not marked up in this proposal unless a written scope addendum "
+                    "authorizes a different arrangement."
+                )
             filled = True
 
         elif any(k in blob for k in ("subcontract", "sub-contractor", "subcontractor")):
             paragraph = (
                 "### Subcontractor Cost Treatment\n\n"
                 "zö agency does not plan to use subcontractors for the services described "
-                "herein without the State's prior written consent. If consent is granted, "
+                "herein without the buyer's prior written consent. If consent is granted, "
                 "any approved subcontractor costs are absorbed within the professional "
-                "phase fees above unless a written scope addendum states otherwise — no "
-                "separate subcontractor markup is proposed here."
+                f"fees under {fee_home} unless a written scope addendum states otherwise — "
+                "no separate subcontractor markup is proposed here."
             )
             filled = True
 
