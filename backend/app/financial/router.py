@@ -1636,6 +1636,20 @@ def create_invoice_resolution(payload: InvoiceResolutionUpsert):
         payload.invoice_id,
         payload.resolution,
     )
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="financial",
+            action="agency.invoice_resolved",
+            summary=f"Invoice resolution: {payload.resolution}",
+            entity_type="invoice",
+            entity_id=payload.invoice_id,
+            entity_label=payload.invoice_id[:300],
+            metadata={"resolution": payload.resolution},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return row
 
 
@@ -1765,7 +1779,21 @@ def quickbooks_refresh():
     Open like ai-insights/regenerate (internal financial dashboard). Cron
     continues to hit `/quickbooks/sync` with the secret.
     """
-    return _run_quickbooks_sync("auto", operation="quickbooks_refresh")
+    result = _run_quickbooks_sync("auto", operation="quickbooks_refresh")
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="financial",
+            action="qb.sync_refreshed",
+            summary="Refreshed QuickBooks ledger sync",
+            entity_type="sync",
+            entity_label="QuickBooks Ledger",
+            metadata={"run_id": result.get("run_id") if isinstance(result, dict) else None},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 @router.post("/quickbooks/forecast/monthly/backfill")
@@ -2207,6 +2235,20 @@ def resolve_audit_item(
         raise HTTPException(status_code=404, detail="Audit item not found")
     _AUDIT_RESOLUTIONS[payload.id] = f"Resolved ({payload.action})"
     logger.info(f"[AUDIT] Resolved item {payload.id!r} with action={payload.action!r}")
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="financial",
+            action="audit.flag_resolved",
+            summary=f"Resolved audit flag ({payload.action})",
+            entity_type="audit_item",
+            entity_id=payload.id,
+            entity_label=payload.id[:300],
+            metadata={"action": payload.action},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"success": True, "id": payload.id, "status": _AUDIT_RESOLUTIONS[payload.id]}
 
 

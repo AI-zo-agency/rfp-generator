@@ -105,3 +105,77 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   rfps_created INTEGER DEFAULT 0,
   error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS user_activity_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  workspace     TEXT NOT NULL CHECK (workspace IN ('rfp', 'financial', 'leads')),
+  actor_email   TEXT NOT NULL DEFAULT 'system'
+                CHECK (length(trim(actor_email)) > 0 AND length(actor_email) <= 320),
+  action        TEXT NOT NULL CHECK (length(trim(action)) > 0 AND length(action) <= 200),
+  outcome       TEXT NOT NULL DEFAULT 'recorded'
+                CHECK (outcome IN ('recorded', 'started', 'completed', 'failed', 'cancelled')),
+  entity_type   TEXT,
+  entity_id     TEXT,
+  entity_label  TEXT,
+  summary       TEXT NOT NULL CHECK (length(trim(summary)) > 0 AND length(summary) <= 500),
+  metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  request_id    TEXT,
+  run_id        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_uae_workspace_time
+  ON user_activity_events (workspace, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uae_actor_time
+  ON user_activity_events (actor_email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uae_workspace_actor_time
+  ON user_activity_events (workspace, actor_email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uae_entity
+  ON user_activity_events (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_uae_action
+  ON user_activity_events (workspace, action);
+CREATE INDEX IF NOT EXISTS idx_uae_run_id
+  ON user_activity_events (run_id)
+  WHERE run_id IS NOT NULL;
+
+ALTER TABLE user_activity_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE user_activity_events FROM PUBLIC;
+REVOKE ALL ON TABLE user_activity_events FROM anon, authenticated;
+GRANT ALL ON TABLE user_activity_events TO service_role;
+
+CREATE TABLE IF NOT EXISTS user_analytics_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  workspace     TEXT NOT NULL CHECK (workspace IN ('rfp', 'financial', 'leads')),
+  actor_email   TEXT NOT NULL DEFAULT 'system',
+  session_id    TEXT NOT NULL DEFAULT '',
+  event_type    TEXT NOT NULL
+                CHECK (event_type IN ('page_view', 'tab_view', 'ui_click', 'heartbeat', 'funnel_step')),
+  path          TEXT,
+  tab           TEXT,
+  view          TEXT,
+  feature       TEXT,
+  entity_type   TEXT,
+  entity_id     TEXT,
+  duration_ms   INTEGER NOT NULL DEFAULT 0,
+  engaged       BOOLEAN NOT NULL DEFAULT FALSE,
+  metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  client_ts     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_uane_workspace_time
+  ON user_analytics_events (workspace, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uane_workspace_actor_time
+  ON user_analytics_events (workspace, actor_email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uane_workspace_type_time
+  ON user_analytics_events (workspace, event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uane_workspace_feature_time
+  ON user_analytics_events (workspace, feature, created_at DESC)
+  WHERE feature IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_uane_session_time
+  ON user_analytics_events (session_id, created_at DESC);
+
+ALTER TABLE user_analytics_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE user_analytics_events FROM PUBLIC;
+REVOKE ALL ON TABLE user_analytics_events FROM anon, authenticated;
+GRANT ALL ON TABLE user_analytics_events TO service_role;

@@ -119,6 +119,20 @@ async def generate_brief(
     except Exception as exc:
         logger.warning("AI brief synthesis failed for %s: %s", contact_id, exc)
         raise HTTPException(status_code=502, detail="Could not generate preparation notes") from exc
+    try:
+        from app.services.user_activity import emit_activity
+
+        label = brief.get("who") or brief.get("company") or contact_id
+        emit_activity(
+            workspace="leads",
+            action="prep.generated",
+            summary=f"Generated AI preparation notes for {label}",
+            entity_type="lead",
+            entity_id=contact_id,
+            entity_label=str(label)[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return brief
 
 
@@ -137,6 +151,25 @@ async def enrich(contact_id: str) -> dict:
             known_company=(lead.company or {}).get("name"),
         )
         if result.get("company_name") or result.get("person"):
+            try:
+                from app.services.user_activity import emit_activity
+
+                label = (
+                    result.get("company_name")
+                    or (lead.company or {}).get("name")
+                    or lead.contact.get("name")
+                    or contact_id
+                )
+                emit_activity(
+                    workspace="leads",
+                    action="enrich.monid_ran",
+                    summary=f"Enriched prospect via Monid: {label}",
+                    entity_type="lead",
+                    entity_id=contact_id,
+                    entity_label=str(label)[:300],
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return result
         errors = " ".join(
             part for part in (result.get("company_error"), result.get("person_error")) if part

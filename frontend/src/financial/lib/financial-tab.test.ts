@@ -10,6 +10,7 @@ describe("parseFinancialTab", () => {
   it("keeps a known sidebar tab", () => {
     expect(parseFinancialTab("teamwork")).toBe("teamwork");
     expect(parseFinancialTab("agency")).toBe("agency");
+    expect(parseFinancialTab("activity")).toBe("activity");
   });
 
   it("falls back to quickbooks so unknown or missing values cannot crash the page", () => {
@@ -80,5 +81,9 @@ describe("applyFinancialNavSearch", () => {
     expect(
       applyFinancialNavSearch("tab=teamwork&view=projects", { tab: "agency" }),
     ).toBe("?tab=agency");
+  });
+
+  it("writes the activity tab so a refresh can restore that page", () => {
+    expect(applyFinancialNavSearch("", { tab: "activity" })).toBe("?tab=activity");
   });
 });

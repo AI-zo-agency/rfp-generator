@@ -10,7 +10,9 @@ import {
   IconKnowledge,
   IconProposal,
   IconRfp,
+  IconSync,
 } from "./ui/icons";
+import { trackClick } from "@/lib/zo-analytics";
 
 const workspaceNav = [
   { href: "/rfp-dashboard", label: "Dashboard", Icon: IconDashboard },
@@ -18,6 +20,7 @@ const workspaceNav = [
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics, prefetch: false },
+  { href: "/activity", label: "Activity", Icon: IconSync, prefetch: false },
 ];
 
 interface SidebarProps {
@@ -57,6 +60,7 @@ export function Sidebar({ collapsed }: SidebarProps) {
                 href={item.href}
                 prefetch={"prefetch" in item ? item.prefetch : undefined}
                 title={collapsed ? item.label : undefined}
+                onClick={() => trackClick("nav.click", { path: item.href })}
                 className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-normal transition-smooth ${
                   active
                     ? "bg-[#ef5018] text-white shadow-[0_8px_24px_rgba(239,80,24,0.25)]"

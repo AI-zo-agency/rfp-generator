@@ -303,6 +303,19 @@ async def create_manual_rfp(request: Request) -> RfpRecord:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.created_manual",
+            summary=f"Created manual RFP “{record.title}”",
+            entity_type="rfp",
+            entity_id=record.id,
+            entity_label=(record.title or record.id)[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return record
 
 
@@ -310,6 +323,20 @@ async def create_manual_rfp(request: Request) -> RfpRecord:
 def mark_go(rfp_id: str) -> dict[str, str]:
     if not mark_rfp_go(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        from app.services.user_activity import emit_activity
+
+        rfp = get_rfp(rfp_id)
+        emit_activity(
+            workspace="rfp",
+            action="rfp.marked_go",
+            summary="Marked RFP as Go",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=((rfp.title if rfp else None) or rfp_id)[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": "true", "goNoGo": "go"}
 
 
@@ -407,6 +434,20 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
         celery_dispatch=_celery_dispatch,
         lock_key=lock_key,
     )
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.gonogo_started",
+            summary=f"Started Go/No-Go analysis",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            outcome="started",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "ok": True,
         "status": "running",

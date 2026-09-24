@@ -22,6 +22,13 @@ import { QuickBooksPanels } from "./QuickBooksPanels";
 import { expoOutEase } from "@/lib/motion";
 import { TeamworkPanels } from "./TeamworkPanels";
 import { ClientMapPanels } from "./ClientMapPanels";
+import { UserActivityPanel } from "@/components/UserActivityPanel";
+import { UserAnalyticsPanel } from "@/components/UserAnalyticsPanel";
+import {
+  setAnalyticsContext,
+  trackClick,
+  trackTabView,
+} from "@/lib/zo-analytics";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
@@ -63,6 +70,7 @@ export function FinancialInsightsClient({
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
 
   const [isContractorLoading, setIsContractorLoading] = useState<boolean>(false);
+  const [activityMode, setActivityMode] = useState<"audit" | "analytics">("analytics");
 
   const fetchIworkerData = useCallback(
     async (
@@ -153,16 +161,23 @@ export function FinancialInsightsClient({
   const selectTab = (id: FinancialTabId) => {
     setActiveTab(id);
     persistFinancialNav({ tab: id });
+    setAnalyticsContext({ path: "/financial-insights", tab: id });
+    trackTabView(id, { path: "/financial-insights" });
+    trackClick("financial.tab", { path: "/financial-insights", tab: id, funnel: true });
   };
 
   const selectTeamworkView = (id: TeamworkViewId) => {
     setTeamworkView(id);
     persistFinancialNav({ view: id });
+    setAnalyticsContext({ view: id });
+    trackClick("financial.view", { tab: "teamwork", view: id });
   };
 
   const selectAgencyView = (id: AgencyViewId) => {
     setAgencyView(id);
     persistFinancialNav({ view: id });
+    setAnalyticsContext({ view: id });
+    trackClick("financial.view", { tab: "agency", view: id });
   };
 
   const handleSelectContractor = (contractorName: string) => {
@@ -303,6 +318,52 @@ export function FinancialInsightsClient({
               id="financial-panel-sources"
             >
               <DataSourcesGrid sources={sourcesData} />
+            </TabFade>
+
+            <TabFade
+              active={activeTab === "activity"}
+              className="min-h-0 flex-1 overflow-auto"
+              id="financial-panel-activity"
+            >
+              <div className="mb-4 flex gap-1 rounded-lg border border-black/10 bg-white p-0.5 w-fit">
+                <button
+                  type="button"
+                  onClick={() => setActivityMode("audit")}
+                  className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                    activityMode === "audit"
+                      ? "bg-[#3C5A56] text-white"
+                      : "text-[#274742] hover:bg-black/[0.03]"
+                  }`}
+                >
+                  Audit log
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActivityMode("analytics")}
+                  className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                    activityMode === "analytics"
+                      ? "bg-[#3C5A56] text-white"
+                      : "text-[#274742] hover:bg-black/[0.03]"
+                  }`}
+                >
+                  Product analytics
+                </button>
+              </div>
+              {activityMode === "audit" ? (
+                <UserActivityPanel
+                  workspace="financial"
+                  tone="financial"
+                  title="Financial Workspace — Activity"
+                  subtitle="Syncs, invoice resolutions, audit flags, and AI actions"
+                  className="min-h-[70vh]"
+                />
+              ) : (
+                <UserAnalyticsPanel
+                  workspace="financial"
+                  tone="financial"
+                  className="min-h-[70vh]"
+                />
+              )}
             </TabFade>
           </motion.div>
           </AnimatePresence>

@@ -4,6 +4,7 @@ export const FINANCIAL_TAB_IDS = [
   "teamwork",
   "iworker",
   "sources",
+  "activity",
 ] as const;
 
 export type FinancialTabId = (typeof FINANCIAL_TAB_IDS)[number];

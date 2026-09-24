@@ -215,6 +215,25 @@ async def _enqueue_pipeline_phase(
         record = await start_proposal_job(
             rfp_id, phase, _run, celery_dispatch=_celery_dispatch
         )
+        try:
+            from app.services.user_activity import emit_activity
+
+            rfp_rec = get_rfp(rfp_id)
+            label = (rfp_rec.title if rfp_rec else None) or rfp_id
+            phase_label = phase.replace("_", " ").replace("-", " ")
+            emit_activity(
+                workspace="rfp",
+                action="proposal.phase_started",
+                summary=f"Started proposal phase: {phase_label}",
+                entity_type="rfp",
+                entity_id=rfp_id,
+                entity_label=str(label)[:300],
+                metadata={"phase": phase},
+                run_id=run_id,
+                outcome="started",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return JSONResponse(
             status_code=202,
             content={
@@ -1376,6 +1395,23 @@ async def improve_section_endpoint(
             "**Review the Original vs Revised panel — nothing is saved until you "
             "click Apply changes.**"
         )
+    if draft_changed and not preview_pending:
+        try:
+            from app.services.user_activity import emit_activity
+
+            rfp_rec = get_rfp(rfp_id)
+            emit_activity(
+                workspace="rfp",
+                action="proposal.section_chat_applied",
+                summary=f"Applied section chat on “{(section.title if section else section_id) or section_id}”",
+                entity_type="rfp",
+                entity_id=rfp_id,
+                entity_label=((rfp_rec.title if rfp_rec else None) or rfp_id)[:300],
+                metadata={"section_id": section_id},
+                run_id=chat_run_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return ProposalSectionImproveResponse(
         section=section,
         draft=draft,
@@ -1728,6 +1764,21 @@ async def export_proposal_docx(rfp_id: str) -> Response:
             detail=f"Word export failed: {exc}",
         ) from exc
 
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="proposal.exported",
+            summary=f"Exported proposal DOCX for “{title}”",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=title[:300],
+            metadata={"mode": packets.mode},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     if packets.mode == "separate_cost" and packets.zip_bytes and packets.zip_filename:
         encoded = quote(packets.zip_filename)
         return Response(
@@ -2051,6 +2102,22 @@ async def save_proposal_key_personas(
             status_code=502,
             detail=f"Failed to save Key Personas: {exc}",
         ) from exc
+
+    try:
+        from app.services.user_activity import emit_activity
+
+        rfp_rec = get_rfp(rfp_id)
+        emit_activity(
+            workspace="rfp",
+            action="proposal.personas_set",
+            summary=f"Selected {len(selected_ids)} key persona(s)",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=((rfp_rec.title if rfp_rec else None) or rfp_id)[:300],
+            metadata={"count": len(selected_ids)},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "ok": True,
