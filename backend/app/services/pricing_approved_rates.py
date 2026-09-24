@@ -2,10 +2,11 @@
 
 Sources (merged, no RFP-specific hardcoding):
   1. Human file: data/pricing_approved_hourly_rates.json (wins on rateId)
-  2. KB Agency Role Rates–style tables: Billable Rate column only
-     (parsed via pricing_rate_card_builder; cached after Phase 3.5 fetch)
+  2. In-memory rate card from this run's Supermemory pin (Labor Cost Billable
+     column via Phase 3.5 guide bundle) — never a disk KB cache
 
-Never from: 07_FIN_* lost bids, Guide menu SKUs (4.1 etc.), Internal/Raw floor.
+Never from: 07_FIN_* lost bids, Guide menu SKUs (4.1 etc.), Internal/Raw floor,
+or a stale pricing_role_billable_cache.json write-through.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ KB_ROLE_APPROVER = "KB role billable column"
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _REGISTRY_PATH = _DATA_DIR / "pricing_approved_hourly_rates.json"
-_KB_CACHE_PATH = _DATA_DIR / "pricing_role_billable_cache.json"
 
 _ROLE_SOURCE_RE = re.compile(
     r"(?i)role\s+rates?|labor\s+cost|billable\s+rate|rate\s+card|cost\s+table|"
@@ -175,53 +175,6 @@ def _load_json_registry() -> list[ApprovedHourlyRate]:
     return out
 
 
-def _load_kb_cache() -> list[ApprovedHourlyRate]:
-    raw = _read_json(_KB_CACHE_PATH)
-    if not raw:
-        return []
-    rows = raw.get("rates") if isinstance(raw, dict) else raw
-    if not isinstance(rows, list):
-        return []
-    parsed: list[ApprovedHourlyRate] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            rate = ApprovedHourlyRate.model_validate(row)
-        except Exception:  # noqa: BLE001
-            continue
-        if source_is_blocked(rate.source_file):
-            continue
-        if not _ROLE_SOURCE_RE.search(rate.source_file) and not _ROLE_SOURCE_RE.search(
-            rate.notes or ""
-        ):
-            # Cache must stay role/labor — never guide menu bleed.
-            if not (rate.rate_id or "").startswith("role-hourly-"):
-                continue
-        parsed.append(rate)
-    return parsed
-
-
-def persist_kb_role_billable_cache(rates: list[ApprovedHourlyRate]) -> None:
-    """Write KB role billables so sync prepare/render can resolve without re-fetch."""
-    payload = {
-        "rates": [r.model_dump(by_alias=True) for r in rates],
-        "updatedFrom": "kb_role_billable_extract",
-    }
-    try:
-        _KB_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _KB_CACHE_PATH.write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
-        )
-        logger.info(
-            "role_billable_cache_written path=%s count=%s",
-            _KB_CACHE_PATH,
-            len(rates),
-        )
-    except OSError as exc:
-        logger.warning("role_billable_cache_write_failed: %s", exc)
-
-
 def merge_approved_hourly_rates(
     *groups: list[ApprovedHourlyRate],
 ) -> list[ApprovedHourlyRate]:
@@ -243,18 +196,20 @@ def load_approved_hourly_rates(
     *,
     rate_card: PricingRateCard | None = None,
 ) -> list[ApprovedHourlyRate]:
-    """JSON overrides + KB role cache (+ optional in-memory rate card hourlies)."""
+    """Human JSON overrides + this-run rate card (from Supermemory Labor Cost pin).
+
+    No disk KB cache — stale write-through must not outrank a live pin.
+    Callers without a rate_card get Sonja's JSON only (else MANUAL FILL).
+    """
     human = _load_json_registry()
-    kb_cache = _load_kb_cache()
     from_card = (
         approved_from_pricing_rates(rate_card.rates or []) if rate_card is not None else []
     )
-    merged = merge_approved_hourly_rates(human, from_card, kb_cache)
+    merged = merge_approved_hourly_rates(human, from_card)
     logger.info(
-        "approved_hourly_rates loaded human=%s card=%s cache=%s merged=%s",
+        "approved_hourly_rates loaded human=%s card=%s merged=%s",
         len(human),
         len(from_card),
-        len(kb_cache),
         len(merged),
     )
     return merged
@@ -265,17 +220,30 @@ def ingest_role_billable_from_guide_bundle(
     *,
     kb_sources: list[str] | None = None,
 ) -> list[ApprovedHourlyRate]:
-    """Extract + cache role billables from the Phase 3.5 guide+labor text bundle."""
+    """Extract role billables from this run's Guide+Labor Cost Supermemory bundle.
+
+    Does not write a disk cache — authority is the pinned Labor Cost text
+    already in ``guide_text`` (and the in-memory rate card built from it).
+    """
     text = guide_text or ""
     if not text.strip():
         return []
     # Prefer the labor section when present (avoids menu SKU noise).
-    labor_marker = "=== KB labor / role billable rates"
-    if labor_marker in text:
-        # Drop the rest of the section header line, keep table body.
-        after = text.split(labor_marker, 1)[-1]
-        nl = after.find("\n")
-        text = after[nl + 1 :] if nl >= 0 else after
+    # Pin marker first — Phase 3.5 injects Labor Cost before fuzzy search block.
+    labor_markers = (
+        "=== LABOR COST (pinned role billable card)",
+        "=== KB labor / role billable rates",
+    )
+    for labor_marker in labor_markers:
+        if labor_marker in text:
+            after = text.split(labor_marker, 1)[-1]
+            nl = after.find("\n")
+            text = after[nl + 1 :] if nl >= 0 else after
+            # Stop before a following === section if present.
+            next_sec = text.find("\n===")
+            if next_sec >= 0:
+                text = text[:next_sec]
+            break
     source = "KB labor/role billable rates"
     for src in kb_sources or []:
         if _ROLE_SOURCE_RE.search(src or "") and not re.search(
@@ -288,7 +256,11 @@ def ingest_role_billable_from_guide_bundle(
             break
     rates = approved_from_role_billable_text(text, source_file=source)
     if rates:
-        persist_kb_role_billable_cache(rates)
+        logger.info(
+            "role_billable_ingested_from_bundle count=%s source=%s",
+            len(rates),
+            source,
+        )
     return rates
 
 
@@ -566,6 +538,16 @@ def scrub_unapproved_manuscript_hourly_claims(
         return _MANUAL_HOURLY_FILL
 
     out = _HOURLY_RANGE_RE.sub(_range_repl, body)
+
+    # Without a live registry (Labor Cost pin / rate card / Sonja JSON), do not
+    # blank every $/hr — that would punish a good pin that isn't on disk.
+    if not rates:
+        if logs:
+            logger.info(
+                "scrub_unapproved_manuscript_hourly_claims ranges_only count=%s",
+                len(logs),
+            )
+        return out, logs
 
     def _single_repl(match: re.Match[str]) -> str:
         raw = (match.group("amt") or "").replace(",", "")

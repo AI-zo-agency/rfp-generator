@@ -364,9 +364,32 @@ def apply_zero_fabrication_guards(
 
     try:
         from app.services.pricing_approved_rates import (
+            ApprovedHourlyRate,
             scrub_unapproved_manuscript_hourly_claims,
         )
         from app.services.proposal_budget_content import section_is_budgetish
+
+        fee_registry: list[ApprovedHourlyRate] | None = None
+        resolved = budget
+        if resolved is None and research is not None:
+            resolved = getattr(research, "budget", None)
+        if resolved is not None:
+            fee_registry = []
+            for vr in getattr(resolved, "verified_rates", None) or []:
+                amt = getattr(vr, "hourly_rate", None)
+                role = (getattr(vr, "role", None) or "").strip()
+                if amt is None or float(amt) <= 0:
+                    continue
+                fee_registry.append(
+                    ApprovedHourlyRate(
+                        rateId=f"vr-{role.casefold().replace(' ', '-') or len(fee_registry)}",
+                        label=role,
+                        amount=float(amt),
+                        approvedBy="verifiedRates",
+                        sourceFile=(getattr(vr, "source", None) or "Labor Cost").strip()
+                        or "Labor Cost",
+                    )
+                )
 
         fee_sections: list = []
         fee_changed = False
@@ -375,7 +398,8 @@ def apply_zero_fabrication_guards(
                 fee_sections.append(section)
                 continue
             cleaned, fee_logs = scrub_unapproved_manuscript_hourly_claims(
-                section.content or ""
+                section.content or "",
+                registry=fee_registry,
             )
             if fee_logs:
                 fee_changed = True

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -249,37 +248,34 @@ class RoleBillableIngestTests(unittest.TestCase):
             + "\n\n=== KB labor / role billable rates (search — cite source filenames) ===\n"
             + _ROLE_TABLE
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            cache = Path(tmp) / "pricing_role_billable_cache.json"
-            with patch.object(mod, "_KB_CACHE_PATH", cache):
-                rates = ingest_role_billable_from_guide_bundle(
-                    bundle,
-                    kb_sources=[
-                        "00_Guide_Pricing.docx",
-                        "Agency Role Rates & Cost Table.docx",
-                    ],
-                )
-                self.assertTrue(any(r.amount == 275.0 for r in rates))
-                self.assertTrue(any(r.amount == 400.0 for r in rates))
-                self.assertTrue(cache.exists())
-                loaded = load_approved_hourly_rates()
-                # JSON registry empty in test env; cache should supply after patch
-                with patch.object(mod, "_load_json_registry", return_value=[]):
-                    with patch.object(mod, "_KB_CACHE_PATH", cache):
-                        loaded = load_approved_hourly_rates()
-                self.assertTrue(any(r.amount == 275.0 for r in loaded))
+        rates = ingest_role_billable_from_guide_bundle(
+            bundle,
+            kb_sources=[
+                "00_Guide_Pricing.docx",
+                "Agency Role Rates & Cost Table.docx",
+            ],
+        )
+        self.assertTrue(any(r.amount == 275.0 for r in rates))
+        self.assertTrue(any(r.amount == 400.0 for r in rates))
+        # Live rates come from the bundle / rate_card — not a disk KB cache.
+        with patch.object(mod, "_load_json_registry", return_value=[]):
+            loaded = load_approved_hourly_rates()
+        self.assertEqual(loaded, [])
+        from app.services.pricing_rate_card_builder import (
+            build_pricing_rate_card_from_guide_text,
+        )
+
+        card = build_pricing_rate_card_from_guide_text(bundle)
+        loaded_card = load_approved_hourly_rates(rate_card=card)
+        self.assertTrue(any(r.amount == 275.0 for r in loaded_card))
 
     def test_guide_only_bundle_does_not_invent_hourly_registry(self) -> None:
         """Menu SKU ranges must never become approved hourlies."""
         bundle = "=== 00_Guide_Pricing ===\n" + _GUIDE_MENU_SNIPPET
-        with tempfile.TemporaryDirectory() as tmp:
-            cache = Path(tmp) / "pricing_role_billable_cache.json"
-            with patch.object(mod, "_KB_CACHE_PATH", cache):
-                rates = ingest_role_billable_from_guide_bundle(
-                    bundle, kb_sources=["00_Guide_Pricing.docx"]
-                )
-                self.assertEqual(rates, [])
-                self.assertFalse(cache.exists())
+        rates = ingest_role_billable_from_guide_bundle(
+            bundle, kb_sources=["00_Guide_Pricing.docx"]
+        )
+        self.assertEqual(rates, [])
 
     def test_missing_guide_stub_still_empty_rate_card(self) -> None:
         from app.services.pricing_rate_card_builder import (

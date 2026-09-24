@@ -315,6 +315,37 @@ def _extract_agency_role_billable_rates(
     return added
 
 
+def _peel_labor_rate_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split pinned Labor Cost / KB labor blocks from the Guide menu body.
+
+    Phase 3.5 concatenates Guide + ``=== LABOR COST … ===`` into one string.
+    Role Billable rows must keep source_doc=Labor Cost, not 00_Guide_Pricing.
+    """
+    remaining = text or ""
+    markers: tuple[tuple[str, str], ...] = (
+        ("=== LABOR COST (pinned role billable card)", "Labor Cost"),
+        ("=== KB labor / role billable rates", "KB labor/role billable rates"),
+    )
+    sections: list[tuple[str, str]] = []
+    for marker, source_label in markers:
+        idx = remaining.find(marker)
+        if idx < 0:
+            continue
+        before = remaining[:idx]
+        after = remaining[idx + len(marker) :]
+        nl = after.find("\n")
+        after = after[nl + 1 :] if nl >= 0 else after
+        next_sec = after.find("\n===")
+        if next_sec >= 0:
+            labor_body, tail = after[:next_sec], after[next_sec:]
+        else:
+            labor_body, tail = after, ""
+        if labor_body.strip():
+            sections.append((source_label, labor_body))
+        remaining = before + tail
+    return remaining, sections
+
+
 def build_pricing_rate_card_from_guide_text(
     guide_text: str,
     *,
@@ -344,23 +375,36 @@ def build_pricing_rate_card_from_guide_text(
         logger.warning("pricing_rate_card_empty reason=no_guide_text")
         return card
 
+    guide_only, labor_sections = _peel_labor_rate_sections(text)
     rates: list[PricingRate] = []
     seen: set[str] = set()
 
+    # Labor Billable first so roles keep Labor Cost provenance (not Guide default).
+    for labor_source, labor_body in labor_sections:
+        role_count = _extract_agency_role_billable_rates(
+            labor_body, source_doc=labor_source, rates=rates, seen=seen
+        )
+        if role_count:
+            logger.info(
+                "pricing_rate_card_role_rates source=%s rates=%s",
+                labor_source,
+                role_count,
+            )
+
     # Prefer structured markdown tables from the indexed DOCX (stable full-doc shape).
     table_count = _extract_markdown_table_rates(
-        text, source_doc=source_doc, rates=rates, seen=seen
+        guide_only, source_doc=source_doc, rates=rates, seen=seen
     )
     if table_count:
         logger.info("pricing_rate_card_table_extract rates=%s", table_count)
 
     role_count = _extract_agency_role_billable_rates(
-        text, source_doc=source_doc, rates=rates, seen=seen
+        guide_only, source_doc=source_doc, rates=rates, seen=seen
     )
     if role_count:
         logger.info("pricing_rate_card_role_rates rates=%s", role_count)
 
-    for match in _RANGE_RE.finditer(text):
+    for match in _RANGE_RE.finditer(guide_only):
         menu = match.group("menu")
         tier = _norm_tier(match.group("tier"))
         low = _parse_money(match.group("low"))
@@ -381,7 +425,7 @@ def build_pricing_rate_card_from_guide_text(
             notes="inline range midpoint from guide extract",
         )
 
-    for match in _SINGLE_RE.finditer(text):
+    for match in _SINGLE_RE.finditer(guide_only):
         menu = match.group("menu")
         tier = _norm_tier(match.group("tier"))
         rate_id = f"guide-{menu}-{tier.lower()}"
@@ -413,7 +457,7 @@ def build_pricing_rate_card_from_guide_text(
             )
         )
 
-    for index, match in enumerate(_HOURLY_RE.finditer(text), start=1):
+    for index, match in enumerate(_HOURLY_RE.finditer(guide_only), start=1):
         amt = _parse_money(match.group("amt"))
         if amt is None or amt <= 0:
             continue
@@ -451,10 +495,11 @@ def build_pricing_rate_card_from_guide_text(
         warnings=warnings,
     )
     logger.info(
-        "pricing_rate_card_built rates=%s warnings=%s guide_chars=%s",
+        "pricing_rate_card_built rates=%s warnings=%s guide_chars=%s labor_sections=%s",
         len(rates),
         len(warnings),
         len(text),
+        len(labor_sections),
     )
     return card
 

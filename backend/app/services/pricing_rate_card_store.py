@@ -45,9 +45,17 @@ _OVERRIDES_PATH = (
 )
 
 
+_CARD_PARSE_VERSION = "labor-pin-v1"
+
+
 def guide_fingerprint(guide_text: str) -> str:
-    """Stable id for a guide version — same text, same card."""
-    return hashlib.sha256((guide_text or "").encode("utf-8")).hexdigest()[:32]
+    """Stable id for a guide version — same text, same card.
+
+    Parse-version prefix invalidates stale caches when extraction provenance
+    changes (e.g. Labor Cost pin must not stay stamped as 00_Guide_Pricing).
+    """
+    payload = f"{_CARD_PARSE_VERSION}\n{guide_text or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
 def _read_json(path: Path) -> Any:

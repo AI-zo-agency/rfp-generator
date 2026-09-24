@@ -2816,21 +2816,9 @@ def prepare_budget_for_client_display(
     (+ direct); total_client_invoicing = client grand total including pass-through.
     """
     from app.services.pricing_approved_rates import (
-        approved_from_pricing_rates,
-        persist_kb_role_billable_cache,
         scrub_unapproved_form_rates,
     )
     from app.services.proposal_budget_validation import split_line_item_totals
-
-    # Bridge rate-card role hourlies into the on-disk registry so later render/
-    # derive calls (which load JSON+cache only) still resolve approved $/hr.
-    if rate_card is not None:
-        try:
-            seeded = approved_from_pricing_rates(rate_card.rates or [])
-            if seeded:
-                persist_kb_role_billable_cache(seeded)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("role billable cache seed from rate_card skipped: %s", exc)
 
     budget = scrub_unapproved_form_rates(
         budget, rate_card=rate_card, pricing_instrument=pricing_instrument

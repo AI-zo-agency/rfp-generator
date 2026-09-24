@@ -1275,7 +1275,11 @@ def _parse_verified_rates(raw_rates: Any) -> list[VerifiedRate]:
                 for token in (
                     "00_guide_pricing",
                     "guide_pricing",
+                    "labor cost",
+                    "labor costs",
                     "labor category",
+                    "role billable",
+                    "agency role rates",
                     "rate card",
                     "menu",
                 )
@@ -2610,37 +2614,91 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     # Bind before editor so MANUAL FILL commission placeholders do not trip unbound
     # XOR checks against still-unbound labor lines inside assert_budget_canonical.
     budget = bind_budget_line_items_to_rate_card(budget, rate_card)
-    # Seed classification billable rates from KB labor/role excerpts onto the
-    # budget so phased Cost tabs can still render a mandatory rate schedule.
+    # Seed classification billable rates onto the budget. Prefer the approved
+    # registry (Labor Cost pin → correct sourceFile) over rate-card hourlies.
     try:
+        from app.services.pricing_approved_rates import load_approved_hourly_rates
         from app.services.pricing_rate_card_builder import bindable_rates
+
+        approved_rates = load_approved_hourly_rates(rate_card=rate_card)
+        approved_by_label = {
+            (r.label or "").strip().casefold(): r
+            for r in approved_rates
+            if (r.label or "").strip()
+        }
+
+        def _source_looks_like_guide(src: str) -> bool:
+            s = (src or "").casefold()
+            if not s.strip():
+                return True
+            return "00_guide_pricing" in s or (
+                "guide_pricing" in s and "labor" not in s
+            )
+
+        rewritten: list[VerifiedRate] = []
+        for vr in budget.verified_rates or []:
+            key = (vr.role or vr.person_name or "").strip().casefold()
+            hit = approved_by_label.get(key)
+            if (
+                hit is not None
+                and vr.hourly_rate is not None
+                and abs(float(vr.hourly_rate) - float(hit.amount)) <= 0.01
+                and _source_looks_like_guide(vr.source or "")
+            ):
+                rewritten.append(
+                    vr.model_copy(
+                        update={
+                            "source": (hit.source_file or "").strip() or "Labor Cost"
+                        }
+                    )
+                )
+            else:
+                rewritten.append(vr)
+        budget = budget.model_copy(update={"verified_rates": rewritten})
+
+        existing = {
+            (vr.role or vr.person_name or "").casefold()
+            for vr in (budget.verified_rates or [])
+        }
+        merged = list(budget.verified_rates or [])
+
+        for approved in approved_rates:
+            label = (approved.label or "").strip()
+            if not label or label.casefold() in existing:
+                continue
+            if float(approved.amount or 0) <= 0:
+                continue
+            existing.add(label.casefold())
+            merged.append(
+                VerifiedRate(
+                    personName="",
+                    role=label,
+                    hourlyRate=float(approved.amount),
+                    source=(approved.source_file or "").strip() or "Labor Cost",
+                )
+            )
 
         hourly_roles = [
             r
             for r in bindable_rates(rate_card)
-            if getattr(r, "unit", "") == "hour" and float(getattr(r, "amount", 0) or 0) > 0
+            if getattr(r, "unit", "") == "hour"
+            and float(getattr(r, "amount", 0) or 0) > 0
         ]
-        if hourly_roles:
-            existing = {
-                (vr.role or vr.person_name or "").casefold()
-                for vr in (budget.verified_rates or [])
-            }
-            merged = list(budget.verified_rates or [])
-            for role_rate in hourly_roles:
-                label = (role_rate.service or "").strip()
-                if not label or label.casefold() in existing:
-                    continue
-                existing.add(label.casefold())
-                merged.append(
-                    VerifiedRate(
-                        personName="",
-                        role=label,
-                        hourlyRate=float(role_rate.amount),
-                        source=getattr(role_rate, "source_doc", "") or "",
-                    )
+        for role_rate in hourly_roles:
+            label = (role_rate.service or "").strip()
+            if not label or label.casefold() in existing:
+                continue
+            existing.add(label.casefold())
+            merged.append(
+                VerifiedRate(
+                    personName="",
+                    role=label,
+                    hourlyRate=float(role_rate.amount),
+                    source=getattr(role_rate, "source_doc", "") or "",
                 )
-            if len(merged) > len(budget.verified_rates or []):
-                budget = budget.model_copy(update={"verified_rates": merged})
+            )
+        if len(merged) > len(budget.verified_rates or []):
+            budget = budget.model_copy(update={"verified_rates": merged})
     except Exception:
         logger.exception("seed verified hourly rates from rate card failed for %s", rfp_id)
     step_trace(
