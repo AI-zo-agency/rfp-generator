@@ -161,16 +161,6 @@ export interface PreSubmitAutoFixReport {
   sectionLogs: SectionAutoFixLog[];
 }
 
-export interface FeeJustificationMemo {
-  markdown: string;
-  pricingPosture: string;
-  targetVsCap: string;
-  roleHoursSummary: string[];
-  internalNotes: string[];
-  generatedAt: string;
-  provider?: string | null;
-}
-
 export interface ProposalExecutionPlanSummary {
   validation?: {
     readinessStatus?: "ready" | "blocked" | "partial";
@@ -270,31 +260,10 @@ export interface BudgetLineItem {
   notes?: string | null;
 }
 
-export interface VerifiedRate {
-  personName: string;
-  role: string;
-  hourlyRate?: number | null;
-  source: string;
-}
-
-export interface PricingTier {
-  id: string;
-  name: string;
-  total?: number | null;
-  lineItemIds: string[];
-  rationale: string;
-}
-
 export interface ProposalBudget {
   rfpId: string;
-  rfpBudgetCap?: number | null;
   rfpBudgetNotes: string;
-  feeStructure: string;
-  pricingTier?: string | null;
-  budgetFormat?: string | null;
   lineItems: BudgetLineItem[];
-  tiers: PricingTier[];
-  recommendedTierId?: string | null;
   agencyRevenueEstimate?: number | null;
   lineItemSum?: number | null;
   agencyFeeSubtotal?: number | null;
@@ -302,20 +271,8 @@ export interface ProposalBudget {
   totalClientInvoicing?: number | null;
   commissionRate?: number | null;
   lumpSumTotal?: number | null;
-  directExpensesTotal?: number | null;
   commissionModel?: string | null;
   pricingFlags: string[];
-  qualifyingLanguage: string;
-  scopeAdjustments: string[];
-  scopeSummary: string;
-  designBrief: string;
-  optionTermNotes: string;
-  mediaSpendNotes: string;
-  verifiedRates: VerifiedRate[];
-  kbSources: string[];
-  kbBucketsUsed: string[];
-  confidence: number;
-  feeJustificationMemo?: FeeJustificationMemo | null;
   updatedAt: string;
   provider?: string | null;
 }
