@@ -352,5 +352,108 @@ class Phase35ReconcilePricingPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cost.content.strip(), svc.render_pricing_plan_budget(budget).strip())
 
 
+class SelectionModeRoutesToPlanEditTests(unittest.IsolatedAsyncioTestCase):
+    """Bug A: a selection edit on the v2 Cost tab must hit the plan branch too.
+
+    Before the fix, `improve_proposal_section`'s v2 plan-edit branch only fired
+    when `not selection_mode`, so a highlighted-passage edit fell through to the
+    patch/redraft path and was then silently overwritten by the zero-fabrication
+    guard's re-render from the plan at persist.
+    """
+
+    async def _run(self, *, selection_mode: bool):
+        from unittest.mock import AsyncMock
+        from types import SimpleNamespace
+
+        from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
+        from app.models.rfp import RfpRecord
+        from app.services import proposal_section_editor as editor
+        from app.services import proposal_pricing_service as pricing_service
+
+        budget = _newport_budget()
+        section = ProposalSection(
+            id="s2",
+            title="Budget & Pricing",
+            content=svc.render_pricing_plan_budget(budget),
+            mode="write",
+        )
+        draft = ProposalDraft(rfpId="r-newport", updatedAt="t", sections=[section])
+        research = ProposalResearchCache(rfpId="r-newport", updatedAt="t", budget=budget)
+        rfp = RfpRecord(
+            id="r-newport",
+            title="Newport",
+            client="Newport",
+            sector="government",
+            source="manual",
+            dueDate="2026-09-01",
+            receivedDate="2026-08-01",
+            lastActivity="2026-08-01",
+            lastActivityNote="test",
+        )
+
+        new_budget = _newport_budget()
+        edit_mock = AsyncMock(return_value=(new_budget, "Updated the plan."))
+
+        content = section.content or ""
+        selected = content.split("\n")[0] or content[:20]
+        start = content.index(selected)
+        sel_kwargs = (
+            {
+                "selection_start": start,
+                "selection_end": start + len(selected),
+                "selection_text": selected,
+            }
+            if selection_mode
+            else {}
+        )
+
+        with (
+            patch("app.services.llm.is_configured", return_value=True),
+            patch.object(
+                editor, "aload_rfp_for_proposal",
+                new=AsyncMock(return_value=(rfp, SimpleNamespace(description="", pdf_text=""), "RFP text")),
+            ),
+            patch.object(editor, "aget_proposal_draft", new=AsyncMock(return_value=draft)),
+            patch.object(editor, "aget_research_cache", new=AsyncMock(return_value=research)),
+            patch.object(editor, "asave_research_cache", new=AsyncMock()),
+            patch.object(
+                pricing_service, "fetch_pricing_guide_context",
+                new=AsyncMock(return_value=("", [])),
+            ),
+            patch.object(svc, "edit_pricing_plan_from_chat", edit_mock),
+        ):
+            result = await editor.improve_proposal_section(
+                "r-newport",
+                "s2",
+                "In this passage change the fee to a flat rate",
+                persist=False,
+                **sel_kwargs,
+            )
+        return result, edit_mock, new_budget, selected
+
+    async def test_selection_edit_is_routed_to_the_plan_branch(self) -> None:
+        (section, _draft, _research, _provider, reply, changed, _fix), edit_mock, new_budget, selected = (
+            await self._run(selection_mode=True)
+        )
+        edit_mock.assert_awaited_once()
+        instruction = edit_mock.await_args.kwargs["instruction"]
+        self.assertIn(selected, instruction)
+        self.assertIn("In this passage change the fee to a flat rate", instruction)
+        self.assertTrue(changed)
+        self.assertEqual(reply, "Updated the plan.")
+        self.assertEqual(section.content, svc.render_pricing_plan_budget(new_budget))
+
+    async def test_non_selection_edit_still_routes_to_the_plan_branch(self) -> None:
+        (_section, _draft, _research, _provider, _reply, changed, _fix), edit_mock, _new_budget, _selected = (
+            await self._run(selection_mode=False)
+        )
+        edit_mock.assert_awaited_once()
+        self.assertEqual(
+            edit_mock.await_args.kwargs["instruction"],
+            "In this passage change the fee to a flat rate",
+        )
+        self.assertTrue(changed)
+
+
 if __name__ == "__main__":
     unittest.main()

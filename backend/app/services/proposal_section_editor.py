@@ -9449,7 +9449,7 @@ async def improve_proposal_section(
     latest_user_ask = raw_user_message
 
     plan_budget = research.budget if research is not None else None
-    if plan_budget is not None and plan_budget.pricing_plan and not selection_mode:
+    if plan_budget is not None and plan_budget.pricing_plan:
         from app.services.proposal_budget_content import find_budget_section_index
 
         idx = find_budget_section_index(draft.sections)
@@ -9459,9 +9459,16 @@ async def improve_proposal_section(
                 render_pricing_plan_budget,
             )
 
+            plan_instruction = latest_user_ask
+            if selection_mode and (selection_text or "").strip():
+                plan_instruction = (
+                    f"In this passage: {selection_text.strip()}\n\n"
+                    f"Change requested: {latest_user_ask}"
+                )
+
             new_budget, reply = await edit_pricing_plan_from_chat(
                 plan_budget,
-                instruction=latest_user_ask,
+                instruction=plan_instruction,
                 rfp_text=rfp_full_text or rfp_context or "",
                 target_budget_usd=research.target_budget_usd,
             )
