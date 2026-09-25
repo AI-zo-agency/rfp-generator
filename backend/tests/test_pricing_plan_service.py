@@ -129,3 +129,23 @@ class TargetBudgetEndpointTests(unittest.IsolatedAsyncioTestCase):
                 "r1", api.Phase35BudgetRequest(chainNext=False, targetBudgetUsd=180000)
             )
         self.assertEqual(save.await_args.args[0].target_budget_usd, 180000)
+
+
+class ChatEditTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_edit_goes_through_checks(self) -> None:
+        budget_calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (_json("988_plan.json"), "p")])
+        with patch.object(svc.llm, "chat_json", budget_calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            budget = await svc.generate_pricing_plan_budget("rfp-988", RFP)
+        edited = _json("988_plan.json")
+        edited["tasks"] = [t for t in edited["tasks"] if t["task_id"] != "A12c"]  # drop media
+        edited["sections"] = [
+            {**s, "body_md": s["body_md"].replace("{{VERBATIM:media}}", "").replace("{{MEDIA_SPLIT}}", "")}
+            for s in edited["sections"]
+        ]
+        edited["reply"] = "Removed the media placement task."
+        with patch.object(svc.llm, "chat_json", AsyncMock(return_value=(edited, "p"))), \
+             patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            new_budget, reply = await svc.edit_pricing_plan_from_chat(budget, instruction="remove media", rfp_text=RFP)
+        self.assertEqual(reply, "Removed the media placement task.")
+        self.assertNotIn("A12c", [li.id for li in new_budget.line_items])
+        self.assertNotIn("reply", new_budget.pricing_plan)

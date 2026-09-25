@@ -10743,6 +10743,40 @@ async def improve_proposal_section(
     # read this — it must stay the user's own words, not the evidence stanza.
     latest_user_ask = raw_user_message
 
+    plan_budget = research.budget if research is not None else None
+    if plan_budget is not None and plan_budget.pricing_plan and not selection_mode:
+        from app.services.proposal_budget_content import find_budget_section_index
+
+        idx = find_budget_section_index(draft.sections)
+        if idx is not None and draft.sections[idx].id == section.id:
+            from app.services.pricing_plan_service import (
+                edit_pricing_plan_from_chat,
+                render_pricing_plan_budget,
+            )
+
+            new_budget, reply = await edit_pricing_plan_from_chat(
+                plan_budget,
+                instruction=latest_user_ask,
+                rfp_text=rfp_full_text or rfp_context or "",
+                target_budget_usd=research.target_budget_usd,
+            )
+            research = research.model_copy(update={"budget": new_budget})
+            await asave_research_cache(research)
+            working = section.model_copy(
+                update={"content": render_pricing_plan_budget(new_budget), "status": "generated"}
+            )
+            updated_draft = draft.model_copy(
+                update={"sections": [working if s.id == section.id else s for s in draft.sections]}
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft, research, section_title=section.title
+                )
+                working = _find_draft_section(updated_draft, section.id) or working
+            return _improve_outcome(
+                working, updated_draft, research, _provider_name(), reply, True, None
+            )
+
     # "implement budget table here" → insert/replace table in THIS section only.
     if not selection_mode:
         table_insert = await _try_section_budget_table_insert(
