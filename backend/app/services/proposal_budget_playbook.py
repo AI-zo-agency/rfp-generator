@@ -1379,22 +1379,18 @@ async def build_budget_repair_context(
     research: ProposalResearchCache | None,
     user_message: str = "",
 ) -> str:
-    """RFP budget excerpt + 00_Guide_Pricing + playbook for repair/revise agents."""
-    from app.services.proposal_pricing_service import fetch_pricing_guide_context
+    """RFP budget excerpt + playbook for repair/revise agents.
+
+    ``rfp`` and ``user_message`` are kept in the signature for the existing
+    call sites (proposal_self_edit_loop.py, proposal_section_editor.py) even
+    though this function no longer uses them — fees come from the pricing
+    plan, not from a fetched Pricing Guide, so nothing here needs to build a
+    guide-search focus hint any more.
+    """
+    del rfp, user_message
     from app.services.proposal_rfp_excerpt import budget_and_cost_excerpt
 
     cost_excerpt = budget_and_cost_excerpt(rfp_text, max_chars=16_000)
-    stage_two = ""
-    if research and research.rfp_sections:
-        stage_two = "\n".join(
-            f"{s.title}: {', '.join((s.requirements or [])[:5])}"
-            for s in research.rfp_sections[:12]
-        )
-    guide_text, _ = await fetch_pricing_guide_context(
-        rfp,
-        stage_two=stage_two,
-        focus_hint=user_message[:300] or "tier selection budget ceiling",
-    )
     parts = [
         BUDGET_TOOL_ROUTING,
         budget_playbook_prompt_block(research=research, full_budget_detail=True),
@@ -1413,6 +1409,4 @@ async def build_budget_repair_context(
         pass
     if cost_excerpt.strip():
         parts.append(f"=== RFP BUDGET / COST EXCERPT ===\n{cost_excerpt[:14_000]}")
-    if guide_text.strip():
-        parts.append(f"=== 00_Guide_Pricing ===\n{guide_text[:16_000]}")
     return "\n\n".join(parts)

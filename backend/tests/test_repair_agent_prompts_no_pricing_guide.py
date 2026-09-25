@@ -65,5 +65,50 @@ class NoPricingGuideInRepairPromptsTests(unittest.TestCase):
         self.assertFalse(captured.get("include_pricing_guide"))
 
 
+class BudgetRepairContextDropsPricingGuideTests(unittest.TestCase):
+    """build_budget_repair_context must not fetch/inject 00_Guide_Pricing text —
+    v2's pricing plan owns Cost section fees; nothing prices from the guide."""
+
+    def test_repair_context_never_calls_fetch_pricing_guide_context(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.models.rfp import RfpRecord
+        from app.services.proposal_budget_playbook import build_budget_repair_context
+
+        rfp = RfpRecord(
+            id="r1",
+            title="T",
+            client="C",
+            dueDate="2026-09-01",
+            receivedDate="2026-08-01",
+            lastActivity="2026-08-05",
+            lastActivityNote="n",
+        )
+
+        import app.services.proposal_pricing_service as pricing_service
+
+        fail_if_called = AsyncMock(
+            side_effect=AssertionError("fetch_pricing_guide_context must not be called")
+        )
+        with patch.object(
+            pricing_service, "fetch_pricing_guide_context", new=fail_if_called
+        ):
+            context = asyncio.run(
+                build_budget_repair_context(
+                    rfp=rfp,
+                    rfp_text="Cost proposal required. Submit itemized budget.",
+                    research=None,
+                    user_message="rebuild fees from the pricing guide",
+                )
+            )
+
+        fail_if_called.assert_not_awaited()
+        # The instructional playbook block may still mention "00_Guide_Pricing"
+        # by name (e.g. "labor rows when present") — what must be gone is the
+        # fetched guide document itself, injected under this header.
+        self.assertNotIn("=== 00_Guide_Pricing ===", context)
+
+
 if __name__ == "__main__":
     unittest.main()
