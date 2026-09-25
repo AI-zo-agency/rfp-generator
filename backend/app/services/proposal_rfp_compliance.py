@@ -1893,7 +1893,8 @@ def scan_budget_revenue_gaps(
 ) -> list[ComplianceGap]:
     """Budget math gaps from canonical budget fields — no prose regex."""
     budget = research.budget if research else None
-    if not budget:
+    if not budget or budget.pricing_plan:
+        # Pricing-plan budgets are checked by the plan's own verifier.
         return []
 
     idx = find_budget_section_index(draft.sections)
@@ -1954,7 +1955,12 @@ def scan_submission_pricing_flag_gaps(
     has_manuscript_flag = _text_contains(content, "[PRICING FLAG") or _text_contains(
         content, "## Pricing Flags"
     )
-    has_budget_flags = bool(budget and budget.pricing_flags)
+    flags = budget.pricing_flags if budget else []
+    if budget and budget.pricing_plan:
+        # v2 always adds [PRICING NOTE — ...] internal notes; only
+        # [PRICING FLAG: ...] entries are unresolved checks.
+        flags = [f for f in flags if f.lstrip().startswith("[PRICING FLAG")]
+    has_budget_flags = bool(flags)
 
     if not has_manuscript_flag and not has_budget_flags:
         return []
