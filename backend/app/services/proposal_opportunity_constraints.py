@@ -156,81 +156,6 @@ def _pricing_compliance_lines(compliance: dict[str, Any], *, limit: int = 8) -> 
     return hits
 
 
-def opportunity_pricing_format_hint(obj: Any) -> str | None:
-    """Return budgetFormat when Phase-2 opportunity strongly indicates a form instrument.
-
-    - Proposal Pricing Form + hourly / T&M → blended_rate_form
-    - Role / labor-category hourly table → personnel_loading
-    - Otherwise None (leave judge / LLM).
-    """
-    plan = plan_dict_from(obj)
-    if not plan:
-        return None
-    scope, bi, _tl, budget_plan, compliance = _opportunity_slices(plan)
-    blob_parts = [
-        str(bi.get("notes") or ""),
-        str(bi.get("pricingModelHint") or bi.get("pricing_model_hint") or ""),
-        str(bi.get("basePricingModel") or bi.get("base_pricing_model") or ""),
-        str(budget_plan.get("pricingModel") or budget_plan.get("pricing_model") or ""),
-        str(budget_plan.get("ceiling") or ""),
-        str(budget_plan.get("pricingStrategy") or ""),
-        str(scope.get("notes") or ""),
-        " ".join(_pricing_compliance_lines(compliance, limit=12)),
-    ]
-    blob = " ".join(blob_parts).casefold()
-    if not blob.strip():
-        return None
-
-    role_hourly = any(
-        k in blob
-        for k in (
-            "by role",
-            "labor category",
-            "job title",
-            "classification",
-            "personnel loading",
-            "rate by classification",
-        )
-    )
-    formish = any(
-        k in blob
-        for k in (
-            "proposal pricing form",
-            "pricing proposal form",
-            "official pricing form",
-            "quotation form",
-            "cost proposal form",
-        )
-    )
-    hourly = any(
-        k in blob
-        for k in ("hourly", "t&m", "time and material", "time & material", "billed hourly")
-    )
-    dual_track = ("part 1" in blob and "part 2" in blob) or (
-        "separate" in blob and ("not-to-exceed" in blob or "not to exceed" in blob)
-    )
-
-    if role_hourly:
-        logger.info("opportunity_format_hint=personnel_loading reason=role_hourly")
-        return "personnel_loading"
-    if formish and (hourly or dual_track):
-        logger.info(
-            "opportunity_format_hint=blended_rate_form reason=form+hourly_or_dual_track"
-        )
-        return "blended_rate_form"
-    if (budget_plan.get("pricingModel") or "").strip().upper() in {"T&M", "TM", "HOURLY"}:
-        if formish or hourly:
-            logger.info("opportunity_format_hint=blended_rate_form reason=tm_model")
-            return "blended_rate_form"
-    return None
-
-
-def budget_format_omits_fee_detail(budget_format: str | None) -> bool:
-    """True when the scored instrument is the form/hourly table — not Fee Detail by Phase."""
-    fmt = (budget_format or "").casefold().replace("-", "_")
-    return fmt in {"blended_rate_form", "personnel_loading"}
-
-
 def _typed_delivery_from(obj: Any) -> Any:
     """Return DeliveryConstraints when research (or dict) carries typed pack."""
     if obj is None:
@@ -371,30 +296,6 @@ def format_opportunity_hard_constraints(
             lines.append("- Compliance pricing / form obligations:")
             for req in pricing_reqs:
                 lines.append(f"  • {req}")
-        hint = opportunity_pricing_format_hint(plan)
-        if typed_inst is not None and typed_inst.kind == "buyer_pricing_form":
-            if float(getattr(typed_inst, "confidence", 0) or 0) >= 0.55:
-                hint = hint or "blended_rate_form"
-        elif typed_inst is not None and typed_inst.kind == "personnel_loading":
-            hint = hint or "personnel_loading"
-        if hint:
-            lines.append(
-                f"- REQUIRED budgetFormat for manuscript Cost: {hint} "
-                "(official form / hourly instrument — do NOT emit Fee Detail by Phase "
-                "as the scored response; internal tier build may support hours only)."
-            )
-            lines.append(
-                "- When separate Part / track NTEs exist, emit separate subtotals and "
-                "keep each track under its own cap — never one merged phase-fee total."
-            )
-            lines.append(
-                "- Do not add Travel / Reimbursables unless THIS RFP form allows expenses; "
-                "firm-fixed / form-only instruments omit separate expense lines."
-            )
-            lines.append(
-                "- description may cite deliverables by name; do NOT invent "
-                "'RFP §X, Approach Item Y' citations that are not verbatim in the RFP."
-            )
 
     if want_timeline:
         def _pick(d: dict[str, Any], *keys: str) -> str:

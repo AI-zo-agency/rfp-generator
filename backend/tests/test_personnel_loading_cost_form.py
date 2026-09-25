@@ -4,87 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from app.models.proposal import BudgetLineItem, ProposalBudget, ProposalDraft, ProposalSection
-from app.services.proposal_budget_content import (
-    extract_rfp_labor_role_labels,
-)
+from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_integrity_guards import scrub_ungrounded_case_study_percent_metrics
-
-
-class PersonnelLoadingRenderTests(unittest.TestCase):
-    def test_role_labels_assist_when_rfp_lists_roles(self) -> None:
-        rfp = (
-            "Provide hourly rates for each of the following roles.\n"
-            "1. Account Director\n"
-            "2. Senior Strategist\n"
-            "3. Creative Director\n"
-        )
-        roles = extract_rfp_labor_role_labels(rfp)
-        self.assertIn("Account Director", roles)
-        self.assertIn("Senior Strategist", roles)
-
-    def test_schedule_prefers_verified_rates_over_noisy_descriptions(self) -> None:
-        from app.models.proposal import VerifiedRate
-        from app.services.proposal_budget_content import (
-            render_personnel_loading_form_markdown,
-        )
-
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            budgetFormat="personnel_loading",
-            verifiedRates=[
-                VerifiedRate(
-                    personName="",
-                    role="Account Manager",
-                    hourlyRate=275.0,
-                    source="Labor Cost",
-                ),
-                VerifiedRate(
-                    personName="",
-                    role="Creative Director",
-                    hourlyRate=275.0,
-                    source="Labor Cost",
-                ),
-            ],
-            lineItems=[
-                BudgetLineItem(
-                    id="li-1",
-                    category="labor",
-                    description=(
-                        "Copywriter classification (closest KB labor category"
-                    ),
-                    roleTitle="Copywriter classification (closest KB labor category",
-                    unit="hour",
-                    rate=275.0,
-                    quantity=1,
-                    extended=275.0,
-                ),
-                BudgetLineItem(
-                    id="li-2",
-                    category="labor",
-                    description="Account Manager classification",
-                    roleTitle="Account Manager classification",
-                    unit="hour",
-                    rate=275.0,
-                    quantity=1,
-                    extended=275.0,
-                ),
-            ],
-        )
-        md = render_personnel_loading_form_markdown(budget)
-        self.assertIn("| Account Manager | $275 |", md)
-        self.assertIn("| Creative Director | $275 |", md)
-        self.assertNotIn("closest KB", md)
-        self.assertNotIn("classification", md)
-        # One clean AM row — not duplicated from noisy line item.
-        self.assertEqual(md.count("| Account Manager |"), 1)
-
-
-
-
-
-
 
 
 class CaseStudyMetricScrubTests(unittest.TestCase):
@@ -148,7 +69,6 @@ class CaseStudyMetricScrubTests(unittest.TestCase):
         self.assertIn("| Agency Director | $400 |", cleaned)
 
     def test_budget_section_skipped_by_draft_metric_scrub(self) -> None:
-        from app.models.proposal import ProposalDraft, ProposalSection
         from app.services.proposal_integrity_guards import (
             apply_case_study_metric_scrub_to_draft,
         )

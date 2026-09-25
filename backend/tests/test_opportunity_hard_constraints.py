@@ -15,14 +15,10 @@ from app.models.delivery_constraints import (
 from app.models.pricing_instrument import PricingInstrument
 from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_content import (
-    ensure_fee_detail_table_in_budget_markdown,
     render_budget_markdown,
-    _rollup_phase_fee_rows,
 )
 from app.services.proposal_opportunity_constraints import (
-    budget_format_omits_fee_detail,
     format_opportunity_hard_constraints,
-    opportunity_pricing_format_hint,
 )
 
 _DUPAGE_INSTRUMENT = (
@@ -101,10 +97,6 @@ def _dupage_plan() -> dict:
 
 
 class OpportunityConstraintsTests(unittest.TestCase):
-    def test_dupage_format_hint_is_blended_rate_form(self) -> None:
-        hint = opportunity_pricing_format_hint(_dupage_plan())
-        self.assertEqual(hint, "blended_rate_form")
-
     def test_budget_block_includes_caps_sow_timeline_not_admin(self) -> None:
         block = format_opportunity_hard_constraints(_dupage_plan(), focus="budget")
         self.assertIn("OPPORTUNITY HARD CONSTRAINTS", block)
@@ -113,7 +105,7 @@ class OpportunityConstraintsTests(unittest.TestCase):
         self.assertIn("LinkedIn and Meta", block)
         self.assertIn("2-4 videos", block)
         self.assertIn("10/31/2027", block)
-        self.assertIn("blended_rate_form", block)
+        self.assertNotIn("REQUIRED budgetFormat", block)
         self.assertIn("Proposal Pricing Form", block)
         self.assertNotIn("Submit an Original Signed Proposal", block)
         self.assertNotIn("Proposals will be received", block)
@@ -128,64 +120,6 @@ class OpportunityConstraintsTests(unittest.TestCase):
         block = format_opportunity_hard_constraints(_dupage_plan(), focus="timeline")
         self.assertIn("10/31/2027", block)
         self.assertIn("one-year renewals", block)
-
-    def test_fee_detail_omitted_for_form_format(self) -> None:
-        self.assertTrue(budget_format_omits_fee_detail("blended_rate_form"))
-        self.assertTrue(budget_format_omits_fee_detail("personnel_loading"))
-        self.assertFalse(budget_format_omits_fee_detail("phased"))
-
-    def test_ensure_fee_detail_strips_when_form_format(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        budget = ProposalBudget(
-            rfpId="rfp-test",
-            updatedAt=now,
-            budgetFormat="blended_rate_form",
-            formHourlyRate=175.0,
-            lineItems=[
-                BudgetLineItem(
-                    id="1",
-                    category="Part 1",
-                    description="General marketing",
-                    unit="hour",
-                    rate=175,
-                    quantity=100,
-                    extended=17500,
-                )
-            ],
-        )
-        body = (
-            "## Proposed Investment\n\n**Total: $17,500**\n\n"
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Scope | Fee |\n"
-            "| --- | --- | ---: |\n"
-            "| Discovery | Invented | $13,500 |\n\n"
-            "## Terms\n\nFirm fixed.\n"
-        )
-        out = ensure_fee_detail_table_in_budget_markdown(body, budget)
-        self.assertNotIn("Fee Detail by Phase", out)
-        self.assertIn("## Terms", out)
-
-    def test_rollup_does_not_emit_plus_n_more(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        items = [
-            BudgetLineItem(
-                id=str(i),
-                category="Implementation",
-                description=f"Deliverable {i} for the County engagement",
-                extended=1000.0 * (i + 1),
-                rate=1000.0 * (i + 1),
-                quantity=1,
-            )
-            for i in range(5)
-        ]
-        budget = ProposalBudget(rfpId="rfp-test", updatedAt=now, lineItems=items)
-        rows = _rollup_phase_fee_rows(budget)
-        self.assertEqual(len(rows), 1)
-        _phase, scope, _amt = rows[0]
-        self.assertNotIn("Plus", scope)
-        self.assertNotIn("more.", scope)
-        self.assertIn("Deliverable 0", scope)
-        self.assertIn("Deliverable 4", scope)
 
     def test_render_form_format_skips_fee_detail_heading(self) -> None:
         now = datetime.now(timezone.utc).isoformat()

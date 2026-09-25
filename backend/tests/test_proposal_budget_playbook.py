@@ -6,7 +6,6 @@ import unittest
 
 from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_content import (
-    fill_section_budget_verify_from_canonical,
     render_offer_form_of2_from_canonical,
 )
 from app.services.proposal_budget_playbook import (
@@ -335,46 +334,6 @@ class SectionBudgetVerifyFillTests(unittest.TestCase):
         self.assertTrue(section_has_budget_verify_tags(body))
         self.assertFalse(section_has_budget_verify_tags("Just a narrative case study."))
 
-    def test_fills_total_and_phase_from_canonical(self) -> None:
-        content = (
-            "| Discovery and audit | Listening | $[VERIFY: budget figure] |\n"
-            "| Strategy and positioning | Framework | $[VERIFY: budget figure] |\n"
-            "| Total estimated investment |  | $[VERIFY: total budget figure] |\n"
-        )
-        budget = ProposalBudget(
-            rfpId="rfp-1",
-            updatedAt="2026-07-22T00:00:00+00:00",
-            pricingTier="Average",
-            lineItems=[
-                BudgetLineItem(
-                    id="1",
-                    description="Phase 1 discovery stakeholder sessions",
-                    category="Discovery",
-                    quantity=1,
-                    unit="project",
-                    rate=10000,
-                    extended=10000,
-                    lineItemType="agency_fee",
-                ),
-                BudgetLineItem(
-                    id="2",
-                    description="Phase 2 messaging framework strategy",
-                    category="Strategy",
-                    quantity=1,
-                    unit="project",
-                    rate=20000,
-                    extended=20000,
-                    lineItemType="agency_fee",
-                ),
-            ],
-            agencyRevenueEstimate=30000,
-        )
-        filled, n = fill_section_budget_verify_from_canonical(content, budget)
-        self.assertGreaterEqual(n, 1)
-        self.assertIn("$30,000", filled)
-        self.assertNotIn("[VERIFY: total budget figure]", filled)
-        self.assertNotIn("$$", filled)
-
     def test_render_offer_form_of2_from_canonical_replaces_corrupted_table(self) -> None:
         content = (
             "## Offer Form OF-2\n\n"
@@ -438,53 +397,6 @@ class SectionBudgetVerifyFillTests(unittest.TestCase):
         )
         self.assertFalse(changed)
         self.assertEqual(rendered, "General narrative only")
-
-
-class InsertBudgetTablePreserveProseTests(unittest.TestCase):
-    def test_appends_table_without_wiping_prose(self) -> None:
-        from app.services.proposal_budget_content import insert_budget_table_into_section
-
-        prose = (
-            "## General Requirements Compliance\n\n"
-            "We honor SOW, timelines, budgets, reporting, and records retention "
-            "under an on-call task-order model.\n"
-        )
-        table = (
-            "## Proposed Investment\n\n"
-            "**Total proposed investment: $120,000**\n\n"
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Deliverable | Amount |\n"
-            "| --- | --- | ---: |\n"
-            "| Discovery | Audit | $10,000 |\n"
-            "| **Total** | | **$10,000** |\n"
-        )
-        out, action = insert_budget_table_into_section(prose, table)
-        self.assertEqual(action, "inserted")
-        self.assertIn("We honor SOW, timelines, budgets", out)
-        self.assertIn("| Phase | Deliverable | Amount |", out)
-        self.assertIn("Proposed Investment", out)
-
-    def test_replaces_existing_fee_block_only(self) -> None:
-        from app.services.proposal_budget_content import insert_budget_table_into_section
-
-        prose = (
-            "Compliance narrative stays.\n\n"
-            "## Proposed Investment\n\n"
-            "| Phase | Deliverable | Amount |\n"
-            "| --- | --- | ---: |\n"
-            "| Old | Row | $1 |\n"
-        )
-        table = (
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Deliverable | Amount |\n"
-            "| --- | --- | ---: |\n"
-            "| New | Row | $99 |\n"
-        )
-        out, action = insert_budget_table_into_section(prose, table)
-        self.assertEqual(action, "replaced")
-        self.assertIn("Compliance narrative stays.", out)
-        self.assertIn("$99", out)
-        self.assertNotIn("$1", out)
 
 
 if __name__ == "__main__":

@@ -3997,13 +3997,9 @@ async def generate_full_proposal(
                 draft, _unresolved = render_draft_budget_slots(draft, research.budget)
                 from app.services.proposal_budget_content import (
                     reconcile_draft_budget_summaries,
-                    sync_phase_budget_tables_across_draft,
                 )
 
                 draft, _ = reconcile_draft_budget_summaries(draft, research.budget)
-                draft, _phase_logs = sync_phase_budget_tables_across_draft(
-                    draft, research.budget
-                )
                 await asave_proposal_draft(draft)
                 step_trace(
                     "budget_reincorporate_after_draft",

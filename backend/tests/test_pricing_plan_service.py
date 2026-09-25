@@ -245,24 +245,24 @@ def _newport_budget():
     return svc._budget_from_plan("r-newport", asks, plan, [])
 
 
-def _fail(name):
-    from unittest.mock import MagicMock
+class MoneyIntelligenceFactsTests(unittest.TestCase):
+    def test_plan_budget_facts_come_from_the_plan(self) -> None:
+        from app.models.proposal import ProposalBudget
+        from app.services.pricing_plan_engine import compute, decide_tier, term_value
+        from app.services.proposal_money_intelligence import _canonical_budget_facts
 
-    return MagicMock(side_effect=AssertionError(f"{name} must not run on a pricing-plan budget"))
+        asks = _json("988_asks.json")
+        plan = svc._stamp(plan_988_within_rules(), KB, *decide_tier(asks))
+        facts = _canonical_budget_facts(svc._budget_from_plan("r-988", asks, plan, []))
+        value = term_value(compute(plan, KB.labor))
+        self.assertGreater(value, 0)
+        self.assertIn(f"termValue (our bid: one-time fees + 12 months of monthly fees): {value:,.2f}", facts)
+        self.assertIn("RFP ceiling — Not-to-exceed contract ceiling: 950,000.00", facts)
+        self.assertIn(f"pricingTier: {plan['tier']}", facts)
+        self.assertNotIn("ZERO", facts)
 
-
-class LegacyGuardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_legacy_budget_passes_leave_v2_budget_alone(self) -> None:
-        from app.services.proposal_budget_validation import reconcile_proposal_budget
-        from app.services.rfp_cost_demands import ensure_rfp_cost_demands_in_budget_markdown
-
-        budget = _newport_budget()
-        self.assertIs(reconcile_proposal_budget(budget, rfp_context="x"), budget)
-        body = svc.render_pricing_plan_budget(budget)
-        out, demands, _logs = await ensure_rfp_cost_demands_in_budget_markdown(
-            body, rfp_text="x", budget=budget, rewrite=True
-        )
-        self.assertEqual((out, demands), (body, []))
+        legacy = ProposalBudget(rfpId="r-old", updatedAt="t")
+        self.assertIn("agencyRevenueEstimate is ZERO", _canonical_budget_facts(legacy))
 
 
 class Phase35PricingPlanTests(unittest.IsolatedAsyncioTestCase):
@@ -287,9 +287,7 @@ class Phase35PricingPlanTests(unittest.IsolatedAsyncioTestCase):
              patch.object(gen, "load_rfp_for_proposal", return_value=(None, None, "Newport RFP text")), \
              patch.object(gen, "asave_proposal_draft", saved), \
              patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
-             patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
-             patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
-             patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")):
+             patch.object(pbc, "asave_proposal_draft", AsyncMock()):
             out_draft, out_research, out_budget = await gen._run_phase3_5_budget_inner(
                 "r-newport", app_settings=object(), has_manuscript=True
             )
@@ -341,10 +339,7 @@ class Phase35ReconcilePricingPlanTests(unittest.IsolatedAsyncioTestCase):
              patch.object(gen, "aget_proposal_draft", AsyncMock(return_value=draft)), \
              patch.object(gen, "asave_proposal_draft", saved), \
              patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
-             patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
-             patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
-             patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")), \
-             patch.object(pbc, "apply_rfp_required_budget_instrument", _fail("instrument reshape")):
+             patch.object(pbc, "asave_proposal_draft", AsyncMock()):
             out_draft, out_research, out_budget = await gen.run_phase3_5_budget_reconcile("r-newport")
         self.assertIs(out_budget, budget)
         self.assertEqual(out_budget.budget_format, "pricing_plan")

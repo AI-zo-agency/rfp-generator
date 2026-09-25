@@ -155,16 +155,6 @@ class ChatRawMessageRoutingTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=capture_structure,
             ),
             patch.object(editor, "_plan_edit_scope", side_effect=capture_scope),
-            patch.object(
-                editor,
-                "_try_budget_manual_fill_handoff",
-                new=AsyncMock(return_value=None),
-            ),
-            patch.object(
-                editor,
-                "_try_budget_section_canonical_refresh",
-                new=AsyncMock(return_value=None),
-            ),
         ):
             with self.assertRaises(_Stop):
                 await editor.improve_proposal_section(

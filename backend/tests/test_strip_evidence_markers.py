@@ -5,10 +5,6 @@ from __future__ import annotations
 import unittest
 
 from app.models.proposal import BudgetLineItem, ProposalBudget
-from app.services.proposal_budget_content import (
-    insert_budget_table_into_section,
-    render_embedded_budget_table_markdown,
-)
 from app.services.proposal_budget_playbook import user_asks_insert_budget_table
 from app.services.proposal_manuscript import (
     scrub_client_facing_section_artifacts,
@@ -91,34 +87,6 @@ class EmbeddedBudgetTableTests(unittest.TestCase):
             agencyRevenueEstimate=35000,
             totalClientInvoicing=35000,
         )
-
-    def test_embedded_table_uses_bold_labels_and_sums(self) -> None:
-        md = render_embedded_budget_table_markdown(self._budget())
-        self.assertIn("**Professional fees:**", md)
-        self.assertIn("**Total proposed investment:**", md)
-        self.assertIn("$35,000", md)
-        self.assertNotIn("PRICING FLAG", md)
-        self.assertNotIn("[E", md)
-
-    def test_insert_replaces_flags_and_scrubs_e_markers(self) -> None:
-        body = (
-            "## BUDGETS (SECTION II.A.2)\n\n"
-            "We work within the County budget.\n\n"
-            "[PRICING FLAG: force Low tier]\n"
-            "[PRICING FLAG: PM ratio high]\n\n"
-            "## Proposed Investment\n\n"
-            "**Total proposed investment: $2,550**\n\n"
-            "**References:** [E12, E13, E14]\n"
-        )
-        table = render_embedded_budget_table_markdown(self._budget())
-        out, action = insert_budget_table_into_section(body, table)
-        self.assertIn(action, {"inserted", "replaced"})
-        self.assertIn("We work within the County budget", out)
-        self.assertNotIn("PRICING FLAG", out)
-        self.assertNotIn("E12", out)
-        self.assertNotIn("$2,550", out)
-        self.assertIn("$35,000", out)
-        self.assertIn("**Total proposed investment:**", out)
 
     def test_fix_budget_ask_detected(self) -> None:
         self.assertTrue(

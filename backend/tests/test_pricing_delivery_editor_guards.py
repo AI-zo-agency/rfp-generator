@@ -8,7 +8,6 @@ from pathlib import Path
 
 from app.models.pricing_instrument import PricingInstrument
 from app.models.proposal import (
-    ProposalBudget,
     ProposalDraft,
     ProposalResearchCache,
     ProposalSection,
@@ -16,10 +15,6 @@ from app.models.proposal import (
 from app.services.pricing_delivery_context import (
     format_pricing_delivery_constraints_block,
     is_buyer_pricing_form_instrument,
-)
-from app.services.proposal_budget_content import (
-    fill_hollow_pricing_stubs_from_canon_budget,
-    reformat_budget_terms_in_markdown,
 )
 from app.services.proposal_self_edit_loop import (
     _maybe_append_delivery_constraint_reminder,
@@ -59,86 +54,6 @@ class BuyerFormHollowAndTermsGuards(unittest.TestCase):
                 instrument=PricingInstrument(kind="phased_fee_schedule", confidence=0.5)
             )
         )
-
-    def test_fill_hollow_noop_when_buyer_pricing_form(self) -> None:
-        inst = _instrument()
-        form_md = BUYER_FORM_MD
-        cost = _sec("cost", "Cost Proposal / Pricing Form", form_md)
-        stub = _sec(
-            "fee",
-            "PROPOSAL RATE/FEE SCHEDULE",
-            "## PROPOSAL RATE/FEE SCHEDULE\n\n"
-            "[MANUAL FILL: Draft this RFP-required section — PROPOSAL RATE/FEE SCHEDULE]\n",
-        )
-        draft = ProposalDraft(rfpId="r1", sections=[cost, stub], updatedAt="t")
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            budgetFormat="phased",
-            lumpSumTotal=52000,
-        )
-        updated, logs = fill_hollow_pricing_stubs_from_canon_budget(
-            draft, budget, pricing_instrument=inst
-        )
-        fee = next(s for s in updated.sections if s.id == "fee")
-        self.assertFalse(logs)
-        self.assertIn("Draft this RFP-required section", fee.content or "")
-        self.assertNotIn("Fee Detail", fee.content or "")
-        self.assertNotIn("## Fee Detail", fee.content or "")
-        # Cost buyer form body untouched
-        cost_out = next(s for s in updated.sections if s.id == "cost")
-        self.assertEqual(cost_out.content, form_md)
-
-    def test_fill_hollow_still_fills_without_buyer_form(self) -> None:
-        bp = _sec(
-            "bp",
-            "Cost of Base Proposal",
-            "## Fee Detail\n\n| Phase | Amount |\n|---|---|\n| A | $52,000 |\n\n"
-            + ("More budget narrative. " * 40),
-        )
-        stub = _sec(
-            "fee",
-            "PROPOSAL RATE/FEE SCHEDULE",
-            "## PROPOSAL RATE/FEE SCHEDULE\n\n"
-            "[MANUAL FILL: Draft this RFP-required section — PROPOSAL RATE/FEE SCHEDULE]\n",
-        )
-        draft = ProposalDraft(rfpId="r1", sections=[bp, stub], updatedAt="t")
-        budget = ProposalBudget(
-            rfpId="r1", updatedAt="t", budgetFormat="phased", lumpSumTotal=52000
-        )
-        updated, logs = fill_hollow_pricing_stubs_from_canon_budget(draft, budget)
-        fee = next(s for s in updated.sections if s.id == "fee")
-        self.assertTrue(logs)
-        self.assertNotIn("Draft this RFP-required section", fee.content or "")
-        self.assertIn("$", fee.content or "")
-
-    def test_terms_reformat_noop_for_buyer_form(self) -> None:
-        inst = _instrument()
-        form_md = BUYER_FORM_MD
-        # Inject a ## Terms wall that reformat would normally rewrite
-        with_terms = (
-            form_md
-            + "\n\n## Terms\n\n"
-            "Allocation is 40% strategy, 35% creative, and 25% media "
-            "with investment framing at $75,000 NTE.\n"
-        )
-        out = reformat_budget_terms_in_markdown(
-            with_terms, pricing_instrument=inst
-        )
-        self.assertEqual(out, with_terms)
-
-    def test_terms_reformat_still_runs_without_buyer_form(self) -> None:
-        text = (
-            "## Fee Detail\n\n| Phase | Amount |\n|---|---|\n| A | $10,000 |\n\n"
-            "## Terms\n\n"
-            "Allocation is 40% strategy, 35% creative, and 25% media "
-            "with investment framing at $50,000.\n"
-        )
-        out = reformat_budget_terms_in_markdown(text)
-        # Either reformatted or unchanged — must not crash; buyer-form path is the guard.
-        self.assertIsInstance(out, str)
-        self.assertTrue(len(out) > 20)
-
 
 class RepairPromptInjectionGuards(unittest.TestCase):
     def test_pricing_delivery_block_for_repair(self) -> None:

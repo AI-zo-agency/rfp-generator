@@ -58,30 +58,6 @@ class AllInExpensesTests(unittest.TestCase):
         self.assertIn("Investment Framing", out)
         self.assertIn("all-in", out.casefold())
 
-    def test_omit_reimbursable_action_from_demand(self) -> None:
-        from app.services.rfp_cost_demands import (
-            RfpCostDemand,
-            demands_require_omit_guide_reimbursables,
-        )
-
-        self.assertFalse(
-            demands_require_omit_guide_reimbursables(
-                [RfpCostDemand(id="x", kind="disclosure", requirement="state commission")]
-            )
-        )
-        self.assertTrue(
-            demands_require_omit_guide_reimbursables(
-                [
-                    RfpCostDemand(
-                        id="expenses_all_in",
-                        kind="reimbursable",
-                        requirement="Fees are all-in; no separate expense billing",
-                        actions=["omit_guide_reimbursable_expenses"],
-                    )
-                ]
-            )
-        )
-
     def test_manual_fill_mask_roundtrip_detects_drop(self) -> None:
         prior = (
             "Total $98,125.\n"

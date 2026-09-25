@@ -75,7 +75,6 @@ async def apply_senior_editor_section_coverage_audit(
     draft, pointer_logs = repair_pointer_only_rfp_sections(draft)
     logs.extend(pointer_logs)
 
-    from app.services.proposal_budget_content import reformat_budget_terms_in_markdown
     from app.services.proposal_closing_hollow_repair import repair_hollow_closing_sections
     from app.services.proposal_verify_optional_scrub import restore_empty_money_table_cells
 
@@ -85,11 +84,9 @@ async def apply_senior_editor_section_coverage_audit(
     rewritten: list[ProposalSection] = []
     changed = False
     buyer_form = False
-    pricing_instrument = None
     if research is not None:
         from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
 
-        pricing_instrument = research.pricing_instrument
         buyer_form = is_buyer_pricing_form_instrument(research)
     for section in draft.sections:
         body = section.content or ""
@@ -100,12 +97,6 @@ async def apply_senior_editor_section_coverage_audit(
             for token in ("budget", "pricing", "fee", "cost proposal", "price")
         )
         if is_money_tab and not buyer_form:
-            formatted = reformat_budget_terms_in_markdown(
-                updated, pricing_instrument=pricing_instrument
-            )
-            if formatted != updated:
-                logs.append(f"Reformatted Terms in «{section.title}» to tables/bullets.")
-                updated = formatted
             filled, n_fill = restore_empty_money_table_cells(updated)
             if n_fill:
                 logs.append(
@@ -142,25 +133,6 @@ async def apply_senior_editor_section_coverage_audit(
     if specs:
         draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
         logs.extend(stub_logs)
-        # Budget phase may already be done — fill any pricing stubs minted here
-        # so Rate/Fee Schedule is not left as MANUAL FILL after Budget went green.
-        try:
-            from app.services.proposal_budget_content import (
-                fill_hollow_pricing_stubs_from_canon_budget,
-            )
-
-            budget = research.budget if research else None
-            draft, fill_logs = fill_hollow_pricing_stubs_from_canon_budget(
-                draft,
-                budget,
-                rfp_text=rfp_text or "",
-                pricing_instrument=(
-                    research.pricing_instrument if research else None
-                ),
-            )
-            logs.extend(fill_logs)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Hollow pricing stub fill skipped: %s", exc)
 
     mapped = list(research.rfp_sections or []) if research else []
     seen_ticket_ids: set[str] = set()

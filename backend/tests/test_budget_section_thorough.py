@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
+from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_budget_content import (
     budget_section_score,
-    fill_hollow_pricing_stubs_from_canon_budget,
     find_budget_section_index,
 )
 from app.services.proposal_ralph import apply_ralph_to_draft
@@ -114,35 +113,6 @@ class RalphBudgetExemptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class HollowPricingStubFillTests(unittest.TestCase):
-    def test_senior_editor_late_fee_schedule_stub_gets_canon_budget(self) -> None:
-        """Reproduce staging: Budget green, then Rate/Fee stub minted empty."""
-        bp = _sec(
-            "bp",
-            "Budget & Pricing",
-            "## Proposed Investment\n\n"
-            "| Phase | Fee |\n|---|---|\n"
-            "| Discovery | $12,000 |\n| Build | $40,000 |\n\n"
-            "Total proposed investment: $52,000. " * 3,
-        )
-        stub = _sec(
-            "fee",
-            "PROPOSAL RATE/FEE SCHEDULE",
-            "## PROPOSAL RATE/FEE SCHEDULE\n\n"
-            "[MANUAL FILL: Draft this RFP-required section — PROPOSAL RATE/FEE SCHEDULE]\n\n"
-            "RFP instructions: Required.",
-        )
-        draft = ProposalDraft(rfpId="r1", sections=[bp, stub], updatedAt="t")
-        budget = ProposalBudget(
-            rfpId="r1", updatedAt="t", budgetFormat="phased", lumpSumTotal=52000
-        )
-        updated, logs = fill_hollow_pricing_stubs_from_canon_budget(draft, budget)
-        fee = next(s for s in updated.sections if s.id == "fee")
-        self.assertTrue(logs)
-        self.assertNotIn("Draft this RFP-required section", fee.content or "")
-        self.assertIn("$", fee.content or "")
 
 
 class WorkersCompNotBudgetTests(unittest.TestCase):

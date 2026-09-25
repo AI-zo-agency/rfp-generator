@@ -23,12 +23,6 @@ from app.models.proposal import (
     ProposalResearchCache,
     ProposalSection,
 )
-from app.services.proposal_budget_content import render_budget_markdown
-from app.services.proposal_budget_validation import (
-    align_held_flat_option_year_line_items,
-    rebuild_option_term_notes,
-    reconcile_proposal_budget,
-)
 from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 from app.services.proposal_scan_fact_repairs import (
     apply_leaked_fragment_scrub_to_draft,
@@ -288,86 +282,6 @@ class OptionYearBudgetMathTests(unittest.TestCase):
         total = round(sum(float(i.extended or 0) for i in year1), 2)
         self.assertEqual(total, _YEAR1_RECURRING)
 
-    def test_align_closes_5665_gap_per_option_year(self) -> None:
-        budget = _newport_style_budget()
-        aligned = align_held_flat_option_year_line_items(list(budget.line_items))
-        oy = [i for i in aligned if "option year" in (i.category or "").casefold()]
-        self.assertEqual(len(oy), 2)
-        for item in oy:
-            self.assertEqual(float(item.extended or 0), _YEAR1_RECURRING)
-            self.assertNotEqual(float(item.extended or 0), _BAD_OPTION_YEAR)
-
-    def test_reconcile_aligns_and_rebuilds_option_terms(self) -> None:
-        budget = _newport_style_budget()
-        merged = reconcile_proposal_budget(
-            budget,
-            rfp_context="County may exercise Option Year 2 and Option Year 3 at held-flat rates.",
-        )
-        from app.services.proposal_budget_validation import (
-            _is_option_year_line,
-            _usd,
-            split_line_item_totals,
-        )
-
-        base_items = [i for i in merged.line_items if not _is_option_year_line(i)]
-        _, year1_fee, _ = split_line_item_totals(base_items)
-        oy = [
-            i
-            for i in merged.line_items
-            if "option year" in (i.category or "").casefold()
-        ]
-        self.assertEqual(len(oy), 2)
-        for item in oy:
-            self.assertAlmostEqual(float(item.extended or 0), year1_fee, places=2)
-        notes = merged.option_term_notes or ""
-        self.assertNotIn("(at net.", notes)
-        self.assertIn("held flat", notes.casefold())
-        self.assertIn("2,900", notes)
-        self.assertIn("Option Year 2", notes)
-        self.assertIn("Option Year 3", notes)
-        self.assertNotIn("Option Year 1:", notes)
-        self.assertIn(_usd(year1_fee), notes)
-        self.assertIn(f"Option Year 2: {_usd(year1_fee)}", notes)
-        self.assertNotRegex(notes, r"client invoicing[^:\n]*:\s*\$2,900\.?\s*$")
-
-
-    def test_rebuild_never_truncates_mid_sentence_at_500_chars(self) -> None:
-        long_corrupt = _CORRUPTED_OPTION_TERMS + (" x" * 300)
-        budget = _newport_style_budget()
-        budget = budget.model_copy(update={"option_term_notes": long_corrupt})
-        notes = rebuild_option_term_notes(
-            budget,
-            rfp_context="Option Year 2 Option Year 3",
-        )
-        self.assertNotIn("(at net.", notes)
-        self.assertIn("pass-through", notes.casefold())
-        self.assertTrue(notes.strip().endswith(".") or "Option Year" in notes)
-
-    def test_escalation_path_not_forced_flat(self) -> None:
-        items = [
-            BudgetLineItem(
-                id="y1",
-                category="Year 1",
-                description="Fees",
-                extended=100_000,
-                lineItemType="agency_fee",
-            ),
-            BudgetLineItem(
-                id="y2",
-                category="Option Year 2",
-                description="escalated",
-                extended=103_000,
-                lineItemType="agency_fee",
-            ),
-        ]
-        aligned = align_held_flat_option_year_line_items(
-            items,
-            rfp_context="Option years escalate 3% annually.",
-            option_term_notes="3% escalation",
-        )
-        self.assertEqual(float(aligned[1].extended or 0), 103_000.0)
-
-
 class Rev6WordGlueTests(unittest.TestCase):
     CASES = [
         (
@@ -511,85 +425,6 @@ class LeakAndChromeTests(unittest.TestCase):
         self.assertNotIn("Needs your input", body)
         self.assertNotIn("do not assert California", body)
         self.assertIn("California", body)
-
-
-class EndToEndHandoffDraftTests(unittest.TestCase):
-    """Full dirty draft → scrub stack; assert the report's blockers are gone."""
-
-    def _dirty_draft(self) -> ProposalDraft:
-        glue_sections = [
-            ProposalSection(id=sid, title=title, content=raw)
-            for (sid, raw, _), title in zip(
-                Rev6WordGlueTests.CASES,
-                ["2. Approach", "10. Timing", "15. Bid decision"],
-            )
-        ]
-        return ProposalDraft(
-            rfpId="rfp-newport",
-            updatedAt="t",
-            sections=[
-                _inventory_section(),
-                _business_license_section(),
-                ProposalSection(
-                    id="s14",
-                    title="14. References**· needs input**",
-                    content=(
-                        "## References, Similar Services Performed\n\n"
-                        "## References, Similar Services Performed\n\n"
-                        "[MANUAL FILL] — Sonja, supply verified client references "
-                        "from ClientList / KB only (name…\n"
-                    ),
-                ),
-                ProposalSection(
-                    id="s5",
-                    title="Vendor Conflict of Interest Disclosure Form**· needs input**",
-                    content="Disclosure body.",
-                ),
-                ProposalSection(
-                    id="s18",
-                    title="Draft Agreement AcknowledgmentEdit source",
-                    content="Ack body.",
-                ),
-                *glue_sections,
-            ],
-        )
-
-    def test_handoff_scrub_stack_clears_report_blockers(self) -> None:
-        draft = self._dirty_draft()
-        draft, _ = apply_rev6_voice_scrub_to_draft(draft)
-        draft, _ = apply_leaked_fragment_scrub_to_draft(draft)
-        draft, _ = scrub_unverified_state_registration_claims(draft)
-        draft, _ = apply_zero_fabrication_guards(draft, label="handoff-e2e")
-
-        blob_titles = " | ".join(s.title or "" for s in draft.sections)
-        blob_bodies = "\n".join(s.content or "" for s in draft.sections)
-
-        self.assertNotIn("needs input", blob_titles.casefold())
-        self.assertNotIn("Edit source", blob_titles)
-        self.assertNotIn("do not assert California", blob_bodies)
-        self.assertNotIn("Action needed", blob_bodies)
-        for bad in ("directlytely", "choiceust", "decisionthe"):
-            self.assertNotIn(bad, blob_bodies.casefold())
-
-        budget = reconcile_proposal_budget(
-            _newport_style_budget(),
-            rfp_context="Option Year 2 and Option Year 3.",
-        )
-        from app.services.proposal_budget_validation import (
-            _is_option_year_line,
-            split_line_item_totals,
-        )
-
-        base_items = [i for i in budget.line_items if not _is_option_year_line(i)]
-        _, year1_fee, _ = split_line_item_totals(base_items)
-        md = render_budget_markdown(
-            budget,
-            rfp_text="Cost File with Option Year 2 and Option Year 3.",
-        )
-        self.assertNotIn("(at net.", md)
-        for item in budget.line_items:
-            if "option year" in (item.category or "").casefold():
-                self.assertAlmostEqual(float(item.extended or 0), year1_fee, places=2)
 
 
 class ParamMatrixRegistrationTests(unittest.TestCase):
