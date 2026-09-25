@@ -399,7 +399,7 @@ def render(plan: dict, asks: dict, guide: dict, labor: dict) -> str:
     table = {
         "TASK_TABLE": task_table, "STAFFING_TABLE": staffing_table, "RATE_TABLE": rate_table,
         "FORM": form, "MEDIA_SPLIT": media_split,
-        "TOTAL": lambda a=None: usd(c["total"](a)),
+        "TOTAL": lambda a=None: usd(term_value(c, a)),
         "CEILING": lambda a=None: usd(ceiling(a)),
         "UNALLOCATED": unallocated,
         "AMT": lambda a: usd(c["amounts"].get(a)),

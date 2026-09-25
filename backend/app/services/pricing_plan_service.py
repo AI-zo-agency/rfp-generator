@@ -127,7 +127,7 @@ WRITING RULES
     {{TASK_TABLE}} or {{TASK_TABLE:<track>}}  {{STAFFING_TABLE}} or {{STAFFING_TABLE:<track>}}
     {{RATE_TABLE}}  {{FORM}}  {{MEDIA_SPLIT}}  {{VERBATIM:<key>}}
   inline tokens: {{TOTAL}} {{TOTAL:<track>}} {{CEILING:<track>}} {{UNALLOCATED:<track>}} {{AMT:<task_id>}} {{RATE:<role>}}
-  <track> is the exact track/ceiling label. {{TOTAL}} = all one_time priced tasks.
+  <track> is the exact track/ceiling label. {{TOTAL}} = term value (one-time work plus 12 months of monthly fees, media included) — the same number the task table's priced row shows.
 - Verbatim blocks: {{VERBATIM:investment_framing}} {{VERBATIM:scope_protection}} {{VERBATIM:revisions}},
   {{VERBATIM:reimbursables}} (unless all-inclusive), {{VERBATIM:media}} when 6.1 is used.
 - Answer every required ask explicitly (invoice content, payment terms, rate lock, exclusions...).
@@ -251,13 +251,14 @@ async def _check_and_repair(
     amounts = compute(plan, kb.labor)["amounts"]
     for t in plan.get("tasks", []):
         if t.get("guide_id") == "6.1":
-            note = {
-                "issue": f"Media budget of {usd(amounts.get(t.get('task_id')))} is an assumption — "
+            amount = usd(amounts.get(t.get("task_id")))
+            if any(amount in n.get("issue", "") for n in notes):
+                continue  # LLM already flagged this media amount as an assumption
+            notes.append({
+                "issue": f"Media budget of {amount} is an assumption — "
                 "confirm against the RFP / client media plan",
                 "owner": "Sonja",
-            }
-            if note not in notes:
-                notes.append(note)
+            })
     return plan, rounds
 
 

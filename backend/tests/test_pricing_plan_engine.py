@@ -258,6 +258,20 @@ class RenderTests(unittest.TestCase):
         self.assertIn("| | **Priced work (term value)** | **$42,000** |", md)
         self.assertIn("| | Held for scope confirmed on approval | $14,000 |", md)
 
+    def test_total_token_matches_task_table_term_value(self) -> None:
+        base = _mini_plan()["tasks"][0]
+        plan = _mini_plan()
+        plan["tasks"] = [
+            {**base, "task_id": "A1", "billing": "monthly", "quantity": 1, "unit_price": 1000, "staffing": []},
+            {**base, "task_id": "A2", "billing": "one_time", "quantity": 1, "unit_price": 5000, "staffing": []},
+        ]
+        plan["sections"][0]["body_md"] += "\n{{TOTAL:P1}} of {{CEILING:P1}}, {{UNALLOCATED:P1}} unallocated."
+        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 30000, "scope": "annual", "track": "P1"}]}
+        md = render(plan, asks, GUIDE, LABOR)
+        term = 5000 + 12 * 1000
+        self.assertIn("**Priced work (term value)** | **$17,000**", md)
+        self.assertIn(f"${term:,.0f} of $30,000, $13,000 unallocated.", md)
+
     def test_form_row_ties_out(self) -> None:
         plan = _mini_plan()
         plan["form_fills"] = [

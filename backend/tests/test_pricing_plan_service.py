@@ -174,8 +174,18 @@ class PlanFollowUpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[PRICING NOTE — tier: High — " , " ".join(budget.pricing_flags))
         self.assertNotIn("DO NOT PLACE", svc.render_pricing_plan_budget(budget))
 
-    async def test_code_adds_media_assumption_note_once(self) -> None:
+    async def test_code_skips_media_note_when_llm_already_flagged_the_amount(self) -> None:
+        # The 988 fixture's own LLM note already says "assumes a $430,000 total media budget" (Ella).
         budget = await self._budget()
+        media = [n for n in budget.pricing_plan["internal_notes"] if n["issue"].startswith("Media budget of")]
+        self.assertEqual(media, [])
+        llm_note = [n for n in budget.pricing_plan["internal_notes"] if "$430,000" in n["issue"]]
+        self.assertTrue(llm_note)
+
+    async def test_code_adds_media_assumption_note_when_llm_did_not_mention_it(self) -> None:
+        plan = plan_988_within_rules()
+        plan["internal_notes"] = [n for n in plan["internal_notes"] if "$430,000" not in n["issue"]]
+        budget = await self._budget(plan)
         media = [n for n in budget.pricing_plan["internal_notes"] if n["issue"].startswith("Media budget of")]
         self.assertEqual(media, [{"issue": "Media budget of $430,000 is an assumption — confirm against the "
                                   "RFP / client media plan", "owner": "Sonja"}])
