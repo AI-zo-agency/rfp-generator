@@ -986,6 +986,17 @@ class PricingPlanScanSkipsNotePatchTests(unittest.TestCase):
         self.assertEqual(out_draft.sections[0].content, healthy)
         self.assertFalse(meta["budgetChanged"])
 
+    def test_final_rerender_path_makes_no_llm_call(self) -> None:
+        """Hollow Cost tab forces the main re-render path (not the early no-op path) —
+        the final note-patch step must still skip its LLM call for a v2 budget."""
+        out_draft, _r, logs, meta = self._run(
+            "", "Budget & Pricing", "Cost is 20% of score. Travel is reimbursable."
+        )
+        self.assertIsNotNone(out_draft)
+        self.assertFalse(
+            any("separate budget attachment" in line or "inverse cost" in line for line in logs)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -678,12 +678,17 @@ async def run_fulfill_budget_scan(
             "Budget: manuscript already matches reconciled totals — left Pricing/Budget tab unchanged."
         )
 
-    excerpt = evaluation_and_kpi_excerpt(rfp_text)
-    facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-    draft, patch_logs = patch_budget_section_for_rfp(draft, rfp_text=rfp_text, facts=facts)
-    logs.extend(patch_logs)
-    if patch_logs:
-        meta["budgetChanged"] = True
+    # Pricing-plan Cost tabs are re-rendered from the plan on persist, which
+    # would wipe patched notes — skip the patch (and its LLM call). Legacy
+    # (pre-v2) budgets already returned early above, so this only guards for
+    # symmetry with the other two call sites in this function.
+    if not budget.pricing_plan:
+        excerpt = evaluation_and_kpi_excerpt(rfp_text)
+        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
+        draft, patch_logs = patch_budget_section_for_rfp(draft, rfp_text=rfp_text, facts=facts)
+        logs.extend(patch_logs)
+        if patch_logs:
+            meta["budgetChanged"] = True
 
     draft = _apply_unresolved_budget_slot_restore(
         draft, research, rfp_text=rfp_text, logs=logs, meta=meta
