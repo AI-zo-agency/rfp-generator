@@ -1,0 +1,485 @@
+{
+  "tier_rationale": "state_agency, 2 complexity signals, cost weight None. State agency, statewide reach, and multicultural/bilingual messaging across multiple priority populations justify High-tier pricing depth and staffing.",
+  "tasks": [
+    {
+      "task_id": "A1",
+      "group": "Strategic Planning",
+      "deliverable": "Five-year 988 marketing plan with milestones, timelines, and costs",
+      "scope_ids": [
+        "S1"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "10.1",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 40
+        },
+        {
+          "role": "Account Manager",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 20
+        }
+      ]
+    },
+    {
+      "task_id": "A2",
+      "group": "Research",
+      "deliverable": "Rural peer state (CO, OR, SD, WY) strategy research report",
+      "scope_ids": [
+        "S2"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "1.4",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Account Manager",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 20
+        },
+        {
+          "role": "Creative Director",
+          "hours": 4
+        }
+      ]
+    },
+    {
+      "task_id": "A3",
+      "group": "Audience Strategy",
+      "deliverable": "Direct Outreach campaign strategy for Priority Populations",
+      "scope_ids": [
+        "S3"
+      ],
+      "track": "Direct Outreach",
+      "billing": "one_time",
+      "guide_id": "2.3",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 30
+        },
+        {
+          "role": "Copywriter",
+          "hours": 20
+        },
+        {
+          "role": "Account Manager",
+          "hours": 5
+        }
+      ]
+    },
+    {
+      "task_id": "A4",
+      "group": "Audience Strategy",
+      "deliverable": "Influencer/Referrer engagement strategy",
+      "scope_ids": [
+        "S4"
+      ],
+      "track": "Influencer Outreach",
+      "billing": "one_time",
+      "guide_id": "2.3",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 28
+        },
+        {
+          "role": "Copywriter",
+          "hours": 18
+        },
+        {
+          "role": "Account Manager",
+          "hours": 5
+        }
+      ]
+    },
+    {
+      "task_id": "A5",
+      "group": "Planning Frameworks",
+      "deliverable": "Prioritization framework for materials development",
+      "scope_ids": [
+        "S5"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "10.4",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Art Director",
+          "hours": 16
+        },
+        {
+          "role": "Copywriter",
+          "hours": 12
+        },
+        {
+          "role": "Account Manager",
+          "hours": 4
+        }
+      ]
+    },
+    {
+      "task_id": "A6",
+      "group": "Planning Frameworks",
+      "deliverable": "Streamlined content development/review approach",
+      "scope_ids": [
+        "S6"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "2.5",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Copywriter",
+          "hours": 16
+        },
+        {
+          "role": "Creative Director",
+          "hours": 8
+        },
+        {
+          "role": "Account Manager",
+          "hours": 4
+        }
+      ]
+    },
+    {
+      "task_id": "A9",
+      "group": "Strategic Deliverables",
+      "deliverable": "Stakeholder toolkit for outside-funded partners",
+      "scope_ids": [
+        "S9"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "10.2",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 16
+        },
+        {
+          "role": "Art Director",
+          "hours": 8
+        }
+      ]
+    },
+    {
+      "task_id": "A10",
+      "group": "Digital",
+      "deliverable": "Copy and recommendations for 988 webpage redesign",
+      "scope_ids": [
+        "S10"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "5.2",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Copywriter",
+          "hours": 20
+        },
+        {
+          "role": "Digital Team",
+          "hours": 12
+        }
+      ]
+    },
+    {
+      "task_id": "A11",
+      "group": "Project Management",
+      "deliverable": "Project management and printing/fulfillment vendor coordination across the five-year term",
+      "scope_ids": [
+        "S11"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "9.2",
+      "quantity": 5,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Account Manager",
+          "hours": 200
+        }
+      ]
+    },
+    {
+      "task_id": "A12a",
+      "group": "Creative Production",
+      "deliverable": "Replacement PSA video set",
+      "scope_ids": [
+        "S12"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "4.8",
+      "quantity": 4,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 40
+        },
+        {
+          "role": "Art Director",
+          "hours": 40
+        },
+        {
+          "role": "Copywriter",
+          "hours": 20
+        },
+        {
+          "role": "Digital Team",
+          "hours": 40
+        }
+      ]
+    },
+    {
+      "task_id": "A12b",
+      "group": "Creative Production",
+      "deliverable": "Digital and print asset development meeting 508 accessibility and brand standards, with five-year shelf life",
+      "scope_ids": [
+        "S12",
+        "S7",
+        "S8"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "4.1",
+      "quantity": 40,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Art Director",
+          "hours": 60
+        },
+        {
+          "role": "Copywriter",
+          "hours": 30
+        },
+        {
+          "role": "Digital Team",
+          "hours": 12
+        }
+      ]
+    },
+    {
+      "task_id": "A12c",
+      "group": "Media",
+      "deliverable": "Media creation, buying, and placement",
+      "scope_ids": [
+        "S12"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "6.1",
+      "quantity": 1,
+      "unit_price": 430000,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "A13",
+      "group": "Measurement",
+      "deliverable": "Market research and campaign analytics, optimization, and effectiveness reporting",
+      "scope_ids": [
+        "S13"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "8.1",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Digital Team",
+          "hours": 20
+        },
+        {
+          "role": "Account Manager",
+          "hours": 10
+        },
+        {
+          "role": "Finance",
+          "hours": 10
+        },
+        {
+          "role": "Creative Director",
+          "hours": 6
+        }
+      ]
+    },
+    {
+      "task_id": "A14",
+      "group": "Stakeholder Engagement",
+      "deliverable": "Public awareness support, meeting support, focus groups, and priority population engagement",
+      "scope_ids": [
+        "S14"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "1.2",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Account Manager",
+          "hours": 40
+        },
+        {
+          "role": "Creative Director",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 20
+        },
+        {
+          "role": "Executive",
+          "hours": 10
+        }
+      ]
+    },
+    {
+      "task_id": "A15",
+      "group": "Strategic Deliverables",
+      "deliverable": "Tactical strategy, ad hoc input, and statewide MT988 distribution strategy",
+      "scope_ids": [
+        "S15"
+      ],
+      "track": null,
+      "billing": "one_time",
+      "guide_id": "10.5",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 40
+        },
+        {
+          "role": "Account Manager",
+          "hours": 30
+        },
+        {
+          "role": "Digital Team",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 12
+        }
+      ]
+    }
+  ],
+  "hourly_roles": [
+    "Account Manager",
+    "Art Director",
+    "Copywriter",
+    "Creative Director",
+    "Digital Team",
+    "Executive",
+    "Finance"
+  ],
+  "form_fills": [],
+  "sections": [
+    {
+      "heading": "Investment Approach",
+      "body_md": "{{VERBATIM:investment_framing}}\n\n{{VERBATIM:revisions}}"
+    },
+    {
+      "heading": "1. Compensation Contingent on Approved Deliverables",
+      "body_md": "Payment is tied to completed tasks and deliverables the Department has reviewed and approved. Nothing is invoiced for work that has not been accepted."
+    },
+    {
+      "heading": "2. Deliverable Invoice Approval",
+      "body_md": "Every invoice ties to a specific approved deliverable and is signed off by the Department's project manager before payment. Invoices list task ID, hours spent, deliverables completed, and the resource roles billed, consistent with Section 10.0 of the SOW."
+    },
+    {
+      "heading": "3. Detail of Compensation: Rates, Hours, Tasks, and Costs",
+      "body_md": "Pricing below is organized by task in line with Section 3.0 of the scope of work, with the staffing detail requested for the roles-and-responsibilities matrix in Section 2.0.\n\n{{TASK_TABLE}}\n\n{{STAFFING_TABLE}}\n\n{{RATE_TABLE}}\n\nMedia placement is billed through our standard commission structure so the Department's dollars go as far as possible into airtime and space.\n\n{{MEDIA_SPLIT}}\n\n{{VERBATIM:media}}\n\nTotal priced investment across the five-year term is {{TOTAL}}, against a ceiling of {{CEILING:Not-to-exceed contract ceiling}}. This leaves {{UNALLOCATED:Not-to-exceed contract ceiling}} unallocated for scope refinement as the five-year plan, priority-population messaging, and distribution strategy are finalized with the Department."
+    },
+    {
+      "heading": "4. Not-to-Exceed Contract Ceiling",
+      "body_md": "All activities necessary for or incidental to this SOW are held to a not-to-exceed ceiling of {{CEILING:Not-to-exceed contract ceiling}}. Our priced tasks total {{TOTAL}}, staying under that ceiling. {{VERBATIM:scope_protection}}"
+    },
+    {
+      "heading": "5. Reimbursable Expenses",
+      "body_md": "{{VERBATIM:reimbursables}}\n\nRoutine travel to and from the Department's Helena office is not billed. All other approved travel and expenses are itemized on invoices, tracked monthly, and reimbursed at cost, included within the not-to-exceed ceiling."
+    }
+  ],
+  "internal_notes": [
+    {
+      "issue": "cost_weight_pct is null; RFP gives no scoring weight for cost, consistent with High-tier selection, but confirm no separate scoring sheet exists before final submission.",
+      "owner": "Sonja"
+    },
+    {
+      "issue": "Implied limit: the $950,000 budget must be fully expended by May 31, 2029. Our plan sizes priced tasks to ~75% of the ceiling now (leaving room to add years 2-5 execution work via scope addenda) but Sonja should confirm the multi-year spend-down pace matches program milestones so funds aren't left unspent near the deadline.",
+      "owner": "Sonja"
+    },
+    {
+      "issue": "Media buying/placement line assumes a $430,000 total media budget over the term (not stated in RFP) \u2014 needs Department confirmation before locking the 85/15 split.",
+      "owner": "Ella"
+    },
+    {
+      "issue": "PSA video replacement set assumes 4 videos; graphic/print asset bundle assumes 40 assets; project management assumes a 5-year cadence at ~40 hrs/year of Account Manager time. All are placeholder quantities pending kickoff scoping with DPHHS.",
+      "owner": "Writer"
+    },
+    {
+      "issue": "No buyer_form was extracted from the RFP, so no form_fills were generated; confirm the state doesn't require a separate cost form/spreadsheet submission.",
+      "owner": "Sonja"
+    },
+    {
+      "issue": "all_inclusive_pricing is false, so the reimbursables verbatim is used; confirm this is acceptable to a state agency accustomed to itemized travel reimbursement only (no capital costs referenced in RFP).",
+      "owner": "Ella"
+    },
+    {
+      "issue": "Track labels 'Direct Outreach' and 'Influencer Outreach' have no stated sub-ceilings in the RFP; they are priced as scope groupings only, not separate NTEs.",
+      "owner": "Writer"
+    }
+  ],
+  "tier": "High"
+}

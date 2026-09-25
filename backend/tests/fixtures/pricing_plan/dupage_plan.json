@@ -1,0 +1,373 @@
+{
+  "tier_rationale": "default (county, 0 complexity signals, cost weight 15). County-level, single-department, no bilingual/multicultural or statewide complexity, and cost weighted at only 15% \u2014 Average tier applies across every line, anchored mid-band rather than pushed to Low or High.",
+  "tasks": [
+    {
+      "task_id": "G1",
+      "group": "General workNet DuPage \u2014 Ongoing Content",
+      "deliverable": "Monthly social media management across LinkedIn and Meta (planning, copy, asset creation, scheduling, monitoring, escalation)",
+      "scope_ids": [
+        "S1",
+        "S2"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "monthly",
+      "guide_id": "4.5",
+      "quantity": 1,
+      "unit_price": 3200,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G2",
+      "group": "General workNet DuPage \u2014 Ongoing Content",
+      "deliverable": "Monthly job seeker email, bi-monthly business newsletter, and as-needed emails (segmentation, copy/design, testing, distribution, reporting)",
+      "scope_ids": [
+        "S4",
+        "S5",
+        "S6",
+        "S7"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "monthly",
+      "guide_id": "4.4",
+      "quantity": 1,
+      "unit_price": 1200,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G3",
+      "group": "General workNet DuPage \u2014 Annual Productions",
+      "deliverable": "Short/medium form success-story videos (3-5 minutes)",
+      "scope_ids": [
+        "S3"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": "4.8",
+      "quantity": 4,
+      "unit_price": 3800,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G4",
+      "group": "General workNet DuPage \u2014 Annual Productions",
+      "deliverable": "Print materials (flyers, brochures, rack cards) \u2014 approximately 10 pieces",
+      "scope_ids": [
+        "S8"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": "4.3",
+      "quantity": 10,
+      "unit_price": 1300,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G5",
+      "group": "General workNet DuPage \u2014 Annual Productions",
+      "deliverable": "Standard branded PowerPoint decks (workNet DuPage, Workforce Innovation Board)",
+      "scope_ids": [
+        "S9"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": "4.1",
+      "quantity": 2,
+      "unit_price": 400,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G6",
+      "group": "General workNet DuPage \u2014 Annual Productions",
+      "deliverable": "Annual Year-In-Review (editorial planning, copy, data visualization, digital + print-ready design)",
+      "scope_ids": [
+        "S11"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": "10.1",
+      "quantity": 1,
+      "unit_price": 8000,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G7",
+      "group": "General workNet DuPage \u2014 Planning & Administration",
+      "deliverable": "Annual communications plan, status meetings, approval workflows, escalation procedures, and asset library maintenance",
+      "scope_ids": [
+        "S10",
+        "S17",
+        "S18",
+        "S19",
+        "S20"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": "9.1",
+      "quantity": 1,
+      "unit_price": 12000,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "G8",
+      "group": "General workNet DuPage \u2014 As-Needed",
+      "deliverable": "Potential advertisement design and placement, as needed",
+      "scope_ids": [
+        "S12"
+      ],
+      "track": "General workNet DuPage Marketing and Communications",
+      "billing": "one_time",
+      "guide_id": null,
+      "quantity": null,
+      "unit_price": null,
+      "manual_reason": "RFP describes this as infrequent/atypical with no stated media budget; without a placement budget the menu's traditional media commission model cannot be applied. To be scoped and authorized item-by-item.",
+      "staffing": []
+    },
+    {
+      "task_id": "Y1",
+      "group": "Young Adult Campaign \u2014 Strategy Foundation",
+      "deliverable": "Campaign strategy and creative foundation for young adult outreach, including audience approach and retention strategy framework",
+      "scope_ids": [
+        "S13",
+        "S16"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "2.4",
+      "quantity": 1,
+      "unit_price": 16000,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "Y2",
+      "group": "Young Adult Campaign \u2014 Outreach Execution",
+      "deliverable": "Young adult-centric social media and tech-based outreach execution",
+      "scope_ids": [
+        "S13"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "7.1",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Digital Team",
+          "hours": 20
+        },
+        {
+          "role": "Copywriter",
+          "hours": 10
+        }
+      ]
+    },
+    {
+      "task_id": "Y3",
+      "group": "Young Adult Campaign \u2014 Outreach Execution",
+      "deliverable": "Print or mailing outreach campaign materials",
+      "scope_ids": [
+        "S14"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "4.3",
+      "quantity": 15,
+      "unit_price": 1200,
+      "manual_reason": null,
+      "staffing": []
+    },
+    {
+      "task_id": "Y4",
+      "group": "Young Adult Campaign \u2014 Partner Coordination",
+      "deliverable": "Coordination with community-based partners to disseminate outreach materials",
+      "scope_ids": [
+        "S15"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "7.3",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Account Manager",
+          "hours": 14
+        }
+      ]
+    },
+    {
+      "task_id": "Y5",
+      "group": "Young Adult Campaign \u2014 Retention",
+      "deliverable": "Retention strategy development for young adult customers post-inquiry",
+      "scope_ids": [
+        "S16"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "2.3",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Creative Director",
+          "hours": 20
+        },
+        {
+          "role": "Account Manager",
+          "hours": 10
+        }
+      ]
+    },
+    {
+      "task_id": "Y6",
+      "group": "Young Adult Campaign \u2014 Management",
+      "deliverable": "Campaign project management and status reporting",
+      "scope_ids": [
+        "S17",
+        "S18"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "9.2",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Account Manager",
+          "hours": 28
+        }
+      ]
+    },
+    {
+      "task_id": "Y7",
+      "group": "Young Adult Campaign \u2014 Measurement",
+      "deliverable": "Campaign measurement and analytics",
+      "scope_ids": [
+        "S15",
+        "S16"
+      ],
+      "track": "Young Adult Outreach and Engagement Campaign",
+      "billing": "one_time",
+      "guide_id": "8.1",
+      "quantity": 1,
+      "unit_price": null,
+      "manual_reason": null,
+      "staffing": [
+        {
+          "role": "Digital Team",
+          "hours": 20
+        }
+      ]
+    }
+  ],
+  "hourly_roles": [
+    "Account Manager",
+    "Creative Director",
+    "Digital Team",
+    "Copywriter"
+  ],
+  "form_fills": [
+    {
+      "row_id": "R1",
+      "column": "PRICE",
+      "kind": "labor_rate",
+      "task_ids": [],
+      "role": "Account Manager",
+      "note": "General track is billed as a fixed program of monthly deliverables; this hourly rate is provided as the reference rate for any additional or out-of-scope hourly work."
+    },
+    {
+      "row_id": "R1",
+      "column": "QTY",
+      "kind": "manual",
+      "task_ids": [],
+      "note": "No fixed annual hour count applies to the General track \u2014 deliverables are priced as fixed monthly and annual items, not hourly."
+    },
+    {
+      "row_id": "R1",
+      "column": "EXTENDED PRICE",
+      "kind": "manual",
+      "task_ids": [],
+      "note": "Not applicable; General track pricing is deliverable-based, not hours-extended. See Cost by Task for the priced program."
+    },
+    {
+      "row_id": "R2",
+      "column": "QTY",
+      "kind": "hours",
+      "task_ids": [
+        "Y2",
+        "Y4",
+        "Y5",
+        "Y6",
+        "Y7"
+      ]
+    },
+    {
+      "row_id": "R2",
+      "column": "PRICE",
+      "kind": "rate",
+      "task_ids": [
+        "Y2",
+        "Y4",
+        "Y5",
+        "Y6",
+        "Y7"
+      ]
+    },
+    {
+      "row_id": "R2",
+      "column": "EXTENDED PRICE",
+      "kind": "extended",
+      "task_ids": [
+        "Y2",
+        "Y4",
+        "Y5",
+        "Y6",
+        "Y7"
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "heading": "6. Price",
+      "body_md": "{{VERBATIM:investment_framing}}\n\nThis proposal is structured around the two deliverable sets requested: General workNet DuPage Marketing and Communications, and the Young Adult Outreach and Engagement Campaign. Each is priced and managed separately, consistent with the Statement of Work.\n\n{{VERBATIM:scope_protection}}"
+    },
+    {
+      "heading": "a) Proposal Pricing Form",
+      "body_md": "**General workNet DuPage Marketing and Communications**\n\nThe program below covers social content, email communications, print and presentation materials, the annual Year-In-Review, and program administration within the stated annual ceiling of {{CEILING:General workNet DuPage Marketing and Communications}}.\n\n{{TASK_TABLE:General workNet DuPage Marketing and Communications}}\n\nPriced deliverables total {{TOTAL:General workNet DuPage Marketing and Communications}} against the ceiling, with room reserved for scope refinement over the contract year. Advertisement design and placement is scoped and authorized separately, item by item, once a specific opportunity and budget are identified.\n\n**Young Adult Outreach and Engagement Campaign**\n\nThe campaign below covers strategy, tech-based and print outreach, community partner coordination, retention strategy, project management, and measurement within the stated annual ceiling of {{CEILING:Young Adult Outreach and Engagement Campaign}}.\n\n{{TASK_TABLE:Young Adult Outreach and Engagement Campaign}}\n\n{{STAFFING_TABLE:Young Adult Outreach and Engagement Campaign}}\n\nPriced deliverables total {{TOTAL:Young Adult Outreach and Engagement Campaign}} against the ceiling, leaving {{UNALLOCATED:Young Adult Outreach and Engagement Campaign}} available for expansion as cadence and hours are finalized with workNet DuPage.\n\n**Hourly Rates**\n\n{{RATE_TABLE}}\n\n**Proposal Pricing Form**\n\n{{FORM}}\n\n**Terms**\n\n{{VERBATIM:revisions}}\n\n{{VERBATIM:reimbursables}}\n\nPricing above is firm for 120 calendar days from the proposal due date, as required, and rates remain fixed through the initial one-year term and any mutually agreed renewal terms without change. Invoices will reference the applicable Purchase Order number and be submitted to the address specified on the Purchase Order for processing. Payment will be made in accordance with the Illinois Local Government Prompt Payment Act."
+    }
+  ],
+  "internal_notes": [
+    {
+      "issue": "General track pricing mixes fixed monthly retainer tasks (G1, G2) with annual one-time items (G3\u2013G7). Per pricing rules only the one-time items count against the $75,000 annual ceiling check (landing at ~65%), but the monthly retainer fees, annualized, add materially to true annual cost and could push the real total near or past the $75,000 ceiling. Sonja should confirm the monthly rates against the full annual math before this goes out.",
+      "owner": "Sonja"
+    },
+    {
+      "issue": "Quantities are proposal-stage assumptions: 4 videos/year, 10 print pieces, 2 decks, 15 print/mailing pieces for the young adult campaign, and all staffing hour estimates. These should be validated with workNet DuPage at kickoff and adjusted via scope addendum if the actual cadence differs.",
+      "owner": "Ella"
+    },
+    {
+      "issue": "As-needed ad placement (S12) has no committed media budget in the RFP, so it could not be priced or run through the 85/15 media model. Flag to Ella whether we want to propose a placeholder media allowance or leave fully as-needed/authorized separately.",
+      "owner": "Ella"
+    },
+    {
+      "issue": "Buyer form only requests a single hourly rate per track (Part 1: rate only; Part 2: rate and hours), not a task-by-task price sheet. We answered Part 1 with a reference blended rate (Account Manager) since General track work is deliverable-based, and Part 2 with the blended rate/hours derived from the staffed Young Adult tasks. Writer should confirm this framing reads clearly against the literal form language.",
+      "owner": "Writer"
+    },
+    {
+      "issue": "No implied_limits were flagged in the extracted ASKS for this RFP; none required separate discussion.",
+      "owner": "Writer"
+    }
+  ],
+  "tier": "Average"
+}

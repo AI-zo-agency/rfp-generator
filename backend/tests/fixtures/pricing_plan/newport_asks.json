@@ -1,0 +1,194 @@
+{
+  "compensation_outline": {
+    "ref": null,
+    "items": []
+  },
+  "ceilings": [],
+  "implied_limits": [],
+  "cost_weight_pct": 20,
+  "cost_weight_quote": "Project Costs                                                20%",
+  "all_inclusive_pricing": {
+    "value": true,
+    "quote": "Pricing provided shall include any and all labor; materials; equipment; supervision; travel and expenses; inflation/increases; and insurance to provide the services as described in the RFP."
+  },
+  "buyer_form": {
+    "name": "Cost File - Proposed Pricing",
+    "may_modify": false,
+    "columns": [
+      "CITY OF NEWPORT BEACH",
+      "NBPD",
+      "NBFD"
+    ],
+    "rows": [
+      {
+        "row_id": "R1",
+        "label": "Monthly Fee for Social Media Management and Content Services",
+        "unit": "month",
+        "track": null
+      },
+      {
+        "row_id": "R2",
+        "label": "Event or Special Project Fee (if applicable)",
+        "unit": "EA",
+        "track": null
+      },
+      {
+        "row_id": "R3",
+        "label": "Hourly Rate for Additional Services (if applicable)",
+        "unit": "HR",
+        "track": null
+      }
+    ],
+    "quote": "Proposer shall submit a Cost File for the entire duration of a one (1) year contract term with an option to extend for two (2) additional one (1) year terms."
+  },
+  "asks": [
+    {
+      "id": "K1",
+      "kind": "monthly_fee",
+      "required": true,
+      "quote": "Monthly Fee for Social Media Management and Content Services",
+      "locator": "Cost File - Proposed Pricing table"
+    },
+    {
+      "id": "K2",
+      "kind": "other",
+      "required": false,
+      "quote": "Event or Special Project Fee (if applicable)",
+      "locator": "Cost File - Proposed Pricing table"
+    },
+    {
+      "id": "K3",
+      "kind": "hourly_rates",
+      "required": false,
+      "quote": "Hourly Rate for Additional Services (if applicable)",
+      "locator": "Cost File - Proposed Pricing table"
+    },
+    {
+      "id": "K4",
+      "kind": "invoice_content",
+      "required": true,
+      "quote": "Consultant's bills shall include the name of the person who performed the Work, a brief description of the Services performed and/or the specific task in the Scope of Services to which it relates, the date the Services were performed, the number of hours spent on all Work billed on an hourly basis, and a description of any reimbursable expenditures.",
+      "locator": "Draft Agreement Section 5.2"
+    },
+    {
+      "id": "K5",
+      "kind": "rate_lock",
+      "required": true,
+      "quote": "The proposed pricing shall remain unchanged for the duration of the contract term, including any renewal terms.",
+      "locator": "Cost File Instructions C"
+    },
+    {
+      "id": "K6",
+      "kind": "payment_terms",
+      "required": false,
+      "quote": "City shall pay Consultant no later than thirty (30) calendar days after approval of the monthly invoice by City staff.",
+      "locator": "Draft Agreement Section 5.2"
+    }
+  ],
+  "priced_scope": [
+    {
+      "id": "S1",
+      "ref": "Scope of Services 1",
+      "item": "Social media strategy, planning and editorial calendars",
+      "track": null
+    },
+    {
+      "id": "S2",
+      "ref": "Scope of Services 2",
+      "item": "Content development, copywriting and platform-specific messaging",
+      "track": null
+    },
+    {
+      "id": "S3",
+      "ref": "Scope of Services 3",
+      "item": "Graphic design, photography, video and short-form multimedia content",
+      "track": null
+    },
+    {
+      "id": "S4",
+      "ref": "Scope of Services 4",
+      "item": "Public information, educational, promotional, recruitment and community engagement content",
+      "track": null
+    },
+    {
+      "id": "S5",
+      "ref": "Scope of Services 5",
+      "item": "Campaigns supporting City, NBPD and/or NBFD programs, projects, events and initiatives",
+      "track": null
+    },
+    {
+      "id": "S6",
+      "ref": "Scope of Services 6",
+      "item": "Event coverage, interviews and original content production",
+      "track": null
+    },
+    {
+      "id": "S7",
+      "ref": "Scope of Services 7",
+      "item": "Community management, comment monitoring and social listening",
+      "track": null
+    },
+    {
+      "id": "S8",
+      "ref": "Scope of Services 8",
+      "item": "Identification of emerging issues, trends and content opportunities",
+      "track": null
+    },
+    {
+      "id": "S9",
+      "ref": "Scope of Services 9",
+      "item": "Paid social media strategy, creative development and campaign support",
+      "track": null
+    },
+    {
+      "id": "S10",
+      "ref": "Scope of Services 10",
+      "item": "Audience analysis and content optimization",
+      "track": null
+    },
+    {
+      "id": "S11",
+      "ref": "Scope of Services 11",
+      "item": "Accessibility support, including captions, alternative text and accessible graphics",
+      "track": null
+    },
+    {
+      "id": "S12",
+      "ref": "Scope of Services 12",
+      "item": "Performance measurement, analytics, reporting and recommendations",
+      "track": null
+    },
+    {
+      "id": "S13",
+      "ref": "Scope of Services 13",
+      "item": "Quick-turn and after-hours support for urgent or time-sensitive communications",
+      "track": null
+    },
+    {
+      "id": "S14",
+      "ref": "Scope of Services 14",
+      "item": "Other related social media and digital content services as requested by the City, NBPD or NBFD",
+      "track": null
+    }
+  ],
+  "tier_facts": {
+    "client_scale": "city",
+    "multicultural_or_bilingual": {
+      "value": false,
+      "quote": null
+    },
+    "multi_department": {
+      "value": true,
+      "quote": "Prospective proposers may elect to propose on Social Media Management, Strategy and Content Creation for the City of Newport Beach, Newport Beach Police Department (\u201cNBPD\u201d) and/or Newport Beach Fire Department (\u201cNBFD\u201d)."
+    },
+    "statewide_or_regional": {
+      "value": false,
+      "quote": null
+    },
+    "cost_primary_factor": {
+      "value": false,
+      "quote": "Since this solicitation is an RFP as opposed to a bid, pricing alone will not constitute the entire selection criteria."
+    }
+  },
+  "exclusions": []
+}
