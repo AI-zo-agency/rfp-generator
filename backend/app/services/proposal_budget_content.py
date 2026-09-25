@@ -3420,259 +3420,17 @@ def render_budget_markdown(
     approach_digest: str = "",
     pricing_instrument: PricingInstrument | None = None,
 ) -> str:
-    """Client-facing budget: one total, phase/deliverable fee table, short terms."""
+    """Cost section markdown from the pricing plan.
+
+    Returns "" for budgets without a pricing plan (pre-v2, frozen as saved).
+    Contract for every caller: "" means leave the Cost section as it is.
+    """
+    del rfp_text, approach_digest, pricing_instrument  # kept for caller kwargs
     if budget.pricing_plan:
         from app.services.pricing_plan_service import render_pricing_plan_budget
 
         return render_pricing_plan_budget(budget)
-
-    budget = prepare_budget_for_client_display(
-        budget, pricing_instrument=pricing_instrument
-    )
-    # Defensive: personnel_loading with priced fixed lines but no hourly rates
-    # must not claim an hourly schedule or suppress Fee Detail.
-    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
-
-    budget, _coerce_logs = coerce_budget_to_phased_from_guide(
-        budget, None, rfp_text=rfp_text
-    )
-    lines: list[str] = []
-    fmt = (budget.budget_format or "").casefold()
-    wants_personnel = fmt == "personnel_loading"
-    wants_form = not wants_personnel and fmt == "blended_rate_form"
-    strict_form = wants_form and rfp_forbids_quotation_form_changes(rfp_text)
-
-    from app.services.proposal_budget_playbook import rfp_mandates_hourly_rate_schedule
-    from app.services.proposal_budget_validation import infer_line_item_type
-
-    def _has_priced_fixed_fees() -> bool:
-        for item in budget.line_items or []:
-            unit = (item.unit or "").casefold()
-            if unit in {"hour", "hours", "hr", "hrs"}:
-                continue
-            if infer_line_item_type(item) in {"direct_expense", "client_passthrough"}:
-                continue
-            if float(item.extended or 0) > 0:
-                return True
-            if float(item.rate or 0) > 0 and float(item.quantity or 0) > 0:
-                return True
-        return False
-
-    rfp_wants_hourly_schedule = (
-        wants_personnel or rfp_mandates_hourly_rate_schedule(rfp_text)
-    )
-    # When RFP also prices phases / fixed fees, keep Fee Detail alongside the
-    # hourly instrument (strict per-section: both asks → both blocks).
-    # Official Pricing Form / personnel_loading alone → suppress Fee Detail by Phase.
-    from app.services.proposal_opportunity_constraints import budget_format_omits_fee_detail
-
-    also_wants_fee_detail = bool(budget.line_items) and (
-        not wants_personnel or _has_priced_fixed_fees()
-    )
-    if budget_format_omits_fee_detail(fmt):
-        if wants_form:
-            also_wants_fee_detail = False
-        elif wants_personnel and not _has_priced_fixed_fees():
-            also_wants_fee_detail = False
-
-    # Instrument hourly+hours+NTE wins over LLM-invented Guide SKU fixed fees —
-    # those fixed lines must not divert the Cost File into Proposed Investment.
-    nte_for_path = primary_instrument_nte(pricing_instrument)
-    if nte_for_path is None:
-        try:
-            cap = float(budget.rfp_budget_cap or 0)
-        except (TypeError, ValueError):
-            cap = 0.0
-        nte_for_path = cap if cap > 0 else None
-    force_hours_schedule = wants_personnel and _instrument_wants_hours_ledger(
-        pricing_instrument, nte=nte_for_path
-    )
-    if force_hours_schedule:
-        also_wants_fee_detail = False
-
-    if wants_personnel:
-        personnel_md = render_personnel_loading_form_markdown(
-            budget, rfp_text=rfp_text
-        ).rstrip()
-        if personnel_md:
-            lines.append(personnel_md)
-            lines.append("")
-            # Schedule-only Cost File (on-call T&M / billing rates): do not invent
-            # a Proposed Investment total from hourly rate rows, Fee Detail, or
-            # flat-phase Terms — those contradict Draft Agreement time-and-expense.
-            if force_hours_schedule or not _has_priced_fixed_fees():
-                schedule_md = _personnel_schedule_cost_file_markdown(
-                    budget,
-                    rfp_text=rfp_text,
-                    personnel_md=personnel_md,
-                    pricing_instrument=pricing_instrument,
-                )
-                from app.services.proposal_manuscript import (
-                    scrub_client_facing_section_artifacts,
-                )
-
-                return scrub_client_facing_section_artifacts(schedule_md).rstrip() + "\n"
-        else:
-            # Hollow rate table — cut it; fall through to Fee Detail / MANUAL FILL.
-            wants_personnel = False
-            rfp_wants_hourly_schedule = rfp_mandates_hourly_rate_schedule(rfp_text)
-    elif wants_form:
-        lines.append(
-            render_pricing_proposal_form_markdown(
-                budget, rfp_text=rfp_text, instrument=pricing_instrument
-            ).rstrip()
-        )
-        lines.append("")
-        # Form-only instrument: form worksheet only — no Proposed Investment,
-        # Terms, Option Terms, travel lines, or project-phase framing.
-        # Do not run Sonja→"agency leadership" jargon scrub — this worksheet is
-        # code-authored and intentionally names Sonja on MANUAL FILL handoffs.
-        rendered = "\n".join(lines).strip()
-        from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
-
-        rendered = scrub_client_facing_section_artifacts(rendered)
-        return rendered + "\n"
-
-    total = _canonical_client_total(budget)
-    fees, direct = _professional_fees_and_direct(budget)
-    # Fee Detail is client truth for professional fees — never show a higher
-    # Proposed Investment than the table rows sum to.
-    table_fees = fee_detail_professional_total(budget)
-    if table_fees > 0:
-        fees = table_fees
-    passthrough = round(float(budget.client_media_passthrough or 0), 2)
-    if table_fees > 0:
-        total = round(fees + direct + passthrough, 2)
-    if total is not None:
-        lines.append("## Proposed Investment")
-        lines.append("")
-        if fees > 0:
-            lines.append(f"**Professional fees: {_usd(fees)}**")
-        if direct > 0:
-            lines.append(f"**Direct travel / reimbursables: {_usd(direct)}**")
-        if passthrough > 0:
-            lines.append(
-                f"**Client media pass-through (net): {_usd(passthrough)}**"
-            )
-        lines.append(f"**Total proposed investment: {_usd(total)}**")
-        lines.append(
-            "zö agency structures fees as transparent project phases aligned to the scope "
-            "outlined in this proposal."
-        )
-        if passthrough > 0:
-            lines.append(
-                "Media placements billed as client pass-through at net — "
-                "separate from professional fees."
-            )
-        lines.append("")
-
-    scope = (budget.scope_summary or "").strip()
-    if scope:
-        # prepare_budget_for_client_display already rebuilt money prose from line items.
-        if len(scope) > 700:
-            cut = scope[:700]
-            scope = cut.rsplit(".", 1)[0].strip() + "."
-        lines.append(scope)
-        lines.append("")
-
-    ql = format_qualifying_language_for_client(
-        (budget.qualifying_language or "").strip(),
-        line_items=list(budget.line_items or []),
-        total=total,
-        suppress_mix_tables=bool(budget.line_items) and not wants_personnel,
-    )
-    if ql:
-        if strict_form:
-            lines.append(
-                "> Supporting terms only — not part of the official Pricing/Quotation form."
-            )
-            lines.append("")
-        lines.append("## Terms")
-        lines.append("")
-        lines.append(ql)
-        lines.append("")
-
-    if also_wants_fee_detail and not wants_personnel:
-        heading = (
-            "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
-        )
-        _append_fee_detail_by_phase_table(lines, budget, heading=heading)
-        deploy = _outside_fee_detail_notes_markdown(budget)
-        if deploy.strip():
-            lines.append(deploy.rstrip())
-            lines.append("")
-    elif also_wants_fee_detail and wants_personnel and _has_priced_fixed_fees():
-        # RFP asked for hourly + fixed/phased dollars — both blocks.
-        _append_fee_detail_by_phase_table(
-            lines, budget, heading="## Fee Detail by Phase"
-        )
-        deploy = _outside_fee_detail_notes_markdown(budget)
-        if deploy.strip():
-            lines.append(deploy.rstrip())
-            lines.append("")
-
-    # Classification schedule ONLY when THIS RFP explicitly demands it — never
-    # because KB verifiedRates happen to exist on the ledger.
-    if not wants_personnel and rfp_wants_hourly_schedule:
-        schedule = render_kb_classification_rate_schedule_markdown(
-            budget, rfp_text=rfp_text
-        )
-        if schedule.strip():
-            lines.append(schedule.rstrip())
-            lines.append("")
-        elif rfp_mandates_hourly_rate_schedule(rfp_text) and not _budget_line_has_hourly_rate(
-            budget
-        ):
-            lines.append("## Hourly Rate Schedule by Classification")
-            lines.append("")
-            lines.append(
-                "[MANUAL FILL: Sonja — complete hourly rate schedule by classification "
-                "from KB labor/role billable rates; phased fees alone do not satisfy "
-                "this RFP ask.]"
-            )
-            lines.append("")
-
-    # Honest gap when narrative mentions Additional Work hourly but we have no rates.
-    scope_cf = (budget.scope_summary or "").casefold()
-    if (
-        not wants_personnel
-        and ("hour" in scope_cf or "hourly" in scope_cf)
-        and not _budget_line_has_hourly_rate(budget)
-        and rfp_mandates_hourly_rate_schedule(rfp_text)
-    ):
-        lines.append("## Additional Work — Hourly Rates")
-        lines.append("")
-        lines.append(
-            "[MANUAL FILL: Sonja — labor-category / role hourly rates for Additional "
-            "Work outside the annual scope, per RFP. Do not invent rates.]"
-        )
-        lines.append("")
-
-    # Always rebuild from ledger — never ship truncated/LLM-corrupted option prose
-    # (mid-sentence cuts like "Client media pass-through (at net. Total… $2,900").
-    from app.services.proposal_budget_validation import rebuild_option_term_notes
-
-    opt2 = rebuild_option_term_notes(budget, rfp_context=rfp_text or "")
-    if opt2:
-        opt2 = opt2.replace("agency revenue estimate", "proposed fees")
-        opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
-        opt2 = re.sub(r"(?i)agency commission revenue", "professional fees", opt2)
-        opt2 = re.sub(r"(?i)not agency revenue", "not professional fees", opt2)
-        lines.append("## Option Terms")
-        lines.append(opt2)
-        lines.append("")
-
-    rendered = "\n".join(lines).strip()
-    rendered, _mix_logs = scrub_duplicate_budget_breakdown_tables(rendered)
-    rendered = scrub_budget_designer_handoff_issues(
-        rendered,
-        budget=budget,
-        approach_digest=approach_digest,
-    )
-    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
-
-    rendered = scrub_client_facing_section_artifacts(rendered)
-    return _scrub_internal_budget_jargon(rendered) + "\n"
+    return ""
 
 
 _TBD_NEEDS_INPUT_RE = re.compile(
@@ -4216,6 +3974,8 @@ def reshape_budget_for_rfp_form(
         approach_digest=approach_digest_from_draft_sections(draft.sections),
         pricing_instrument=pricing_instrument,
     )
+    if not content.strip():
+        return None  # no pricing plan: Cost section stays as saved
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
@@ -4381,6 +4141,8 @@ async def incorporate_budget_into_draft(
         approach_digest=approach_digest,
         pricing_instrument=pricing_instrument,
     )
+    if not content.strip():
+        return draft  # no pricing plan: Cost section stays as saved
     content, nte_logs = ensure_instrument_nte_total_block(content, pricing_instrument)
     for line in nte_logs:
         logger.info("incorporate_budget NTE ensure rfp_id=%s: %s", rfp_id, line)

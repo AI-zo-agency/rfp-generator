@@ -106,6 +106,8 @@ def rerender_budget_section_from_canon(
     content = render_budget_markdown(
         budget, rfp_text=rfp_text, pricing_instrument=pricing_instrument
     )
+    if not content.strip():
+        return draft  # no pricing plan: Cost section stays as saved
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}

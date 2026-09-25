@@ -110,7 +110,7 @@ class SeniorEditorBudgetProtectTests(unittest.IsolatedAsyncioTestCase):
             any("Deleted" in str(row.get("detail") or "") for row in report.section_logs)
         )
 
-    def test_ensure_budget_restores_when_missing(self) -> None:
+    def test_ensure_budget_does_not_append_for_legacy_budget(self) -> None:
         from app.models.proposal import BudgetLineItem
 
         sections = [
@@ -138,10 +138,10 @@ class SeniorEditorBudgetProtectTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+        # Pre-v2 budget (no pricing plan) is frozen: never append a Cost section.
         restored, did = ensure_budget_section_present(sections, budget)
-        self.assertTrue(did)
-        self.assertTrue(any(s.id == "section-budget-pricing" for s in restored))
-        self.assertIn("$", restored[-1].content or "")
+        self.assertFalse(did)
+        self.assertEqual(restored, sections)
 
 
 class SeniorEditorTicketNormalizeTests(unittest.TestCase):

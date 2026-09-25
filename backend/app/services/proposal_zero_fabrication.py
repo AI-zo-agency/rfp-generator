@@ -125,16 +125,11 @@ def apply_zero_fabrication_guards(
         report.logs.append(f"{label}: reference phone — {line}")
 
     resolved_budget = budget or (research.budget if research else None)
-    if resolved_budget and resolved_budget.line_items:
-        from app.services.proposal_budget_content import (
-            reconcile_draft_budget_summaries,
-            sync_phase_budget_tables_across_draft,
-        )
+    # Budget-shape steps only for pricing-plan budgets; pre-v2 budgets are
+    # frozen and their Cost section is treated as ordinary manuscript text.
+    if resolved_budget and resolved_budget.line_items and resolved_budget.pricing_plan:
+        from app.services.proposal_budget_content import reconcile_draft_budget_summaries
 
-        if not resolved_budget.pricing_plan:  # phase tables are a legacy-ledger concept
-            draft, sync_logs = sync_phase_budget_tables_across_draft(draft, resolved_budget)
-            for line in sync_logs:
-                report.logs.append(f"{label}: phase table sync — {line}")
         draft, reconciled = reconcile_draft_budget_summaries(draft, resolved_budget)
         if reconciled:
             report.logs.append(

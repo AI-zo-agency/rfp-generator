@@ -59,18 +59,17 @@ class ZeroFabricationGuardTests(unittest.TestCase):
         conflicts = detect_contradictory_phase_tables(_draft_with_tables())
         self.assertTrue(conflicts)
 
-    def test_apply_syncs_sibling_tables_to_canon(self) -> None:
-        updated, report = apply_zero_fabrication_guards(
-            _draft_with_tables(),
+    def test_apply_leaves_legacy_budget_tables_as_saved(self) -> None:
+        # Pre-v2 budget (no pricing plan) is frozen: no sibling phase-table sync.
+        original = _draft_with_tables()
+        updated, _report = apply_zero_fabrication_guards(
+            original,
             budget=_budget(),
             label="test",
         )
-        self.assertTrue(report.logs)
         bodies = " ".join(s.content or "" for s in updated.sections)
+        self.assertIn("$8,000", bodies)
         self.assertIn("$6,500", bodies)
-        self.assertNotIn("$8,000", bodies)
-        post_conflicts = detect_contradictory_phase_tables(updated)
-        self.assertFalse(post_conflicts)
 
     def test_scrubs_fabricated_personnel_and_cert_claims(self) -> None:
         draft = ProposalDraft(

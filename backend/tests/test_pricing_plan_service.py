@@ -63,7 +63,7 @@ class BudgetBuildTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_flag_on_routes_generate_to_v2_and_passes_target(self) -> None:
+    async def test_generate_routes_to_v2_and_passes_target(self) -> None:
         from app.models.proposal import ProposalBudget, ProposalResearchCache
         from app.services import proposal_pricing_service as pps
 
@@ -71,8 +71,7 @@ class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
         v2_budget = ProposalBudget(rfpId="r1", updatedAt="t", budgetFormat="pricing_plan", pricingPlan={"tasks": []})
         content = type("C", (), {"description": "desc", "pdf_text": "pdf"})()
         gen = AsyncMock(return_value=v2_budget)
-        with patch.object(pps.settings, "use_pricing_plan_v2", True), \
-             patch.object(pps.llm, "is_configured", return_value=True), \
+        with patch.object(pps.llm, "is_configured", return_value=True), \
              patch.object(pps, "load_rfp_for_proposal", return_value=(object(), content, "ctx")), \
              patch.object(pps, "aget_research_cache", AsyncMock(return_value=research)), \
              patch.object(pps, "asave_research_cache", AsyncMock()) as save, \

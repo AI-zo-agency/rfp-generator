@@ -2957,173 +2957,36 @@ async def run_phase3_6_self_edit(rfp_id: str):
 async def run_phase3_5_budget_reconcile(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
-    """Reconcile cached budget math, re-render budget section, sync fee narrative (no LLM regen)."""
+    """Re-render the Cost section from a pricing plan (no LLM regen).
+
+    Budgets without a pricing plan (pre-v2) are frozen: returned unchanged,
+    nothing saved.
+    """
     from app.services.proposal_pricing_service import reconcile_cached_budget
 
     budget, research = await reconcile_cached_budget(rfp_id)
+    draft_existing = await aget_proposal_draft(rfp_id)
+
+    if not budget.pricing_plan:
+        logger.info("reconcile skipped: legacy budget frozen rfp_id=%s", rfp_id)
+        if not draft_existing:
+            raise ProposalError("No proposal draft to reconcile.", status_code=400)
+        return draft_existing, research, budget
+
+    from app.core.config import settings as app_settings
+
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
-
-    if budget.pricing_plan:
-        # v2 budget: the plan is final from its own checker. Skip the entire
-        # legacy chain below (format judge, coerce, instrument reshape, phase
-        # sync, fee-narrative LLM, grounding repair) and reuse the same
-        # early-exit Phase 3.5 already takes (commit 15f9cdf).
-        from app.core.config import settings as app_settings
-
-        draft_existing = await aget_proposal_draft(rfp_id)
-        has_manuscript = bool(
-            draft_existing and any(s.content.strip() for s in draft_existing.sections)
-        )
-        return await _finish_phase3_5_pricing_plan(
-            rfp_id,
-            budget,
-            research,
-            rfp_context,
-            app_settings=app_settings,
-            has_manuscript=has_manuscript,
-        )
-
-    from app.services.proposal_budget_content import (
-        prepare_budget_for_client_display,
-        reconcile_draft_budget_summaries,
+    has_manuscript = bool(
+        draft_existing and any(s.content.strip() for s in draft_existing.sections)
     )
-
-    # Final math BEFORE narrative sync so fee claims cannot drift after.
-    budget = run_budget_editor_pass(
-        budget,
-        rfp_sections=research.rfp_sections if research else [],
-        rfp_context=rfp_context[:28_000],
-    )
-    try:
-        from app.services.proposal_budget_format_judge import (
-            align_budget_format_to_judgment,
-            judge_rfp_budget_format,
-        )
-
-        judgment = await judge_rfp_budget_format(rfp_context)
-        aligned_fmt, fmt_changed = align_budget_format_to_judgment(
-            budget.budget_format, judgment
-        )
-        if fmt_changed:
-            budget = budget.model_copy(update={"budget_format": aligned_fmt})
-            logger.info(
-                "Budget reconcile Cost format judged → %s for %s",
-                aligned_fmt,
-                rfp_id,
-            )
-    except ProposalGenerationCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Budget format judge skipped on reconcile for %s: %s", rfp_id, exc)
-
-    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
-
-    budget, coerce_logs = coerce_budget_to_phased_from_guide(
-        budget, None, rfp_text=rfp_context
-    )
-    for line in coerce_logs:
-        logger.info("Budget reconcile coerce for %s: %s", rfp_id, line)
-
-    rate_card_obj = None
-    if research and research.pricing_rate_card:
-        try:
-            from app.models.pricing_rate_card import PricingRateCard
-
-            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
-        except Exception:  # noqa: BLE001
-            rate_card_obj = None
-
-    budget = prepare_budget_for_client_display(
-        budget, rate_card=rate_card_obj, pricing_instrument=getattr(research, "pricing_instrument", None) if research else None
-    )
-    research = research.model_copy(update={"budget": budget})
-    await asave_research_cache(research)
-
-    draft = await incorporate_budget_into_draft(
+    return await _finish_phase3_5_pricing_plan(
         rfp_id,
         budget,
-        rfp_text=rfp_context,
-        pricing_instrument=getattr(research, "pricing_instrument", None),
+        research,
+        rfp_context,
+        app_settings=app_settings,
+        has_manuscript=has_manuscript,
     )
-    if not draft:
-        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
-
-    draft, _ = reconcile_draft_budget_summaries(draft, budget)
-    from app.services.proposal_budget_content import (
-        apply_rfp_required_budget_instrument,
-        sync_phase_budget_tables_across_draft,
-    )
-
-    draft, budget, reshaped = apply_rfp_required_budget_instrument(
-        draft,
-        budget,
-        rfp_text=rfp_context,
-        pricing_instrument=getattr(research, "pricing_instrument", None),
-    )
-    if reshaped:
-        if research:
-            research = research.model_copy(update={"budget": budget})
-            await asave_research_cache(research)
-        logger.info(
-            "Phase 3.5 reconcile reshaped Cost to RFP instrument (%s) for %s",
-            budget.budget_format,
-            rfp_id,
-        )
-
-    draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
-    if phase_sync_logs:
-        logger.info(
-            "Phase 3.5 reconcile synced canonical phase tables for %s: %s",
-            rfp_id,
-            phase_sync_logs[:8],
-        )
-    draft = await align_fee_narrative_with_budget(
-        rfp_id=rfp_id,
-        draft=draft,
-        budget=budget,
-    )
-    mismatches = await run_budget_grounding_check(
-        rfp_id=rfp_id,
-        draft=draft,
-        budget=budget,
-    )
-    if mismatches:
-        from app.services.proposal_pricing_sync_repair import (
-            run_pricing_sync_repair_or_handoff,
-        )
-
-        step_trace(
-            "phase3_5_grounding_mismatches",
-            rfp_id=rfp_id,
-            mismatch_count=len(mismatches),
-            mismatch_sample=[
-                (m.note or m.sentence or str(m))[:120] for m in mismatches[:8]
-            ],
-        )
-        draft, research, budget, _sync_report = await run_pricing_sync_repair_or_handoff(
-            rfp_id=rfp_id,
-            draft=draft,
-            budget=budget,
-            research=research,
-            initial_mismatches=mismatches,
-            rfp_text=rfp_context,
-        )
-    else:
-        budget = budget.model_copy(update={"narrative_mismatches": []})
-        if research:
-            research = research.model_copy(update={"budget": budget})
-    if research:
-        await asave_research_cache(research)
-    await asave_proposal_draft(draft)
-
-    logger.info(
-        "Budget reconcile complete for %s: revenue=%s, passthrough=%s, invoicing=%s",
-        rfp_id,
-        budget.agency_revenue_estimate,
-        budget.client_media_passthrough,
-        budget.total_client_invoicing,
-    )
-    return draft, research, budget
 
 
 async def _assert_proposal_not_reset(rfp_id: str) -> None:
@@ -3356,376 +3219,14 @@ async def _run_phase3_5_budget_inner(
     await _assert_proposal_not_reset(rfp_id)
 
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
-    if budget.pricing_plan:
-        return await _finish_phase3_5_pricing_plan(
-            rfp_id,
-            budget,
-            research,
-            rfp_context,
-            app_settings=app_settings,
-            has_manuscript=has_manuscript,
-        )
-    from app.services.proposal_budget_content import (
-        prepare_budget_for_client_display,
-        reconcile_draft_budget_summaries,
-    )
-
-    # Final math first — then manuscript sync/grounding against the frozen totals.
-    # budgetFormat from the pricing agent is authoritative (no RFP synonym regex).
-    try:
-        budget = run_budget_editor_pass(
-            budget,
-            rfp_sections=research.rfp_sections if research else [],
-            rfp_context=rfp_context[:28_000],
-        )
-    except Exception as exc:
-        logger.exception("Budget editor pass failed for %s: %s", rfp_id, exc)
-        step_trace(
-            "phase3_5_budget_editor_failed",
-            rfp_id=rfp_id,
-            error_type=exc.__class__.__name__,
-        )
-        raise ProposalError(
-            f"Budget editor pass failed: {exc}",
-            status_code=502,
-        ) from exc
-    step_trace(
-        "phase3_5_budget_editor_ok",
-        rfp_id=rfp_id,
-        **summarize_budget(budget),
-    )
-
-    from app.models.pricing_rate_card import PricingRateCard
-
-    rate_card_obj = None
-    if research and research.pricing_rate_card:
-        try:
-            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
-        except Exception:  # noqa: BLE001
-            rate_card_obj = None
-
-    budget = prepare_budget_for_client_display(budget, rate_card=rate_card_obj)
-    await _assert_proposal_not_reset(rfp_id)
-
-    # Principle-based Cost instrument judge — overrides habit phased when confident.
-    try:
-        from app.services.proposal_budget_format_judge import (
-            align_budget_format_to_judgment,
-            judge_rfp_budget_format,
-        )
-
-        judgment = await judge_rfp_budget_format(rfp_context)
-        aligned_fmt, fmt_changed = align_budget_format_to_judgment(
-            budget.budget_format, judgment
-        )
-        if fmt_changed:
-            budget = budget.model_copy(update={"budget_format": aligned_fmt})
-            logger.info(
-                "Phase 3.5 Cost format judged %s → %s for %s (%s)",
-                judgment.budget_format,
-                aligned_fmt,
-                rfp_id,
-                judgment.reason[:120],
-            )
-            step_trace(
-                "phase3_5_budget_format_judged",
-                rfp_id=rfp_id,
-                budget_format=aligned_fmt,
-                confidence=judgment.confidence,
-                reason=judgment.reason[:200],
-                rfp_quote=judgment.rfp_quote[:200],
-            )
-        elif judgment.confidence >= 0.55:
-            step_trace(
-                "phase3_5_budget_format_confirmed",
-                rfp_id=rfp_id,
-                budget_format=budget.budget_format,
-                confidence=judgment.confidence,
-            )
-    except ProposalGenerationCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Budget format judge skipped for %s: %s", rfp_id, exc)
-
-    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
-
-    budget, coerce_logs = coerce_budget_to_phased_from_guide(
-        budget, rate_card_obj, rfp_text=rfp_context
-    )
-    for line in coerce_logs:
-        logger.info("Phase 3.5 budget coerce for %s: %s", rfp_id, line)
-    if coerce_logs:
-        budget = run_budget_editor_pass(
-            budget,
-            rfp_sections=research.rfp_sections if research else [],
-            rfp_context=rfp_context[:28_000],
-            rate_card=rate_card_obj,
-        )
-        budget = prepare_budget_for_client_display(
-            budget,
-            rate_card=rate_card_obj,
-            pricing_instrument=research.pricing_instrument if research else None,
-        )
-
-    if research:
-        research = research.model_copy(update={"budget": budget})
-        await asave_research_cache(research)
-
-    with pipeline_step("incorporate_budget"):
-        draft = await incorporate_budget_into_draft(
-            rfp_id,
-            budget,
-            rfp_text=rfp_context,
-            pricing_instrument=research.pricing_instrument if research else None,
-        )
-    if not draft:
-        if getattr(app_settings, "budget_before_drafting", False) and not has_manuscript:
-            logger.info(
-                "Phase 3.5 budget-before-drafting: no manuscript yet for %s — skipping incorporate",
-                rfp_id,
-            )
-            step_trace(
-                "phase3_5_incorporate_skipped",
-                rfp_id=rfp_id,
-                reason="budget_before_drafting_no_manuscript",
-            )
-            now = datetime.now(timezone.utc).isoformat()
-            draft = ProposalDraft(rfpId=rfp_id, sections=[], updatedAt=now, generatedAt=now)
-            await asave_proposal_draft(draft)
-            if research:
-                research = research.model_copy(update={"budget": budget})
-                await asave_research_cache(research)
-            return draft, research, budget
-        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
-
-    draft, _ = reconcile_draft_budget_summaries(draft, budget)
-    from app.services.proposal_budget_content import (
-        apply_rfp_required_budget_instrument,
-        sync_phase_budget_tables_across_draft,
-    )
-
-    draft, budget, reshaped = apply_rfp_required_budget_instrument(
-        draft,
-        budget,
-        rfp_text=rfp_context,
-        pricing_instrument=research.pricing_instrument if research else None,
-    )
-    if reshaped:
-        if research:
-            research = research.model_copy(update={"budget": budget})
-            await asave_research_cache(research)
-        logger.info(
-            "Phase 3.5 reshaped Cost to RFP instrument (%s) for %s",
-            budget.budget_format,
-            rfp_id,
-        )
-        step_trace(
-            "phase3_5_budget_reshape_for_rfp",
-            rfp_id=rfp_id,
-            budget_format=budget.budget_format,
-        )
-
-    draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
-    if phase_sync_logs:
-        logger.info(
-            "Phase 3.5 synced canonical phase tables for %s: %s",
-            rfp_id,
-            phase_sync_logs[:8],
-        )
-        step_trace(
-            "phase3_5_phase_table_sync",
-            rfp_id=rfp_id,
-            sync_count=len(phase_sync_logs),
-            samples=phase_sync_logs[:6],
-        )
-    draft = await align_fee_narrative_with_budget(
-        rfp_id=rfp_id,
-        draft=draft,
-        budget=budget,
-    )
-
-    from app.services.proposal_budget_slots import render_draft_budget_slots
-
-    draft, unresolved_slots = render_draft_budget_slots(draft, budget)
-    if unresolved_slots:
-        logger.warning(
-            "Phase 3.5 unresolved money slots for %s: %s",
-            rfp_id,
-            unresolved_slots[:12],
-        )
-        step_trace(
-            "phase3_5_unresolved_money_slots",
-            rfp_id=rfp_id,
-            unresolved_count=len(unresolved_slots),
-            unresolved_sample=list(unresolved_slots)[:12],
-        )
-
-    # Phase 3.5d — repair or hand off if manuscript pricing claims contradict canonical budget.
-    mismatches = await run_budget_grounding_check(
-        rfp_id=rfp_id,
-        draft=draft,
-        budget=budget,
-    )
-    if mismatches:
-        from app.services.proposal_pricing_sync_repair import (
-            run_pricing_sync_repair_or_handoff,
-        )
-
-        step_trace(
-            "phase3_5_grounding_mismatches",
-            rfp_id=rfp_id,
-            mismatch_count=len(mismatches),
-            mismatch_sample=[
-                (m.note or m.sentence or str(m))[:120] for m in mismatches[:8]
-            ],
-        )
-        draft, research, budget, _sync_report = await run_pricing_sync_repair_or_handoff(
-            rfp_id=rfp_id,
-            draft=draft,
-            budget=budget,
-            research=research,
-            initial_mismatches=mismatches,
-            rfp_text=rfp_context,
-        )
-    else:
-        budget = budget.model_copy(update={"narrative_mismatches": []})
-        if research:
-            research = research.model_copy(update={"budget": budget})
-    if research:
-        await asave_research_cache(research)
-    await _assert_proposal_not_reset(rfp_id)
-
-    from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
-
-    draft, zf_report = apply_zero_fabrication_guards(
-        draft,
-        research=research,
-        budget=budget,
-        rfp_text=rfp_context,
-        label="phase3_5",
-    )
-    for line in zf_report.logs[:12]:
-        logger.info("Phase 3.5 zero-fabrication: %s — %s", rfp_id, line)
-    if zf_report.phase_table_conflicts:
-        step_trace(
-            "phase3_5_phase_table_conflicts",
-            rfp_id=rfp_id,
-            conflicts=zf_report.phase_table_conflicts[:6],
-        )
-
-    # Final RFP Cost-demand coverage pass — catch anything reshape / sync / ZF
-    # stripped, and stub remaining gaps so Cost never silently omits RFP asks.
-    try:
-        from app.services.proposal_budget_content import find_budget_section_index
-        from app.services.rfp_cost_demands import (
-            approach_digest_from_draft_sections,
-            ensure_rfp_cost_demands_in_budget_markdown,
-            pricing_flags_for_rfp_cost_demands,
-        )
-
-        idx = find_budget_section_index(list(draft.sections))
-        if idx is not None:
-            approach = approach_digest_from_draft_sections(draft.sections)
-            cost_body = draft.sections[idx].content or ""
-            covered, demands, demand_logs = await ensure_rfp_cost_demands_in_budget_markdown(
-                cost_body,
-                rfp_text=rfp_context or "",
-                approach_digest=approach,
-                budget=budget,
-                # Stub-only: Stage 3 + incorporate already rewrote; avoid a
-                # second LLM rewrite that can bloat Terms / leak MFILL tokens.
-                rewrite=False,
-                pricing_instrument=research.pricing_instrument if research else None,
-            )
-            if covered.strip() != cost_body.strip():
-                sections = list(draft.sections)
-                sections[idx] = sections[idx].model_copy(
-                    update={"content": covered, "status": "generated"}
-                )
-                draft = draft.model_copy(update={"sections": sections})
-            for line in demand_logs[:12]:
-                logger.info("Phase 3.5 final rfp_cost_demand: %s — %s", rfp_id, line)
-            demand_flags = pricing_flags_for_rfp_cost_demands(demands)
-            if demand_flags or demands:
-                prior = [
-                    f
-                    for f in (budget.pricing_flags or [])
-                    if not str(f).startswith("RFP Cost demand [")
-                ]
-                budget = budget.model_copy(
-                    update={"pricing_flags": prior + demand_flags}
-                )
-                if research:
-                    research = research.model_copy(update={"budget": budget})
-                step_trace(
-                    "phase3_5_rfp_cost_demands",
-                    rfp_id=rfp_id,
-                    demand_count=len(demands),
-                    unmet=len(demand_flags),
-                    ids=[d.id for d in demands][:24],
-                )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Phase 3.5 final RFP cost-demand pass failed for %s: %s", rfp_id, exc
-        )
-
-    try:
-        from app.services.proposal_budget_sanity import (
-            collect_budget_sanity_flags,
-            collect_budget_scope_gap_flags,
-        )
-
-        sanity_flags = collect_budget_sanity_flags(budget)
-        selected_for_scope: list[str] | None = None
-        try:
-            from app.services.rfp_repository import get_rfp as _get_rfp_for_scope
-
-            scope_rfp = _get_rfp_for_scope(rfp_id)
-            if (
-                scope_rfp
-                and getattr(scope_rfp, "bid_scope_locked_at", None)
-                and getattr(scope_rfp, "selected_tracks", None)
-            ):
-                selected_for_scope = list(scope_rfp.selected_tracks)
-        except Exception:  # noqa: BLE001
-            selected_for_scope = None
-        sanity_flags += collect_budget_scope_gap_flags(
-            budget,
-            research.rfp_sections if research else [],
-            selected_tracks=selected_for_scope,
-        )
-        if sanity_flags:
-            for flag in sanity_flags:
-                logger.warning("Phase 3.5 budget sanity check for %s: %s", rfp_id, flag)
-            if hasattr(budget, "pricing_audit_flags"):
-                new_audit_flags = list(budget.pricing_audit_flags) + [
-                    PricingAuditFlag(severity="high", concern=flag)
-                    for flag in sanity_flags
-                ]
-                budget = budget.model_copy(update={"pricing_audit_flags": new_audit_flags})
-                if research:
-                    research = research.model_copy(update={"budget": budget})
-                    await asave_research_cache(research)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Phase 3.5 budget sanity check failed for %s: %s", rfp_id, exc)
-
-    await asave_proposal_draft(draft)
-
-    logger.info(
-        "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
+    return await _finish_phase3_5_pricing_plan(
         rfp_id,
-        budget.pricing_tier,
-        len(budget.line_items),
-        budget.agency_revenue_estimate,
+        budget,
+        research,
+        rfp_context,
+        app_settings=app_settings,
+        has_manuscript=has_manuscript,
     )
-    step_trace(
-        "phase3_5_budget_complete",
-        rfp_id=rfp_id,
-        **summarize_budget(budget),
-        manuscript_summary=summarize_sections(draft.sections if draft else []),
-        unresolved_slots=len(unresolved_slots or []),
-    )
-    return draft, research, budget
 
 
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
@@ -4482,7 +3983,8 @@ async def generate_full_proposal(
             draft, research = await run_phase3_drafting(rfp_id)
             # Phase 3 may have overwritten/stubbed the Cost tab — re-land canonical
             # fee tables, then resolve money slots in narrative sections.
-            if research and research.budget:
+            # Pre-v2 budgets (budget gate skipped) stay frozen.
+            if research and research.budget and research.budget.pricing_plan:
                 from app.services.proposal_budget_content import (
                     incorporate_budget_into_draft,
                 )

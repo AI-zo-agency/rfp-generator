@@ -233,8 +233,8 @@ def restore_unresolved_budget_token_tabs(
     )
 
     logs: list[str] = []
-    if budget is None:
-        return draft, logs
+    if budget is None or not budget.pricing_plan:
+        return draft, logs  # pre-v2 budgets are frozen as saved
     markdown: str | None = None
     sections = list(draft.sections)
     changed = False
@@ -419,6 +419,10 @@ async def run_fulfill_budget_scan(
         "budgetRepairedNotes": [],
         "budgetEscalationNotes": [],
     }
+    if research and research.budget and not research.budget.pricing_plan:
+        # Pre-v2 budget: frozen as saved — no ledger repair, no Cost rewrite.
+        logs.append("Budget: budget predates the pricing plan — frozen as saved, skipped.")
+        return draft, research, logs, meta
 
     from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
 

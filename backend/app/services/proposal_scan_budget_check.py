@@ -152,6 +152,8 @@ def _sync_budget_section(
     content = render_budget_markdown(
         budget, rfp_text=rfp_text, pricing_instrument=pricing_instrument
     )
+    if not content.strip():
+        return draft  # no pricing plan: Cost section stays as saved
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
     if idx is not None:
@@ -204,6 +206,18 @@ def check_and_repair_budget_for_scan(
         )
 
     budget = research.budget
+    if not budget.pricing_plan:
+        # Pre-v2 budget: frozen as saved — no ledger repair, no Cost re-render.
+        logs.append("Budget check: budget predates the pricing plan — frozen as saved, skipped.")
+        return BudgetScanCheckResult(
+            draft=draft,
+            research=research,
+            status="ok",
+            changed=False,
+            repaired_notes=[],
+            escalation_notes=[],
+            logs=logs,
+        )
     rate_card = _rate_card_from_research(research, rfp_id=rfp_id)
     rfp_context = (rfp_text or "")[:80_000]
 

@@ -7191,6 +7191,19 @@ async def _try_budget_section_rfp_coverage_check(
             approach_digest=approach_digest_from_draft_sections(draft.sections),
             pricing_instrument=research.pricing_instrument,
         )
+        if not content.strip():
+            # Pre-v2 budget: frozen as saved.
+            return (
+                section,
+                draft,
+                research,
+                provider,
+                (
+                    f"**{section.title}** — this proposal's budget predates the "
+                    "pricing plan, so its Cost section is kept exactly as saved."
+                ),
+                False,
+            )
         before = section.content or ""
         changed = content.strip() != before.strip()
         working = section
@@ -8099,6 +8112,19 @@ async def _apply_budget_section_canonical_refresh(
                 f"**{section.title}** — I can't refresh fees yet because there is no "
                 "canonical Stage 3.5 budget. Run **Budget build** or ask to rebuild "
                 "Cost Proposal from the pricing guide first."
+            ),
+            False,
+        )
+    if not canonical.pricing_plan:
+        # Pre-v2 budget: frozen as saved — no ledger refresh, no Cost re-render.
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            (
+                f"**{section.title}** — this proposal's budget predates the pricing "
+                "plan, so its Cost section is kept exactly as saved."
             ),
             False,
         )
