@@ -1092,7 +1092,8 @@ def apply_budget_freeform_postprocess(
     ):
         if "investment framing" in text.casefold() or "## terms" in text.casefold():
             logs.append("Restored Pricing Guide USE VERBATIM Terms blocks")
-    # RFP Cost demands (LLM) are applied async in chat/Build — not here.
+    # rfp_text / approach_digest are accepted for caller signature
+    # compatibility but unused in this freeform-scrub pass.
     _ = (rfp_text, approach_digest)
     return text, logs
 

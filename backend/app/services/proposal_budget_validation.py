@@ -247,11 +247,11 @@ def collect_orphan_commission_violations(budget: ProposalBudget) -> list[str]:
 def collect_commission_fee_math_violations(budget: ProposalBudget) -> list[str]:
     """A drafted commission-fee line's dollar amount must equal rate x media base.
 
-    reconcile_proposal_budget trusts the line item's own `extended` as ground
-    truth and only falls back to rate x pass-through when the line is missing
-    or zero (derive_commission_agency_revenue) — so a populated commission
-    line with the wrong arithmetic (wrong base, stale rate, plain error) is
-    never caught. This checks only lines whose own description says
+    Callers trust the line item's own `extended` as ground truth and only fall
+    back to rate x pass-through when the line is missing or zero
+    (derive_commission_agency_revenue) — so a populated commission line with
+    the wrong arithmetic (wrong base, stale rate, plain error) is never
+    caught elsewhere. This checks only lines whose own description says
     "commission" (matching collect_orphan_commission_violations's
     identification), never the whole agency_fee_subtotal, so a mixed fee
     structure (flat retainer + commission line) does not false-positive.
@@ -428,9 +428,9 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     """Return human-readable violations when budget math or flags are unreconciled."""
     violations: list[str] = []
     line_sum = sum_line_items_extended(budget)
-    # agency_fee excludes direct_expense (travel) line items — reconcile_proposal_budget's
-    # agency_revenue_estimate is agency_fee + ALL direct spend (in-line travel plus the
-    # explicit directExpensesTotal residual), so `direct` here must match that or a
+    # agency_fee excludes direct_expense (travel) line items — budget.agency_revenue_estimate
+    # is agency_fee + ALL direct spend (in-line travel plus the explicit
+    # directExpensesTotal residual), so `direct` here must match that or a
     # legitimately-reconciled travel line would trip a false invariant violation.
     direct = round(
         direct_expense_subtotal(budget.line_items) + float(budget.direct_expenses_total or 0), 2
@@ -482,10 +482,10 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
                 violations.append(f"unresolved budget flag: {flag[:120]}")
 
     # PM ratio vs. guide is intentionally NOT a hard invariant — see the
-    # advisory [PRICING FLAG: ...] this same check appends inside
-    # reconcile_proposal_budget. It is a policy/guide tension (absolute-dollar
-    # PM floor vs. percentage-of-fee ceiling), not an arithmetic fact, and can
-    # be legitimately unresolvable on a small-fee RFP no retry fixes.
+    # advisory [PRICING FLAG: ...] budget generation appends for this same
+    # check. It is a policy/guide tension (absolute-dollar PM floor vs.
+    # percentage-of-fee ceiling), not an arithmetic fact, and can be
+    # legitimately unresolvable on a small-fee RFP no retry fixes.
     #
     # Same for one-time×months and residual PM-floor dollars: surface as
     # pricing flags for Sonja, do not halt Phase 3.5.
