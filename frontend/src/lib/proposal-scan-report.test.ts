@@ -312,6 +312,13 @@ describe("buildScanRfpBanner", () => {
       );
     });
 
+    it("says a frozen legacy budget was kept as saved and how to rebuild it", () => {
+      const banner = buildScanRfpBanner({ budgetStatus: "frozen" });
+      expect(banner).toBe(
+        "Budget predates the pricing plan — kept as saved; click Generate budget to rebuild it."
+      );
+    });
+
     it("adds no clause at all when there is no budget yet", () => {
       const banner = buildScanRfpBanner({ budgetStatus: "none", verifyTagsRemoved: 0 });
       expect(banner).toBe(

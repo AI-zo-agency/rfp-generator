@@ -78,7 +78,7 @@ export interface ScanRfpFulfillReport {
   disqualificationRiskCount?: number;
   disqualificationRisks?: string[];
   orchestratorLoopPasses?: number;
-  budgetStatus?: "none" | "ok" | "repaired" | "needs_human" | "repaired_needs_human";
+  budgetStatus?: "none" | "ok" | "repaired" | "needs_human" | "repaired_needs_human" | "frozen";
   budgetChanged?: boolean;
   budgetRegenerated?: boolean;
   budgetRepairedNotes?: string[];
@@ -307,6 +307,10 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
       `budget needs a human review before submission${
         escalationNotes ? ` (${escalationNotes})` : ""
       }`
+    );
+  } else if (budgetStatus === "frozen") {
+    clauses.push(
+      "budget predates the pricing plan — kept as saved; click Generate budget to rebuild it"
     );
   } else if (budgetStatus === "repaired_needs_human") {
     clauses.push(

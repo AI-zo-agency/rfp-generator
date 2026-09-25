@@ -420,6 +420,11 @@ async def run_fulfill_budget_scan(
     if research and research.budget and not research.budget.pricing_plan:
         # Pre-v2 budget: frozen as saved — no ledger repair, no Cost rewrite.
         logs.append("Budget: budget predates the pricing plan — frozen as saved, skipped.")
+        meta["budgetStatus"] = "frozen"
+        meta["budgetEscalationNotes"] = [
+            "Budget predates the pricing plan — kept as saved. "
+            "Click Generate budget to rebuild it."
+        ]
         return draft, research, logs, meta
 
     from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
@@ -516,18 +521,21 @@ async def run_fulfill_budget_scan(
                     "Budget: preserved official Pricing Form — cleaned handoff tags / "
                     "filled contact placeholders (no re-render)."
                 )
-        excerpt = evaluation_and_kpi_excerpt(rfp_text)
-        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-        idx2 = find_budget_section_index(draft.sections)
-        if idx2 is not None and not section_looks_like_official_pricing_form(
-            draft.sections[idx2]
-        ):
-            draft, patch_logs = patch_budget_section_for_rfp(
-                draft, rfp_text=rfp_text, facts=facts
-            )
-            logs.extend(patch_logs)
-            if patch_logs:
-                meta["budgetChanged"] = True
+        # Pricing-plan Cost tabs are re-rendered from the plan on persist, which
+        # would wipe patched notes — skip the patch (and its LLM call).
+        if not research.budget.pricing_plan:
+            excerpt = evaluation_and_kpi_excerpt(rfp_text)
+            facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
+            idx2 = find_budget_section_index(draft.sections)
+            if idx2 is not None and not section_looks_like_official_pricing_form(
+                draft.sections[idx2]
+            ):
+                draft, patch_logs = patch_budget_section_for_rfp(
+                    draft, rfp_text=rfp_text, facts=facts
+                )
+                logs.extend(patch_logs)
+                if patch_logs:
+                    meta["budgetChanged"] = True
         draft = _apply_unresolved_budget_slot_restore(
             draft, research, rfp_text=rfp_text, logs=logs, meta=meta
         )
@@ -582,19 +590,21 @@ async def run_fulfill_budget_scan(
         # Still allow attachment / inverse-cost notes on a separate narrative
         # budget tab if one exists; never patch notes onto the official form body
         # via find_budget_section_index when it still points at the form.
-        excerpt = evaluation_and_kpi_excerpt(rfp_text)
-        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-        # Only patch when find_budget points at a non-form narrative section.
-        idx2 = find_budget_section_index(draft.sections)
-        if idx2 is not None and not section_looks_like_official_pricing_form(
-            draft.sections[idx2]
-        ):
-            draft, patch_logs = patch_budget_section_for_rfp(
-                draft, rfp_text=rfp_text, facts=facts
-            )
-            logs.extend(patch_logs)
-            if patch_logs:
-                meta["budgetChanged"] = True
+        # Only patch when find_budget points at a non-form narrative section,
+        # and never on pricing-plan budgets (persist re-render wipes the notes).
+        if not budget.pricing_plan:
+            excerpt = evaluation_and_kpi_excerpt(rfp_text)
+            facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
+            idx2 = find_budget_section_index(draft.sections)
+            if idx2 is not None and not section_looks_like_official_pricing_form(
+                draft.sections[idx2]
+            ):
+                draft, patch_logs = patch_budget_section_for_rfp(
+                    draft, rfp_text=rfp_text, facts=facts
+                )
+                logs.extend(patch_logs)
+                if patch_logs:
+                    meta["budgetChanged"] = True
         draft = _apply_unresolved_budget_slot_restore(
             draft, research, rfp_text=rfp_text, logs=logs, meta=meta
         )

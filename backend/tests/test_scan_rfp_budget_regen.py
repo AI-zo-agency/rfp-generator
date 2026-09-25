@@ -884,5 +884,108 @@ class CollapseDuplicateCostTabsTests(unittest.TestCase):
         )
 
 
+class FrozenLegacyBudgetScanTests(unittest.TestCase):
+    def test_legacy_budget_reports_frozen_with_message(self) -> None:
+        rfp_id = "rfp-frozen"
+        cost = "## Budget\n\n| Item | Amount |\n| --- | ---: |\n| Fees | $10,000 |\n"
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[ProposalSection(id="b", title="Budget", content=cost, status="generated")],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=ProposalBudget(
+                rfpId=rfp_id,
+                updatedAt="2026-08-05T00:00:00+00:00",
+                lineItems=[BudgetLineItem(id="L1", description="Fees", category="Labor", extended=10_000)],
+            ),
+        )
+        out_draft, _r, _logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id=rfp_id,
+                rfp=_rfp(rfp_id),
+                draft=draft,
+                research=research,
+                rfp_text="Submit a budget.",
+                use_llm=False,
+                skip_section_ids=set(),
+            )
+        )
+        self.assertEqual(meta["budgetStatus"], "frozen")
+        self.assertFalse(meta["budgetChanged"])
+        self.assertIn(
+            "Budget predates the pricing plan — kept as saved. "
+            "Click Generate budget to rebuild it.",
+            meta["budgetEscalationNotes"],
+        )
+        self.assertEqual(out_draft.sections[0].content, cost)
+
+
+class PricingPlanScanSkipsNotePatchTests(unittest.TestCase):
+    """v2 Cost tabs are re-rendered from the plan on persist; note patches would be wiped."""
+
+    def _run(self, content: str, title: str, rfp_text: str):
+        rfp_id = "rfp-v2-nopatch"
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[ProposalSection(id="b", title=title, content=content, status="generated")],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=ProposalBudget(
+                pricingPlan=_PLAN,
+                rfpId=rfp_id,
+                updatedAt="2026-08-05T00:00:00+00:00",
+                lineItems=[
+                    BudgetLineItem(
+                        id="L1",
+                        description="Services",
+                        category="Labor",
+                        extended=150_000,
+                        lineItemType="agency_fee",
+                    )
+                ],
+                lumpSumTotal=150_000,
+                agencyFeeSubtotal=150_000,
+                totalClientInvoicing=150_000,
+            ),
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+
+        llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
+        with patch.object(scan_mod, "extract_rfp_scoring_facts_llm", new=llm):
+            out = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text=rfp_text,
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+        llm.assert_not_awaited()
+        return out
+
+    def test_fee_table_already_adds_up_path_makes_no_llm_call(self) -> None:
+        healthy = (
+            "## Proposed Investment\n\n"
+            "**Total proposed investment: $150,000**\n\n"
+            "| Item | Amount |\n| --- | ---: |\n| Services | $150,000 |\n"
+            "| **Total** | **$150,000** |\n"
+        )
+        out_draft, _r, logs, meta = self._run(
+            healthy, "Budget & Pricing", "Cost is 20% of score. Travel is reimbursable."
+        )
+        self.assertTrue(any("already adds up" in line for line in logs))
+        self.assertEqual(out_draft.sections[0].content, healthy)
+        self.assertFalse(meta["budgetChanged"])
+
+
 if __name__ == "__main__":
     unittest.main()
