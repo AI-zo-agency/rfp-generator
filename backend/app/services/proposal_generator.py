@@ -3197,16 +3197,10 @@ async def _run_phase3_5_budget_inner(
         )
         raise
 
-    rate_card = (research.pricing_rate_card or {}) if research else {}
-    rates = rate_card.get("rates") or rate_card.get("Rates") or []
-    contract = (research.pricing_contract or {}) if research else {}
     step_trace(
         "phase3_5_budget_llm_generated",
         rfp_id=rfp_id,
         **summarize_budget(budget),
-        rate_card_rates=len(rates) if isinstance(rates, list) else 0,
-        contract_fee_model=contract.get("feeModel") or contract.get("fee_model"),
-        contract_confidence=contract.get("confidence"),
     )
 
     # User may have clicked Reset while budget was computing — do not rewrite wiped data.

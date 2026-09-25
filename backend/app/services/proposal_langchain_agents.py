@@ -125,11 +125,10 @@ Rules:
 8. Subcontractors: if cost proposal lists translation partners, Company Background must align — zö self-performs marketing/communications; translation partners are scoped separately.
 9. RFP compliance: reference contacts with phones and emails, workforce diversity %, budget hours table, PSA acks — from KB only; never defer to unnamed attachments or "upon request".
 10. BUDGET / COST / FEES / PRICING sections (critical):
-   - NEVER search the general knowledge base for this client's rates, hours, or fee totals — new RFPs have no client-specific pricing in KB.
-   - ALWAYS call search_rfp_requirements first for budget ceiling, cost scoring, quote/fee form requirements.
-   - THEN call search_pricing_guide to get 00_Guide_Pricing Low/Average/High tiers and menu rates.
-   - Pick ONE tier deliberately from RFP budget pressure + evaluation weight on cost, then build fees from the guide.
-   - Never invent dollar amounts. Use [VERIFY: …] when guide/RFP lacks a figure. Never put a phone number in a Fee column.
+   - The Cost section's fees come from the pricing plan — never write, change, or re-derive fee amounts, tiers, or totals.
+   - Other pricing tabs cross-reference the Cost section instead of restating fees.
+   - NEVER search the general knowledge base for this client's rates, hours, or fee totals; use search_rfp_requirements for quote/fee form requirements.
+   - Never invent dollar amounts. Use [VERIFY: …] when a figure is missing. Never put a phone number in a Fee column.
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
 12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise, designer-ready layout within wordTarget.
 13. LENGTH & FORMAT (designer-compact): Stay at or under wordTarget but cover EVERY RFP ask.

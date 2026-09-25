@@ -9214,14 +9214,19 @@ async def improve_proposal_section(
             restore_unresolved_budget_token_tabs,
         )
 
-        collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(list(draft.sections))
-        if cost_logs:
-            draft = draft.model_copy(
-                update={
-                    "sections": collapsed,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
+        # Frozen legacy budgets: their Cost tabs are ordinary text — never collapse.
+        cost_logs: list[str] = []
+        if research and research.budget and research.budget.pricing_plan:
+            collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(
+                list(draft.sections)
             )
+            if cost_logs:
+                draft = draft.model_copy(
+                    update={
+                        "sections": collapsed,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
         slot_logs: list[str] = []
         if research and research.budget:
             draft, slot_logs = restore_unresolved_budget_token_tabs(

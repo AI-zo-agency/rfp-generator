@@ -135,6 +135,8 @@ async def _maybe_reconcile_budget_from_cache(
         return draft, research, None
     if not research or not research.budget:
         return draft, research, "budget:preserved — no cached budget object"
+    if not research.budget.pricing_plan:
+        return draft, research, "budget:frozen (legacy) — not reconciled"
 
     from app.services.proposal_generator import run_phase3_5_budget_reconcile
 

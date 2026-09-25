@@ -1366,52 +1366,6 @@ def ensure_pricing_guide_verbatim_in_budget_markdown(
     return text
 
 
-def primary_instrument_nte(pricing_instrument: PricingInstrument | None) -> float | None:
-    """Largest positive track NTE on the instrument, if any."""
-    if pricing_instrument is None:
-        return None
-    best: float | None = None
-    for track in pricing_instrument.tracks or []:
-        nte = getattr(track, "nte_annual", None)
-        try:
-            nte_f = float(nte) if nte is not None else 0.0
-        except (TypeError, ValueError):
-            continue
-        if nte_f <= 0:
-            continue
-        if best is None or nte_f > best:
-            best = nte_f
-    return best
-
-
-def ensure_instrument_nte_total_block(
-    content: str,
-    pricing_instrument: PricingInstrument | None,
-) -> tuple[str, list[str]]:
-    """Append an explicit Total Not-to-Exceed line from the instrument when missing.
-
-    SOW compensation tabs must show the ceiling even if the Stage 3 model omitted
-    a totals row. Idempotent when a matching NTE / not-to-exceed already appears.
-    """
-    logs: list[str] = []
-    nte = primary_instrument_nte(pricing_instrument)
-    if nte is None:
-        return content or "", logs
-    body = (content or "").rstrip()
-    nte_usd = _usd(nte)
-    # Already states this ceiling (table cell or prose).
-    has_nte_phrase = bool(re.search(r"(?i)not[\s-]?to[\s-]?exceed|\bNTE\b", body))
-    if nte_usd in body and has_nte_phrase:
-        return body, logs
-    block = (
-        "\n\n| | |\n| --- | --- |\n"
-        f"| **Total Not-to-Exceed** | **{nte_usd}** |\n"
-    )
-    logs.append(f"appended instrument NTE total {nte_usd}")
-    logger.info("ensure_instrument_nte_total_block nte=%s", nte_usd)
-    return (body + block).strip(), logs
-
-
 def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     """Return (delivery phase, deliverable label) for the client fee table.
 
@@ -1792,13 +1746,6 @@ async def incorporate_budget_into_draft(
     )
     if not content.strip():
         return draft  # no pricing plan: Cost section stays as saved
-    if not budget.pricing_plan:
-        # A v2 budget's plan render already owns the ceiling — an instrument
-        # NTE appended here can contradict the plan's own total and duplicate
-        # the row (Bug B). Only legacy (non-plan) content needs the assist.
-        content, nte_logs = ensure_instrument_nte_total_block(content, pricing_instrument)
-        for line in nte_logs:
-            logger.info("incorporate_budget NTE ensure rfp_id=%s: %s", rfp_id, line)
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
