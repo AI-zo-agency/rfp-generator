@@ -17,6 +17,7 @@ from app.models.proposal import (
     ProposalResearchCache,
     VerifiedRate,
 )
+from app.core.config import settings
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
 from app.services.llm import LlmError
@@ -2065,6 +2066,20 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
 
     rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     prior_research = await aget_research_cache(rfp_id)
+
+    if settings.use_pricing_plan_v2:
+        from app.services.go_no_go_service import combine_rfp_text
+        from app.services.pricing_plan_service import generate_pricing_plan_budget
+
+        full_rfp = combine_rfp_text(_content.description, _content.pdf_text)
+        target = prior_research.target_budget_usd if prior_research else None
+        budget = await generate_pricing_plan_budget(rfp_id, full_rfp, target_budget_usd=target)
+        research = prior_research or ProposalResearchCache(
+            rfpId=rfp_id, updatedAt=budget.updated_at, provider=budget.provider
+        )
+        research = research.model_copy(update={"budget": budget})
+        await asave_research_cache(research)
+        return budget, research
 
     # Phase 3.5: extract if missing OR incomplete buyer form (stale/partial persist).
     from app.services.pricing_instrument_extract import (

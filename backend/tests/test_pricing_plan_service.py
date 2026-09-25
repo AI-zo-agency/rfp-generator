@@ -63,3 +63,25 @@ class BudgetBuildTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flag_on_routes_generate_to_v2_and_passes_target(self) -> None:
+        from app.models.proposal import ProposalBudget, ProposalResearchCache
+        from app.services import proposal_pricing_service as pps
+
+        research = ProposalResearchCache(rfpId="r1", updatedAt="t", targetBudgetUsd=250000)
+        v2_budget = ProposalBudget(rfpId="r1", updatedAt="t", budgetFormat="pricing_plan", pricingPlan={"tasks": []})
+        content = type("C", (), {"description": "desc", "pdf_text": "pdf"})()
+        gen = AsyncMock(return_value=v2_budget)
+        with patch.object(pps.settings, "use_pricing_plan_v2", True), \
+             patch.object(pps.llm, "is_configured", return_value=True), \
+             patch.object(pps, "load_rfp_for_proposal", return_value=(object(), content, "ctx")), \
+             patch.object(pps, "aget_research_cache", AsyncMock(return_value=research)), \
+             patch.object(pps, "asave_research_cache", AsyncMock()) as save, \
+             patch("app.services.pricing_plan_service.generate_pricing_plan_budget", gen):
+            budget, saved = await pps.generate_proposal_budget("r1")
+        self.assertEqual(budget.budget_format, "pricing_plan")
+        self.assertEqual(gen.await_args.kwargs["target_budget_usd"], 250000)
+        self.assertIs(saved.budget, budget)
+        save.assert_awaited_once()

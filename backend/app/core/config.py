@@ -122,6 +122,8 @@ class Settings(BaseSettings):
 
     # Phase 1: decision-first Company Qualification Layer for Section 1.
     use_company_qualification_s1: bool = False
+    # Pricing plan v2: asks -> LLM plan -> code checks -> render (Cost section).
+    use_pricing_plan_v2: bool = False
 
     # State-canonicalization gates (detection always available; blocking is flagged).
     # CONSISTENCY_CRITICALS_BLOCK — promote scan_manuscript_consistency criticals
