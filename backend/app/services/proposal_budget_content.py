@@ -1792,9 +1792,13 @@ async def incorporate_budget_into_draft(
     )
     if not content.strip():
         return draft  # no pricing plan: Cost section stays as saved
-    content, nte_logs = ensure_instrument_nte_total_block(content, pricing_instrument)
-    for line in nte_logs:
-        logger.info("incorporate_budget NTE ensure rfp_id=%s: %s", rfp_id, line)
+    if not budget.pricing_plan:
+        # A v2 budget's plan render already owns the ceiling — an instrument
+        # NTE appended here can contradict the plan's own total and duplicate
+        # the row (Bug B). Only legacy (non-plan) content needs the assist.
+        content, nte_logs = ensure_instrument_nte_total_block(content, pricing_instrument)
+        for line in nte_logs:
+            logger.info("incorporate_budget NTE ensure rfp_id=%s: %s", rfp_id, line)
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
