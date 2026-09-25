@@ -25,12 +25,6 @@ def merge_research_preserve_audit_fields(
     ``proposal_generator.py``, which forward ``rfpSections`` but nothing else).
     Patching those two would leave the next one free to silently wipe these
     fields again.
-
-    ``pricing_rate_card`` matters most operationally: ``run_fulfill_budget_scan``
-    (the "Scan RFP" path) reads it to build the underbid-floor check's rate card,
-    and a missing card takes the ``rate_card = None`` branch, which by design
-    never halts. Losing this field on a routine Sections 1-3 regeneration would
-    silently turn off the underbid-floor protection.
     """
     if existing is None:
         return incoming

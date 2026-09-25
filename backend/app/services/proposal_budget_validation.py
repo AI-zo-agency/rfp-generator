@@ -1308,7 +1308,7 @@ def reconcile_proposal_budget(
         # verbatim re-labelled the $3,500 travel row as the agency fee after
         # split_line_item_totals had correctly excluded it — and every consumer
         # reads this stored agencyFeeSubtotal (proposal_budget_content,
-        # proposal_budget_sync, proposal_section_editor), so the defect
+        # proposal_section_editor), so the defect
         # reappeared downstream with all gates green.
         agency_fee = round(line_sum - direct_expense_subtotal(line_items), 2)
         passthrough = 0.0
@@ -1575,10 +1575,6 @@ def validate_budget_canonical(budget: ProposalBudget) -> list[str]:
     rendered = render_budget_markdown_for_validation(budget)
     if _VERIFY_BEFORE_SUBMIT_RE.search(rendered):
         errors.append("rendered budget markdown still contains verify-before-submission language")
-
-    from app.services.pricing_rate_binding import collect_unbound_line_item_violations
-
-    errors.extend(collect_unbound_line_item_violations(budget))
 
     return errors
 

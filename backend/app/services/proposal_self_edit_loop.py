@@ -1743,32 +1743,6 @@ async def run_self_edit_loop(
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
 
-    from app.services.proposal_manuscript_budget_contradictions import (
-        run_manuscript_budget_contradiction_pass,
-    )
-
-    budget_xsec = await run_manuscript_budget_contradiction_pass(
-        draft,
-        rfp=rfp,
-        research=research,
-        use_llm=not skip_llm_rewrites,
-    )
-    if budget_xsec.logs:
-        draft = budget_xsec.draft
-        await asave_proposal_draft(draft)
-        for line in budget_xsec.logs[:12]:
-            report.section_logs.append(
-                {"section": "budget-cross-section", "detail": line}
-            )
-        step_trace(
-            "senior_editor_budget_cross_section",
-            rfp_id=rfp_id,
-            findings=len(budget_xsec.findings),
-            rewrites=budget_xsec.rewrites_applied,
-            pricing_flags=budget_xsec.pricing_flags_added,
-            summary=budget_xsec.summary[:200],
-        )
-
     recently_repaired = {
         str(row.get("sectionId") or "")
         for row in report.section_logs

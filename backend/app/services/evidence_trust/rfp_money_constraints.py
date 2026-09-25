@@ -25,8 +25,7 @@ CONSTRAINT_PROGRAM_OR_MEDIA_ENVELOPE = "program_or_media_envelope"
 CONSTRAINT_MINIMUM_BUDGET = "minimum_budget"
 
 # --- RFP-stated minimum budget -------------------------------------------
-# The buyer telling you the floor of what they expect to spend. Distinct from
-# proposal_budget_floor.py, which is zo's OWN 00_Guide_Pricing rate floor.
+# The buyer telling you the floor of what they expect to spend.
 # Incident: a $500,000 "minimum budgeted amount" had nowhere to land, so a
 # $278,400 bid passed every gate and left ~$220k on the table.
 

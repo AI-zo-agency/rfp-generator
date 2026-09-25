@@ -1,4 +1,4 @@
-"""T5 — KB pricing rate card, binding, money slots, free-currency backstop."""
+"""T5 — money slots, free-currency backstop."""
 
 from __future__ import annotations
 
@@ -12,11 +12,6 @@ from app.models.proposal import (
     ProposalSection,
 )
 from app.models.rfp import RfpRecord
-from app.services.pricing_rate_binding import (
-    bind_budget_line_items_to_rate_card,
-    collect_unbound_line_item_violations,
-)
-from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
 from app.services.proposal_budget_slots import (
     find_unresolved_budget_slots,
     render_budget_slots,
@@ -24,16 +19,6 @@ from app.services.proposal_budget_slots import (
 )
 from app.services.proposal_consistency import scan_manuscript_consistency
 from app.services.proposal_pipeline_status import collect_manuscript_blockers
-
-
-_GUIDE_SAMPLE = """
-Category 05 — Content & Digital
-- 5.3 Monthly Social Media Management 3 platforms (Avg: $3,200–$4,800)
-- 5.4 Monthly Digital Advertising Management (Avg: $2,500–$4,500)
-Category 09 — Account & Project Management
-- 9.1 Project Management short projects 3–6 months (Avg: $7,500–$12,000)
-Senior Strategist $175/hr
-"""
 
 
 def _rfp() -> RfpRecord:
@@ -46,100 +31,6 @@ def _rfp() -> RfpRecord:
         lastActivity="2026-01-01T00:00:00Z",
         lastActivityNote="test",
     )
-
-
-class PricingRateCardBuilderTests(unittest.TestCase):
-    def test_extracts_menu_ranges_and_hourly(self) -> None:
-        card = build_pricing_rate_card_from_guide_text(_GUIDE_SAMPLE)
-        self.assertGreaterEqual(len(card.rates), 3)
-        by_menu = {r.menu_id: r for r in card.rates if r.menu_id}
-        self.assertIn("5.3", by_menu)
-        self.assertEqual(by_menu["5.3"].amount_low, 3200.0)
-        self.assertEqual(by_menu["5.3"].amount_high, 4800.0)
-        self.assertAlmostEqual(by_menu["5.3"].amount or 0, 4000.0)
-        hourly = [r for r in card.rates if r.unit == "hour"]
-        self.assertTrue(hourly)
-        self.assertEqual(hourly[0].amount, 175.0)
-
-    def test_empty_guide_yields_warning_not_invention(self) -> None:
-        card = build_pricing_rate_card_from_guide_text("(No 00_Guide_Pricing content in KB)")
-        self.assertEqual(card.rates, [])
-        self.assertTrue(card.warnings)
-
-
-class RateBindingTests(unittest.TestCase):
-    def test_confident_match_sets_source_rate_id(self) -> None:
-        card = build_pricing_rate_card_from_guide_text(_GUIDE_SAMPLE)
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            pricingTier="Average",
-            lineItems=[
-                BudgetLineItem(
-                    id="L1",
-                    category="Digital",
-                    description="Monthly Social Media Management",
-                    rateSource="5.3 — 00_Guide_Pricing Average",
-                    rate=4000.0,
-                    extended=4000.0,
-                    unit="flat",
-                )
-            ],
-            agencyRevenueEstimate=4000.0,
-        )
-        bound = bind_budget_line_items_to_rate_card(budget, card)
-        self.assertFalse(bound.line_items[0].is_manual_fill)
-        self.assertTrue(bound.line_items[0].source_rate_id)
-        self.assertEqual(collect_unbound_line_item_violations(bound), [])
-
-    def test_no_match_flags_manual_fill_without_inventing(self) -> None:
-        card = build_pricing_rate_card_from_guide_text(_GUIDE_SAMPLE)
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            lineItems=[
-                BudgetLineItem(
-                    id="L9",
-                    category="Mystery",
-                    description="Invented holographic billboard package",
-                    rate=99999.0,
-                    extended=99999.0,
-                )
-            ],
-            agencyRevenueEstimate=99999.0,
-        )
-        bound = bind_budget_line_items_to_rate_card(budget, card)
-        item = bound.line_items[0]
-        self.assertTrue(item.is_manual_fill)
-        self.assertIsNone(item.source_rate_id)
-        self.assertEqual(item.extended, 99999.0)  # not rewritten
-        self.assertTrue(any("unbound" in f.lower() for f in bound.pricing_flags))
-        self.assertEqual(collect_unbound_line_item_violations(bound), [])
-
-    def test_unbound_xor_violation_detected(self) -> None:
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            lineItems=[
-                BudgetLineItem(
-                    id="L0",
-                    category="Fees",
-                    description="Bound sibling",
-                    extended=500.0,
-                    isManualFill=True,
-                ),
-                BudgetLineItem(
-                    id="L1",
-                    category="Fees",
-                    description="Ungrounded fee",
-                    extended=1000.0,
-                    isManualFill=False,
-                    sourceRateId=None,
-                ),
-            ],
-        )
-        errs = collect_unbound_line_item_violations(budget)
-        self.assertTrue(any("L1" in e for e in errs))
 
 
 class MoneySlotTests(unittest.TestCase):

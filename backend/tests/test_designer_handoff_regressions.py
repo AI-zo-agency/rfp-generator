@@ -330,23 +330,6 @@ class OptionYearBudgetMathTests(unittest.TestCase):
         self.assertIn(f"Option Year 2: {_usd(year1_fee)}", notes)
         self.assertNotRegex(notes, r"client invoicing[^:\n]*:\s*\$2,900\.?\s*$")
 
-    def test_render_rewrites_corrupted_option_terms_paragraph(self) -> None:
-        budget = reconcile_proposal_budget(
-            _newport_style_budget(),
-            rfp_context="Option Year 2 and Option Year 3.",
-        )
-        md = render_budget_markdown(
-            budget,
-            rfp_text="Cost File. Option Year 2 and Option Year 3 held flat.",
-        )
-        self.assertIn("## Option Terms", md)
-        self.assertNotIn("(at net.", md)
-        self.assertNotRegex(md, r"invoicing[^:\n]*:\s*\$2,900")
-        # Unclosed paren corruption must be gone.
-        opt_block = md.split("## Option Terms", 1)[1]
-        open_parens = opt_block.count("(")
-        close_parens = opt_block.count(")")
-        self.assertEqual(open_parens, close_parens, opt_block[:500])
 
     def test_rebuild_never_truncates_mid_sentence_at_500_chars(self) -> None:
         long_corrupt = _CORRUPTED_OPTION_TERMS + (" x" * 300)

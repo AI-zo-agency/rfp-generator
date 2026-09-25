@@ -253,12 +253,10 @@ def _fail(name):
 
 class LegacyGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_budget_passes_leave_v2_budget_alone(self) -> None:
-        from app.services.proposal_budget_editor import run_budget_editor_pass
         from app.services.proposal_budget_validation import reconcile_proposal_budget
         from app.services.rfp_cost_demands import ensure_rfp_cost_demands_in_budget_markdown
 
         budget = _newport_budget()
-        self.assertIs(run_budget_editor_pass(budget, rfp_context="x"), budget)
         self.assertIs(reconcile_proposal_budget(budget, rfp_context="x"), budget)
         body = svc.render_pricing_plan_budget(budget)
         out, demands, _logs = await ensure_rfp_cost_demands_in_budget_markdown(
@@ -290,11 +288,7 @@ class Phase35PricingPlanTests(unittest.IsolatedAsyncioTestCase):
              patch.object(gen, "asave_proposal_draft", saved), \
              patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
              patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
-             patch.object(gen, "run_budget_editor_pass", _fail("run_budget_editor_pass")), \
              patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
-             patch("app.services.proposal_budget_format_judge.judge_rfp_budget_format", _fail("format judge")), \
-             patch.object(gen, "align_fee_narrative_with_budget", _fail("align_fee_narrative")), \
-             patch.object(gen, "run_budget_grounding_check", _fail("grounding check")), \
              patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")):
             out_draft, out_research, out_budget = await gen._run_phase3_5_budget_inner(
                 "r-newport", app_settings=object(), has_manuscript=True
@@ -348,13 +342,8 @@ class Phase35ReconcilePricingPlanTests(unittest.IsolatedAsyncioTestCase):
              patch.object(gen, "asave_proposal_draft", saved), \
              patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
              patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
-             patch.object(gen, "run_budget_editor_pass", _fail("run_budget_editor_pass")), \
              patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
-             patch("app.services.proposal_budget_format_judge.judge_rfp_budget_format", _fail("format judge")), \
-             patch.object(gen, "align_fee_narrative_with_budget", _fail("align_fee_narrative")), \
-             patch.object(gen, "run_budget_grounding_check", _fail("grounding check")), \
              patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")), \
-             patch.object(ps, "coerce_budget_to_phased_from_guide", _fail("coerce")), \
              patch.object(pbc, "apply_rfp_required_budget_instrument", _fail("instrument reshape")):
             out_draft, out_research, out_budget = await gen.run_phase3_5_budget_reconcile("r-newport")
         self.assertIs(out_budget, budget)

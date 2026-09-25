@@ -7,7 +7,6 @@ from unittest import mock
 
 from app.models.rfp import RfpRecord
 from app.services import proposal_pricing_service as pps
-from app.services.pricing_approved_rates import approved_from_role_billable_text
 
 
 LABOR_BODY = """\
@@ -132,18 +131,6 @@ class LaborCostPinFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Creative Director", text)
         self.assertTrue(any("Agency Role Rates" in s for s in srcs))
 
-    async def test_billable_parse_ignores_internal_and_guide_menu(self) -> None:
-        rates = approved_from_role_billable_text(
-            LABOR_BODY, source_file="Labor Cost"
-        )
-        amounts = {float(r.amount) for r in rates}
-        self.assertIn(145.0, amounts)
-        self.assertIn(185.0, amounts)
-        self.assertNotIn(90.0, amounts)
-        menu_rates = approved_from_role_billable_text(
-            GUIDE_MENU, source_file="00_Guide_Pricing.docx"
-        )
-        self.assertEqual(menu_rates, [])
 
 
 class DisplayClientNameTests(unittest.TestCase):
@@ -170,50 +157,3 @@ class DisplayClientNameTests(unittest.TestCase):
         plan = {"proposalMemory": {"facts": {"clientName": "MT"}}}
         self.assertEqual(resolve_display_client_name("DPHHS 988", plan), "DPHHS 988")
 
-
-class LaborCostProvenanceTests(unittest.TestCase):
-    def test_rate_card_stamps_labor_pin_not_guide(self) -> None:
-        from app.services.pricing_rate_card_builder import (
-            bindable_rates,
-            build_pricing_rate_card_from_guide_text,
-        )
-
-        bundle = (
-            "**5.1 Monthly Digital**\n"
-            "| **High** | $8,000 to $12,000 | x |\n\n"
-            "=== LABOR COST (pinned role billable card) ===\n"
-            "| Role | Billable Rate (USD) | Internal Rate |\n"
-            "| --- | --- | --- |\n"
-            "| Account Manager | $275.00 | $85.00 |\n"
-            "| Creative Director | $275.00 | $85.00 |\n"
-        )
-        card = build_pricing_rate_card_from_guide_text(bundle)
-        hourly = [r for r in bindable_rates(card) if r.unit == "hour"]
-        self.assertTrue(hourly)
-        for r in hourly:
-            self.assertEqual(r.source_doc, "Labor Cost", msg=r.service)
-
-    def test_ingest_prefers_labor_cost_pin_marker(self) -> None:
-        from app.services.pricing_approved_rates import (
-            ingest_role_billable_from_guide_bundle,
-        )
-
-        bundle = (
-            "=== 00_Guide_Pricing ===\njunk\n\n"
-            "=== LABOR COST (pinned role billable card) ===\n"
-            "| Role | Billable Rate (USD) | Internal |\n"
-            "| Account Manager | $275.00 | $85.00 |\n"
-            "| Agency Director | $400.00 | $150.00 |\n\n"
-            "=== KB labor / role billable rates (search) ===\n"
-            "| Role | Billable |\n"
-            "| Programming | $999.00 |\n"
-        )
-        rates = ingest_role_billable_from_guide_bundle(
-            bundle,
-            kb_sources=["00_Guide_Pricing.docx", "Labor Cost"],
-        )
-        amounts = {float(r.amount) for r in rates}
-        self.assertIn(275.0, amounts)
-        self.assertIn(400.0, amounts)
-        self.assertNotIn(999.0, amounts)
-        self.assertTrue(all(r.source_file == "Labor Cost" for r in rates))

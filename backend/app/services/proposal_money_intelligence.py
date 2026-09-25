@@ -20,13 +20,64 @@ from app.models.proposal import (
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_budget_content import find_budget_section_index
-from app.services.proposal_budget_validation import _USD_IN_TEXT_RE
+from app.services.proposal_budget_validation import _USD_IN_TEXT_RE, sum_line_items_extended
 from app.services.proposal_consistency import (
     _is_non_bid_currency_context,
     allowed_budget_amounts,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_budget_facts(budget: ProposalBudget) -> str:
+    line_subtotal = sum_line_items_extended(budget)
+    direct = float(budget.direct_expenses_total or 0)
+    agency_fee = float(budget.agency_fee_subtotal or line_subtotal)
+    passthrough = float(budget.client_media_passthrough or 0)
+    lines = [
+        f"pricingTier: {budget.pricing_tier or 'Average'}",
+        f"lineItemSum (all table rows): {budget.line_item_sum or line_subtotal}",
+        f"agencyFeeSubtotal (zö fee rows only): {budget.agency_fee_subtotal or agency_fee}",
+        f"clientMediaPassthrough (NOT agency revenue): {passthrough or 0}",
+        f"directExpensesTotal: {direct}",
+        (
+            "agencyRevenueEstimate (USE FOR 'agency revenue' / commission / fee income): "
+            f"{budget.agency_revenue_estimate}"
+        ),
+        (
+            "totalClientInvoicing (media pass-through + agency fees — NOT agency revenue): "
+            f"{budget.total_client_invoicing or (line_subtotal + direct)}"
+        ),
+        f"commissionRate: {budget.commission_rate}",
+        f"lumpSumTotal: {budget.lump_sum_total}",
+        f"feeStructure: {budget.fee_structure}",
+        f"budgetFormat: {budget.budget_format}",
+        f"commissionModel: {budget.commission_model or '(none)'}",
+        f"rfpBudgetCap (hard fee NTE only): {budget.rfp_budget_cap}",
+        f"rfpMediaOrProgramEnvelope: {budget.rfp_media_or_program_envelope}",
+    ]
+    if (budget.rfp_money_constraint_notes or "").strip():
+        lines.append(
+            "rfpMoneyConstraintNotes:\n" + budget.rfp_money_constraint_notes[:1200]
+        )
+    if budget.option_term_notes.strip():
+        lines.append(f"optionTermNotes (canonical):\n{budget.option_term_notes[:1200]}")
+    if budget.qualifying_language.strip():
+        lines.append(f"qualifyingLanguage:\n{budget.qualifying_language[:2000]}")
+    if budget.media_spend_notes.strip():
+        lines.append(f"mediaSpendNotes:\n{budget.media_spend_notes[:800]}")
+    revenue = float(budget.agency_revenue_estimate or 0)
+    if revenue <= 0:
+        lines.append(
+            "CRITICAL: agencyRevenueEstimate is ZERO — do NOT write $0 in narrative; "
+            "run budget reconcile or set commissionRate × clientMediaPassthrough first."
+        )
+    lines.append(
+        "NEVER treat the proposal's own bid total as the RFP ceiling unless it equals "
+        "rfpBudgetCap or rfpMediaOrProgramEnvelope above."
+    )
+    return "\n".join(lines)
+
 
 _PASS_A_PROMPT = """You triage dollar amounts found outside the canonical budget table.
 For each candidate, decide if it is a bid/fee claim that must match the ledger,
@@ -104,8 +155,6 @@ async def run_currency_triage_pass_a(
     if not candidates:
         logger.info("money_intelligence Pass A skipped — zero candidates")
         return []
-
-    from app.services.proposal_budget_sync import _canonical_budget_facts
 
     canonical = _canonical_budget_facts(budget)
     try:
@@ -206,8 +255,6 @@ async def run_budget_integrity_pass_b(
             sections.append(section)
     if not sections:
         return []
-
-    from app.services.proposal_budget_sync import _canonical_budget_facts
 
     payload = [
         {

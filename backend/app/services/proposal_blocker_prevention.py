@@ -126,10 +126,6 @@ class BlockerPreventionResult:
     fact_contradiction_rewrites: int = 0
     fact_contradiction_unresolved: int = 0
     fact_contradiction_unresolved_titles: list[str] = field(default_factory=list)
-    budget_contradiction_count: int = 0
-    budget_contradiction_rewrites: int = 0
-    budget_contradiction_unresolved: int = 0
-    budget_contradiction_unresolved_titles: list[str] = field(default_factory=list)
 
 
 async def apply_feedback_blocker_suite(
@@ -181,10 +177,6 @@ async def apply_feedback_blocker_suite(
     fact_contradiction_rewrites = 0
     fact_contradiction_unresolved = 0
     fact_contradiction_unresolved_titles: list[str] = []
-    budget_contradiction_count = 0
-    budget_contradiction_rewrites = 0
-    budget_contradiction_unresolved = 0
-    budget_contradiction_unresolved_titles: list[str] = []
 
     # ONE combined detection call for all three dimensions (fact / RFP / budget),
     # instead of three separate full-manuscript audits. Each pass below then
@@ -194,7 +186,6 @@ async def apply_feedback_blocker_suite(
     # own detection exactly as before (safe fallback, no behavior change).
     fact_precomputed: dict | None = None
     rfp_precomputed: dict | None = None
-    budget_precomputed: dict | None = None
     if use_llm_contradiction and rfp is not None:
         try:
             from app.services.proposal_combined_contradiction_audit import (
@@ -205,7 +196,7 @@ async def apply_feedback_blocker_suite(
                 draft, rfp=rfp, rfp_text=rfp_text, research=research
             )
             if combined is not None:
-                fact_precomputed, rfp_precomputed, budget_precomputed = combined
+                fact_precomputed, rfp_precomputed, _budget_precomputed = combined
                 logs.append("Contradiction detection: one combined LLM pass (fact + RFP + budget).")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Combined contradiction detection skipped: %s", exc)
@@ -259,40 +250,9 @@ async def apply_feedback_blocker_suite(
             logger.warning("Feedback blocker contradiction pass skipped: %s", exc)
             logs.append(f"contradiction suite skipped: {exc}")
 
-    if use_llm_contradiction and rfp is not None:
-        try:
-            from app.services.proposal_manuscript_budget_contradictions import (
-                run_manuscript_budget_contradiction_pass,
-            )
-
-            budget_audit = await run_manuscript_budget_contradiction_pass(
-                draft,
-                rfp=rfp,
-                research=research,
-                use_llm=True,
-                precomputed_raw=budget_precomputed,
-            )
-            draft = budget_audit.draft
-            logs.extend(budget_audit.logs)
-            budget_contradiction_count = len(budget_audit.findings)
-            budget_contradiction_rewrites = budget_audit.rewrites_applied
-            budget_contradiction_unresolved = len(budget_audit.unresolved_findings)
-            budget_contradiction_unresolved_titles = [
-                f.banner_line() for f in budget_audit.unresolved_findings[:8]
-            ]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Budget cross-section pass skipped: %s", exc)
-            logs.append(f"budget cross-section suite skipped: {exc}")
-
-    total_unresolved = (
-        fact_contradiction_unresolved
-        + contradiction_unresolved
-        + budget_contradiction_unresolved
-    )
+    total_unresolved = fact_contradiction_unresolved + contradiction_unresolved
     all_unresolved_titles = (
-        fact_contradiction_unresolved_titles
-        + contradiction_unresolved_titles
-        + budget_contradiction_unresolved_titles
+        fact_contradiction_unresolved_titles + contradiction_unresolved_titles
     )[:12]
 
     # Contradiction rewrites can reintroduce banned Rev 6 patterns — scrub once.
@@ -310,22 +270,12 @@ async def apply_feedback_blocker_suite(
     return BlockerPreventionResult(
         draft=draft,
         logs=logs,
-        contradiction_count=(
-            fact_contradiction_count + contradiction_count + budget_contradiction_count
-        ),
-        contradiction_rewrites=(
-            fact_contradiction_rewrites
-            + contradiction_rewrites
-            + budget_contradiction_rewrites
-        ),
+        contradiction_count=fact_contradiction_count + contradiction_count,
+        contradiction_rewrites=fact_contradiction_rewrites + contradiction_rewrites,
         contradiction_unresolved=total_unresolved,
         contradiction_unresolved_titles=all_unresolved_titles,
         fact_contradiction_count=fact_contradiction_count,
         fact_contradiction_rewrites=fact_contradiction_rewrites,
         fact_contradiction_unresolved=fact_contradiction_unresolved,
         fact_contradiction_unresolved_titles=fact_contradiction_unresolved_titles,
-        budget_contradiction_count=budget_contradiction_count,
-        budget_contradiction_rewrites=budget_contradiction_rewrites,
-        budget_contradiction_unresolved=budget_contradiction_unresolved,
-        budget_contradiction_unresolved_titles=budget_contradiction_unresolved_titles,
     )

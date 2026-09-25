@@ -63,8 +63,8 @@ _ALLOWED_BRACKET_TAG_RE = re.compile(
 )
 
 # [PRICING FLAG: ...] is never legitimate in shipped content — it is an
-# internal Sonja/pricing-review note (see proposal_budget_validation.py,
-# pricing_rate_binding.py) that must always surface as a note leak.
+# internal Sonja/pricing-review note (see proposal_budget_validation.py)
+# that must always surface as a note leak.
 _PRICING_FLAG_LEAK_RE = re.compile(r"\[PRICING\s+FLAG\b[^\]]*\]", re.IGNORECASE)
 
 # --- Truncation patterns ---------------------------------------------------------

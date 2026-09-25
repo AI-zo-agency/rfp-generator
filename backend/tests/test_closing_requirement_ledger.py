@@ -408,37 +408,5 @@ class FabricatedReadyRepairTests(unittest.TestCase):
         self.assertIn("MANUAL FILL", updated.sections[0].content or "")
 
 
-class BudgetFormatAlignTests(unittest.TestCase):
-    def test_confident_judge_overrides_phased(self) -> None:
-        from app.services.proposal_budget_format_judge import (
-            BudgetFormatJudgment,
-            align_budget_format_to_judgment,
-        )
-
-        judgment = BudgetFormatJudgment(
-            budgetFormat="personnel_loading",
-            reason="Hourly rates by role",
-            confidence=0.9,
-        )
-        fmt, changed = align_budget_format_to_judgment("phased", judgment)
-        self.assertTrue(changed)
-        self.assertEqual(fmt, "personnel_loading")
-
-    def test_low_confidence_leaves_pricing_agent(self) -> None:
-        from app.services.proposal_budget_format_judge import (
-            BudgetFormatJudgment,
-            align_budget_format_to_judgment,
-        )
-
-        judgment = BudgetFormatJudgment(
-            budgetFormat="personnel_loading",
-            reason="guess",
-            confidence=0.2,
-        )
-        fmt, changed = align_budget_format_to_judgment("phased", judgment)
-        self.assertFalse(changed)
-        self.assertEqual(fmt, "phased")
-
-
 if __name__ == "__main__":
     unittest.main()

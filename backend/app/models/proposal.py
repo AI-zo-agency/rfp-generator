@@ -489,9 +489,8 @@ class ProposalBudget(BaseModel):
         default=None,
         alias="rfpBudgetFloor",
         description=(
-            "RFP-stated MINIMUM budget / low end of a stated budget range. "
-            "Distinct from proposal_budget_floor.py, which is zo's own "
-            "00_Guide_Pricing rate floor rather than the buyer's stated one."
+            "RFP-stated MINIMUM budget / low end of a stated budget range "
+            "(the buyer's stated floor, not zo's own guide rates)."
         ),
     )
     rfp_media_or_program_envelope: float | None = Field(

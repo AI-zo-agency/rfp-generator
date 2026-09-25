@@ -77,7 +77,6 @@ class TestCompulsoryRev6:
         for rel in (
             "app/services/proposal_scan_rfp_contradictions.py",
             "app/services/proposal_manuscript_fact_contradictions.py",
-            "app/services/proposal_manuscript_budget_contradictions.py",
         ):
             src = (
                 Path(__file__).resolve().parents[1] / rel

@@ -14,11 +14,8 @@ from app.services.proposal_budget_content import (
     find_budget_section_index,
     official_pricing_form_is_filled,
     render_budget_markdown,
-    reshape_budget_for_rfp_form,
     section_looks_like_official_pricing_form,
 )
-from app.services.proposal_budget_editor import run_budget_editor_pass
-from app.services.proposal_budget_sync import collect_prose_arithmetic_violations
 from app.services.proposal_fulfill_rfp_accuracy import (
     RfpScoringFacts,
     _EXCEL_ATTACHMENT_RE,
@@ -410,7 +407,8 @@ async def run_fulfill_budget_scan(
     use_llm: bool,
     skip_section_ids: set[str],
 ) -> tuple[ProposalDraft, ProposalResearchCache | None, list[str], dict[str, Any]]:
-    """Thorough budget pass: regenerate if missing, else reconcile + grounding."""
+    """Budget pass: regenerate if missing, else re-render a stale/hollow Cost tab from the plan."""
+    del use_llm, skip_section_ids  # kept for the caller's kwargs
     logs: list[str] = []
     meta: dict[str, Any] = {
         "budgetStatus": "none",
@@ -436,48 +434,6 @@ async def run_fulfill_budget_scan(
         )
         logs.extend(cost_logs)
         meta["budgetChanged"] = True
-
-    # An under-minimum canonical budget must be repaired BEFORE the staleness
-    # checks below. Those checks restore the manuscript tab from canon, so a
-    # user's manual correction was being overwritten with the same too-low
-    # number that prompted the correction (the Kitsap $278,400 vs $500,000
-    # report). Fixing canon first makes the restore write the right figure.
-    if research and research.budget and research.budget.rfp_budget_floor:
-        from app.services.evidence_trust.rfp_money_constraints import (
-            collect_under_minimum_flags,
-        )
-
-        if collect_under_minimum_flags(research.budget):
-            floor = float(research.budget.rfp_budget_floor)
-            logs.append(
-                f"Budget: proposed total is under the RFP-stated minimum "
-                f"${floor:,.0f} — re-pricing before manuscript sync."
-            )
-            try:
-                from app.services.proposal_pricing_service import (
-                    repair_budget_to_rfp_minimum,
-                )
-                from app.services.proposal_repository import asave_research_cache
-
-                repaired, repair_logs = await repair_budget_to_rfp_minimum(
-                    research.budget,
-                    rfp_id=rfp_id,
-                    rfp_context=rfp_text,
-                    rfp_sections=research.rfp_sections if research else [],
-                )
-                logs.extend(f"Budget: {line}" for line in repair_logs)
-                if repaired is not research.budget:
-                    research = research.model_copy(update={"budget": repaired})
-                    await asave_research_cache(research)
-                    meta["budgetChanged"] = True
-                    meta["budgetStatus"] = "repaired"
-                    meta["budgetRepairedNotes"] = [
-                        *(meta.get("budgetRepairedNotes") or []),
-                        f"re-priced toward RFP minimum ${floor:,.0f}",
-                    ]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("RFP-minimum budget repair during Scan failed: %s", exc)
-                logs.append(f"Budget: RFP-minimum repair failed ({exc}).")
 
     if manuscript_budget_is_missing(draft, research):
         logs.append(
@@ -524,9 +480,6 @@ async def run_fulfill_budget_scan(
         and section_looks_like_official_pricing_form(sections_preview[idx_preview])
         and official_pricing_form_is_filled(preview or "")
     )
-    preview_broken = bool(
-        idx_preview is not None and collect_prose_arithmetic_violations(preview or "")
-    )
     # Generated budgets that already add up must not be re-reconciled / re-rendered.
     # Complete & Clean was rewriting a correct fee table, dropping a phase row,
     # and leaving the old Agency Fee Subtotal in the prose.
@@ -534,7 +487,6 @@ async def run_fulfill_budget_scan(
         not meta["budgetRegenerated"]
         and idx_preview is not None
         and not manuscript_cost_section_is_hollow(preview or "")
-        and not preview_broken
         and not budget_manuscript_needs_restore(preview or "", research.budget)
     ):
         logs.append(
@@ -584,34 +536,8 @@ async def run_fulfill_budget_scan(
         )
         return draft, research, logs, meta
 
-    # Reuse the rate card already persisted on the research cache so the Scan RFP
-    # path gets the same 00_Guide_Pricing underbid floor check as Phase 3.5.
-    rate_card = None
-    if research.pricing_rate_card:
-        try:
-            from app.models.pricing_rate_card import PricingRateCard
-
-            rate_card = PricingRateCard.model_validate(research.pricing_rate_card)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "pricing_rate_card invalid on cache for %s — skipping underbid floor check",
-                rfp_id,
-            )
-            rate_card = None
-
-    prior_budget = research.budget
-    budget = run_budget_editor_pass(
-        prior_budget,
-        rfp_sections=research.rfp_sections,
-        rfp_context=rfp_text[:80_000],
-        rate_card=rate_card,
-    )
-    # Ignore updatedAt churn — only real money/line changes force a rewrite.
-    object_changed = prior_budget.model_dump(
-        exclude={"updated_at", "updatedAt"}, by_alias=True
-    ) != budget.model_dump(exclude={"updated_at", "updatedAt"}, by_alias=True)
-    research = research.model_copy(update={"budget": budget})
-    logs.append("Budget: reconciled line items and canonical totals from RFP/pricing model.")
+    # Pricing-plan budgets are already checked by the plan; the ledger is used as saved.
+    budget = research.budget
     if not meta["budgetRegenerated"]:
         meta["budgetStatus"] = "ok"
 
@@ -624,18 +550,9 @@ async def run_fulfill_budget_scan(
         and section_looks_like_official_pricing_form(target)
         and official_pricing_form_is_filled(before or "")
     )
-    prose_broken = bool(
-        idx is not None and collect_prose_arithmetic_violations(before or "")
-    )
-    if prose_broken:
-        logs.append(
-            "Budget: arithmetic mismatch — rewriting Budget tab from the canonical "
-            "fee ledger so the table, subtotal, and total match."
-        )
 
-    # Official RFQ pricing forms: never wipe with render_budget_markdown UNLESS
-    # the form's own arithmetic is broken — then fall through and rebuild.
-    if is_filled_official_form and idx is not None and not prose_broken:
+    # Official RFQ pricing forms: never wipe with render_budget_markdown.
+    if is_filled_official_form and idx is not None:
         cleaned = strip_non_budget_handoffs_from_pricing(before or "")
         locks = research.manuscript_locks if research else None
         contact_name = (locks.primary_contact_name if locks else "") or ""
@@ -690,17 +607,16 @@ async def run_fulfill_budget_scan(
     polluted = idx is not None and budget_manuscript_needs_restore(before or "", budget)
     stale_tab = manuscript_budget_tab_stale(draft, research)
     # Complete & Clean must NOT wipe a healthy Pricing / Budget tab just to
-    # re-render from canon. Refresh when object changed, prose math is broken,
-    # section is missing/hollow/stale, or Phase 3.5 just regenerated.
+    # re-render from canon. Refresh when the section is missing/hollow/stale
+    # or Phase 3.5 just regenerated.
     needs_manuscript_refresh = (
-        object_changed
-        or prose_broken
-        or hollow
+        hollow
         or polluted
         or stale_tab
         or meta["budgetRegenerated"]
     )
 
+    content = ""
     if needs_manuscript_refresh:
         content = render_budget_markdown(
             budget,
@@ -713,6 +629,10 @@ async def run_fulfill_budget_scan(
             "",
             content,
         ).strip()
+    if needs_manuscript_refresh and not content:
+        # Empty render = no usable plan; never blank the Cost tab.
+        logs.append("Budget: nothing to render from the pricing plan — Cost tab left as saved.")
+    elif needs_manuscript_refresh:
         if idx is not None:
             sections[idx] = sections[idx].model_copy(
                 update={"content": content, "status": "generated"}
@@ -748,95 +668,12 @@ async def run_fulfill_budget_scan(
             "Budget: manuscript already matches reconciled totals — left Pricing/Budget tab unchanged."
         )
 
-    if needs_manuscript_refresh and (budget.budget_format or "").casefold() in {
-        "blended_rate_form",
-        "personnel_loading",
-    }:
-        reshaped = reshape_budget_for_rfp_form(
-            draft,
-            budget,
-            rfp_text=rfp_text,
-            pricing_instrument=research.pricing_instrument if research else None,
-        )
-        if reshaped is not None:
-            draft = reshaped
-            logs.append(
-                f"Budget: aligned manuscript to agent budgetFormat={budget.budget_format}."
-            )
-            meta["budgetChanged"] = True
-
     excerpt = evaluation_and_kpi_excerpt(rfp_text)
     facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
     draft, patch_logs = patch_budget_section_for_rfp(draft, rfp_text=rfp_text, facts=facts)
     logs.extend(patch_logs)
     if patch_logs:
         meta["budgetChanged"] = True
-
-    if use_llm and needs_manuscript_refresh:
-        try:
-            from app.services.proposal_budget_sync import align_fee_narrative_with_budget
-
-            synced = await align_fee_narrative_with_budget(
-                rfp_id=rfp_id,
-                draft=draft,
-                budget=budget,
-            )
-            if skip_section_ids:
-                merged = list(synced.sections)
-                for i, sec in enumerate(draft.sections):
-                    if sec.id in skip_section_ids:
-                        merged[i] = sec
-                synced = synced.model_copy(update={"sections": merged})
-            if synced.model_dump() != draft.model_dump():
-                draft = synced
-                logs.append(
-                    "Budget: synced fee/pricing sentences in narrative sections to canonical budget."
-                )
-                meta["budgetChanged"] = True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Fee narrative sync during scan skipped: %s", exc)
-            logs.append(f"Budget: fee narrative sync skipped ({exc}).")
-
-        try:
-            from app.services.proposal_budget_sync import run_budget_grounding_check
-
-            mismatches = await run_budget_grounding_check(
-                rfp_id=rfp_id,
-                draft=draft,
-                budget=budget,
-            )
-            if mismatches:
-                from app.services.proposal_pricing_sync_repair import (
-                    run_pricing_sync_repair_or_handoff,
-                )
-
-                draft, research, budget, sync_report = await run_pricing_sync_repair_or_handoff(
-                    rfp_id=rfp_id,
-                    draft=draft,
-                    budget=budget,
-                    research=research,
-                    initial_mismatches=mismatches,
-                    rfp_text=rfp_text,
-                )
-                meta["budgetChanged"] = True
-                if getattr(sync_report, "handoff", False):
-                    meta["budgetStatus"] = "repaired_needs_human"
-                    meta["budgetEscalationNotes"].append(
-                        f"{len(mismatches)} pricing mismatch(es) need human review"
-                    )
-                else:
-                    meta["budgetStatus"] = "repaired"
-                    meta["budgetRepairedNotes"].append(
-                        f"grounding repair for {len(mismatches)} pricing mismatch(es)"
-                    )
-                logs.append(
-                    f"Budget: thorough grounding check handled {len(mismatches)} mismatch(es)."
-                )
-            else:
-                logs.append("Budget: thorough grounding check — no pricing mismatches.")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Budget grounding during Scan RFP skipped: %s", exc)
-            logs.append(f"Budget: grounding check skipped ({exc}).")
 
     draft = _apply_unresolved_budget_slot_restore(
         draft, research, rfp_text=rfp_text, logs=logs, meta=meta

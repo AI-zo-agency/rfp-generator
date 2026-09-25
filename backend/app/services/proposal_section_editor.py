@@ -93,7 +93,6 @@ from app.services.proposal_budget_content import (
     canonical_budget_summary_figures,
     fill_section_budget_verify_from_canonical,
     insert_budget_table_into_section,
-    normalize_fixed_pricing_narrative,
     reconcile_draft_budget_summaries,
     render_budget_markdown,
     render_embedded_budget_table_markdown,
@@ -8132,81 +8131,6 @@ async def _apply_budget_section_canonical_refresh(
     from app.services.proposal_budget_validation import reconcile_proposal_budget
 
     budget = reconcile_proposal_budget(canonical, rfp_context=rfp_text)
-    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
-
-    # Always hydrate verifiedRates from whole-KB billable role excerpts on
-    # Cost refresh. Do not gate on ask/RFP keyword detectors — clients phrase
-    # rate requests many ways; the ledger render decides what to show.
-    try:
-        from app.models.proposal import VerifiedRate
-        from app.services.pricing_rate_card_builder import bindable_rates
-        from app.services.pricing_rate_card_store import build_stable_rate_card
-        from app.services.proposal_pricing_service import fetch_pricing_guide_context
-        from app.services.rfp_repository import get_rfp
-
-        rfp_rec = get_rfp(rfp_id)
-        if rfp_rec is not None:
-            logger.info(
-                "cost_refresh_kb_labor_rates rfp_id=%s ask=%r",
-                rfp_id,
-                (user_message or "")[:120],
-            )
-            guide_text, guide_srcs = await fetch_pricing_guide_context(
-                rfp_rec,
-                focus_hint=user_message[:300] or "billable hourly role rates",
-            )
-            logger.info(
-                "cost_refresh_kb_labor_rates_done rfp_id=%s sources=%s chars=%s",
-                rfp_id,
-                (guide_srcs or [])[:8],
-                len(guide_text or ""),
-            )
-            rate_card = build_stable_rate_card(guide_text)
-            hourly_roles = [
-                r
-                for r in bindable_rates(rate_card)
-                if getattr(r, "unit", "") == "hour"
-                and float(getattr(r, "amount", 0) or 0) > 0
-            ]
-            if hourly_roles:
-                # Replace (do not merge-skip) so every Cost refresh rebinds
-                # current KB billable role rates regardless of ask wording.
-                merged = [
-                    VerifiedRate(
-                        personName="",
-                        role=(role_rate.service or "").strip(),
-                        hourlyRate=float(role_rate.amount),
-                        source=getattr(role_rate, "source_doc", "") or "",
-                    )
-                    for role_rate in hourly_roles
-                    if (role_rate.service or "").strip()
-                ]
-                # Dedupe by role label, first occurrence wins.
-                seen: set[str] = set()
-                unique: list[VerifiedRate] = []
-                for vr in merged:
-                    key = (vr.role or "").casefold()
-                    if not key or key in seen:
-                        continue
-                    seen.add(key)
-                    unique.append(vr)
-                budget = budget.model_copy(update={"verified_rates": unique})
-                logger.info(
-                    "cost_refresh_kb_labor_rates_bound rfp_id=%s roles=%s",
-                    rfp_id,
-                    len(unique),
-                )
-            else:
-                logger.warning(
-                    "cost_refresh_kb_labor_rates_empty rfp_id=%s — no unit=hour rows parsed",
-                    rfp_id,
-                )
-    except Exception:
-        logger.warning(
-            "Cost refresh could not seed KB hourly rates for %s",
-            rfp_id,
-            exc_info=True,
-        )
 
     now = datetime.now(timezone.utc).isoformat()
     research = research.model_copy(update={"budget": budget, "updatedAt": now})

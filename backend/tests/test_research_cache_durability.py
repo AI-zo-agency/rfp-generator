@@ -10,13 +10,6 @@ whitelist and never protected by the merge helper:
     pricing_rate_card, manuscript_locks, proof_points, section_queries,
     loss_lessons, evidence_allocation
 
-This matters most for pricing_rate_card: run_fulfill_budget_scan
-(proposal_fulfill_rfp_budget_kpi.py) reads research.pricing_rate_card to
-build the rate_card used by the underbid-floor check shipped in
-0264e60/0076a22. A missing/invalid card takes the `rate_card = None` branch,
-which by design never halts — so wiping this field silently turns off the
-10x-underbid protection on the next "Scan RFP" pass.
-
 Every test here is a REAL sqlite round trip via proposal_repository
 save/get_research_cache, not a mock — the defect lives in the save path,
 so a mocked store would not see it. Pattern follows
@@ -33,19 +26,13 @@ from unittest.mock import patch
 from app.core import config
 from app.models.pricing_rate_card import PricingRate, PricingRateCard
 from app.models.proposal import (
-    BudgetLineItem,
     LossLesson,
     ManuscriptLocks,
     ProofPoint,
-    ProposalBudget,
-    ProposalDraft,
     ProposalResearchCache,
     RfpSectionMap,
 )
-from app.models.rfp import RfpRecord
-from app.services import proposal_fulfill_rfp_budget_kpi as scan_mod
 from app.services import proposal_repository as repo
-from app.services.proposal_common import ProposalError
 
 
 def _rate(rate_id: str, service: str, low: float, high: float) -> PricingRate:
@@ -64,7 +51,7 @@ def _rate(rate_id: str, service: str, low: float, high: float) -> PricingRate:
     )
 
 
-# Same verified live KB tier data used by tests/test_budget_underbid_floor.py.
+# Verified live KB tier data.
 RATE_CARD = PricingRateCard(
     rates=[
         _rate(
@@ -407,100 +394,6 @@ class EvidenceAllocationSurvivesRegenerationTests(ResearchCacheDurabilityTestBas
         )
         reloaded = await repo.aget_research_cache(rfp_id)
         self.assertEqual(reloaded.evidence_allocation["case-study-1"], ["fresh"])
-
-
-class UnderbidFloorSurvivesSectionsRegenerationTests(ResearchCacheDurabilityTestBase):
-    """The regression this task exists to close: a sections-1-3 regeneration must
-    not silently disable the underbid-floor check on the next Scan RFP pass.
-
-    Drives the REAL production path end to end:
-      1. Phase 3.5 persists a pricing_rate_card on the research cache (real sqlite save).
-      2. A sections-1-3 regeneration re-saves the cache from the hand-written whitelist
-         (mirrors _generate_sections_1_3_inner exactly — no mocking of the rebuild).
-      3. run_fulfill_budget_scan (the real "Scan RFP" entry point, not a stand-in) is
-         driven with an underbid budget.
-    Before the fix: pricing_rate_card is wiped in step 2, rate_card resolves to None
-    in run_fulfill_budget_scan, and the check silently never fires (no exception).
-    After the fix: the card survives, and the 10x-underbid halt still raises 422.
-    """
-
-    async def test_underbid_floor_still_fires_after_sections_1_3_regeneration(self) -> None:
-        rfp_id = "rfp-underbid-after-regen"
-
-        # Step 1: Phase 3.5 / KB extraction persists the pricing rate card.
-        await repo.asave_research_cache(
-            ProposalResearchCache(
-                rfpId=rfp_id,
-                pricingRateCard=RATE_CARD.model_dump(by_alias=True),
-                updatedAt="2026-08-05T00:00:00Z",
-            )
-        )
-        prior = await repo.aget_research_cache(rfp_id)
-        self.assertIsNotNone(prior.pricing_rate_card)
-
-        # Step 2: a routine "regenerate the company section" (Sections 1-3) call —
-        # exact field whitelist from _generate_sections_1_3_inner.
-        await repo.asave_research_cache(
-            _sections_1_3_rebuild_payload(rfp_id, prior, "2026-08-05T01:00:00Z")
-        )
-
-        # Now attach the underbid budget the way a real Stage 3.5 run would, without
-        # touching pricing_rate_card again — this is the "force_regenerate sections-1-3
-        # after pricing already ran" ordering the defect report calls out.
-        underbid_budget = ProposalBudget(
-            rfpId=rfp_id,
-            updatedAt="2026-08-05T01:30:00Z",
-            lineItems=[
-                BudgetLineItem(
-                    id="L01",
-                    category="Digital Marketing",
-                    description="Discovery & stakeholder interviews",
-                    extended=1000,
-                ),
-                BudgetLineItem(
-                    id="L02",
-                    category="Digital Marketing",
-                    description="Strategic plan document production",
-                    extended=1000,
-                ),
-                BudgetLineItem(
-                    id="L03",
-                    category="Digital Marketing",
-                    description="Implementation roadmap",
-                    extended=1000,
-                ),
-            ],
-        )
-        after_regen = await repo.aget_research_cache(rfp_id)
-        research_for_scan = after_regen.model_copy(update={"budget": underbid_budget})
-
-        rfp = RfpRecord(
-            id=rfp_id,
-            title="T",
-            client="C",
-            dueDate="2026-09-01",
-            receivedDate="2026-08-01",
-            lastActivity="2026-08-05",
-            lastActivityNote="n",
-        )
-        draft = ProposalDraft(
-            rfpId=rfp_id,
-            sections=[],
-            updatedAt="2026-08-05T01:30:00Z",
-        )
-
-        with self.assertRaises(ProposalError) as ctx:
-            await scan_mod.run_fulfill_budget_scan(
-                rfp_id=rfp_id,
-                rfp=rfp,
-                draft=draft,
-                research=research_for_scan,
-                rfp_text="Some RFP text.",
-                use_llm=False,
-                skip_section_ids=set(),
-            )
-        self.assertEqual(ctx.exception.status_code, 422)
-        self.assertIn("00_Guide_Pricing", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -17,7 +17,6 @@ from app.services.pricing_delivery_context import (
     format_pricing_delivery_constraints_block,
     is_buyer_pricing_form_instrument,
 )
-from app.services.pricing_instrument_render import render_pricing_instrument_markdown
 from app.services.proposal_budget_content import (
     fill_hollow_pricing_stubs_from_canon_budget,
     reformat_budget_terms_in_markdown,
@@ -28,6 +27,14 @@ from app.services.proposal_self_edit_loop import (
 )
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "dupage_pricing_instrument.json"
+
+# A filled buyer Pricing Form body (static; the guards key off the instrument).
+BUYER_FORM_MD = (
+    "## Proposal Pricing Form\n\n"
+    "| Track | Hourly rate | Hours | Annual NTE |\n"
+    "| --- | --- | --- | --- |\n"
+    "| Part A | [MANUAL FILL: SONJA — hourly rate] | — | $75,000 |\n"
+)
 
 
 def _instrument() -> PricingInstrument:
@@ -55,7 +62,7 @@ class BuyerFormHollowAndTermsGuards(unittest.TestCase):
 
     def test_fill_hollow_noop_when_buyer_pricing_form(self) -> None:
         inst = _instrument()
-        form_md = render_pricing_instrument_markdown(inst)
+        form_md = BUYER_FORM_MD
         cost = _sec("cost", "Cost Proposal / Pricing Form", form_md)
         stub = _sec(
             "fee",
@@ -107,7 +114,7 @@ class BuyerFormHollowAndTermsGuards(unittest.TestCase):
 
     def test_terms_reformat_noop_for_buyer_form(self) -> None:
         inst = _instrument()
-        form_md = render_pricing_instrument_markdown(inst)
+        form_md = BUYER_FORM_MD
         # Inject a ## Terms wall that reformat would normally rewrite
         with_terms = (
             form_md
@@ -187,7 +194,7 @@ class SeniorEditorCoverageBuyerForm(unittest.IsolatedAsyncioTestCase):
         )
 
         inst = _instrument()
-        form_md = render_pricing_instrument_markdown(inst)
+        form_md = BUYER_FORM_MD
         with_terms = (
             form_md
             + "\n\n## Terms\n\n"

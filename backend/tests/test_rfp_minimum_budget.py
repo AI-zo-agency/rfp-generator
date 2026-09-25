@@ -7,10 +7,6 @@ money model was ceiling-only (rfp_budget_cap / NTE) with no floor concept.
 
 from __future__ import annotations
 
-import contextlib
-import unittest
-from unittest.mock import patch
-
 from app.models.proposal import ProposalBudget
 from app.services.evidence_trust.rfp_money_constraints import (
     CONSTRAINT_HARD_FEE_NTE,
@@ -20,7 +16,6 @@ from app.services.evidence_trust.rfp_money_constraints import (
     extract_rfp_money_constraints,
     primary_minimum_budget,
 )
-from app.services.proposal_pricing_service import repair_budget_to_rfp_minimum
 
 
 def _budget(**kw) -> ProposalBudget:
@@ -177,118 +172,3 @@ class TestShortfallFlags:
         )
         assert collect_under_minimum_flags(budget) == []
 
-
-class TestMinimumRepairLoop(unittest.IsolatedAsyncioTestCase):
-    """The repair is bounded and can only improve or no-op.
-
-    Per product decision, a stated minimum never halts the build: the agent
-    retries a few times and then flags loudly.
-    """
-
-    @staticmethod
-    def _priced(total: float) -> ProposalBudget:
-        return _budget(
-            rfpBudgetFloor=500_000.0,
-            agencyRevenueEstimate=total,
-            lineItems=[
-                {
-                    "id": "li-1",
-                    "category": "labor",
-                    "description": "Campaign strategy",
-                    "quantity": 1,
-                    "rate": total,
-                    "extended": total,
-                }
-            ],
-        )
-
-    @contextlib.contextmanager
-    def _stub_llm(self, totals: list[float]):
-        """Stub the LLM to return a budget worth each total in `totals`, in order."""
-        import app.services.proposal_pricing_service as svc
-
-        calls = {"n": 0}
-
-        async def fake_chat_json(messages, **kw):
-            value = totals[min(calls["n"], len(totals) - 1)]
-            calls["n"] += 1
-            return (
-                {
-                    "lineItems": [
-                        {
-                            "id": "li-1",
-                            "category": "labor",
-                            "description": "Campaign strategy, expanded per RFP 3.2",
-                            "quantity": 1,
-                            "rate": value,
-                            "extended": value,
-                        }
-                    ],
-                    "scopeAdjustments": ["Deepened content cadence per RFP 3.2"],
-                },
-                "stub",
-            )
-
-        def fake_editor(budget, **kw):
-            total = sum(float(li.extended or 0) for li in budget.line_items or [])
-            return budget.model_copy(
-                update={"agency_revenue_estimate": total, "line_item_sum": total}
-            )
-
-        with (
-            patch.object(svc.llm, "is_configured", return_value=True),
-            patch.object(svc.llm, "chat_json", fake_chat_json),
-            patch.object(svc, "run_budget_editor_pass", fake_editor),
-        ):
-            yield calls
-
-    async def test_reaches_the_floor_and_stops_early(self):
-        with self._stub_llm([520_000.0]) as calls:
-            repaired, _logs = await repair_budget_to_rfp_minimum(
-                self._priced(278_400.0), rfp_id="r1"
-            )
-        assert repaired.agency_revenue_estimate == 520_000.0
-        assert calls["n"] == 1, "should stop as soon as the floor is met"
-        assert collect_under_minimum_flags(repaired) == []
-        assert not [f for f in repaired.pricing_flags if "UNDERBID" in f]
-
-    async def test_gives_up_after_three_attempts_and_flags(self):
-        with self._stub_llm([300_000.0, 350_000.0, 400_000.0]) as calls:
-            repaired, logs = await repair_budget_to_rfp_minimum(
-                self._priced(278_400.0), rfp_id="r1"
-            )
-        assert calls["n"] == 3
-        # Best-effort progress is kept, not thrown away.
-        assert repaired.agency_revenue_estimate == 400_000.0
-        assert any("UNDERBID" in f for f in repaired.pricing_flags)
-        assert any("exhausted" in line for line in logs)
-
-    async def test_attempt_that_breaches_the_cap_is_discarded(self):
-        budget = self._priced(278_400.0).model_copy(update={"rfp_budget_cap": 600_000.0})
-        with self._stub_llm([900_000.0]):
-            repaired, logs = await repair_budget_to_rfp_minimum(budget, rfp_id="r1")
-        assert repaired.agency_revenue_estimate == 278_400.0, "cap breach must not land"
-        assert any("breaches RFP cap" in line for line in logs)
-
-    async def test_floor_above_cap_flags_instead_of_repairing(self):
-        budget = self._priced(278_400.0).model_copy(update={"rfp_budget_cap": 300_000.0})
-        with self._stub_llm([900_000.0]) as calls:
-            repaired, _ = await repair_budget_to_rfp_minimum(budget, rfp_id="r1")
-        assert calls["n"] == 0, "contradictory constraints must not drive a repair"
-        assert any("constraints conflict" in f for f in repaired.pricing_flags)
-
-    async def test_no_floor_is_a_no_op(self):
-        budget = _budget(agencyRevenueEstimate=278_400.0)
-        with self._stub_llm([900_000.0]) as calls:
-            repaired, logs = await repair_budget_to_rfp_minimum(budget, rfp_id="r1")
-        assert calls["n"] == 0
-        assert logs == []
-        assert repaired is budget
-
-    async def test_already_at_the_floor_is_a_no_op(self):
-        with self._stub_llm([900_000.0]) as calls:
-            _repaired, logs = await repair_budget_to_rfp_minimum(
-                self._priced(500_000.0), rfp_id="r1"
-            )
-        assert calls["n"] == 0
-        assert logs == []

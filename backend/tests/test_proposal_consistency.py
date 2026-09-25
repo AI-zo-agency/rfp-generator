@@ -12,9 +12,9 @@ from app.models.proposal import (
     ProposalSection,
 )
 from app.models.rfp import RfpRecord
-from app.services.proposal_budget_sync import collect_deterministic_budget_mismatches
 from app.services.proposal_consistency import (
     allowed_budget_amounts,
+    collect_deterministic_budget_mismatches,
     introduces_unauthorized_dollars,
     scan_manuscript_consistency,
 )

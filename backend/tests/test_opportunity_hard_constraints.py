@@ -215,38 +215,6 @@ class OpportunityConstraintsTests(unittest.TestCase):
         self.assertNotIn("Fee Detail by Phase", md)
         self.assertNotIn("Supporting Fee Detail", md)
 
-    def test_render_budget_markdown_with_instrument_golden_markers(self) -> None:
-        """E2E Cost path: blended_rate_form + research instrument → DuPage golden."""
-        inst = PricingInstrument.model_validate(
-            json.loads(_DUPAGE_INSTRUMENT.read_text())
-        )
-        now = datetime.now(timezone.utc).isoformat()
-        budget = ProposalBudget(
-            rfpId="rfp-dupage-golden",
-            updatedAt=now,
-            budgetFormat="blended_rate_form",
-            formHourlyRate=None,
-            lumpSumTotal=0.0,
-            agencyRevenueEstimate=0.0,
-            lineItems=[],
-            qualifyingLanguage="Hourly rates as stated on the Proposal Pricing Form.",
-        )
-        md = render_budget_markdown(
-            budget,
-            rfp_text="Submit the Proposal Pricing Form.",
-            pricing_instrument=inst,
-        )
-        self.assertIn("26-088-WIOA", md)
-        self.assertIn("Part 1", md)
-        self.assertIn("Part 2", md)
-        self.assertIn("75,000", md)
-        self.assertIn("100,000", md)
-        self.assertIn("connect@zo.agency", md)
-        self.assertIn("[MANUAL FILL: SONJA]", md)
-        self.assertIn("[SIGN]", md)
-        self.assertNotIn("FEIN", md)
-        self.assertNotIn("Federal Tax", md)
-        self.assertNotIn("Fee Detail by Phase", md)
 
     def test_phased_instrument_does_not_emit_bid_number(self) -> None:
         """phased_fee_schedule must not paint Bid Number / Part rows via Cost render."""

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_content import (
     PRICING_GUIDE_VERBATIM_INVESTMENT_FRAMING,
     PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES,
     ensure_pricing_guide_verbatim_in_budget_markdown,
     force_pricing_guide_verbatim_qualifying_language,
-    prepare_budget_for_client_display,
     qualifying_language_has_pricing_guide_verbatim,
-    render_budget_markdown,
 )
 from app.services.proposal_budget_playbook import apply_budget_freeform_postprocess
 
@@ -32,35 +29,6 @@ class PricingGuideVerbatimTests(unittest.TestCase):
         self.assertIn(PRICING_GUIDE_VERBATIM_REIMBURSABLE_EXPENSES, out)
         self.assertIn("Cashless platforms and wayfinding tools", out)
 
-    def test_prepare_budget_forces_verbatim(self) -> None:
-        budget = ProposalBudget(
-            rfpId="r1",
-            updatedAt="t",
-            lineItems=[
-                BudgetLineItem(
-                    id="p1",
-                    category="Discovery",
-                    description="Kickoff",
-                    lineItemType="agency_fee",
-                    quantity=1,
-                    rate=1000,
-                    extended=1000,
-                )
-            ],
-            qualifyingLanguage="### Investment Framing\n\nParaphrased fluff only.",
-            lumpSumTotal=1000,
-            agencyRevenueEstimate=1000,
-            totalClientInvoicing=1000,
-        )
-        cleaned = prepare_budget_for_client_display(budget)
-        self.assertTrue(
-            qualifying_language_has_pricing_guide_verbatim(
-                cleaned.qualifying_language or ""
-            )
-        )
-        md = render_budget_markdown(cleaned)
-        self.assertIn("we abide by those terms as does our client", md.casefold())
-        self.assertIn("mileage at current irs rate", md.casefold())
 
     def test_freeform_postprocess_restores_terms(self) -> None:
         body = (

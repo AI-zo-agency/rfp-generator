@@ -44,13 +44,7 @@ from app.services.proposal_drafting_graph import (
     run_drafting_graph,
 )
 from app.services.proposal_budget_content import incorporate_budget_into_draft
-from app.services.proposal_budget_editor import run_budget_editor_pass
-from app.services.proposal_budget_sync import (
-    align_fee_narrative_with_budget,
-    run_budget_grounding_check,
-)
 from app.services.proposal_consistency import self_edit_exhausted_issues
-from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
 from app.services.proposal_pipeline_status import assert_manuscript_ready
 from app.services.proposal_pricing_service import generate_proposal_budget
@@ -4127,7 +4121,6 @@ async def generate_full_proposal(
                     rfp_id=rfp_id,
                     log_count=len(zf_report.logs),
                     phase_table_conflicts=len(zf_report.phase_table_conflicts),
-                    budget_mismatches=zf_report.budget_mismatch_count,
                     samples=zf_report.logs[:10],
                 )
 

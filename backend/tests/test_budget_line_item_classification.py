@@ -152,8 +152,8 @@ class ReconcileDoesNotRelabelTravelAsFeeTests(unittest.TestCase):
         self.assertNotIn("agency fee: $3,500", out)
 
     def test_manuscript_sync_slots_do_not_report_travel_as_fee(self) -> None:
-        """proposal_budget_sync carried the same agency_revenue fallback."""
-        from app.services.proposal_budget_sync import _canonical_slot_values
+        """The consistency slot values carried the same agency_revenue fallback."""
+        from app.services.proposal_consistency import _canonical_slot_values
 
         reconciled = reconcile_proposal_budget(
             _budget([_item("Travel — on-site listening sessions", 3500, category="travel")])

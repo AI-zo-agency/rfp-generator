@@ -97,132 +97,6 @@ def _usd(value: float | None) -> str:
     return f"${value:,.2f}"
 
 
-def derive_blended_form_rates(
-    budget: ProposalBudget,
-) -> tuple[float | None, float | None, float | None, str]:
-    """Return (hourly, monthly, annual, notes) for an RFP Pricing Proposal Form.
-
-    Hourly must resolve against pricing_approved_hourly_rates — never invent from
-    line-item blends or monthly÷160. Monthly/annual only when already set on the
-    ledger (instrument schema will set them later); do not derive from fee totals.
-    """
-    from app.services.pricing_approved_rates import resolve_approved_hourly
-
-    hourly = budget.form_hourly_rate
-    monthly = budget.form_monthly_rate
-    annual = budget.form_annual_rate
-    notes = (budget.form_rate_notes or "").strip()
-
-    if hourly is not None:
-        hit = resolve_approved_hourly(hourly)
-        if hit is None:
-            hourly = None
-            notes = (
-                notes
-                or "[MANUAL FILL: SONJA — set approved hourly in pricing_approved_hourly_rates]"
-            ).strip()
-        else:
-            notes = notes or (
-                f"Hourly from approved registry: {hit.label or hit.rate_id} "
-                f"({hit.source_file}, {hit.approved_by})."
-            )
-
-    # Do not invent monthly/annual from agency fees — that produced DuPage $20,445.17.
-    return hourly, monthly, annual, notes
-
-
-def render_verbatim_quotation_form_markdown(budget: ProposalBudget) -> str:
-    """DEPRECATED name — fail-closed buyer-form worksheet (never NJ-college fields).
-
-    Kept as the symbol callers already import. Does NOT emit FEIN/fax/monthly/
-    annual/amounts-in-words unless later wired from a THIS-RFP form schema.
-    """
-    return render_buyer_pricing_form_worksheet(budget)
-
-
-def render_buyer_pricing_form_worksheet(budget: ProposalBudget) -> str:
-    """Minimal worksheet: verified agency identity + approved hourly or MANUAL FILL.
-
-    Principle: no guessed form rows. Full field schema comes from RFP instrument
-    extraction (next). Until then, tell humans to complete the buyer-issued form.
-    """
-    from app.services.agency_facts import (
-        AGENCY_DBA,
-        AGENCY_EMAIL,
-        AGENCY_FEIN,
-        AGENCY_LEGAL_NAME,
-        AGENCY_PHONE,
-    )
-    from app.services.pricing_approved_rates import (
-        load_approved_hourly_rates,
-        resolve_approved_hourly,
-    )
-
-    hourly, _monthly, _annual, notes = derive_blended_form_rates(budget)
-    registry = load_approved_hourly_rates()
-    approved = resolve_approved_hourly(hourly, registry=registry) if hourly is not None else None
-    if approved is not None:
-        rate_cell = _usd(float(approved.amount))
-    else:
-        rate_cell = "[MANUAL FILL: SONJA — approved hourly rate required]"
-
-    legal = f"{AGENCY_LEGAL_NAME} DBA {AGENCY_DBA}"
-    lines = [
-        "## Buyer Pricing Form worksheet",
-        "",
-        "Complete the **buyer-issued** Proposal Pricing Form / Quotation form from "
-        "THIS RFP. Do not alter the buyer's layout. This worksheet lists only "
-        "verified agency identity and an approved hourly rate (if one exists) — "
-        "it does **not** invent fields from other RFPs (no college template, "
-        "no fax / monthly / annual / amounts-in-words unless THIS form asks).",
-        "",
-        "| Field | Response |",
-        "| --- | --- |",
-        f"| Company / Legal name | {legal} |",
-        f"| Federal Tax ID (FEIN) | {AGENCY_FEIN} |",
-        "| Authorized representative | Sonja Anderson, Agency Director / CEO |",
-        f"| Telephone | {AGENCY_PHONE} |",
-        f"| Email | {AGENCY_EMAIL} |",
-        f"| **Hourly rate** (if THIS form asks) | {rate_cell} |",
-        "",
-        "[MANUAL FILL: Sonja — enter rates, hours, and extended prices on the "
-        "buyer-issued form; keep each separately capped track under its RFP NTE.]",
-        "",
-    ]
-    if notes:
-        lines.append(f"*Internal note (do not paste onto the official form):* {notes}")
-        lines.append("")
-    if not registry:
-        lines.append(
-            "*No approved hourly rates loaded yet (empty JSON registry and no KB "
-            "role billable cache). Phase 3.5 ingests Agency Role Rates–style "
-            "Billable columns from the KB; until then rates stay MANUAL FILL. "
-            "Never use 00_Guide_Pricing deliverable tiers or 07_FIN_ lost-bid files.*"
-        )
-        lines.append("")
-    return "\n".join(lines)
-
-
-def render_pricing_proposal_form_markdown(
-    budget: ProposalBudget,
-    *,
-    rfp_text: str = "",
-    instrument: PricingInstrument | None = None,
-) -> str:
-    # Prefer typed buyer form when research extracted one; else fail-closed worksheet.
-    _ = rfp_text  # reserved for future instrument-schema extraction
-    from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
-
-    if is_buyer_pricing_form_instrument(instrument=instrument):
-        from app.services.pricing_instrument_render import (
-            apply_track_cap_gate,
-            render_pricing_instrument_markdown,
-        )
-
-        return render_pricing_instrument_markdown(apply_track_cap_gate(instrument))
-    return render_buyer_pricing_form_worksheet(budget)
-
-
 def _hourly_rate_from_line(item: BudgetLineItem) -> float | None:
     unit = (item.unit or "").casefold()
     if item.rate is not None and unit in {"hour", "hours", "hr", "hrs", ""}:
@@ -3004,35 +2878,6 @@ def ensure_pricing_guide_verbatim_in_budget_markdown(
     return text
 
 
-def normalize_fixed_pricing_narrative(
-    budget: ProposalBudget,
-    *,
-    rfp_text: str = "",
-) -> ProposalBudget:
-    """Drop hourly-table prose when the RFP requires a fixed Pricing Table."""
-    from app.services.proposal_budget_format_judge import rfp_indicates_fixed_pricing_table
-
-    if (budget.budget_format or "").casefold() != "phased":
-        return budget
-    if not rfp_indicates_fixed_pricing_table(rfp_text):
-        return budget
-    ql = force_pricing_guide_verbatim_qualifying_language(
-        _scrub_internal_budget_jargon(budget.qualifying_language or "")
-    )
-    scope = _scrub_internal_budget_jargon(budget.scope_summary or "")
-    if not scope.strip() or any(
-        token in (budget.scope_summary or "").casefold()
-        for token in ("hourly", "00_guide", "pricing guide", "industry low", "industry average")
-    ):
-        scope = _professional_zo_budget_framing()
-    return budget.model_copy(
-        update={
-            "qualifying_language": ql[:2000],
-            "scope_summary": scope[:2000],
-        }
-    )
-
-
 def prepare_budget_for_client_display(
     budget: ProposalBudget,
     *,
@@ -3044,40 +2889,9 @@ def prepare_budget_for_client_display(
     Preserves agency vs pass-through split: agency_revenue / lump_sum = agency fees
     (+ direct); total_client_invoicing = client grand total including pass-through.
     """
-    from app.services.pricing_approved_rates import (
-        ApprovedHourlyRate,
-        load_approved_hourly_rates,
-        merge_approved_hourly_rates,
-        scrub_unapproved_form_rates,
-    )
+    del rate_card, pricing_instrument  # kept for caller kwargs
     from app.services.proposal_budget_validation import split_line_item_totals
 
-    # Approve hourlies from this-run rate card and/or verifiedRates (Labor Cost
-    # pin) — never a stale disk cache.
-    registry = load_approved_hourly_rates(rate_card=rate_card)
-    if budget.verified_rates:
-        from_vr = [
-            ApprovedHourlyRate(
-                rateId=f"vr-{(vr.role or '').strip().casefold().replace(' ', '-') or i}",
-                label=(vr.role or "").strip(),
-                amount=float(vr.hourly_rate),
-                approvedBy="verifiedRates",
-                sourceFile=(vr.source or "Labor Cost").strip() or "Labor Cost",
-            )
-            for i, vr in enumerate(budget.verified_rates)
-            if (vr.role or "").strip()
-            and vr.hourly_rate is not None
-            and float(vr.hourly_rate) > 0
-        ]
-        if from_vr:
-            registry = merge_approved_hourly_rates(registry, from_vr)
-
-    budget = scrub_unapproved_form_rates(
-        budget,
-        registry=registry,
-        rate_card=rate_card,
-        pricing_instrument=pricing_instrument,
-    )
     cleaned = dedupe_travel_vs_direct_expenses(budget)
     fees, reimbursables = _professional_fees_and_direct(cleaned)
     table_fees = fee_detail_professional_total(cleaned)
@@ -3748,8 +3562,7 @@ def reconcile_budget_summary_prose(
     # Label-by-label fixes when the Year 1 block regex did not fire. Connector
     # accepts a colon OR natural sentence phrasing ("Agency fee is $X") — colon-only
     # let sentences like "Year 1 agency revenue is $325,242.66" (a mislabeled
-    # figure copying the grand total) through untouched; see proposal_budget_sync
-    # for the matching fix in the detector this auto-fixer complements.
+    # figure copying the grand total) through untouched.
     _connector = r"(?:\s*:\s*|\s+(?:is|are|was|equals?|totals?|comes?\s+to|amounts?\s+to)\s+)"
     label_specs: list[tuple[str, float]] = [
         (
@@ -3952,8 +3765,6 @@ def reshape_budget_for_rfp_form(
     fmt = (budget.budget_format or "").casefold()
     if fmt not in {"personnel_loading", "blended_rate_form"}:
         return None
-    wants_personnel = fmt == "personnel_loading"
-    wants_blended = fmt == "blended_rate_form"
     idx = find_budget_section_index(draft.sections)
     if idx is None:
         return None
@@ -3980,21 +3791,6 @@ def reshape_budget_for_rfp_form(
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
     )
-    if wants_blended and not wants_personnel:
-        form_md = render_pricing_proposal_form_markdown(
-            budget, rfp_text=rfp_text, instrument=pricing_instrument
-        )
-        for i, section in enumerate(sections):
-            title = (section.title or "").casefold()
-            if section.id == "rfp-closing-pricing-form" or "pricing proposal form" in title:
-                if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
-                    section.content or ""
-                ):
-                    continue
-                sections[i] = section.model_copy(
-                    update={"content": form_md, "status": "generated"}
-                )
-                break
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now})
 
@@ -4131,7 +3927,6 @@ async def incorporate_budget_into_draft(
     if not draft:
         return None
 
-    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
     from app.services.rfp_cost_demands import approach_digest_from_draft_sections
 
     approach_digest = approach_digest_from_draft_sections(draft.sections)

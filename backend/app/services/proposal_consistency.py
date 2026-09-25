@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.models.proposal import (
+    BudgetNarrativeMismatch,
     PreSubmitIssue,
     ProposalBudget,
     ProposalDraft,
@@ -268,6 +269,179 @@ def self_edit_exhausted_issues(
     return issues
 
 
+def _usd_or_zero(value: float | None) -> str:
+    if value is None:
+        return "$0.00"
+    if abs(value - round(value)) < 0.01:
+        return f"${value:,.0f}"
+    return f"${value:,.2f}"
+
+
+def _canonical_slot_values(budget: ProposalBudget) -> dict[str, float]:
+    from app.services.proposal_budget_content import canonical_budget_summary_figures
+
+    figs = canonical_budget_summary_figures(budget)
+    # agency_revenue substitutes only for a MISSING fee. A zero fee alongside
+    # real travel is a true zero (all-travel budget) — backfilling it here
+    # would sync "Agency fee: $3,500" into the manuscript for a budget whose
+    # only line is $3,500 of travel. Mirrors reconcile_budget_summary_prose.
+    agency = figs["agency_fee"]
+    if agency <= 0 and figs["direct"] <= 0:
+        agency = figs["agency_revenue"]
+    return {
+        "agency_fee": round(float(agency or 0), 2),
+        "media_passthrough": round(float(figs["passthrough"] or 0), 2),
+        "direct_expenses": round(float(figs["direct"] or 0), 2),
+        "total_invoicing": round(float(figs["total"] or 0), 2),
+    }
+
+
+# Connects a budget label to its dollar figure — a colon ("Agency fee: $X") or
+# natural sentence phrasing ("Agency fee is $X" / "...equals $X" / "...totals $X").
+# Colon-only used to miss real client-facing prose like "Year 1 agency revenue
+# is $325,242.66" (confirmed against tests/fixtures/manuscripts/
+# cvvb_v1_duplication_budget), letting a mislabeled-but-canonical figure (the
+# grand total, repeated under the agency-fee and pass-through labels too)
+# through every deterministic check.
+_LABEL_VALUE_CONNECTOR = (
+    r"(?:\s*:\s*|\s+(?:is|are|was|equals?|totals?|comes?\s+to|amounts?\s+to)\s+)"
+)
+_USD_TOKEN = r"(\$[\d,]+(?:\.\d{2})?)"
+
+_LABELLED_FEE_CLAIM_RES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"(?i)(?:Total\s+Year\s*1\s+agency\s+fee|Total\s+agency\s+(?:fee|revenue)|"
+            r"Agency\s+(?:fee|revenue)(?:\s+estimate)?|Base-year\s+proposed\s+fees)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
+        ),
+        "agency_fee",
+    ),
+    (
+        re.compile(
+            r"(?i)Client\s+media\s+pass-?through(?:\s*\([^)]*\))?"
+            r"(?:\s+billed\s+at\s+net)?"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
+        ),
+        "media_passthrough",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
+            r"Estimated\s+reimbursable\s+travel)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
+        ),
+        "direct_expenses",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:Total\s+Year\s*1\s+client\s+invoicing|Total\s+client\s+invoicing|"
+            r"Total\s+Year\s*1\s+investment|Total\s+proposed\s+investment|"
+            r"Grand\s+total\s+client\s+invoicing)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
+        ),
+        "total_invoicing",
+    ),
+]
+
+
+def _parse_usd_token(text: str) -> float | None:
+    cleaned = text.replace("$", "").replace(",", "").strip()
+    try:
+        return round(float(cleaned), 2)
+    except ValueError:
+        return None
+
+
+def collect_deterministic_budget_mismatches(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> list[BudgetNarrativeMismatch]:
+    """Label-aware dollar check — no LLM. Catches agency/passthrough/total swaps."""
+    from app.services.evidence_trust.rfp_money_constraints import (
+        collect_invented_ceiling_mismatches,
+        collect_over_authority_flags,
+    )
+
+    slots = _canonical_slot_values(budget)
+    out: list[BudgetNarrativeMismatch] = []
+    seen: set[tuple[str, str, float]] = set()
+
+    # Ledger vs RFP authority (even with no labeled fee claims).
+    for flag in collect_over_authority_flags(budget):
+        out.append(
+            BudgetNarrativeMismatch(
+                sectionId="budget",
+                sectionTitle="Budget / RFP authority",
+                sentence=flag[:500],
+                claimedField="rfp_authority",
+                canonicalValue=float(
+                    budget.rfp_media_or_program_envelope
+                    or budget.rfp_budget_cap
+                    or 0
+                ),
+                matches=False,
+                note=flag,
+            )
+        )
+
+    if not any(v > 0 for v in slots.values()):
+        return out
+
+    for section in draft.sections:
+        body = section.content or ""
+        if not body.strip():
+            continue
+        for invented in collect_invented_ceiling_mismatches(
+            body,
+            budget=budget,
+            section_id=section.id,
+            section_title=section.title or "",
+        ):
+            key = (section.id, "rfp_ceiling_claim", float(invented.canonical_value or 0))
+            # Deduplicate by sentence prefix
+            sent_key = (section.id, "rfp_ceiling_claim", hash((invented.sentence or "")[:80]))
+            if sent_key in seen:
+                continue
+            seen.add(sent_key)
+            out.append(invented)
+
+        for pattern, field in _LABELLED_FEE_CLAIM_RES:
+            for match in pattern.finditer(body):
+                claimed = _parse_usd_token(match.group(1))
+                if claimed is None or claimed <= 0:
+                    continue
+                canonical = float(slots.get(field) or 0)
+                if canonical <= 0:
+                    continue
+                tol = max(1.0, canonical * 0.02)
+                if abs(claimed - canonical) <= tol:
+                    continue
+                key = (section.id, field, claimed)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    BudgetNarrativeMismatch(
+                        sectionId=section.id,
+                        sectionTitle=section.title or "",
+                        sentence=match.group(0)[:240],
+                        claimedField=field,
+                        canonicalValue=canonical,
+                        matches=False,
+                        note=(
+                            f"Labeled {field} claim {match.group(1)} does not match "
+                            f"canonical {_usd_or_zero(canonical)}"
+                        ),
+                    )
+                )
+    return out
+
+
 def scan_manuscript_consistency(
     *,
     draft: ProposalDraft,
@@ -286,8 +460,6 @@ def scan_manuscript_consistency(
         # Regex free_currency criticals removed — Pass A (proposal_money_intelligence)
         # owns bid-claim triage. Deterministic labeled mismatches + RFP-authority
         # checks below still run synchronously.
-        from app.services.proposal_budget_sync import collect_deterministic_budget_mismatches
-
         for mismatch in collect_deterministic_budget_mismatches(draft, budget):
             issues.append(
                 PreSubmitIssue(

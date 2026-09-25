@@ -22,6 +22,10 @@ from app.services.proposal_fulfill_rfp_budget_kpi import (
 )
 
 
+# Any non-empty plan marks a pricing-plan (v2) budget; pre-v2 budgets are frozen.
+_PLAN = {"tier": "Average"}
+
+
 def _rfp(rfp_id: str = "rfp-regen") -> RfpRecord:
     return RfpRecord(
         id=rfp_id,
@@ -56,6 +60,7 @@ class ManuscriptBudgetMissingTests(unittest.TestCase):
 
     def test_present_when_budget_model_exists(self) -> None:
         budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId="rfp-regen",
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -92,6 +97,7 @@ class ManuscriptBudgetMissingTests(unittest.TestCase):
         )
         self.assertTrue(manuscript_cost_section_is_hollow(hollow))
         travel_budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId="rfp-regen",
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -149,6 +155,7 @@ class BudgetRegenWiringTests(unittest.TestCase):
             rfpId=rfp_id, updatedAt="2026-08-05T00:00:00+00:00"
         )
         regenerated_budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId=rfp_id,
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -186,10 +193,6 @@ class BudgetRegenWiringTests(unittest.TestCase):
                 return_value=(regenerated_draft, regenerated_research, regenerated_budget)
             ),
         ) as regen, patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
@@ -231,6 +234,7 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             "Monthly rate covers strategy, creative, and account service.\n"
         )
         budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId=rfp_id,
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -271,10 +275,6 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
@@ -319,6 +319,7 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             "| **Total** | | **$279,800** |\n"
         )
         budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId=rfp_id,
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -383,14 +384,7 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
-        def _editor_must_not_run(_budget, **_kw):
-            raise AssertionError("editor must not rewrite an accurate fee table")
-
         with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=_editor_must_not_run,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
@@ -412,118 +406,6 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         self.assertFalse(meta.get("budgetRegenerated"))
         self.assertTrue(any("already adds up" in line for line in logs))
 
-    def test_mismatch_rewrites_budget_tab_from_canonical_ledger(self) -> None:
-        rfp_id = "rfp-mismatch-fees"
-        broken = (
-            "## Proposed Investment\n\n"
-            "**Professional fees: $279,800**\n"
-            "**Agency Fee Subtotal: $279,800**\n"
-            "**Total proposed investment: $279,800**\n\n"
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Deliverable | Amount |\n"
-            "| --- | --- | ---: |\n"
-            "| Phase 1 | Discovery | $40,000 |\n"
-            "| Phase 2 | Strategy | $55,000 |\n"
-            "| Phase 5 | Launch | $50,000 |\n"
-            "| Phase 7 | Reporting | $116,300 |\n"
-            "| **Total** | | **$261,300** |\n"
-        )
-        budget = ProposalBudget(
-            rfpId=rfp_id,
-            updatedAt="2026-08-05T00:00:00+00:00",
-            lineItems=[
-                BudgetLineItem(
-                    id="L1",
-                    description="Discovery",
-                    category="Phase 1",
-                    extended=40_000,
-                    lineItemType="agency_fee",
-                ),
-                BudgetLineItem(
-                    id="L2",
-                    description="Strategy",
-                    category="Phase 2",
-                    extended=55_000,
-                    lineItemType="agency_fee",
-                ),
-                BudgetLineItem(
-                    id="L3",
-                    description="Creative",
-                    category="Phase 3",
-                    extended=70_000,
-                    lineItemType="agency_fee",
-                ),
-                BudgetLineItem(
-                    id="L4",
-                    description="Production",
-                    category="Phase 4",
-                    extended=60_000,
-                    lineItemType="agency_fee",
-                ),
-                BudgetLineItem(
-                    id="L5",
-                    description="Launch",
-                    category="Phase 5",
-                    extended=54_800,
-                    lineItemType="agency_fee",
-                ),
-            ],
-            lumpSumTotal=279_800,
-            agencyRevenueEstimate=279_800,
-            agencyFeeSubtotal=279_800,
-            totalClientInvoicing=279_800,
-        )
-        draft = ProposalDraft(
-            rfpId=rfp_id,
-            sections=[
-                ProposalSection(
-                    id="section-budget-pricing",
-                    title="Budget & Cost Efficiency",
-                    content=broken,
-                    status="generated",
-                )
-            ],
-            updatedAt="2026-08-05T00:00:00+00:00",
-        )
-        research = ProposalResearchCache(
-            rfpId=rfp_id,
-            updatedAt="2026-08-05T00:00:00+00:00",
-            budget=budget,
-        )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_budget_sync import collect_prose_arithmetic_violations
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
-
-        self.assertTrue(collect_prose_arithmetic_violations(broken))
-
-        with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
-            out_draft, _research, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id=rfp_id,
-                    rfp=_rfp(rfp_id),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Cost is 20% of score. Submit a fee table.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
-            )
-
-        fixed = out_draft.sections[0].content or ""
-        self.assertNotEqual(fixed, broken)
-        self.assertTrue(any("arithmetic mismatch" in line for line in logs))
-        self.assertTrue(meta.get("budgetChanged"))
-        self.assertEqual(collect_prose_arithmetic_violations(fixed), [])
-        self.assertIn("$279,800", fixed)
-        self.assertNotIn("$261,300", fixed)
 
     def test_second_scan_restores_pricing_polluted_by_contact_lock_tag(self) -> None:
         from app.services.proposal_fulfill_rfp_budget_kpi import (
@@ -542,6 +424,7 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             "Comer, but this section names Sonja Anderson as…]"
         )
         budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId="rfp-polluted",
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -579,10 +462,6 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
@@ -651,6 +530,7 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             rfpId="rfp-contact",
             updatedAt="2026-08-05T00:00:00+00:00",
             budget=ProposalBudget(
+                pricingPlan=_PLAN,
                 rfpId="rfp-contact",
                 updatedAt="2026-08-05T00:00:00+00:00",
                 lineItems=[
@@ -675,10 +555,6 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
@@ -711,6 +587,7 @@ class StaleManuscriptRefreshWithoutRegenTests(unittest.TestCase):
             "**Total proposed investment: $500**\n"
         )
         healthy_budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId="rfp-stale",
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -753,19 +630,20 @@ class StaleManuscriptRefreshWithoutRegenTests(unittest.TestCase):
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
+        plan_render = (
+            "## Proposed Investment\n\n"
+            "**Professional fees: $120,000**\n"
+            "**Total proposed investment: $120,500**\n"
+        )
         with patch.object(
             scan_mod,
             "_regen_budget_via_phase_3_5",
             new=AsyncMock(),
         ) as regen, patch.object(
             scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
-            scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
+        ), patch.object(scan_mod, "render_budget_markdown", return_value=plan_render):
             out, _r, logs, meta = asyncio.run(
                 run_fulfill_budget_scan(
                     rfp_id="rfp-stale",
@@ -798,6 +676,7 @@ class FailClosedTravelOnlyBudgetTests(unittest.TestCase):
             "municipal / education marketing engagements.\n"
         )
         travel_budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId="rfp-hollow",
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -839,10 +718,6 @@ class FailClosedTravelOnlyBudgetTests(unittest.TestCase):
             scan_mod,
             "_regen_budget_via_phase_3_5",
             new=AsyncMock(return_value=(draft, research, travel_budget)),
-        ), patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
         ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
@@ -891,6 +766,7 @@ class UnresolvedBudgetTokensTests(unittest.TestCase):
             "| Media placements | {{budget.media_placements}} |\n"
         )
         budget = ProposalBudget(
+            pricingPlan=_PLAN,
             rfpId=rfp_id,
             updatedAt="2026-08-05T00:00:00+00:00",
             lineItems=[
@@ -934,10 +810,6 @@ class UnresolvedBudgetTokensTests(unittest.TestCase):
         from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
-            scan_mod,
-            "run_budget_editor_pass",
-            side_effect=lambda b, **_kw: b,
-        ), patch.object(
             scan_mod,
             "extract_rfp_scoring_facts_llm",
             new=AsyncMock(return_value=RfpScoringFacts()),

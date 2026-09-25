@@ -7,7 +7,6 @@ import unittest
 from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_content import (
     format_qualifying_language_for_client,
-    render_budget_markdown,
     scrub_duplicate_budget_breakdown_tables,
 )
 
@@ -65,15 +64,6 @@ def _phased_budget() -> ProposalBudget:
 
 
 class FeeDetailSoleBreakdownTests(unittest.TestCase):
-    def test_render_drops_component_share_when_fee_detail_present(self) -> None:
-        md = render_budget_markdown(_phased_budget())
-        self.assertIn("## Fee Detail by Phase", md)
-        self.assertIn("| Phase | Scope | Fee |", md)
-        self.assertNotIn("| Component | Share | Amount |", md)
-        self.assertNotIn("Strategy (2)", md)
-        self.assertIn("$122000", md.replace(",", "").replace(" ", ""))
-        self.assertIn("Sponsorship & B2B", md)
-        self.assertIn("$9000", md.replace(",", ""))
 
     def test_scrub_removes_conflicting_mix_table_from_persisted_section(self) -> None:
         body = (
