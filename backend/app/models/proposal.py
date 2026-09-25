@@ -547,6 +547,16 @@ class ProposalBudget(BaseModel):
     option_term_notes: str = Field(default="", alias="optionTermNotes")
     media_spend_notes: str = Field(default="", alias="mediaSpendNotes")
     verified_rates: list[VerifiedRate] = Field(default_factory=list, alias="verifiedRates")
+    pricing_asks: dict[str, Any] | None = Field(
+        default=None,
+        alias="pricingAsks",
+        description="Pricing plan v2: RFP pricing asks with verbatim quotes.",
+    )
+    pricing_plan: dict[str, Any] | None = Field(
+        default=None,
+        alias="pricingPlan",
+        description="Pricing plan v2: authored + checked plan; the Cost section renders from this.",
+    )
     kb_sources: list[str] = Field(default_factory=list, alias="kbSources")
     kb_buckets_used: list[str] = Field(default_factory=list, alias="kbBucketsUsed")
     confidence: int = 0
@@ -738,6 +748,11 @@ class ProposalResearchCache(BaseModel):
     retrieval_rounds: int = Field(default=0, alias="retrievalRounds")
     coverage_threshold: int = Field(default=85, alias="coverageThreshold")
     budget: ProposalBudget | None = None
+    target_budget_usd: float | None = Field(
+        default=None,
+        alias="targetBudgetUsd",
+        description="Agency-set budget anchor for pricing when the RFP states no ceiling.",
+    )
     loss_lessons: list[LossLesson] = Field(default_factory=list, alias="lossLessons")
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
