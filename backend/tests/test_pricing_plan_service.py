@@ -114,18 +114,33 @@ class RenderSwitchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TargetBudgetEndpointTests(unittest.IsolatedAsyncioTestCase):
-    async def test_target_saved_before_budget_job(self) -> None:
+    async def test_target_travels_to_the_job_not_saved_by_the_request(self) -> None:
         from app.api.v1 import proposals as api
-        from app.models.proposal import ProposalResearchCache
 
-        research = ProposalResearchCache(rfpId="r1", updatedAt="t")
-        with patch.object(api, "aget_research_cache", AsyncMock(return_value=research)), \
-             patch.object(api, "asave_research_cache", AsyncMock()) as save, \
-             patch.object(api, "_enqueue_pipeline_phase", AsyncMock(return_value="queued")):
+        enqueue = AsyncMock(return_value="queued")
+        run = AsyncMock()
+        with patch.object(api, "asave_research_cache", AsyncMock()) as save, \
+             patch.object(api, "_enqueue_pipeline_phase", enqueue), \
+             patch.object(api, "run_phase3_5_budget", run):
             await api.phase3_5_budget_endpoint(
                 "r1", api.Phase35BudgetRequest(chainNext=False, targetBudgetUsd=180000)
             )
-        self.assertEqual(save.await_args.args[0].target_budget_usd, 180000)
+            save.assert_not_awaited()
+            self.assertEqual(enqueue.await_args.kwargs["job_kwargs"], {"chain_next": False, "target_budget_usd": 180000})
+            await enqueue.await_args.args[2]()  # the in-process work coroutine
+        run.assert_awaited_once_with("r1", target_budget_usd=180000)
+
+    async def test_job_saves_target_only_when_changed(self) -> None:
+        from app.models.proposal import ProposalResearchCache
+        from app.services import proposal_generator as gen
+
+        research = ProposalResearchCache(rfpId="r1", updatedAt="t", targetBudgetUsd=180000)
+        with patch.object(gen, "aget_research_cache", AsyncMock(return_value=research)), \
+             patch.object(gen, "asave_research_cache", AsyncMock()) as save:
+            await gen._sync_target_budget("r1", 180000)
+            save.assert_not_awaited()
+            await gen._sync_target_budget("r1", 0)  # cleared field -> None
+            self.assertIsNone(save.await_args.args[0].target_budget_usd)
 
 
 class ChatEditTests(unittest.IsolatedAsyncioTestCase):

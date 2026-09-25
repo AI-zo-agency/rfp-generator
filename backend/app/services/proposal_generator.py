@@ -3115,18 +3115,32 @@ async def _assert_proposal_not_reset(rfp_id: str) -> None:
         )
 
 
+_UNSET = object()
+
+
+async def _sync_target_budget(rfp_id: str, target: float | None) -> None:
+    """Persist the agency target budget only when it changed (runs inside the job lock)."""
+    research = await aget_research_cache(rfp_id)
+    if research is not None and (target or None) != research.target_budget_usd:
+        await asave_research_cache(research.model_copy(update={"target_budget_usd": target or None}))
+
+
 async def run_phase3_5_budget(
     rfp_id: str,
     *,
     force: bool = False,
+    target_budget_usd: float | None | object = _UNSET,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
     """Phase 3.5: Stage 3 budget from 00_Guide_Pricing, incorporate into manuscript, sync fee narrative.
 
     ``force=True`` (chat-initiated rebuild) runs Pricing Guide generation even when
     submission authority marked cost/pricing ambiguous — Sonja explicitly asked.
+    ``target_budget_usd`` (only when the request set it) is saved first when changed.
     """
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
+    if target_budget_usd is not _UNSET:
+        await _sync_target_budget(rfp_id, target_budget_usd)  # type: ignore[arg-type]
 
     from app.core.config import settings as app_settings
 

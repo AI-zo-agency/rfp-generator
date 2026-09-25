@@ -1079,22 +1079,20 @@ async def phase3_5_budget_endpoint(
     """Start Phase 3.5 budget in the background; poll GET /proposal for completion."""
 
     chain_next = True if body is None else bool(body.chain_next)
-
+    # The target is saved by the job itself (under the per-RFP job lock), in both
+    # the in-process and the Celery path — never by this request.
+    target_kw: dict[str, Any] = {}
     if body is not None and "target_budget_usd" in body.model_fields_set:
-        research = await aget_research_cache(rfp_id)
-        if research is not None:
-            await asave_research_cache(
-                research.model_copy(update={"target_budget_usd": body.target_budget_usd or None})
-            )
+        target_kw["target_budget_usd"] = body.target_budget_usd
 
     async def work() -> None:
-        await run_phase3_5_budget(rfp_id)
+        await run_phase3_5_budget(rfp_id, **target_kw)
 
     return await _enqueue_pipeline_phase(
         rfp_id,
         "phase-3-5-budget",
         work,
-        job_kwargs={"chain_next": chain_next},
+        job_kwargs={"chain_next": chain_next, **target_kw},
     )
 
 
