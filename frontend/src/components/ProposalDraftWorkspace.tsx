@@ -496,11 +496,18 @@ function ProposalDraftWorkspaceInner({
   const [activeSubmissionFlag, setActiveSubmissionFlag] = useState<ManualFillFlag | null>(null);
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
-  const [budgetTarget, setBudgetTarget] = useState<string>("");
-  useEffect(() => {
-    const saved = research?.targetBudgetUsd;
-    setBudgetTarget(saved ? String(Math.round(saved)) : "");
-  }, [research?.targetBudgetUsd]);
+  // Adjust state during render (no effect) so polling that re-sets `research`
+  // with the SAME saved target never touches the field — only a genuinely new
+  // saved value replaces what the user may be mid-typing.
+  const savedTarget = research?.targetBudgetUsd ?? null;
+  const [budgetTarget, setBudgetTarget] = useState<string>(
+    savedTarget ? String(Math.round(savedTarget)) : ""
+  );
+  const [syncedTarget, setSyncedTarget] = useState<number | null>(savedTarget);
+  if (savedTarget !== syncedTarget) {
+    setSyncedTarget(savedTarget);
+    setBudgetTarget(savedTarget ? String(Math.round(savedTarget)) : "");
+  }
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);

@@ -1897,6 +1897,7 @@ export async function runPhase3_5Budget(
 }> {
   const payload: Record<string, unknown> = {};
   if (options?.chainNext === false) payload.chainNext = false;
+  // null/undefined value clears the saved target (sent as 0); omitting the key entirely leaves it unchanged server-side.
   if (options?.targetBudgetUsd !== undefined) payload.targetBudgetUsd = options.targetBudgetUsd ?? 0;
   const body = Object.keys(payload).length ? JSON.stringify(payload) : undefined;
   const result = await runProposalPhaseAsync(
