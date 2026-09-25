@@ -1161,11 +1161,11 @@ def _is_numeric_token(token: str) -> bool:
 
 
 BUDGET_TOOL_ROUTING = """=== BUDGET TOOL ROUTING (mandatory) ===
-New RFP clients have NO fee/hours/rates in the company knowledge base.
+The Cost section's fees come from the pricing plan — never pick a tier or price
+from the guide, and never re-derive fee amounts, hours, or rates.
 1) Call search_rfp_requirements for budget ceiling, cost evaluation weight, quote/pricing form rules.
-2) Call search_pricing_guide for 00_Guide_Pricing Low/Average/High tiers and approved menu rates.
-3) Pick ONE tier from RFP pressure + cost scoring weight, then price from the guide only.
-4) Never invent dollars; never put phone numbers in Fee columns; use [VERIFY: …] when unknown.
+2) Edit layout / columns / names / prose only. Never invent dollars; never put phone
+   numbers in Fee columns; use [VERIFY: …] when unknown.
 """
 
 

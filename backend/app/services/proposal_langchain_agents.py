@@ -195,17 +195,13 @@ Rules:
 5b. RFP-GROUNDED ALWAYS: Read the COVERAGE CHECKLIST and RFP GAPS for THIS section. Even on voice/tone asks, keep covered substance and ADD proposal answers for gaps from evidence/KB. Never invent deliverables, metrics, clients, or case studies. Never ignore the mapped RFP section.
 6. Budget/fee edits (critical — ONLY when THIS section is Budget/Cost/Pricing OR the user
    explicitly asks to change fees/rates/line items):
-   - SURGICAL first: apply ONLY the user ask. Prefer the smallest table/prose change.
+   - The Cost section's fees come from the pricing plan — never write, change, or
+     re-derive fee amounts, tiers, or totals. Edit layout/names/columns only.
    - NEVER delete existing Hourly Rate Schedule $ rows or replace them with MANUAL FILL.
    - NEVER rewrite Fee Detail fees when the user only asked for a schedule/table layout change.
    - For person/name columns: search_team_bios / MasterTemplate org roster — never invent names.
-   - Do NOT invent client-specific fee totals from general KB. Fee dollars stay on the ledger /
-     00_Guide_Pricing path (search_pricing_guide) when the ask actually changes fees.
-   - Refuse invented dollars; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
-6a. NEVER call search_pricing_guide for narrative / strategy / approach / partnership / voice
-   restores. Example: restoring a "why regional partnerships move slower" caveat is NOT a
-   pricing ask — use search_rfp_requirements if needed, then edit the prose. Do not pull
-   00_Guide_Pricing.
+   - Do NOT invent client-specific fee totals from general KB or any pricing guide.
+   - Refuse invented dollars; flag out-of-plan scope with [PRICING FLAG: … — Sonja review required].
 7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
    Clean/filter references with search_case_studies + RFP reference rules — not by searching the buyer's name in KB.
 8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
@@ -217,7 +213,9 @@ Patch ONE section to clear listed review issues — minimal diff, preserve stron
 
 Rules:
 1. Search KB tools only when needed to resolve [VERIFY] or missing zö facts. Never search KB for the RFP buyer by name.
-2. For budget/fee issues: search_rfp_requirements + search_pricing_guide only — never invent client prices from general KB.
+2. For budget/fee issues: the Cost section's fees come from the pricing plan — never
+   re-derive amounts or tiers; use search_rfp_requirements only for fee-form requirements,
+   and never invent client prices from general KB.
 3. Fix wrong-client names, voice issues, and placeholders from the issues list.
 4. Do NOT invent facts. Do NOT add marketing fluff to procurement/form sections.
 5. Change only what the issues require.
@@ -238,7 +236,8 @@ Rules:
 - When [VERIFY] gaps are listed, dedicate a query to each missing zö field.
 - Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
 - BUDGET / COST / FEES / PRICING sections:
-  - If the user is changing fee dollars / rebuilding rates from the guide → plan 00_Guide_Pricing queries only.
+  - Cost section fees come from the pricing plan — NEVER plan a query to rebuild or
+    re-derive fee dollars/rates/tiers.
   - If the user is editing table layout / columns / names / prose on Cost → plan roster/org/bio queries
     as needed (MasterTemplate, team bios). Do NOT invent fee totals from client KB.
 - Each non-budget query MUST include "zö agency" + the specific fact + a doc-type hint.
@@ -701,32 +700,19 @@ async def run_tool_json_agent(
     section_title: str = "",
     user_message: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
-    """Multi-turn LangChain agent with KB tools — repair, revise, surgical fix."""
+    """Multi-turn LangChain agent with KB tools — repair, revise, surgical fix.
+
+    These agents patch section content; they never own Cost-section fee amounts
+    (those are rendered from the pricing plan — see each profile's system prompt),
+    so the pricing-guide research tool is never registered here.
+    """
     profile = get_profile(role)
-    blob = f"{section_title}\n{user_message}".casefold()
-    include_pricing = any(
-        k in blob
-        for k in (
-            "budget",
-            "pricing",
-            "cost proposal",
-            "cost of base",
-            "fee detail",
-            "hourly rate",
-            "compensation",
-            "00_guide",
-            "pricing guide",
-            "line item",
-            "restore verbatim",
-            "use verbatim",
-        )
-    )
     tools = build_proposal_tools(
         rfp_id,
         title,
         client,
         sector=sector,
-        include_pricing_guide=include_pricing,
+        include_pricing_guide=False,
     )
     final_text, provider, tool_log = await run_tool_agent_loop(
         system_prompt=profile.system_prompt,
