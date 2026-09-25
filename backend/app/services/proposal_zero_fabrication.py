@@ -131,9 +131,10 @@ def apply_zero_fabrication_guards(
             sync_phase_budget_tables_across_draft,
         )
 
-        draft, sync_logs = sync_phase_budget_tables_across_draft(draft, resolved_budget)
-        for line in sync_logs:
-            report.logs.append(f"{label}: phase table sync — {line}")
+        if not resolved_budget.pricing_plan:  # phase tables are a legacy-ledger concept
+            draft, sync_logs = sync_phase_budget_tables_across_draft(draft, resolved_budget)
+            for line in sync_logs:
+                report.logs.append(f"{label}: phase table sync — {line}")
         draft, reconciled = reconcile_draft_budget_summaries(draft, resolved_budget)
         if reconciled:
             report.logs.append(

@@ -3156,6 +3156,55 @@ async def run_phase3_5_budget(
         )
 
 
+async def _finish_phase3_5_pricing_plan(
+    rfp_id: str,
+    budget: ProposalBudget,
+    research: ProposalResearchCache,
+    rfp_context: str,
+    *,
+    app_settings: object,
+    has_manuscript: bool,
+) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
+    """Pricing plan v2 is final from its own checker: place it, guard, save.
+
+    Skips every legacy step (editor/reconcile math, format judge, phase coerce,
+    instrument reshape, fee-narrative LLM sync, grounding repair, cost-demand
+    stubs) — each either rewrites the ledger or re-derives money the plan owns.
+    """
+    with pipeline_step("incorporate_budget"):
+        draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    if not draft:
+        if getattr(app_settings, "budget_before_drafting", False) and not has_manuscript:
+            now = datetime.now(timezone.utc).isoformat()
+            draft = ProposalDraft(rfpId=rfp_id, sections=[], updatedAt=now, generatedAt=now)
+            await asave_proposal_draft(draft)
+            return draft, research, budget
+        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
+    await _assert_proposal_not_reset(rfp_id)
+
+    from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+    draft, zf_report = apply_zero_fabrication_guards(
+        draft,
+        research=research,
+        budget=budget,
+        rfp_text=rfp_context,
+        label="phase3_5",
+    )
+    for line in zf_report.logs[:12]:
+        logger.info("Phase 3.5 zero-fabrication: %s — %s", rfp_id, line)
+    await asave_proposal_draft(draft)
+    logger.info("Phase 3.5 pricing plan v2 complete for %s: tier=%s", rfp_id, budget.pricing_tier)
+    step_trace(
+        "phase3_5_budget_complete",
+        rfp_id=rfp_id,
+        pricing_plan_v2=True,
+        **summarize_budget(budget),
+        manuscript_summary=summarize_sections(draft.sections),
+    )
+    return draft, research, budget
+
+
 async def _run_phase3_5_budget_inner(
     rfp_id: str,
     *,
@@ -3272,6 +3321,15 @@ async def _run_phase3_5_budget_inner(
     await _assert_proposal_not_reset(rfp_id)
 
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
+    if budget.pricing_plan:
+        return await _finish_phase3_5_pricing_plan(
+            rfp_id,
+            budget,
+            research,
+            rfp_context,
+            app_settings=app_settings,
+            has_manuscript=has_manuscript,
+        )
     from app.services.proposal_budget_content import (
         prepare_budget_for_client_display,
         reconcile_draft_budget_summaries,

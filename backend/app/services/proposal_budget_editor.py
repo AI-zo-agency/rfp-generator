@@ -43,6 +43,8 @@ def run_budget_editor_pass(
     prices travel/reimbursables. Empty RFP text, or RFP text that does not
     clearly state remote-only work, never halts.
     """
+    if budget.pricing_plan:
+        return budget  # pricing plan v2: its own checker already finalized the math
     before_revenue = budget.agency_revenue_estimate
     before_lump = budget.lump_sum_total
     before_subtotal = sum_line_items_extended(budget)

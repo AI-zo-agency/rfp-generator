@@ -223,5 +223,75 @@ class LineItemAdapterTests(unittest.TestCase):
         self.assertEqual(media.line_item_type, "client_passthrough")
 
 
+def _newport_budget():
+    from app.services.pricing_plan_engine import decide_tier
+
+    asks = _json("newport_asks.json")
+    plan = svc._stamp(_json("newport_plan.json"), KB, *decide_tier(asks))
+    return svc._budget_from_plan("r-newport", asks, plan, [])
+
+
+def _fail(name):
+    from unittest.mock import MagicMock
+
+    return MagicMock(side_effect=AssertionError(f"{name} must not run on a pricing-plan budget"))
+
+
+class LegacyGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_budget_passes_leave_v2_budget_alone(self) -> None:
+        from app.services.proposal_budget_editor import run_budget_editor_pass
+        from app.services.proposal_budget_validation import reconcile_proposal_budget
+        from app.services.rfp_cost_demands import ensure_rfp_cost_demands_in_budget_markdown
+
+        budget = _newport_budget()
+        self.assertIs(run_budget_editor_pass(budget, rfp_context="x"), budget)
+        self.assertIs(reconcile_proposal_budget(budget, rfp_context="x"), budget)
+        body = svc.render_pricing_plan_budget(budget)
+        out, demands, _logs = await ensure_rfp_cost_demands_in_budget_markdown(
+            body, rfp_text="x", budget=budget, rewrite=True
+        )
+        self.assertEqual((out, demands), (body, []))
+
+
+class Phase35PricingPlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_phase35_places_plan_and_skips_legacy_chain(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
+        from app.services import proposal_budget_content as pbc
+        from app.services import proposal_generator as gen
+
+        budget = _newport_budget()
+        research = ProposalResearchCache(rfpId="r-newport", updatedAt="t", budget=budget)
+        draft = ProposalDraft(
+            rfpId="r-newport", updatedAt="t",
+            sections=[
+                ProposalSection(id="s1", title="Approach", content="We will plan.", status="generated"),
+                ProposalSection(id="s2", title="Budget & Pricing", content="old legacy fee table", status="generated"),
+            ],
+        )
+        saved = AsyncMock()
+        with patch.object(gen, "aget_research_cache", AsyncMock(return_value=research)), \
+             patch.object(gen, "generate_proposal_budget", AsyncMock(return_value=(budget, research))), \
+             patch.object(gen, "_assert_proposal_not_reset", AsyncMock()), \
+             patch.object(gen, "load_rfp_for_proposal", return_value=(None, None, "Newport RFP text")), \
+             patch.object(gen, "asave_proposal_draft", saved), \
+             patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
+             patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
+             patch.object(gen, "run_budget_editor_pass", _fail("run_budget_editor_pass")), \
+             patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
+             patch("app.services.proposal_budget_format_judge.judge_rfp_budget_format", _fail("format judge")), \
+             patch.object(gen, "align_fee_narrative_with_budget", _fail("align_fee_narrative")), \
+             patch.object(gen, "run_budget_grounding_check", _fail("grounding check")), \
+             patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")):
+            out_draft, out_research, out_budget = await gen._run_phase3_5_budget_inner(
+                "r-newport", app_settings=object(), has_manuscript=True
+            )
+        self.assertIs(out_budget, budget)
+        self.assertIs(out_research, research)
+        final = saved.await_args.args[0]
+        self.assertIs(final, out_draft)
+        cost = next(s for s in final.sections if s.id == "s2")
+        self.assertEqual(cost.content.strip(), svc.render_pricing_plan_budget(budget).strip())
+
+
 if __name__ == "__main__":
     unittest.main()

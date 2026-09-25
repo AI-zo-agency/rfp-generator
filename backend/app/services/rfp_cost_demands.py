@@ -986,6 +986,8 @@ async def ensure_rfp_cost_demands_in_budget_markdown(
     from app.services.pricing_delivery_context import is_buyer_pricing_form_instrument
 
     body = content or ""
+    if budget is not None and budget.pricing_plan:
+        return body, [], ["skipped pricing_plan"]
     if is_buyer_pricing_form_instrument(instrument=pricing_instrument) or re.search(
         r"(?im)^##\s+Buyer Pricing Form\s*$", body
     ):

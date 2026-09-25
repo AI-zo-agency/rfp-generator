@@ -1150,6 +1150,8 @@ def reconcile_proposal_budget(
     4. Rebuild option-term math from verified base
     5. Remove stale reconciliation flags — never leave open math-discrepancy flags
     """
+    if budget.pricing_plan:
+        return budget  # pricing plan v2 line items are a derived view, not a ledger to fix
     flags = _strip_misplaced_verify_flags(
         _strip_stale_reconciliation_flags(list(budget.pricing_flags))
     )
