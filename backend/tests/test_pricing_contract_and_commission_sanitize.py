@@ -41,6 +41,22 @@ class PricingContractBuilderTests(unittest.TestCase):
         self.assertNotEqual(contract.fee_model, "commission")
         self.assertIsNone(contract.media_spend_annual)
 
+    def test_guide_61_seeds_commission_alongside_hourly_labor(self) -> None:
+        from app.services.pricing_contract_builder import extract_guide_commission_rate
+
+        guide = (
+            "Category 06 — Media Planning & Placement\n"
+            "6.1 Traditional Media: 85/15 commission (85% placements, 15% zö). "
+            "Client invoiced at net.\n"
+        )
+        self.assertAlmostEqual(extract_guide_commission_rate(guide) or 0, 0.15)
+        contract = build_pricing_contract(
+            stage_one_text=guide,
+            rfp_text="Provide hourly labor category rates and media buying.",
+        )
+        self.assertIn(contract.fee_model, {"commission", "hybrid"})
+        self.assertAlmostEqual(contract.commission_rate or 0, 0.15)
+
 
 class CommissionSanitizerTests(unittest.TestCase):
     def _orphan_budget(self) -> ProposalBudget:

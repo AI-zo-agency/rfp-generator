@@ -1020,6 +1020,10 @@ def scrub_empty_numbered_table_rows(text: str) -> str:
     for line in text.splitlines(keepends=True):
         stripped = line.strip()
         if stripped.startswith("|"):
+            # Keep markdown alignment rows (`| --- | ---: |`) — never treat as empty.
+            if _is_markdown_table_separator_line(stripped):
+                out.append(line)
+                continue
             cells = [c.strip() for c in stripped.strip("|").split("|")]
             nonempty = [c for c in cells if c and c not in {"---", ":---", "---:", ":---:"}]
             # Sole content is a row index digit (or empty) — drop the padding row.

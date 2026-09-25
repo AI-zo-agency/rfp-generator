@@ -16,8 +16,8 @@ _COMMISSION_MODEL_RE = re.compile(
 )
 _NO_COMMISSION_RE = re.compile(
     r"\b(?:no\s+media\s+commission|without\s+(?:media\s+)?commission|"
-    r"hourly\s+(?:labor|rates)|labor\s+categor|"
-    r"fully\s+burdened\s+hourly)\b",
+    r"no\s+commission\s+(?:on|for)\s+media|"
+    r"fully\s+burdened\s+hourly\s+only)\b",
     re.I,
 )
 _HOURLY_RE = re.compile(r"\bhourly\b", re.I)
@@ -58,6 +58,30 @@ def _extract_commission_rate(blob: str) -> float | None:
     if pct <= 0 or pct > 100:
         return None
     return round(pct / 100.0, 4)
+
+
+def extract_guide_commission_rate(guide_text: str) -> float | None:
+    """Commission from Guide 6.1 / 85/15 evidence only — never invent.
+
+    Used to seed ProposalBudget.commission_rate when the pricing LLM left it
+    null even though the pinned Guide states Traditional Media 85/15.
+    Ignores unrelated percentages (e.g. 50% wages stress-test prose).
+    """
+    blob = guide_text or ""
+    if re.search(r"(?i)85\s*/\s*15", blob):
+        return 0.15
+    # Guide 6.1 Traditional Media near an agency/% figure.
+    near = re.search(
+        r"(?i)(?:6\.1|traditional\s+media).{0,160}?"
+        r"(?:commission|agency|zö|zo).{0,40}?"
+        r"(\d{1,2}(?:\.\d+)?)\s*%",
+        blob,
+    )
+    if near:
+        pct = float(near.group(1))
+        if 5.0 <= pct <= 25.0:
+            return round(pct / 100.0, 4)
+    return None
 
 
 def _extract_media_spend(blob: str) -> float | None:

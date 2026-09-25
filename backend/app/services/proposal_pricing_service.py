@@ -2197,6 +2197,9 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                 stage_one,
                 (prior_research.budget.media_spend_notes if prior_research and prior_research.budget else "") or "",
                 (prior_research.budget.rfp_budget_notes if prior_research and prior_research.budget else "") or "",
+                # Guide 6.1 / 85/15 must reach the contract builder so hourly
+                # labor RFPs still seed commission when the Guide evidences it.
+                (guide_text or "")[:12000],
             )
             if part
         ),
@@ -2626,7 +2629,73 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     except Exception:
         logger.exception("Pricing tier cost-weight guard failed for %s", rfp_id)
 
+    # Seed Guide 6.1 / 85/15 onto the ledger when the LLM left commissionRate null
+    # or seeded an unrelated percentage (e.g. 50% wages stress-test prose).
+    try:
+        from app.services.pricing_contract_builder import extract_guide_commission_rate
+
+        guide_rate = extract_guide_commission_rate(guide_text or "")
+        if guide_rate is None and pricing_contract.commission_rate is not None:
+            try:
+                cr = float(pricing_contract.commission_rate)
+            except (TypeError, ValueError):
+                cr = None
+            if cr is not None and 0.05 <= cr <= 0.25:
+                guide_rate = cr
+        current = budget.commission_rate
+        try:
+            current_f = float(current) if current is not None else None
+        except (TypeError, ValueError):
+            current_f = None
+        needs_seed = guide_rate is not None and guide_rate > 0 and (
+            current_f is None or current_f <= 0 or current_f > 0.25
+        )
+        if needs_seed:
+            budget = budget.model_copy(
+                update={
+                    "commission_rate": guide_rate,
+                    "commission_model": budget.commission_model or "commission",
+                }
+            )
+            logger.info(
+                "budget_commission_seeded_from_guide rfp_id=%s rate=%s prior=%s",
+                rfp_id,
+                guide_rate,
+                current_f,
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("guide commission seed skipped", exc_info=True)
+
     budget = sanitize_commission_budget(budget, pricing_contract)
+    # Re-apply Guide commission if sanitize cleared it or left a non-Guide rate.
+    try:
+        from app.services.pricing_contract_builder import extract_guide_commission_rate
+
+        guide_rate = extract_guide_commission_rate(guide_text or "")
+        if guide_rate is not None and guide_rate > 0:
+            try:
+                current_f = (
+                    float(budget.commission_rate)
+                    if budget.commission_rate is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                current_f = None
+            if current_f is None or current_f <= 0 or abs(current_f - guide_rate) > 0.001:
+                if current_f is None or current_f <= 0 or current_f > 0.25:
+                    budget = budget.model_copy(
+                        update={
+                            "commission_rate": guide_rate,
+                            "commission_model": budget.commission_model or "commission",
+                        }
+                    )
+                    logger.info(
+                        "budget_commission_reseeded_after_sanitize rfp_id=%s rate=%s",
+                        rfp_id,
+                        guide_rate,
+                    )
+    except Exception:  # noqa: BLE001
+        logger.warning("guide commission reseed skipped", exc_info=True)
     # Bind before editor so MANUAL FILL commission placeholders do not trip unbound
     # XOR checks against still-unbound labor lines inside assert_budget_canonical.
     budget = bind_budget_line_items_to_rate_card(budget, rate_card)

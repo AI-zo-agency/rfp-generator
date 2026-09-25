@@ -166,6 +166,52 @@ class RfpCostDemandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Media Planning", out)
         self.assertIn("Hourly Rate Schedule", out)
         self.assertNotIn("Fee Detail by Phase", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertNotIn("passed through at cost", out.casefold())
+
+    def test_grounded_media_uses_ledger_commission(self) -> None:
+        budget = _budget(("Labor", "AM", 275)).model_copy(
+            update={
+                "budget_format": "personnel_loading",
+                "commission_rate": 0.15,
+            }
+        )
+        demands = [
+            RfpCostDemand(
+                id="media_planning",
+                kind="disclosure",
+                requirement="Disclose media buying fee treatment",
+                rfpQuote="media buying",
+                satisfaction="missing",
+            )
+        ]
+        out, _, logs = apply_grounded_demand_fills("## Cost\n", demands, budget=budget)
+        self.assertTrue(logs)
+        self.assertIn("85%", out)
+        self.assertIn("15%", out)
+        self.assertIn("Guide 6.1", out)
+
+    def test_grounded_nte_no_default_passthrough(self) -> None:
+        budget = _budget(("Labor", "AM hours", 2050)).model_copy(
+            update={
+                "budget_format": "personnel_loading",
+                "rfp_budget_cap": 950_000.0,
+            }
+        )
+        demands = [
+            RfpCostDemand(
+                id="not_to_exceed_total",
+                kind="disclosure",
+                requirement="State NTE",
+                rfpQuote="not to exceed",
+                satisfaction="missing",
+            )
+        ]
+        out, _, _ = apply_grounded_demand_fills("## Cost\n", demands, budget=budget)
+        self.assertIn("950,000", out)
+        self.assertIn("SOW", out)
+        self.assertNotIn("pass-through at cost", out.casefold())
+        self.assertNotIn("master contract", out.casefold())
 
     def test_workstream_ask_becomes_fee_table_row(self) -> None:
         body = (

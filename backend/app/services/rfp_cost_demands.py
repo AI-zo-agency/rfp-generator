@@ -468,15 +468,40 @@ def apply_grounded_demand_fills(
                 ceiling = fee_phrase
             if ceiling:
                 if nte_phrase:
+                    media_bit = ""
+                    commission = (
+                        getattr(budget, "commission_rate", None) if budget else None
+                    )
+                    try:
+                        commission_f = (
+                            float(commission) if commission is not None else None
+                        )
+                    except (TypeError, ValueError):
+                        commission_f = None
+                    if commission_f is not None and commission_f > 0:
+                        rate_pct = (
+                            commission_f * 100.0
+                            if commission_f <= 1.0
+                            else commission_f
+                        )
+                        agency_share = (
+                            rate_pct if rate_pct <= 50 else (100.0 - rate_pct)
+                        )
+                        client_share = 100.0 - agency_share
+                        media_bit = (
+                            f" Media buying follows the documented "
+                            f"{client_share:.0f}/{agency_share:.0f} commission "
+                            f"model; placement dollars invoice at net inside this "
+                            f"ceiling."
+                        )
                     paragraph = (
                         f"### Not-to-Exceed Total Contract Amount\n\n"
                         f"zö agency's not-to-exceed figure for this engagement is "
-                        f"**{ceiling}**, the budget ceiling stated for this work. "
-                        f"Invoicing follows {fee_home}. "
-                        f"Media buy dollars directed by the client, if any, are "
-                        f"pass-through at cost and sit inside that same ceiling, "
-                        f"not on top of it. Any material change in scope will be "
-                        f"documented in a scope addendum before work proceeds."
+                        f"**{ceiling}**, the budget ceiling stated in the SOW "
+                        f"Cost / Compensation section. "
+                        f"Invoicing follows {fee_home}.{media_bit} "
+                        f"Any material change in scope will be documented in a "
+                        f"scope addendum before work proceeds."
                     )
                 else:
                     paragraph = (
@@ -484,10 +509,8 @@ def apply_grounded_demand_fills(
                         f"zö agency proposes a not-to-exceed total contract amount of "
                         f"**{ceiling}** for the professional-fee scope in {fee_home} "
                         f"(inclusive of all professional fees shown). "
-                        f"Media buy dollars directed by the client, if any, are "
-                        f"pass-through at cost and are not included in this "
-                        f"professional-fee ceiling. Any material change in scope "
-                        f"will be documented in a scope addendum before work proceeds."
+                        f"Any material change in scope will be documented in a "
+                        f"scope addendum before work proceeds."
                     )
                 if any(
                     k in blob
@@ -558,20 +581,19 @@ def apply_grounded_demand_fills(
                 paragraph = (
                     "### Media Planning & Buying — Fee Treatment\n\n"
                     f"Media buying follows the agency's documented commission model "
-                    f"({client_share:.0f}% placements / {agency_share:.0f}% agency). "
-                    f"Client-directed media placement dollars are pass-through; "
-                    f"agency commission and planning labor are disclosed separately "
-                    f"from placement spend. Invoicing aligns with {fee_home}."
+                    f"({client_share:.0f}% placements / {agency_share:.0f}% agency), "
+                    f"consistent with Guide 6.1 Traditional Media. Client-directed "
+                    f"placement dollars are invoiced at net; agency commission covers "
+                    f"strategy, negotiation, placement, and reporting. "
+                    f"Invoicing aligns with {fee_home}."
                 )
             else:
                 paragraph = (
                     "### Media Planning & Buying — Fee Treatment\n\n"
                     "Media planning and buying labor for the scope is included with "
-                    f"professional fees under {fee_home} (not a separate unmarked "
-                    "commission line inventing a rate). Client-directed media "
-                    "placement dollars, if any, are passed through at cost and are "
-                    "not marked up in this proposal unless a written scope addendum "
-                    "authorizes a different arrangement."
+                    f"professional fees under {fee_home}. "
+                    "[MANUAL FILL: Sonja — confirm media commission vs pass-through "
+                    "from Guide 6.1 before submission; do not invent a rate.]"
                 )
             filled = True
 
@@ -589,7 +611,21 @@ def apply_grounded_demand_fills(
         if filled and paragraph:
             # Avoid duplicating if a similar heading already exists.
             heading = paragraph.split("\n", 1)[0].casefold()
-            if heading not in text.casefold():
+            already = heading in text.casefold()
+            # Schedule Cost File may already have NTE / media under ## headings.
+            if (
+                not already
+                and "not-to-exceed" in heading
+                and "not-to-exceed" in text.casefold()
+            ):
+                already = True
+            if (
+                not already
+                and "media planning" in heading
+                and "media planning" in text.casefold()
+            ):
+                already = True
+            if not already:
                 blocks.append(paragraph.strip())
                 logs.append(f"Grounded Cost fill: {demand.id}")
             updated.append(
@@ -772,14 +808,21 @@ Hard rules:
 - MUST preserve (or restore) the markdown table under "## Fee Detail by Phase"
   with columns Phase | Scope | Fee and a Total row. Never replace the fee table
   with prose-only "Fee phases:" lists. Never delete the table.
-- MUST preserve "## Hourly Rate Schedule by Classification" when present.
+- MUST preserve "## Hourly Rate Schedule" / "## Cost Proposal — Hourly Rate Schedule"
+  and "## Task Hours & Cost Ledger" when present — never delete rate or hours rows.
 - Do NOT invent commission percentages, hourly rates, or new fee dollar amounts.
 - Keep every existing Fee Detail / Proposed Investment / rate-table dollar EXACT.
 - Do NOT create headings like "## RFP Cost demand — …" or invent «MFILL_N» tokens.
-- Prefer short grounded prose that answers the demand (NTE = proposed professional
-  fee total from Proposed Investment; oral presentation at offeror's expense;
-  media labor in phase fees + media buy pass-through; subcontractors only with
-  State consent and costs inside phase fees; cost-effectiveness narrative).
+- Do NOT invent staff roles or titles (e.g. "Media Buying Coordinator") that are
+  not already named in the manuscript, approach digest, or rate schedule. Unknown
+  seats → [MANUAL FILL: Sonja — …].
+- Do NOT cite a "master contract" or other document unless that document's text is
+  in the RFP excerpt below. Cite the SOW Cost / Compensation section only.
+- Do NOT decline to propose hours ("hours fixed at task authorization later").
+  Keep or restore the Task Hours & Cost Ledger with MANUAL FILL hours cells.
+- Prefer short grounded prose that answers the demand (NTE = SOW ceiling when
+  present; oral presentation at offeror's expense; media terms from ledger
+  commissionRate / Guide 6.1 when present; subcontractors only with buyer consent).
 - MANUAL FILL only when a number/% truly cannot be known (e.g. Year-2 escalation
   not in RFP/KB). Use one compact [MANUAL FILL: Sonja — …] line — not a stub dump.
 - «MFILL_N» tokens already in the manuscript are PROTECTED — copy unchanged.
@@ -950,7 +993,9 @@ async def ensure_rfp_cost_demands_in_budget_markdown(
         return body, [], ["skipped buyer_pricing_form"]
 
     # Schedule-only personnel Cost File — flat-phase / Fee Detail rewrite contradicts
-    # Draft Agreement time-and-expense + Letter Proposal NTE language.
+    # Draft Agreement time-and-expense + Letter Proposal NTE language. Keep
+    # deterministic grounded fills (NTE / media) but never LLM rewrite that invents
+    # seats, master-contract claims, or declines the hours matrix.
     if budget is not None and (budget.budget_format or "").casefold() == "personnel_loading":
         from app.services.proposal_budget_validation import infer_line_item_type
 
@@ -967,11 +1012,27 @@ async def ensure_rfp_cost_demands_in_budget_markdown(
                 has_fixed = True
                 break
         if not has_fixed and re.search(
-            r"(?im)^##\s+(?:Cost Proposal\s*[—\-–]?\s*)?Hourly Rate Schedule",
+            r"(?im)^##\s+(?:Cost Proposal\s*[,—\-–]?\s*)?Hourly Rate Schedule",
             body,
         ):
-            logger.info("rfp_cost_demands skipped — personnel_loading schedule manuscript")
-            return body, [], ["skipped personnel_loading schedule"]
+            working = list(demands) if demands is not None else await extract_rfp_cost_demands(
+                rfp_text=rfp_text, approach_digest=approach_digest
+            )
+            text = strip_rfp_cost_demand_stub_sections(body)
+            logs: list[str] = [
+                "personnel_loading schedule: grounded fills only (no LLM rewrite)"
+            ]
+            if not working:
+                return text, [], logs
+            audited = await audit_rfp_cost_demands(working, text, budget=budget)
+            text, audited, fill_logs = apply_grounded_demand_fills(
+                text, audited, budget=budget
+            )
+            logs.extend(fill_logs)
+            logger.info(
+                "rfp_cost_demands personnel_loading schedule path — no LLM rewrite"
+            )
+            return text, audited, logs
 
     working = list(demands) if demands is not None else await extract_rfp_cost_demands(
         rfp_text=rfp_text, approach_digest=approach_digest

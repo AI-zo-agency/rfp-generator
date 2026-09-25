@@ -198,11 +198,15 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
         md = render_budget_markdown(budget, rfp_text=rfp)
         self.assertIn("Hourly Rate Schedule", md)
         self.assertIn("Account Manager", md)
-        self.assertIn("Senior Web Developer", md)
+        self.assertIn("Programming", md)
         self.assertIn("$400", md)
-        self.assertNotIn("Contractor", md)
-        self.assertNotIn("| Executive |", md)
-        self.assertNotIn("| Finance |", md)
+        self.assertIn("Contractor", md)
+        self.assertIn("| Executive |", md)
+        self.assertIn("| Finance |", md)
+        self.assertNotIn("Senior Web Developer", md)
+        self.assertNotIn("This table answers", md)
+        self.assertNotIn("Do not substitute", md)
+        self.assertNotIn("Year-1 Hourly Rate", md)
         self.assertNotIn("Proposed Investment", md)
         self.assertNotIn("$3,000", md)
         self.assertNotIn("Fee Detail", md)
@@ -212,6 +216,78 @@ class PersonnelLoadingRenderTests(unittest.TestCase):
         self.assertIn("held for the full contract term", md.casefold())
         self.assertIn("Reimbursable Expenses", md)
         self.assertIn("Travel", md)
+
+    def test_hourly_nte_instrument_emits_task_hours_ledger(self) -> None:
+        from app.models.pricing_instrument import PricingInstrument, PricingTrack
+        from app.models.proposal import VerifiedRate
+
+        budget = ProposalBudget(
+            rfpId="r1",
+            updatedAt="t",
+            budgetFormat="personnel_loading",
+            rfpBudgetCap=950_000.0,
+            commissionRate=0.15,
+            verifiedRates=[
+                VerifiedRate(
+                    personName="",
+                    role="Account Manager",
+                    hourlyRate=275,
+                    source="Labor Cost",
+                ),
+                VerifiedRate(
+                    personName="",
+                    role="Programming",
+                    hourlyRate=400,
+                    source="Labor Cost",
+                ),
+                VerifiedRate(
+                    personName="",
+                    role="Creative Director",
+                    hourlyRate=275,
+                    source="Labor Cost",
+                ),
+            ],
+            lineItems=[
+                BudgetLineItem(
+                    id="li-1",
+                    category="labor",
+                    description="Account Manager",
+                    roleTitle="Account Manager",
+                    unit="hour",
+                    quantity=1,
+                    rate=275,
+                    extended=275,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        instrument = PricingInstrument(
+            kind="personnel_loading",
+            confidence=0.9,
+            tracks=[
+                PricingTrack(
+                    id="t1",
+                    label="Compensation",
+                    nteAnnual=950_000.0,
+                    asksHourly=True,
+                    asksHours=True,
+                )
+            ],
+        )
+        md = render_budget_markdown(
+            budget, rfp_text="SOW cost proposal.", pricing_instrument=instrument
+        )
+        self.assertIn("Task Hours & Cost Ledger", md)
+        self.assertIn("MANUAL FILL: hours", md)
+        self.assertIn("Account Manager", md)
+        self.assertIn("Programming", md)
+        self.assertIn("950,000", md)
+        self.assertIn("85%", md)
+        self.assertIn("15%", md)
+        self.assertIn("Guide 6.1", md)
+        self.assertNotIn("This table answers", md)
+        self.assertNotIn("master contract", md.casefold())
+        self.assertNotIn("pass-through at cost", md.casefold())
 
     def test_phased_format_keeps_phase_table(self) -> None:
         budget = ProposalBudget(

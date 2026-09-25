@@ -246,13 +246,6 @@ def render_personnel_loading_form_markdown(
     Returns empty string when there are no bindable rates and no RFP role labels
     (caller must cut the hollow table rather than ship placeholder columns).
     """
-    # Back-office / PO rows from the role card — not client Cost File classifications.
-    _skip_roles = frozenset({"contractor", "executive", "finance"})
-    # Rate-card internal labels → titles that match 04_Bio / client-facing schedule.
-    _display_alias = {
-        "programming": "Senior Web Developer",
-    }
-
     def _sanitize_role_label(label: str) -> str:
         """Strip LLM meta-chrome; keep clean labor-category names only."""
         text = (label or "").strip()
@@ -277,7 +270,7 @@ def render_personnel_loading_form_markdown(
     def _display_role(label: str) -> str | None:
         cleaned = _sanitize_role_label(label)
         key = cleaned.casefold().strip()
-        if not key or key in _skip_roles:
+        if not key:
             return None
         # Reject labels that are still meta / incomplete after sanitize.
         if len(key) < 3 or key.endswith(("(", "categor", "category")):
@@ -292,7 +285,7 @@ def render_personnel_loading_form_markdown(
             )
         ):
             return None
-        return _display_alias.get(key, cleaned)
+        return cleaned
 
     def _roles_from_verified() -> list[str]:
         """Prefer Labor Cost / verifiedRates labels — clean, deduped, KB-grounded."""
@@ -365,11 +358,7 @@ def render_personnel_loading_form_markdown(
     for role in roles:
         rate_val: float | None = None
         role_cf = role.casefold()
-        # Match alias reverse (Senior Web Developer ← Programming line).
         match_keys = {role_cf}
-        for raw, alias in _display_alias.items():
-            if alias.casefold() == role_cf:
-                match_keys.add(raw)
         for item in budget.line_items:
             if item.id in used_ids:
                 continue
@@ -418,23 +407,17 @@ def render_personnel_loading_form_markdown(
         lines = [
             "## Cost Proposal — Hourly Rate Schedule",
             "",
-            "This table answers the RFP's scored Cost / hourly-rate instrument "
-            "(labor categories with Year-2 / Year-3 percentage increases). "
-            "Do not substitute a fixed-fee retainer for this form.",
-            "",
             "| Role / Labor Category | Year-1 Hourly Rate | Year-2 % Increase | Year-3 % Increase |",
             "| --- | ---: | ---: | ---: |",
         ]
         for role, rate_cell, y2_cell, y3_cell in rate_rows:
             lines.append(f"| {role} | {rate_cell} | {y2_cell} | {y3_cell} |")
     else:
+        # No YoY ask → plain "Hourly Rate" (do not imply an escalation schedule).
         lines = [
             "## Cost Proposal — Hourly Rate Schedule",
             "",
-            "This table answers the RFP's scored Cost / hourly-rate instrument "
-            "(labor categories). Do not substitute a fixed-fee retainer for this form.",
-            "",
-            "| Role / Labor Category | Year-1 Hourly Rate |",
+            "| Role / Labor Category | Hourly Rate |",
             "| --- | ---: |",
         ]
         for role, rate_cell, _, _ in rate_rows:
@@ -442,6 +425,144 @@ def render_personnel_loading_form_markdown(
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _instrument_asks_hours(pricing_instrument: PricingInstrument | None) -> bool:
+    """True when any track asks for hours (staffed hours matrix)."""
+    if pricing_instrument is None:
+        return False
+    for track in pricing_instrument.tracks or []:
+        if bool(getattr(track, "asks_hours", False)):
+            return True
+    return False
+
+
+def _instrument_wants_hours_ledger(
+    pricing_instrument: PricingInstrument | None,
+    *,
+    nte: float | None,
+) -> bool:
+    """Hours matrix when SOW asks hours, or hourly rates under a positive NTE."""
+    if _instrument_asks_hours(pricing_instrument):
+        return True
+    if pricing_instrument is None or nte is None or float(nte) <= 0:
+        return False
+    for track in pricing_instrument.tracks or []:
+        if bool(getattr(track, "asks_hourly", False)):
+            return True
+    return False
+
+
+def _schedule_roles_and_rates(
+    budget: ProposalBudget,
+) -> list[tuple[str, float]]:
+    """Clean role → hourly pairs for schedule / hours ledger (Labor Cost first)."""
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for vr in budget.verified_rates or []:
+        role = (vr.role or "").strip()
+        rate = float(vr.hourly_rate or 0)
+        if not role or rate <= 0:
+            continue
+        key = role.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((role, rate))
+    if len(out) >= 2:
+        return out
+    for item in budget.line_items or []:
+        unit = (item.unit or "").casefold()
+        if unit not in {"hour", "hours", "hr", "hrs"}:
+            continue
+        role = (item.role_title or item.description or "").strip()
+        role = re.split(r"\s*[—–]\s*", role, maxsplit=1)[0].strip()
+        rate = _hourly_rate_from_line(item)
+        if rate is None and item.rate is not None:
+            rate = float(item.rate)
+        if not role or rate is None or float(rate) <= 0:
+            continue
+        key = role.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((role, float(rate)))
+    return out
+
+
+def render_task_hours_cost_ledger_markdown(
+    budget: ProposalBudget,
+    *,
+    nte: float | None = None,
+) -> str:
+    """Task ID × role × hours × rate × cost matrix for hourly+NTE instruments.
+
+    Hours/cost stay MANUAL FILL when unknown — never invent a hours allocation.
+    Rates come from verified Labor Cost / priced hourlies. Ceiling row when NTE set.
+    """
+    pairs = _schedule_roles_and_rates(budget)
+    if not pairs:
+        return ""
+    ceiling = nte
+    if ceiling is None:
+        try:
+            cap = float(budget.rfp_budget_cap or 0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        ceiling = cap if cap > 0 else None
+
+    lines = [
+        "## Task Hours & Cost Ledger",
+        "",
+        "Each task authorization lists Task ID, assigned role, hours, the rate from "
+        "the Hourly Rate Schedule, and the resulting cost before work begins.",
+        "",
+        "| Task ID | Role / Labor Category | Hours | Hourly Rate | Cost |",
+        "| --- | --- | ---: | ---: | ---: |",
+    ]
+    for role, rate in pairs:
+        lines.append(
+            f"| [MANUAL FILL: Task ID] | {role} | [MANUAL FILL: hours] | "
+            f"{_usd(rate)} | [MANUAL FILL: cost] |"
+        )
+    if ceiling is not None and float(ceiling) > 0:
+        lines.append(
+            f"| **Not-to-Exceed (contract ceiling)** | | | | **{_usd(float(ceiling))}** |"
+        )
+    lines.append("")
+    lines.append(
+        "Priced task rows plus any unpriced remaining scope must stay at or under "
+        f"the not-to-exceed ceiling"
+        + (f" of {_usd(float(ceiling))}" if ceiling else "")
+        + "."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _media_commission_terms_markdown(budget: ProposalBudget) -> str:
+    """Guide-backed media terms when commission_rate is on the ledger."""
+    commission = getattr(budget, "commission_rate", None)
+    if commission is None:
+        return ""
+    try:
+        rate = float(commission)
+    except (TypeError, ValueError):
+        return ""
+    if rate <= 0:
+        return ""
+    rate_pct = rate * 100.0 if rate <= 1.0 else rate
+    agency_share = rate_pct if rate_pct <= 50 else (100.0 - rate_pct)
+    client_share = 100.0 - agency_share
+    return (
+        "## Media Planning & Buying\n\n"
+        f"Media buying follows the agency's documented commission model "
+        f"({client_share:.0f}% placements / {agency_share:.0f}% agency), consistent "
+        f"with Guide 6.1 Traditional Media. Client-directed placement dollars are "
+        f"invoiced at net; agency commission covers strategy, negotiation, placement, "
+        f"and reporting. "
+        f"[VERIFY: Sonja — confirm Guide 6.1 invoicing language on the final Cost File.]\n"
+    )
 
 
 def _rfp_is_tm_letter_proposal(rfp_text: str) -> bool:
@@ -483,11 +604,13 @@ def _personnel_schedule_cost_file_markdown(
     *,
     rfp_text: str,
     personnel_md: str,
+    pricing_instrument: PricingInstrument | None = None,
 ) -> str:
     """Deterministic Cost File for schedule-only personnel_loading (on-call T&M).
 
     No Proposed Investment total (hourly rows are rates, not a project fee).
     No Fee Detail / flat-phase framing.
+    When the instrument asks hours under an NTE, append a Task ID hours ledger.
     """
     lines: list[str] = []
     if re.search(r"(?i)cost\s+file|separate\s+file|sealed", rfp_text or ""):
@@ -503,6 +626,40 @@ def _personnel_schedule_cost_file_markdown(
         )
     lines.append(personnel_md.rstrip())
     lines.append("")
+
+    nte = primary_instrument_nte(pricing_instrument)
+    if nte is None:
+        try:
+            cap = float(budget.rfp_budget_cap or 0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        nte = cap if cap > 0 else None
+
+    # Hourly + hours ask (or hourly rates under an NTE) → hours matrix.
+    wants_hours = _instrument_wants_hours_ledger(pricing_instrument, nte=nte)
+    if wants_hours:
+        ledger = render_task_hours_cost_ledger_markdown(budget, nte=nte)
+        if ledger:
+            lines.append(ledger.rstrip())
+            lines.append("")
+
+    media_md = _media_commission_terms_markdown(budget)
+    if media_md:
+        lines.append(media_md.rstrip())
+        lines.append("")
+
+    if nte is not None and float(nte) > 0:
+        lines.extend(
+            [
+                "## Not-to-Exceed Total Contract Amount",
+                "",
+                f"zö agency's not-to-exceed figure for this engagement is "
+                f"**{_usd(float(nte))}**, the budget ceiling stated in the SOW "
+                f"Cost / Compensation section. Invoicing follows the Cost Proposal "
+                f"Hourly Rate Schedule and the Task Hours & Cost Ledger.",
+                "",
+            ]
+        )
 
     if _rfp_is_tm_letter_proposal(rfp_text):
         lines.extend(
@@ -543,6 +700,14 @@ def _personnel_schedule_cost_file_markdown(
             desc = (item.description or item.category or "").strip()
             if desc and desc not in reimb_bits:
                 reimb_bits.append(desc[:240])
+    # SOW-style pre-auth travel / expenses toward NTE.
+    sow_travel = bool(
+        re.search(
+            r"(?i)(?:pre[- ]?authoriz|prior\s+(?:written\s+)?approv).{0,40}travel"
+            r"|travel.{0,40}(?:pre[- ]?authoriz|not\s+reimburs)",
+            rfp_text or "",
+        )
+    )
     lines.extend(["## Reimbursable Expenses", ""])
     if reimb_bits:
         for bit in reimb_bits[:6]:
@@ -550,6 +715,12 @@ def _personnel_schedule_cost_file_markdown(
         lines.append(
             "- Billed at cost only with prior written approval in the applicable "
             "Letter Proposal; not included in hourly professional fees."
+        )
+    elif sow_travel:
+        lines.append(
+            "Routine contractor travel is not reimbursed. Pre-authorized travel and "
+            "other expenses approved in writing by the Department count toward the "
+            "not-to-exceed ceiling and are billed at cost."
         )
     else:
         lines.append(
@@ -3299,6 +3470,21 @@ def render_budget_markdown(
         elif wants_personnel and not _has_priced_fixed_fees():
             also_wants_fee_detail = False
 
+    # Instrument hourly+hours+NTE wins over LLM-invented Guide SKU fixed fees —
+    # those fixed lines must not divert the Cost File into Proposed Investment.
+    nte_for_path = primary_instrument_nte(pricing_instrument)
+    if nte_for_path is None:
+        try:
+            cap = float(budget.rfp_budget_cap or 0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        nte_for_path = cap if cap > 0 else None
+    force_hours_schedule = wants_personnel and _instrument_wants_hours_ledger(
+        pricing_instrument, nte=nte_for_path
+    )
+    if force_hours_schedule:
+        also_wants_fee_detail = False
+
     if wants_personnel:
         personnel_md = render_personnel_loading_form_markdown(
             budget, rfp_text=rfp_text
@@ -3309,11 +3495,12 @@ def render_budget_markdown(
             # Schedule-only Cost File (on-call T&M / billing rates): do not invent
             # a Proposed Investment total from hourly rate rows, Fee Detail, or
             # flat-phase Terms — those contradict Draft Agreement time-and-expense.
-            if not _has_priced_fixed_fees():
+            if force_hours_schedule or not _has_priced_fixed_fees():
                 schedule_md = _personnel_schedule_cost_file_markdown(
                     budget,
                     rfp_text=rfp_text,
                     personnel_md=personnel_md,
+                    pricing_instrument=pricing_instrument,
                 )
                 from app.services.proposal_manuscript import (
                     scrub_client_facing_section_artifacts,
