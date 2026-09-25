@@ -67,6 +67,7 @@ from app.services.proposal_budget_playbook import (
     BUDGET_EXPLAIN_ADVISORY_RULES,
     apply_budget_freeform_postprocess,
     augment_cost_section_requirements,
+    budget_chat_should_collapse_duplicate_cost_tabs,
     budget_playbook_prompt_block,
     pack_budget_compliance_advisory_block,
     refuse_noncompliant_budget_edit,
@@ -9216,7 +9217,7 @@ async def improve_proposal_section(
 
         # Frozen legacy budgets: their Cost tabs are ordinary text — never collapse.
         cost_logs: list[str] = []
-        if research and research.budget and research.budget.pricing_plan:
+        if budget_chat_should_collapse_duplicate_cost_tabs(research):
             collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(
                 list(draft.sections)
             )

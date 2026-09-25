@@ -199,6 +199,17 @@ def should_apply_budget_playbook(section: ProposalSection, user_message: str = "
     return section_is_budget_related(section)
 
 
+def budget_chat_should_collapse_duplicate_cost_tabs(
+    research: ProposalResearchCache | None,
+) -> bool:
+    """Gate for the chat-path Cost tab collapse (proposal_section_editor.improve_proposal_section).
+
+    Frozen legacy budgets (no pricing_plan) are ordinary manuscript text — never
+    collapse/merge their Cost tabs. Only v2 (pricing-plan) budgets get the collapse.
+    """
+    return bool(research and research.budget and research.budget.pricing_plan)
+
+
 def user_asks_budget_summary_reconcile(text: str) -> bool:
     """True when the user wants narrative totals fixed from the existing fee table.
 

@@ -986,6 +986,74 @@ class PricingPlanScanSkipsNotePatchTests(unittest.TestCase):
         self.assertEqual(out_draft.sections[0].content, healthy)
         self.assertFalse(meta["budgetChanged"])
 
+    def test_official_form_path_makes_no_llm_call(self) -> None:
+        """M3 guard: a filled official Pricing Form on a v2 budget must not trigger
+        the RFP-facts LLM call or the note patch, and budgetChanged stays false
+        when the form is already clean (no handoff tags, no placeholders)."""
+        rfp_id = "rfp-v2-official-form"
+        # Dollar mismatch vs the canonical budget total forces
+        # budget_manuscript_needs_restore True, which is what routes this scan
+        # past the early "already adds up" no-op and into the dedicated
+        # is_filled_official_form branch (~595) that the M3 guard covers.
+        form = (
+            "### Section I: Contact Information\n"
+            "RFQ NUMBER: 26-070-WIOA\n"
+            "CONTACT PERSON: Ron Comer\n"
+            "CONTACT EMAIL: ron@zo.agency\n\n"
+            "| ITEM | EXTENDED |\n| --- | ---: |\n| Services | $100,000 |\n"
+            "GRAND TOTAL (In words): One Hundred Thousand Dollars\n"
+        )
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="rfp-pricing",
+                    title="Request for Qualifications Pricing Form",
+                    content=form,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=ProposalBudget(
+                pricingPlan=_PLAN,
+                rfpId=rfp_id,
+                updatedAt="2026-08-05T00:00:00+00:00",
+                lineItems=[
+                    BudgetLineItem(
+                        id="L1",
+                        description="Services",
+                        category="Labor",
+                        extended=150_000,
+                        lineItemType="agency_fee",
+                    )
+                ],
+                lumpSumTotal=150_000,
+                totalClientInvoicing=150_000,
+            ),
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+
+        llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
+        with patch.object(scan_mod, "extract_rfp_scoring_facts_llm", new=llm):
+            _out, _r, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Complete the RFQ Pricing Form.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+        llm.assert_not_awaited()
+        self.assertFalse(meta["budgetChanged"])
+        self.assertTrue(any("official Pricing Form already filled" in line for line in logs))
+
     def test_final_rerender_path_makes_no_llm_call(self) -> None:
         """Hollow Cost tab forces the main re-render path (not the early no-op path) —
         the final note-patch step must still skip its LLM call for a v2 budget."""
