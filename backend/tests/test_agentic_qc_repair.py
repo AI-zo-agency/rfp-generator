@@ -83,5 +83,60 @@ class AgenticQcSelectionTests(unittest.TestCase):
         self.assertEqual(toc[1], "§2.2 — Todd Anderson")
 
 
+class AgenticQcSkipsCostSectionTests(unittest.TestCase):
+    def test_skip_section_ids_never_rewritten(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.services import proposal_agentic_qc_repair as qc
+
+        cost = _sec("section-budget-pricing", "Budget & Pricing", "Fees cover the Disabled .")
+        draft = ProposalDraft(rfpId="r1", updatedAt="t", sections=[cost])
+        self.assertTrue(detect_qc_defect_reasons(cost))
+        rewrite = AsyncMock(return_value="rewritten cost text")
+        with patch.object(qc.llm, "is_configured", return_value=True), patch.object(
+            qc, "_agent_rewrite_section", new=rewrite
+        ):
+            out, logs = asyncio.run(
+                qc.run_agentic_manuscript_qc_repair(
+                    draft, skip_section_ids={"section-budget-pricing"}
+                )
+            )
+        rewrite.assert_not_awaited()
+        self.assertEqual(out.sections[0].content, cost.content)
+        self.assertEqual(logs, [])
+
+    def test_persist_guard_passes_cost_section_as_skip(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_zero_fabrication import (
+            apply_zero_fabrication_guards_before_persist,
+        )
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                _sec("s1", "Approach", "We will do the work."),
+                _sec("section-budget-pricing", "Budget & Pricing", "| Fees | $1 |"),
+            ],
+        )
+
+        async def _fake(d, **kwargs):
+            return d, []
+
+        qc_mock = AsyncMock(side_effect=_fake)
+        with patch(
+            "app.services.proposal_agentic_qc_repair.run_agentic_manuscript_qc_repair",
+            new=qc_mock,
+        ):
+            asyncio.run(apply_zero_fabrication_guards_before_persist(draft))
+        qc_mock.assert_awaited_once()
+        self.assertEqual(
+            qc_mock.await_args.kwargs.get("skip_section_ids"), {"section-budget-pricing"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

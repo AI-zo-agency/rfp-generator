@@ -2437,8 +2437,16 @@ async def _run_fulfill_rfp_gaps_body(
                 step_total=len(FULFILL_STEPS),
                 in_progress_phase="fulfill-scan",
             )
+            from app.services.proposal_budget_content import find_budget_section_index
+
+            # Never LLM-rewrite the Cost section (plan-rendered or frozen legacy).
+            cost_idx = find_budget_section_index(draft.sections)
             draft, qc_logs = await run_agentic_manuscript_qc_repair(
-                draft, rfp_text=rfp_text
+                draft,
+                rfp_text=rfp_text,
+                skip_section_ids=(
+                    {draft.sections[cost_idx].id} if cost_idx is not None else set()
+                ),
             )
             report["logs"].extend(qc_logs)
             if qc_logs:

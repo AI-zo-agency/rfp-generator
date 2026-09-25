@@ -455,8 +455,14 @@ async def apply_zero_fabrication_guards_before_persist(
                 run_agentic_manuscript_qc_repair,
             )
 
+            from app.services.proposal_budget_content import find_budget_section_index
+
+            # The Cost section is plan-rendered (v2) or frozen as saved (legacy):
+            # never LLM-rewrite it.
+            cost_idx = find_budget_section_index(draft.sections)
+            cost_skip = {draft.sections[cost_idx].id} if cost_idx is not None else set()
             draft, qc_logs = await run_agentic_manuscript_qc_repair(
-                draft, rfp_text=rfp_text, max_sections=8
+                draft, rfp_text=rfp_text, max_sections=8, skip_section_ids=cost_skip
             )
             for line in qc_logs:
                 report.logs.append(f"{label}: agentic QC — {line}")

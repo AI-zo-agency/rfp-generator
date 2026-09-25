@@ -306,8 +306,12 @@ async def run_agentic_manuscript_qc_repair(
     *,
     rfp_text: str = "",
     max_sections: int = _MAX_SECTIONS,
+    skip_section_ids: set[str] | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
-    """LLM-fix QC leftovers on flagged tabs only (cost-bounded)."""
+    """LLM-fix QC leftovers on flagged tabs only (cost-bounded).
+
+    ``skip_section_ids`` are never rewritten (e.g. the Cost section).
+    """
     if not llm.is_configured():
         return draft, []
 
@@ -317,6 +321,8 @@ async def run_agentic_manuscript_qc_repair(
 
     flagged: list[tuple[ProposalSection, list[str]]] = []
     for section in draft.sections:
+        if skip_section_ids and section.id in skip_section_ids:
+            continue
         reasons = detect_qc_defect_reasons(section)
         if reasons:
             flagged.append((section, reasons))
