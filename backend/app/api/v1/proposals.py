@@ -57,6 +57,7 @@ from app.services.proposal_repository import (
     save_proposal_draft,
     aget_research_cache,
     asave_proposal_draft,
+    asave_research_cache,
     adelete_proposal_draft,
     adelete_research_cache,
 )
@@ -1060,6 +1061,12 @@ class Phase35BudgetRequest(BaseModel):
             "Set false for Advanced options → Generate budget (stop after Phase 3.5)."
         ),
     )
+    target_budget_usd: float | None = Field(
+        default=None,
+        alias="targetBudgetUsd",
+        ge=0,
+        description="Budget anchor when the RFP states no ceiling. 0 clears it.",
+    )
 
 
 @router.post(
@@ -1072,6 +1079,13 @@ async def phase3_5_budget_endpoint(
     """Start Phase 3.5 budget in the background; poll GET /proposal for completion."""
 
     chain_next = True if body is None else bool(body.chain_next)
+
+    if body is not None and "target_budget_usd" in body.model_fields_set:
+        research = await aget_research_cache(rfp_id)
+        if research is not None:
+            await asave_research_cache(
+                research.model_copy(update={"target_budget_usd": body.target_budget_usd or None})
+            )
 
     async def work() -> None:
         await run_phase3_5_budget(rfp_id)

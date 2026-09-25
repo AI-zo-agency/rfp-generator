@@ -496,6 +496,11 @@ function ProposalDraftWorkspaceInner({
   const [activeSubmissionFlag, setActiveSubmissionFlag] = useState<ManualFillFlag | null>(null);
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
+  const [budgetTarget, setBudgetTarget] = useState<string>("");
+  useEffect(() => {
+    const saved = research?.targetBudgetUsd;
+    setBudgetTarget(saved ? String(Math.round(saved)) : "");
+  }, [research?.targetBudgetUsd]);
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2628,6 +2633,7 @@ function ProposalDraftWorkspaceInner({
         await runPhase3_5BudgetWithRecovery(rfp.id, undefined, {
           // Standalone Advanced action — do not Celery-chain into Senior editor.
           chainNext: false,
+          targetBudgetUsd: budgetTarget.trim() ? Number(budgetTarget) : null,
         });
       if (draft) {
         applyOutlineFromServer(draft);
@@ -2659,6 +2665,7 @@ function ProposalDraftWorkspaceInner({
     isGeneratingBudget,
     anyPipelineRunning,
     applyOutlineFromServer,
+    budgetTarget,
   ]);
 
   // "Already cleaned" for this draft — true from this session's just-finished run
@@ -4519,6 +4526,19 @@ function ProposalDraftWorkspaceInner({
                     </button>
                   </CapabilityHoverTip>
                   <div className="my-1 h-px bg-zo-border/60" />
+                  <label className="block px-2.5 pt-1 text-[11px] text-muted-foreground">
+                    Target budget (only used when the RFP states no ceiling)
+                    <input
+                      type="number"
+                      min={0}
+                      step={1000}
+                      inputMode="numeric"
+                      value={budgetTarget}
+                      onChange={(e) => setBudgetTarget(e.target.value)}
+                      placeholder="e.g. 150000"
+                      className="mt-1 block w-full rounded-md border border-zo-border bg-background px-2 py-1 text-xs"
+                    />
+                  </label>
                   <button
                     type="button"
                     role="menuitem"

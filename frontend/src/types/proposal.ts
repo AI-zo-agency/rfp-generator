@@ -195,6 +195,8 @@ export interface ProposalResearch {
   retrievalRounds: number;
   coverageThreshold: number;
   budget?: ProposalBudget | null;
+  /** Agency-set budget anchor used when the RFP states no ceiling. */
+  targetBudgetUsd?: number | null;
   lossLessons?: LossLesson[];
   writingAvoidances?: string[];
   proofPoints?: ProofPoint[];

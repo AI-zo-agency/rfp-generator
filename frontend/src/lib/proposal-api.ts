@@ -400,7 +400,7 @@ export async function recoverProposalDraftIfSaved(
 export async function runPhase3_5BudgetWithRecovery(
   rfpId: string,
   signal?: AbortSignal,
-  options?: { chainNext?: boolean }
+  options?: { chainNext?: boolean; targetBudgetUsd?: number | null }
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
@@ -1889,16 +1889,16 @@ export async function runPhase3_6SelfEdit(
 export async function runPhase3_5Budget(
   rfpId: string,
   signal?: AbortSignal,
-  options?: { chainNext?: boolean }
+  options?: { chainNext?: boolean; targetBudgetUsd?: number | null }
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
   draft: ProposalOutline | null;
 }> {
-  const body =
-    options?.chainNext === false
-      ? JSON.stringify({ chainNext: false })
-      : undefined;
+  const payload: Record<string, unknown> = {};
+  if (options?.chainNext === false) payload.chainNext = false;
+  if (options?.targetBudgetUsd !== undefined) payload.targetBudgetUsd = options.targetBudgetUsd ?? 0;
+  const body = Object.keys(payload).length ? JSON.stringify(payload) : undefined;
   const result = await runProposalPhaseAsync(
     rfpId,
     "phase-3-5-budget",

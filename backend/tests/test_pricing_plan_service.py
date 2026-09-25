@@ -114,3 +114,18 @@ class RenderSwitchTests(unittest.IsolatedAsyncioTestCase):
         out, report = apply_zero_fabrication_guards(draft, budget=budget, rfp_text=RFP)
         self.assertEqual(out.sections[1].content.strip(), svc.render_pricing_plan_budget(budget).strip())
         self.assertTrue(any("pricing plan" in line for line in report.logs))
+
+
+class TargetBudgetEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_target_saved_before_budget_job(self) -> None:
+        from app.api.v1 import proposals as api
+        from app.models.proposal import ProposalResearchCache
+
+        research = ProposalResearchCache(rfpId="r1", updatedAt="t")
+        with patch.object(api, "aget_research_cache", AsyncMock(return_value=research)), \
+             patch.object(api, "asave_research_cache", AsyncMock()) as save, \
+             patch.object(api, "_enqueue_pipeline_phase", AsyncMock(return_value="queued")):
+            await api.phase3_5_budget_endpoint(
+                "r1", api.Phase35BudgetRequest(chainNext=False, targetBudgetUsd=180000)
+            )
+        self.assertEqual(save.await_args.args[0].target_budget_usd, 180000)
