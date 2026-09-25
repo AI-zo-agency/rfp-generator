@@ -60,13 +60,8 @@ This document provides a comprehensive inventory of all files containing **promp
 * [`backend/app/services/proposal_money_intelligence.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_money_intelligence.py)
   * `_PASS_A_PROMPT` (Line 31) — Triages dollar figures mentioned outside budget tables.
   * `_PASS_B_PROMPT` (Line 166) — Budget narrative and math integrity checker.
-* [`backend/app/services/proposal_budget_sync.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_budget_sync.py)
-  * `FEE_SLOT_PLAN_PROMPT` (Line 32) — Synchronizes narrative pricing with canonical budget tables.
-  * `FEE_GROUNDING_CHECK_PROMPT` (Line 53) — Verifies narrative fee claims against evidence.
 * [`backend/app/services/proposal_manuscript_auditor.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_manuscript_auditor.py#L27)
   * `_AUDIT_PROMPT` — Whole-manuscript adversarial auditor prompt.
-* [`backend/app/services/proposal_fee_justification.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_fee_justification.py#L16)
-  * `FEE_MEMO_PROMPT` — Generates internal pricing rationale memos.
 * [`backend/app/services/proposal_proof_points.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_proof_points.py#L23)
   * `PROOF_POINT_PROMPT` — Proof point extraction prompt.
 * [`backend/app/services/proposal_loss_lessons.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_loss_lessons.py#L18)
@@ -123,8 +118,6 @@ This document provides a comprehensive inventory of all files containing **promp
   * Detects cross-section contradictions in timelines, point of contact names, and company details.
 * [`backend/app/services/proposal_consistency_enforcement.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_consistency_enforcement.py)
   * Enforces primary contact info, scrubbed schedule overruns, and methodology alignment.
-* [`backend/app/services/proposal_manuscript_budget_contradictions.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_manuscript_budget_contradictions.py)
-  * Cross-verifies dollar values in text against the canonical budget table.
 * [`backend/app/services/proposal_manuscript_fact_contradictions.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_manuscript_fact_contradictions.py)
   * Cross-verifies facts across all draft sections for consistency.
 * [`backend/app/services/proposal_scan_rfp_contradictions.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_scan_rfp_contradictions.py)
@@ -139,14 +132,12 @@ This document provides a comprehensive inventory of all files containing **promp
   * Removes unresolvable `[VERIFY: ...]` tags when details cannot be corroborated.
 
 ### **Budget & Financial Guardrails**
+* [`backend/app/services/pricing_plan_engine.py`](../backend/app/services/pricing_plan_engine.py)
+  * Pricing plan v2 engine (pure code): all money math, tier choice, plan checks, and the Cost section render.
+* [`backend/app/services/pricing_plan_service.py`](../backend/app/services/pricing_plan_service.py)
+  * Pricing plan v2 pipeline (the only budget path): RFP asks → LLM plan → engine checks/repair → ProposalBudget; writes `[PRICING FLAG: …]` / `[PRICING NOTE — …]` entries.
 * [`backend/app/services/proposal_budget_validation.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_budget_validation.py)
   * Strict budget schema, rate floor, and math validator.
-* [`backend/app/services/proposal_budget_floor.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_budget_floor.py)
-  * Enforces minimum agency pricing floors.
-* [`backend/app/services/proposal_scan_budget_check.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_scan_budget_check.py)
-  * Validates budget line item totals against overall bid amounts.
-* [`backend/app/services/commission_budget_sanitizer.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/commission_budget_sanitizer.py)
-  * Sanitizes media buying commission calculations.
 
 ### **Section Isolation, Health & Quality**
 * [`backend/app/services/proposal_section_health.py`](file:///Users/mahipatel/ZO-AGENCY/backend/app/services/proposal_section_health.py)
