@@ -2962,6 +2962,27 @@ async def run_phase3_5_budget_reconcile(
 
     budget, research = await reconcile_cached_budget(rfp_id)
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
+
+    if budget.pricing_plan:
+        # v2 budget: the plan is final from its own checker. Skip the entire
+        # legacy chain below (format judge, coerce, instrument reshape, phase
+        # sync, fee-narrative LLM, grounding repair) and reuse the same
+        # early-exit Phase 3.5 already takes (commit 15f9cdf).
+        from app.core.config import settings as app_settings
+
+        draft_existing = await aget_proposal_draft(rfp_id)
+        has_manuscript = bool(
+            draft_existing and any(s.content.strip() for s in draft_existing.sections)
+        )
+        return await _finish_phase3_5_pricing_plan(
+            rfp_id,
+            budget,
+            research,
+            rfp_context,
+            app_settings=app_settings,
+            has_manuscript=has_manuscript,
+        )
+
     from app.services.proposal_budget_content import (
         prepare_budget_for_client_display,
         reconcile_draft_budget_summaries,

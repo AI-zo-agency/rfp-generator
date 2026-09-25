@@ -308,5 +308,66 @@ class Phase35PricingPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cost.content.strip(), svc.render_pricing_plan_budget(budget).strip())
 
 
+class ReconcileCachedBudgetPricingPlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconcile_cached_budget_returns_v2_unchanged(self) -> None:
+        from app.models.proposal import ProposalResearchCache
+        from app.services import proposal_pricing_service as ps
+
+        budget = _newport_budget()
+        research = ProposalResearchCache(rfpId="r-newport", updatedAt="t", budget=budget)
+        saved = AsyncMock()
+        with patch.object(ps, "aget_research_cache", AsyncMock(return_value=research)), \
+             patch.object(ps, "load_rfp_for_proposal", return_value=(None, None, "Newport RFP text")), \
+             patch.object(ps, "asave_research_cache", saved):
+            out_budget, out_research = await ps.reconcile_cached_budget("r-newport")
+        self.assertIs(out_budget, budget)
+        self.assertIs(out_research, research)
+        saved.assert_not_awaited()
+
+
+class Phase35ReconcilePricingPlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconcile_places_plan_and_skips_legacy_chain(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
+        from app.services import proposal_budget_content as pbc
+        from app.services import proposal_generator as gen
+        from app.services import proposal_pricing_service as ps
+
+        budget = _newport_budget()
+        research = ProposalResearchCache(rfpId="r-newport", updatedAt="t", budget=budget)
+        draft = ProposalDraft(
+            rfpId="r-newport", updatedAt="t",
+            sections=[
+                ProposalSection(id="s1", title="Approach", content="We will plan.", status="generated"),
+                ProposalSection(id="s2", title="Budget & Pricing", content="old legacy fee table", status="generated"),
+            ],
+        )
+        saved = AsyncMock()
+        with patch.object(ps, "reconcile_cached_budget", AsyncMock(return_value=(budget, research))), \
+             patch.object(gen, "_assert_proposal_not_reset", AsyncMock()), \
+             patch.object(gen, "load_rfp_for_proposal", return_value=(None, None, "Newport RFP text")), \
+             patch.object(gen, "aget_proposal_draft", AsyncMock(return_value=draft)), \
+             patch.object(gen, "asave_proposal_draft", saved), \
+             patch.object(pbc, "aget_proposal_draft", AsyncMock(return_value=draft)), \
+             patch.object(pbc, "asave_proposal_draft", AsyncMock()), \
+             patch.object(gen, "run_budget_editor_pass", _fail("run_budget_editor_pass")), \
+             patch("app.services.proposal_budget_validation.reconcile_proposal_budget", _fail("reconcile")), \
+             patch("app.services.proposal_budget_format_judge.judge_rfp_budget_format", _fail("format judge")), \
+             patch.object(gen, "align_fee_narrative_with_budget", _fail("align_fee_narrative")), \
+             patch.object(gen, "run_budget_grounding_check", _fail("grounding check")), \
+             patch.object(pbc, "sync_phase_budget_tables_across_draft", _fail("phase table sync")), \
+             patch.object(ps, "coerce_budget_to_phased_from_guide", _fail("coerce")), \
+             patch.object(pbc, "apply_rfp_required_budget_instrument", _fail("instrument reshape")):
+            out_draft, out_research, out_budget = await gen.run_phase3_5_budget_reconcile("r-newport")
+        self.assertIs(out_budget, budget)
+        self.assertEqual(out_budget.budget_format, "pricing_plan")
+        self.assertEqual(out_budget.line_items, budget.line_items)
+        self.assertEqual(out_budget.pricing_plan, budget.pricing_plan)
+        self.assertIs(out_research, research)
+        final = saved.await_args.args[0]
+        self.assertIs(final, out_draft)
+        cost = next(s for s in final.sections if s.id == "s2")
+        self.assertEqual(cost.content.strip(), svc.render_pricing_plan_budget(budget).strip())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2989,6 +2989,11 @@ async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, Proposal
             "No cached budget to reconcile. Run Phase 3.5 budget generation first.",
             status_code=400,
         )
+    if research.budget.pricing_plan:
+        # v2 budget: the plan is final from its own checker. No sanitize/rate-card
+        # binding/editor pass, no save — caller (run_phase3_5_budget_reconcile)
+        # routes pricing-plan budgets to the plan renderer instead.
+        return research.budget, research
 
     from app.models.pricing_contract import PricingContract
     from app.services.commission_budget_sanitizer import sanitize_commission_budget
