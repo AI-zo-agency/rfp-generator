@@ -1211,7 +1211,7 @@ async def run_verify_scrub_only_scan(
         "truncation_repaired=%s truncation_repaired_titles=%s "
         "truncation_still_truncated_ids=%s truncated_sections=%s truncated_titles=%s "
         "unverified_claims=%s submission_needs_drafting=%s submission_needs_attachment=%s "
-        "submission_needs_attachment_titles=%s budget_status=%s budget_changed=%s",
+        "submission_needs_attachment_titles=%s",
         rfp_id,
         report.get("sectionsScanned"),
         report.get("verifyTagsRemoved"),
@@ -1231,8 +1231,6 @@ async def run_verify_scrub_only_scan(
         report.get("submissionNeedsDraftingCount"),
         report.get("submissionNeedsAttachmentCount"),
         report.get("submissionNeedsAttachmentTitles"),
-        report.get("budgetStatus"),
-        report.get("budgetChanged"),
     )
     return review, updated_research, draft, report
 

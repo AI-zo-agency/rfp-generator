@@ -178,8 +178,8 @@ async def apply_feedback_blocker_suite(
     fact_contradiction_unresolved = 0
     fact_contradiction_unresolved_titles: list[str] = []
 
-    # ONE combined detection call for all three dimensions (fact / RFP / budget),
-    # instead of three separate full-manuscript audits. Each pass below then
+    # ONE combined detection call for both dimensions (fact / RFP),
+    # instead of separate full-manuscript audits. Each pass below then
     # APPLIES its own findings via precomputed_raw — the per-finding rewrite
     # logic (and its tests) are unchanged; only the detection is consolidated.
     # If the combined call fails, precomputed stays None and each pass runs its
@@ -196,8 +196,8 @@ async def apply_feedback_blocker_suite(
                 draft, rfp=rfp, rfp_text=rfp_text, research=research
             )
             if combined is not None:
-                fact_precomputed, rfp_precomputed, _budget_precomputed = combined
-                logs.append("Contradiction detection: one combined LLM pass (fact + RFP + budget).")
+                fact_precomputed, rfp_precomputed = combined
+                logs.append("Contradiction detection: one combined LLM pass (fact + RFP).")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Combined contradiction detection skipped: %s", exc)
 

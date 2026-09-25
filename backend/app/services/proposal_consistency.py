@@ -456,7 +456,8 @@ def scan_manuscript_consistency(
 
     issues.extend(scan_manuscript_lock_issues(draft=draft, research=research))
 
-    if budget and budget.agency_revenue_estimate:
+    # Legacy-only: reads pre-v2 ledger labels; pricing-plan budgets have their own checks.
+    if budget and budget.agency_revenue_estimate and not budget.pricing_plan:
         # Regex free_currency criticals removed — Pass A (proposal_money_intelligence)
         # owns bid-claim triage. Deterministic labeled mismatches + RFP-authority
         # checks below still run synchronously.

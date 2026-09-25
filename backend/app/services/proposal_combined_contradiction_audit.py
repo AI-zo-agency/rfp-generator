@@ -1,10 +1,10 @@
-"""One combined LLM detection call for all three contradiction dimensions.
+"""One combined LLM detection call for both contradiction dimensions.
 
-Complete & Clean Draft used to run THREE separate full-manuscript audits back to
-back (verified-fact, RFP-requirement, cross-section budget). Each re-sent the
-whole manuscript digest, so the manuscript was shipped to the model three times.
+Complete & Clean Draft used to run separate full-manuscript audits back to
+back (verified-fact, RFP-requirement). Each re-sent the whole manuscript
+digest, so the manuscript was shipped to the model more than once.
 
-This detector sends the manuscript ONCE and returns all three finding lists.
+This detector sends the manuscript ONCE and returns both finding lists.
 Each downstream pass (unchanged) then applies its own findings via
 ``precomputed_raw`` — so the per-finding rewrite logic and its tests are
 untouched; only the detection call is consolidated.
@@ -23,7 +23,7 @@ from app.services.proposal_scan_rfp_contradictions import _manuscript_digest
 logger = logging.getLogger(__name__)
 
 _COMBINED_SYSTEM = """You are a proposal QA editor for zö agency. In ONE pass over
-the manuscript, find contradictions in THREE independent dimensions and return
+the manuscript, find contradictions in TWO independent dimensions and return
 each in its own array. Be precise; only flag REAL issues.
 
 HARD RULE: Nothing in the proposal may contradict anything else — agency facts,
@@ -66,24 +66,6 @@ person's title/role/status that conflicts with a correction is a factContradicti
    complianceReminders (deadlines / labelling rules) — these are NOT contradictions.
    Prefer rewrite when the RFP already states the correct requirement.
 
-3) budgetContradictions — cross-section budget/hours/fee + scope-home consistency:
-   - Double-billed coordination (two fee lines with overlapping scope).
-   - Hours-vs-fee mismatch, phase table not summing to the stated total, or one
-     section stating a total another section contradicts.
-   - Phase label mismatch: Fee Detail cites a phase name/number that another
-     section (Implementation / Approach / Work Plan / etc.) uses for different work.
-     Rewrite citations to match the authoritative phase naming already in the draft.
-   - Orphan workstreams: a named phase or account-management cadence promised
-     elsewhere with no Fee Detail home and no explicit "included in …" statement —
-     rewrite to name the absorbing fee line when safe; verify/human only if Sonja
-     must choose a dedicated Account & Project Management line.
-   - Sidebar/section name drift for the same cost deliverable across tabs.
-   Each: {sectionId, sectionTitle, relatedSectionId, canonicalFact,
-   manuscriptContradiction, severity, fixAction, rewriteInstruction}.
-   canonicalFact = ledger totals or the authoritative phase/naming elsewhere.
-   Prefer rewrite; put the section that needs the wording fix in sectionId
-   (often the Budget tab for citation fixes).
-
 NEVER invent dollar amounts, dates, signature IDs, notary numbers, or client facts.
 severity ∈ critical|major|minor. fixAction ∈ rewrite|verify|human.
 Default to rewrite for critical/major when the correct wording already exists
@@ -93,7 +75,6 @@ Return ONLY JSON:
 {
   "factContradictions": [...],
   "rfpContradictions": [...],
-  "budgetContradictions": [...],
   "attachmentNeeds": ["..."],
   "complianceReminders": ["..."],
   "summary": "one sentence"
@@ -107,10 +88,10 @@ async def detect_all_contradictions(
     rfp_text: str,
     research: ProposalResearchCache | None,
     lean: bool | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    """One LLM call → (fact_raw, rfp_raw, budget_raw), each shaped for the
-    matching pass's ``_parse_findings``. Returns None when detection could not
-    run (caller then falls back to the three separate passes).
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """One LLM call → (fact_raw, rfp_raw), each shaped for the matching pass's
+    ``_parse_findings``. Returns None when detection could not run (caller then
+    falls back to the separate passes).
     """
     if not llm.is_configured():
         return None
@@ -152,7 +133,7 @@ async def detect_all_contradictions(
         f"RFP TEXT (authoritative for dimension 2):\n{(rfp_text or '')[:rfp_cap]}\n\n"
     )
     lean_rule = (
-        "\nLEAN PASS: return at most 8 findings TOTAL across all three arrays "
+        "\nLEAN PASS: return at most 8 findings TOTAL across both arrays "
         "(critical/major only). Prefer empty arrays over padding.\n"
         if lean
         else ""
@@ -196,8 +177,4 @@ async def detect_all_contradictions(
         "complianceReminders": _list("complianceReminders", "compliance_reminders"),
         "summary": summary,
     }
-    budget_raw: dict[str, Any] = {
-        "contradictions": _list("budgetContradictions", "budget_contradictions"),
-        "summary": summary,
-    }
-    return fact_raw, rfp_raw, budget_raw
+    return fact_raw, rfp_raw
