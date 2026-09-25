@@ -184,7 +184,6 @@ class BudgetRegenWiringTests(unittest.TestCase):
         )
 
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
             scan_mod,
@@ -192,11 +191,7 @@ class BudgetRegenWiringTests(unittest.TestCase):
             new=AsyncMock(
                 return_value=(regenerated_draft, regenerated_research, regenerated_budget)
             ),
-        ) as regen, patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
+        ) as regen:
             out_draft, out_research, logs, meta = asyncio.run(
                 run_fulfill_budget_scan(
                     rfp_id=rfp_id,
@@ -271,25 +266,17 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             updatedAt="2026-08-05T00:00:00+00:00",
             budget=budget,
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
-
-        with patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
-            out_draft, _research, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id=rfp_id,
-                    rfp=_rfp(rfp_id),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Submit the Pricing Proposal Form with the proposal.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        out_draft, _research, logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id=rfp_id,
+                rfp=_rfp(rfp_id),
+                draft=draft,
+                research=research,
+                rfp_text="Submit the Pricing Proposal Form with the proposal.",
+                use_llm=False,
+                skip_section_ids=set(),
             )
+        )
 
         self.assertFalse(meta.get("budgetChanged"))
         self.assertEqual(out_draft.sections[0].content, healthy)
@@ -381,25 +368,17 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             updatedAt="2026-08-05T00:00:00+00:00",
             budget=budget,
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
-
-        with patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
-            out_draft, out_research, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id=rfp_id,
-                    rfp=_rfp(rfp_id),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Cost is 20% of score. Submit a fee table.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        out_draft, out_research, logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id=rfp_id,
+                rfp=_rfp(rfp_id),
+                draft=draft,
+                research=research,
+                rfp_text="Cost is 20% of score. Submit a fee table.",
+                use_llm=False,
+                skip_section_ids=set(),
             )
+        )
 
         self.assertEqual(out_draft.sections[0].content, healthy)
         self.assertEqual(out_research.budget.agency_fee_subtotal, 279_800)
@@ -458,25 +437,17 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
             updatedAt="2026-08-05T00:00:00+00:00",
             budget=budget,
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
-
-        with patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
-            out_draft, _r, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id="rfp-polluted",
-                    rfp=_rfp("rfp-polluted"),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Pricing Proposal Form required.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        out_draft, _r, logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id="rfp-polluted",
+                rfp=_rfp("rfp-polluted"),
+                draft=draft,
+                research=research,
+                rfp_text="Pricing Proposal Form required.",
+                use_llm=False,
+                skip_section_ids=set(),
             )
+        )
 
         self.assertTrue(meta.get("budgetChanged"))
         body = out_draft.sections[0].content or ""
@@ -551,25 +522,17 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
                 updatedAt="2026-08-05T00:00:00+00:00",
             ),
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
-
-        with patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ):
-            out_draft, _r, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id="rfp-contact",
-                    rfp=_rfp("rfp-contact"),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Complete the RFQ Pricing Form.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        out_draft, _r, logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id="rfp-contact",
+                rfp=_rfp("rfp-contact"),
+                draft=draft,
+                research=research,
+                rfp_text="Complete the RFQ Pricing Form.",
+                use_llm=False,
+                skip_section_ids=set(),
             )
+        )
         body = out_draft.sections[0].content or ""
         self.assertIn("Ron Comer", body)
         self.assertNotIn("[Contact Name]", body)
@@ -628,7 +591,6 @@ class StaleManuscriptRefreshWithoutRegenTests(unittest.TestCase):
         )
 
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         plan_render = (
             "## Proposed Investment\n\n"
@@ -639,11 +601,7 @@ class StaleManuscriptRefreshWithoutRegenTests(unittest.TestCase):
             scan_mod,
             "_regen_budget_via_phase_3_5",
             new=AsyncMock(),
-        ) as regen, patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ), patch.object(scan_mod, "render_budget_markdown", return_value=plan_render):
+        ) as regen, patch.object(scan_mod, "render_budget_markdown", return_value=plan_render):
             out, _r, logs, meta = asyncio.run(
                 run_fulfill_budget_scan(
                     rfp_id="rfp-stale",
@@ -711,17 +669,12 @@ class FailClosedTravelOnlyBudgetTests(unittest.TestCase):
         )
 
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         # Regen "succeeds" but still returns travel-only — must fail closed.
         with patch.object(
             scan_mod,
             "_regen_budget_via_phase_3_5",
             new=AsyncMock(return_value=(draft, research, travel_budget)),
-        ), patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
         ):
             _out, _r, logs, meta = asyncio.run(
                 run_fulfill_budget_scan(
@@ -807,13 +760,8 @@ class UnresolvedBudgetTokensTests(unittest.TestCase):
             budget=budget,
         )
         import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
 
         with patch.object(
-            scan_mod,
-            "extract_rfp_scoring_facts_llm",
-            new=AsyncMock(return_value=RfpScoringFacts()),
-        ), patch.object(
             scan_mod,
             "_regen_budget_via_phase_3_5",
             new=AsyncMock(side_effect=AssertionError("must not regen")),
@@ -954,23 +902,17 @@ class PricingPlanScanSkipsNotePatchTests(unittest.TestCase):
                 totalClientInvoicing=150_000,
             ),
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-
-        llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
-        with patch.object(scan_mod, "extract_rfp_scoring_facts_llm", new=llm):
-            out = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id=rfp_id,
-                    rfp=_rfp(rfp_id),
-                    draft=draft,
-                    research=research,
-                    rfp_text=rfp_text,
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        return asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id=rfp_id,
+                rfp=_rfp(rfp_id),
+                draft=draft,
+                research=research,
+                rfp_text=rfp_text,
+                use_llm=False,
+                skip_section_ids=set(),
             )
-        llm.assert_not_awaited()
-        return out
+        )
 
     def test_fee_table_already_adds_up_path_makes_no_llm_call(self) -> None:
         healthy = (
@@ -1035,22 +977,17 @@ class PricingPlanScanSkipsNotePatchTests(unittest.TestCase):
                 totalClientInvoicing=150_000,
             ),
         )
-        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
-
-        llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
-        with patch.object(scan_mod, "extract_rfp_scoring_facts_llm", new=llm):
-            _out, _r, logs, meta = asyncio.run(
-                run_fulfill_budget_scan(
-                    rfp_id=rfp_id,
-                    rfp=_rfp(rfp_id),
-                    draft=draft,
-                    research=research,
-                    rfp_text="Complete the RFQ Pricing Form.",
-                    use_llm=False,
-                    skip_section_ids=set(),
-                )
+        _out, _r, logs, meta = asyncio.run(
+            run_fulfill_budget_scan(
+                rfp_id=rfp_id,
+                rfp=_rfp(rfp_id),
+                draft=draft,
+                research=research,
+                rfp_text="Complete the RFQ Pricing Form.",
+                use_llm=False,
+                skip_section_ids=set(),
             )
-        llm.assert_not_awaited()
+        )
         self.assertFalse(meta["budgetChanged"])
         self.assertTrue(any("official Pricing Form already filled" in line for line in logs))
 

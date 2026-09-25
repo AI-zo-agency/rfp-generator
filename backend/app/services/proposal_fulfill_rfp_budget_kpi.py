@@ -17,11 +17,7 @@ from app.services.proposal_budget_content import (
     section_looks_like_official_pricing_form,
 )
 from app.services.proposal_fulfill_rfp_accuracy import (
-    RfpScoringFacts,
-    _EXCEL_ATTACHMENT_RE,
-    _INVERSE_COST_SCORING_RE,
     evaluation_and_kpi_excerpt,
-    extract_rfp_scoring_facts_llm,
     parse_scoring_facts_from_rfp,
     scan_draft_accuracy_findings,
 )
@@ -36,66 +32,8 @@ _CONTRACTOR_KPI_RFP_RE = re.compile(
     re.I | re.S,
 )
 
-_BUDGET_ATTACHMENT_NOTE = (
-    "\n\n## RFP budget file (required with proposal)\n\n"
-    "This solicitation requires a **separate budget attachment** (often Excel / Attachment 01). "
-    "The narrative below supports the worksheet — it does **not** replace the official file. "
-    "\n\n[MANUAL FILL: attach completed budget worksheet per RFP instructions before export.]\n"
-)
-
-_INVERSE_COST_NOTE = (
-    "\n\n> **Cost scoring (RFP):** Price is evaluated with **inverse scoring** — "
-    "a lower responsive proposed price typically earns more cost/price points. "
-    "Do not assume bidding at the ceiling maximizes cost score.\n"
-)
-
-
 def rfp_requires_contractor_kpi_alignment(rfp_text: str) -> bool:
     return bool(_CONTRACTOR_KPI_RFP_RE.search(rfp_text or ""))
-
-
-def _append_if_missing(content: str, marker: str, block: str) -> str:
-    if marker.casefold() in (content or "").casefold():
-        return content or ""
-    return (content or "").rstrip() + block
-
-
-def patch_budget_section_for_rfp(
-    draft: ProposalDraft,
-    *,
-    rfp_text: str,
-    facts: RfpScoringFacts,
-) -> tuple[ProposalDraft, list[str]]:
-    """Deterministic budget-section notes — attachment Excel, inverse cost scoring."""
-    logs: list[str] = []
-    idx = find_budget_section_index(draft.sections)
-    if idx is None:
-        logs.append("Budget scan: no Budget/Pricing section in manuscript.")
-        return draft, logs
-
-    section = draft.sections[idx]
-    content = section.content or ""
-    updated = content
-
-    if _EXCEL_ATTACHMENT_RE.search(rfp_text or "") or (facts.budget_submission_format or "").strip():
-        before = updated
-        updated = _append_if_missing(updated, "separate budget attachment", _BUDGET_ATTACHMENT_NOTE)
-        if updated != before:
-            logs.append("Budget: added RFP separate-attachment (Excel) requirement note.")
-
-    if facts.cost_scoring_inverse or _INVERSE_COST_SCORING_RE.search(rfp_text or ""):
-        before = updated
-        updated = _append_if_missing(updated, "inverse scoring", _INVERSE_COST_NOTE)
-        if updated != before:
-            logs.append("Budget: added inverse cost-scoring reminder.")
-
-    if updated == content:
-        return draft, logs
-
-    sections = list(draft.sections)
-    sections[idx] = section.model_copy(update={"content": updated, "status": "generated"})
-    now = datetime.now(timezone.utc).isoformat()
-    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
 _TRAVEL_ONLY_TOTAL_RE = re.compile(
@@ -521,21 +459,6 @@ async def run_fulfill_budget_scan(
                     "Budget: preserved official Pricing Form — cleaned handoff tags / "
                     "filled contact placeholders (no re-render)."
                 )
-        # Pricing-plan Cost tabs are re-rendered from the plan on persist, which
-        # would wipe patched notes — skip the patch (and its LLM call).
-        if not research.budget.pricing_plan:
-            excerpt = evaluation_and_kpi_excerpt(rfp_text)
-            facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-            idx2 = find_budget_section_index(draft.sections)
-            if idx2 is not None and not section_looks_like_official_pricing_form(
-                draft.sections[idx2]
-            ):
-                draft, patch_logs = patch_budget_section_for_rfp(
-                    draft, rfp_text=rfp_text, facts=facts
-                )
-                logs.extend(patch_logs)
-                if patch_logs:
-                    meta["budgetChanged"] = True
         draft = _apply_unresolved_budget_slot_restore(
             draft, research, rfp_text=rfp_text, logs=logs, meta=meta
         )
@@ -587,24 +510,6 @@ async def run_fulfill_budget_scan(
             logs.append(
                 "Budget: official Pricing Form already filled — left unchanged."
             )
-        # Still allow attachment / inverse-cost notes on a separate narrative
-        # budget tab if one exists; never patch notes onto the official form body
-        # via find_budget_section_index when it still points at the form.
-        # Only patch when find_budget points at a non-form narrative section,
-        # and never on pricing-plan budgets (persist re-render wipes the notes).
-        if not budget.pricing_plan:
-            excerpt = evaluation_and_kpi_excerpt(rfp_text)
-            facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-            idx2 = find_budget_section_index(draft.sections)
-            if idx2 is not None and not section_looks_like_official_pricing_form(
-                draft.sections[idx2]
-            ):
-                draft, patch_logs = patch_budget_section_for_rfp(
-                    draft, rfp_text=rfp_text, facts=facts
-                )
-                logs.extend(patch_logs)
-                if patch_logs:
-                    meta["budgetChanged"] = True
         draft = _apply_unresolved_budget_slot_restore(
             draft, research, rfp_text=rfp_text, logs=logs, meta=meta
         )
@@ -677,18 +582,6 @@ async def run_fulfill_budget_scan(
         logs.append(
             "Budget: manuscript already matches reconciled totals — left Pricing/Budget tab unchanged."
         )
-
-    # Pricing-plan Cost tabs are re-rendered from the plan on persist, which
-    # would wipe patched notes — skip the patch (and its LLM call). Legacy
-    # (pre-v2) budgets already returned early above, so this only guards for
-    # symmetry with the other two call sites in this function.
-    if not budget.pricing_plan:
-        excerpt = evaluation_and_kpi_excerpt(rfp_text)
-        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
-        draft, patch_logs = patch_budget_section_for_rfp(draft, rfp_text=rfp_text, facts=facts)
-        logs.extend(patch_logs)
-        if patch_logs:
-            meta["budgetChanged"] = True
 
     draft = _apply_unresolved_budget_slot_restore(
         draft, research, rfp_text=rfp_text, logs=logs, meta=meta
