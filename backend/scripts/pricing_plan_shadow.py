@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.services.go_no_go_service import combine_rfp_text
 from app.services.monthly_llm_budget import get_monthly_budget_status
+from app.services.pricing_plan_engine import render_internal_notes
 from app.services.pricing_plan_service import generate_pricing_plan_budget, render_pricing_plan_budget
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_common import load_rfp_for_proposal
@@ -43,6 +44,7 @@ async def main() -> None:
         idx = find_budget_section_index(draft.sections) if draft else None
         (args.out / f"{rfp_id}.v1.md").write_text(draft.sections[idx].content if idx is not None else "(no v1 Cost section)")
         (args.out / f"{rfp_id}.v2.md").write_text(render_pricing_plan_budget(budget))
+        (args.out / f"{rfp_id}.v2.internal.md").write_text(render_internal_notes(budget.pricing_plan or {}))
         summary.append({
             "rfp_id": rfp_id,
             "tier": budget.pricing_tier,

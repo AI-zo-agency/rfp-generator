@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.services import pricing_plan_service as svc
 from app.services.pricing_plan_engine import parse_guide, parse_labor
+from tests.test_pricing_plan_engine import plan_988_within_rules
 
 FIX = Path(__file__).parent / "fixtures" / "pricing_plan"
 GUIDE_MD = (FIX / "guide.md").read_text()
@@ -24,7 +25,7 @@ def _json(name: str) -> dict:
 
 class RepairLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_bad_plan_is_sent_back_with_errors_then_accepted(self) -> None:
-        good = _json("988_plan.json")
+        good = plan_988_within_rules()
         bad = copy.deepcopy(good)
         bad["sections"][0]["body_md"] += " Costs $12,000."
         calls = AsyncMock(side_effect=[(bad, "p"), (good, "p")])
@@ -38,7 +39,7 @@ class RepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["kb_snapshot"]["labor"]["Agency Director"], 400.0)
 
     async def test_unresolved_errors_become_internal_notes(self) -> None:
-        bad = _json("988_plan.json")
+        bad = plan_988_within_rules()
         bad["sections"][0]["body_md"] += " Costs $12,000."
         with patch.object(svc.llm, "chat_json", AsyncMock(return_value=(bad, "p"))):
             plan, rounds = await svc.author_pricing_plan(RFP, _json("988_asks.json"), KB)
@@ -48,21 +49,17 @@ class RepairLoopTests(unittest.IsolatedAsyncioTestCase):
 
 class BudgetBuildTests(unittest.IsolatedAsyncioTestCase):
     async def test_generate_builds_budget_with_legacy_line_items(self) -> None:
-        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (_json("988_plan.json"), "p")])
+        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (plan_988_within_rules(), "p")])
         with patch.object(svc.llm, "chat_json", calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
             budget = await svc.generate_pricing_plan_budget("rfp-988", RFP)
         self.assertEqual(budget.budget_format, "pricing_plan")
         self.assertEqual(budget.pricing_tier, "High")
         self.assertEqual(budget.rfp_budget_cap, 950000.0)
         priced = sum(li.extended or 0 for li in budget.line_items if li.unit == "project")
-        self.assertEqual(priced, 717650)
+        self.assertEqual(priced, 771275)
         md = svc.render_pricing_plan_budget(budget)
-        self.assertIn("$717,650", md)
+        self.assertIn("$771,275", md)
         self.assertNotIn("{{", md)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
@@ -89,7 +86,7 @@ class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
 
 class RenderSwitchTests(unittest.IsolatedAsyncioTestCase):
     async def _v2_budget(self):
-        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (_json("988_plan.json"), "p")])
+        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (plan_988_within_rules(), "p")])
         with patch.object(svc.llm, "chat_json", calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
             return await svc.generate_pricing_plan_budget("rfp-988", RFP)
 
@@ -133,10 +130,10 @@ class TargetBudgetEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 class ChatEditTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_edit_goes_through_checks(self) -> None:
-        budget_calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (_json("988_plan.json"), "p")])
+        budget_calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (plan_988_within_rules(), "p")])
         with patch.object(svc.llm, "chat_json", budget_calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
             budget = await svc.generate_pricing_plan_budget("rfp-988", RFP)
-        edited = _json("988_plan.json")
+        edited = plan_988_within_rules()
         edited["tasks"] = [t for t in edited["tasks"] if t["task_id"] != "A12c"]  # drop media
         edited["sections"] = [
             {**s, "body_md": s["body_md"].replace("{{VERBATIM:media}}", "").replace("{{MEDIA_SPLIT}}", "")}
@@ -149,3 +146,82 @@ class ChatEditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, "Removed the media placement task.")
         self.assertNotIn("A12c", [li.id for li in new_budget.line_items])
         self.assertNotIn("reply", new_budget.pricing_plan)
+
+
+class PlanFollowUpTests(unittest.IsolatedAsyncioTestCase):
+    async def _budget(self, plan=None):
+        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (plan or plan_988_within_rules(), "p")])
+        with patch.object(svc.llm, "chat_json", calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            return await svc.generate_pricing_plan_budget("rfp-988", RFP)
+
+    async def test_internal_notes_and_tier_go_to_pricing_flags_not_render(self) -> None:
+        budget = await self._budget()
+        self.assertTrue(any(f.startswith("[PRICING NOTE — Sonja: ") for f in budget.pricing_flags), budget.pricing_flags)
+        self.assertIn("[PRICING NOTE — tier: High — " , " ".join(budget.pricing_flags))
+        self.assertNotIn("DO NOT PLACE", svc.render_pricing_plan_budget(budget))
+
+    async def test_code_adds_media_assumption_note_once(self) -> None:
+        budget = await self._budget()
+        media = [n for n in budget.pricing_plan["internal_notes"] if n["issue"].startswith("Media budget of")]
+        self.assertEqual(media, [{"issue": "Media budget of $430,000 is an assumption — confirm against the "
+                                  "RFP / client media plan", "owner": "Sonja"}])
+        edited = {**copy.deepcopy(budget.pricing_plan), "reply": "ok"}
+        with patch.object(svc.llm, "chat_json", AsyncMock(return_value=(edited, "p"))), \
+             patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            new_budget, _ = await svc.edit_pricing_plan_from_chat(budget, instruction="tighten", rfp_text=RFP)
+        again = [n for n in new_budget.pricing_plan["internal_notes"] if n["issue"].startswith("Media budget of")]
+        self.assertEqual(len(again), 1)
+
+    async def test_tier_basis_separate_and_stripped_from_edit_prompt(self) -> None:
+        budget = await self._budget()
+        llm_line = plan_988_within_rules()["tier_rationale"]
+        self.assertEqual(budget.pricing_plan["tier_rationale"], llm_line)
+        self.assertTrue(budget.pricing_plan["tier_basis"])
+        edited = {**copy.deepcopy(budget.pricing_plan), "reply": "ok"}
+        call = AsyncMock(return_value=(edited, "p"))
+        with patch.object(svc.llm, "chat_json", call), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            new_budget, _ = await svc.edit_pricing_plan_from_chat(budget, instruction="tighten", rfp_text=RFP)
+        sent = call.await_args_list[0].args[0][1]["content"].split("=== CURRENT PLAN ===")[1]
+        for key in ('"tier"', '"tier_basis"', '"kb_snapshot"'):
+            self.assertNotIn(key, sent)
+        self.assertEqual(new_budget.pricing_plan["tier_rationale"], llm_line)
+
+    async def test_llm_error_mid_repair_keeps_last_plan(self) -> None:
+        bad = plan_988_within_rules()
+        bad["sections"][0]["body_md"] += " Costs $12,000."
+        calls = AsyncMock(side_effect=[(bad, "p"), svc.llm.LlmError("cap reached")])
+        with patch.object(svc.llm, "chat_json", calls):
+            plan, rounds = await svc.author_pricing_plan(RFP, _json("988_asks.json"), KB)
+        self.assertIn("Costs $12,000.", plan["sections"][0]["body_md"])
+        self.assertTrue(any("Unresolved check: prose contains a literal dollar" in n["issue"] for n in plan["internal_notes"]))
+        self.assertTrue(rounds[-1]["errors"])
+
+    async def test_first_call_non_dict_is_502(self) -> None:
+        with patch.object(svc.llm, "chat_json", AsyncMock(return_value=(["not", "a", "plan"], "p"))):
+            with self.assertRaises(svc.ProposalError) as ctx:
+                await svc.author_pricing_plan(RFP, _json("988_asks.json"), KB)
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertIn("returned no plan", str(ctx.exception))
+
+
+class LineItemAdapterTests(unittest.TestCase):
+    def test_line_items_sum_to_term_value(self) -> None:
+        from app.services.pricing_plan_engine import compute, term_value
+
+        for plan in (_json("newport_plan.json"), plan_988_within_rules()):
+            items = svc.plan_to_line_items(plan, KB.labor)
+            total = sum(li.extended for li in items if li.extended is not None)
+            self.assertEqual(total, term_value(compute(plan, KB.labor)))
+
+    def test_billing_shapes_and_types(self) -> None:
+        items = {li.id: li for li in svc.plan_to_line_items(_json("newport_plan.json"), KB.labor)}
+        self.assertEqual((items["A1"].unit, items["A1"].quantity), ("month", 12))
+        self.assertEqual(items["A1"].extended, 12 * items["A1"].rate)
+        self.assertEqual((items["A4"].unit, items["A4"].extended, items["A4"].notes), ("event", None, "per event"))
+        self.assertEqual(items["A1"].line_item_type, "agency_fee")
+        media = {li.id: li for li in svc.plan_to_line_items(plan_988_within_rules(), KB.labor)}["A12c"]
+        self.assertEqual(media.line_item_type, "client_passthrough")
+
+
+if __name__ == "__main__":
+    unittest.main()

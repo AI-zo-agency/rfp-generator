@@ -19,6 +19,7 @@ from app.services.pricing_plan_engine import (
     parse_guide,
     parse_labor,
     render,
+    usd,
     verify_asks,
     verify_plan,
 )
@@ -100,10 +101,12 @@ PRICING RULES
   Without staffing, set unit_price yourself.
 - Guide 6.1 media: guide_id "6.1", unit_price = total media budget, no staffing (code computes 85/15).
 - Scope no Guide line covers: guide_id null, unit_price null, staffing [], manual_reason set. Never invent a price.
-- A ceiling that is ours alone: priced one_time tasks must total 65-85% of it (leave 15-20% for expansion,
-  but do not leave the buyer's budget mostly unused). Adjust quantities and scope depth to land there.
+- Term value = one_time tasks + 12 x monthly fees (per_event and hourly are rates and are not summed).
+- A ceiling that is ours alone: term value EXCLUDING Guide 6.1 media must total 65-85% of (ceiling minus media)
+  (leave 15-20% for expansion, but do not leave the buyer's budget mostly unused). Media is excluded from
+  the 65-85% rule and must never be used to reach it. Adjust quantities and scope depth of fee work to land there.
   shared_pool ceilings are not ours: size the bid to the scope and do not claim the pool as our NTE.
-- Priced one_time tasks per track must stay <= that track's ceiling.
+- Term value per track, media included, must stay <= that track's ceiling.
 - Hourly rates come ONLY from the Labor Cost card. You never type a rate or a dollar figure.
 - Buyer form fill kinds (code computes values):
   task_price = sum of the listed tasks' price (monthly fee, event fee, lump sum);
@@ -222,26 +225,45 @@ def _context(rfp_text: str, asks: dict, kb: PricingKb, tier: str, why: str, targ
 async def _check_and_repair(
     plan: dict, asks: dict, kb: PricingKb, *, system: str, ctx: str, target: float | None
 ) -> tuple[dict, list[dict]]:
+    if not isinstance(plan, dict):
+        raise ProposalError("Pricing plan LLM returned no plan", status_code=502)
     rounds: list[dict] = []
     for attempt in range(MAX_REPAIRS + 1):
         errs, warns = verify_plan(plan, asks, kb.guide, kb.labor, target_budget_usd=target)
         rounds.append({"round": attempt, "errors": errs, "warnings": warns})
         if not errs or attempt == MAX_REPAIRS:
             break
-        plan = await _call(
-            system,
-            ctx + f"\n\n=== YOUR PREVIOUS PLAN ===\n{json.dumps(plan)}\n\n"
-            "=== VERIFIER ERRORS — return the full corrected plan ===\n" + "\n".join(errs),
-        )
+        try:
+            repaired = await _call(
+                system,
+                ctx + f"\n\n=== YOUR PREVIOUS PLAN ===\n{json.dumps(plan)}\n\n"
+                "=== VERIFIER ERRORS — return the full corrected plan ===\n" + "\n".join(errs),
+            )
+        except llm.LlmError as exc:
+            logger.warning("pricing_plan_v2 repair call failed, keeping last plan: %s", exc)
+            break
+        if not isinstance(repaired, dict):
+            break
+        plan = repaired
     notes = plan.setdefault("internal_notes", [])
     notes += [{"issue": f"Unresolved check: {e}", "owner": "Sonja"} for e in rounds[-1]["errors"]]
     notes += [{"issue": w, "owner": "Sonja"} for w in rounds[-1]["warnings"] if w.startswith("unanchored")]
+    amounts = compute(plan, kb.labor)["amounts"]
+    for t in plan.get("tasks", []):
+        if t.get("guide_id") == "6.1":
+            note = {
+                "issue": f"Media budget of {usd(amounts.get(t.get('task_id')))} is an assumption — "
+                "confirm against the RFP / client media plan",
+                "owner": "Sonja",
+            }
+            if note not in notes:
+                notes.append(note)
     return plan, rounds
 
 
 def _stamp(plan: dict, kb: PricingKb, tier: str, why: str) -> dict:
     plan["tier"] = tier
-    plan["tier_rationale"] = f"{why}. {plan.get('tier_rationale', '')}".strip()
+    plan["tier_basis"] = why  # code's reason; tier_rationale stays the LLM's line
     # Render must be pure and reproducible: keep exactly the KB values used.
     plan["kb_snapshot"] = {"verbatim": kb.guide["verbatim"], "labor": kb.labor}
     return plan
@@ -260,23 +282,35 @@ async def author_pricing_plan(
 
 
 def plan_to_line_items(plan: dict, labor: dict) -> list[BudgetLineItem]:
-    """Legacy ledger view so summary reconcilers / KPIs keep matching the section."""
+    """Legacy ledger view: extended sums to the engine's term value (one_time + 12 x monthly)."""
     c = compute(plan, labor)
     items: list[BudgetLineItem] = []
     for t in plan.get("tasks", []):
         amt = c["amounts"].get(t["task_id"])
+        billing = t.get("billing", "one_time")
         qty = float(t.get("quantity") or 1)
+        notes = t.get("manual_reason")
+        if amt is None:
+            rate, extended = None, None
+        elif billing == "monthly":
+            qty, rate, extended = 12.0, amt, 12 * amt
+        elif billing in ("per_event", "hourly"):  # rates, never summed
+            qty, rate, extended = 1.0, amt, None
+            notes = notes or ("per event" if billing == "per_event" else "hourly rate")
+        else:
+            rate, extended = round(amt / qty, 2), amt
         items.append(
             BudgetLineItem(
                 id=t["task_id"],
                 category=t.get("group") or "",
                 description=t.get("deliverable") or "",
-                unit=_UNIT.get(t.get("billing", "one_time"), "project"),
+                unit=_UNIT.get(billing, "project"),
                 quantity=qty,
-                rate=round(amt / qty, 2) if amt is not None else None,
-                extended=amt,
+                rate=rate,
+                extended=extended,
                 rate_source=f"{t['guide_id']} — {plan.get('tier')}" if t.get("guide_id") else "",
-                notes=t.get("manual_reason"),
+                notes=notes,
+                line_item_type="client_passthrough" if t.get("guide_id") == "6.1" else "agency_fee",
                 is_manual_fill=amt is None,
             )
         )
@@ -286,6 +320,8 @@ def plan_to_line_items(plan: dict, labor: dict) -> list[BudgetLineItem]:
 def _budget_from_plan(rfp_id: str, asks: dict, plan: dict, flags: list[str]) -> ProposalBudget:
     own = [x for x in asks.get("ceilings", []) if not x.get("shared_pool")]
     labor = (plan.get("kb_snapshot") or {}).get("labor") or {}
+    flags = [*flags, *(f"[PRICING NOTE — {n.get('owner', '')}: {n.get('issue', '')}]" for n in plan.get("internal_notes", []))]
+    flags.append(f"[PRICING NOTE — tier: {plan.get('tier')} — {plan.get('tier_basis', '')}]")
     return ProposalBudget(
         rfp_id=rfp_id,
         updated_at=datetime.now(timezone.utc).isoformat(),
@@ -333,11 +369,15 @@ async def edit_pricing_plan_from_chat(
     asks = budget.pricing_asks or {}
     tier, why = decide_tier(asks)
     ctx = _context(rfp_text, asks, kb, tier, why, target_budget_usd)
-    current = {k: v for k, v in (budget.pricing_plan or {}).items() if k != "kb_snapshot"}
+    current = {
+        k: v for k, v in (budget.pricing_plan or {}).items() if k not in {"tier", "tier_basis", "kb_snapshot"}
+    }
     raw = await _call(
         EDIT_PROMPT,
         ctx + f"\n\n=== CURRENT PLAN ===\n{json.dumps(current)}\n\n=== USER INSTRUCTION ===\n{instruction}",
     )
+    if not isinstance(raw, dict):
+        raise ProposalError("Pricing plan LLM returned no plan", status_code=502)
     reply = str(raw.pop("reply", "") or "Updated the pricing plan.")
     plan, rounds = await _check_and_repair(raw, asks, kb, system=EDIT_PROMPT, ctx=ctx, target=target_budget_usd)
     flags = [f"[PRICING FLAG: {e}]" for e in rounds[-1]["errors"]]

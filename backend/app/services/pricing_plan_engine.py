@@ -91,12 +91,14 @@ def compute(plan: dict, labor: dict) -> dict:
             amounts[t["task_id"]] = round(float(t["unit_price"]) * float(t.get("quantity") or 1))
     tasks = {t["task_id"]: t for t in plan.get("tasks", [])}
 
-    def total(track=None, billing="one_time"):
+    def total(track=None, billing="one_time", guide_id=None):
         if track is not None and not any(t.get("track") == track for t in tasks.values()):
             track = None  # single-ceiling label, not a track
         return sum(
             a for tid, a in amounts.items()
-            if tasks[tid].get("billing", "one_time") == billing and (track is None or tasks[tid].get("track") == track)
+            if tasks[tid].get("billing", "one_time") == billing
+            and (track is None or tasks[tid].get("track") == track)
+            and (guide_id is None or tasks[tid].get("guide_id") == guide_id)
         )
 
     fills = {}
@@ -114,6 +116,11 @@ def compute(plan: dict, labor: dict) -> dict:
         }.get(k)
         fills[(f.get("row_id"), f.get("column"))] = (k, val)
     return {"amounts": amounts, "hours": hours, "tasks": tasks, "total": total, "fills": fills}
+
+
+def term_value(c: dict, track=None, guide_id=None) -> float:
+    """One-time work plus a year of monthly fees. per_event / hourly are rates, never summed."""
+    return c["total"](track, "one_time", guide_id) + 12 * c["total"](track, "monthly", guide_id)
 
 
 # ---------------------------------------------------------------- verify
@@ -185,21 +192,36 @@ def verify_plan(
             if not band[0] <= per_unit <= band[1]:
                 how = "staffing hours x rates" if tid in c["hours"] else "unit_price"
                 errs.append(f"{tid}: per-unit {per_unit:,.0f} ({how}) outside {gid} {tier} band {band[0]:,.0f}-{band[1]:,.0f}")
+    staffing_asked = any(
+        a.get("required") and a.get("kind") in {"staffing_matrix", "hours_per_task"} for a in asks.get("asks", [])
+    )
+    if staffing_asked:
+        for t in plan.get("tasks", []):
+            if t.get("task_id") in c["amounts"] and t.get("guide_id") != "6.1" and not t.get("staffing"):
+                errs.append(f"{t['task_id']}: RFP requires hours/staffing per task")
     for r in plan.get("hourly_roles", []):
         if r not in labor:
             errs.append(f"hourly role {r!r} not on Labor Cost card")
     # ceilings
     for ceil in asks.get("ceilings", []):
         amt = float(ceil.get("amount") or 0)
-        spent = c["total"](ceil.get("track") if ceil.get("track") in tracks and len(asks["ceilings"]) > 1 else None)
+        tr = ceil.get("track") if ceil.get("track") in tracks and len(asks["ceilings"]) > 1 else None
+        spent = term_value(c, tr)
+        media = term_value(c, tr, "6.1")
+        scoped = [t for t in c["tasks"].values() if tr is None or t.get("track") == tr]
+        if any(t.get("billing") in {"per_event", "hourly"} for t in scoped):
+            warns.append(f"per-event/hourly fees are not counted against {ceil.get('label')}")
         if spent > amt:
             errs.append(f"priced {spent:,.0f} exceeds ceiling {ceil.get('label')} {amt:,.0f}")
-        elif not ceil.get("shared_pool") and amt and not 0.65 <= spent / amt <= 0.85:
-            errs.append(f"priced {spent:,.0f} is {spent / amt:.0%} of {ceil.get('label')} — must be 65-85%")
+        elif not ceil.get("shared_pool") and amt:
+            # Media is a pass-through assumption: it must not be what reaches the band.
+            fees, room = spent - media, amt - media
+            if room <= 0 or not 0.65 <= fees / room <= 0.85:
+                pct = f"{fees / room:.0%}" if room > 0 else "n/a"
+                errs.append(f"priced fees {fees:,.0f} are {pct} of {ceil.get('label')} excluding media — must be 65-85%")
     own_ceilings = [x for x in asks.get("ceilings", []) if not x.get("shared_pool")]
     if not own_ceilings:
-        # Term value: one-time work plus a year of any monthly fees.
-        value = c["total"]() + 12 * c["total"](None, "monthly")
+        value = term_value(c)
         if target_budget_usd:
             if not 0.9 <= value / target_budget_usd <= 1.1:
                 errs.append(
@@ -254,12 +276,16 @@ def verify_plan(
     blocks = [(n, a) for n, a in found if n in BLOCK_TOKENS]
     for dup in {b for b in blocks if blocks.count(b) > 1}:
         errs.append(f"block token {dup[0]}{':' + dup[1] if dup[1] else ''} used more than once")
-    stripped = TOKEN_RE.sub("", body)
-    if re.search(r"\$\s?\d", stripped):
-        errs.append("prose contains a literal dollar figure — use tokens")
-    hit = BANNED.search(stripped)
-    if hit:
-        errs.append(f"prose contains internal jargon: {hit.group(0)!r}")
+    rendered_text = [("prose", TOKEN_RE.sub("", body))]
+    rendered_text += [(f"section heading {s.get('heading')!r}", s.get("heading") or "") for s in plan.get("sections", [])]
+    for t in plan.get("tasks", []):
+        rendered_text += [(f"{t.get('task_id')} {k}", t.get(k) or "") for k in ("deliverable", "group")]
+    for label, text in rendered_text:
+        if re.search(r"\$\s?\d", text):
+            errs.append(f"{label} contains a literal dollar figure" + (" — use tokens" if label == "prose" else ""))
+        hit = BANNED.search(text)
+        if hit:
+            errs.append(f"{label} contains internal jargon: {hit.group(0)!r}")
     all_in = bool((asks.get("all_inclusive_pricing") or {}).get("value"))
     required = [k for k in VERBATIM_KEYS if not (all_in and k == "reimbursables")]
     for k in required:
@@ -313,22 +339,23 @@ def render(plan: dict, asks: dict, guide: dict, labor: dict) -> str:
 
     def task_table(track=None) -> str:
         rows = ["| Task ID | Task / Deliverable | Investment |", "|---|---|---:|"]
-        group = None
         scoped = [t for t in tasks if track is None or t.get("track") == track]
-        for t in scoped:
-            if t.get("group") != group:
-                group = t.get("group")
-                rows.append(f"| | **{group}** | |")
-            amt = c["amounts"].get(t["task_id"])
-            rows.append(f"| {t['task_id']} | {t['deliverable']} | {usd(amt)}{SUFFIX[t.get('billing', 'one_time')] if amt else ''} |")
-        if any(t.get("billing", "one_time") == "one_time" for t in scoped):
-            one = c["total"](track)
-            rows.append(f"| | **Priced tasks** | **{usd(one)}** |")
+        groups = list(dict.fromkeys(t.get("group") for t in scoped))  # first-appearance order
+        for group in groups:
+            rows.append(f"| | **{group}** | |")
+            for t in (t for t in scoped if t.get("group") == group):
+                amt = c["amounts"].get(t["task_id"])
+                rows.append(f"| {t['task_id']} | {t['deliverable']} | {usd(amt)}{SUFFIX[t.get('billing', 'one_time')] if amt else ''} |")
+        billings = {t.get("billing", "one_time") for t in scoped}
+        if billings & {"one_time", "monthly"}:
+            value = term_value(c, track)
+            label = "Priced work (term value)" if "monthly" in billings else "Priced tasks"
+            rows.append(f"| | **{label}** | **{usd(value)}** |")
             cap = ceiling(track)
             if cap:
                 unpriced = [t["task_id"] for t in scoped if t["task_id"] not in c["amounts"]]
                 label = "Held for scope confirmed on approval" + (f" (incl. {', '.join(unpriced)})" if unpriced else "")
-                rows.append(f"| | {label} | {usd(cap - one)} |")
+                rows.append(f"| | {label} | {usd(cap - value)} |")
                 rows.append(f"| | **Total not-to-exceed** | **{usd(cap)}** |")
         return "\n".join(rows)
 
@@ -367,7 +394,7 @@ def render(plan: dict, asks: dict, guide: dict, labor: dict) -> str:
 
     def unallocated(track=None):
         cap = ceiling(track)
-        return usd(cap - c["total"](track) if cap else None)
+        return usd(cap - term_value(c, track) if cap else None)
 
     table = {
         "TASK_TABLE": task_table, "STAFFING_TABLE": staffing_table, "RATE_TABLE": rate_table,
@@ -391,7 +418,12 @@ def render(plan: dict, asks: dict, guide: dict, labor: dict) -> str:
     for s in plan.get("sections", []):
         body = re.sub(r"\n{3,}", "\n\n", TOKEN_RE.sub(sub, s.get("body_md", ""))).strip()
         out += [f"## {s['heading']}", "", body, ""]
-    out += ["---", "", "**INTERNAL — DO NOT PLACE**", "", f"Tier: **{plan.get('tier')}** — {plan.get('tier_rationale', '')}", ""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def render_internal_notes(plan: dict) -> str:
+    """Internal-only block (tier, owners, assumptions). Never part of the client Cost section."""
+    out = ["**INTERNAL — DO NOT PLACE**", "", f"Tier: **{plan.get('tier')}** — {plan.get('tier_basis', '')}", ""]
     out += ["| # | Issue | Owner |", "|---|---|---|"]
     out += [f"| {i} | {n.get('issue', '')} | {n.get('owner', '')} |" for i, n in enumerate(plan.get("internal_notes", []), 1)]
     return "\n".join(out) + "\n"
