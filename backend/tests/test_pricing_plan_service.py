@@ -85,3 +85,32 @@ class GenerateBranchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gen.await_args.kwargs["target_budget_usd"], 250000)
         self.assertIs(saved.budget, budget)
         save.assert_awaited_once()
+
+
+class RenderSwitchTests(unittest.IsolatedAsyncioTestCase):
+    async def _v2_budget(self):
+        calls = AsyncMock(side_effect=[(_json("988_asks.json"), "p"), (_json("988_plan.json"), "p")])
+        with patch.object(svc.llm, "chat_json", calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=KB)):
+            return await svc.generate_pricing_plan_budget("rfp-988", RFP)
+
+    async def test_render_budget_markdown_uses_plan(self) -> None:
+        from app.services.proposal_budget_content import render_budget_markdown
+
+        budget = await self._v2_budget()
+        self.assertEqual(render_budget_markdown(budget, rfp_text=RFP), svc.render_pricing_plan_budget(budget))
+
+    async def test_persist_guard_restores_budget_section_from_plan(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+        budget = await self._v2_budget()
+        draft = ProposalDraft(
+            rfpId="rfp-988", updatedAt="t",
+            sections=[
+                ProposalSection(id="s1", title="Approach", content="We will plan.", status="generated"),
+                ProposalSection(id="s2", title="Budget & Pricing", content="| scrubbed | [MANUAL FILL] |", status="generated"),
+            ],
+        )
+        out, report = apply_zero_fabrication_guards(draft, budget=budget, rfp_text=RFP)
+        self.assertEqual(out.sections[1].content.strip(), svc.render_pricing_plan_budget(budget).strip())
+        self.assertTrue(any("pricing plan" in line for line in report.logs))

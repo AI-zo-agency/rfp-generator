@@ -3421,6 +3421,11 @@ def render_budget_markdown(
     pricing_instrument: PricingInstrument | None = None,
 ) -> str:
     """Client-facing budget: one total, phase/deliverable fee table, short terms."""
+    if budget.pricing_plan:
+        from app.services.pricing_plan_service import render_pricing_plan_budget
+
+        return render_pricing_plan_budget(budget)
+
     budget = prepare_budget_for_client_display(
         budget, pricing_instrument=pricing_instrument
     )

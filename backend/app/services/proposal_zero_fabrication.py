@@ -446,6 +446,21 @@ def apply_zero_fabrication_guards(
     for line in conflicts:
         report.logs.append(f"{label}: {line}")
 
+    plan_budget = budget or (research.budget if research else None)
+    if plan_budget is not None and plan_budget.pricing_plan:
+        # Pricing plan v2 is canonical: earlier scrubs never get the last word on Cost.
+        from app.services.pricing_plan_service import render_pricing_plan_budget
+        from app.services.proposal_budget_content import find_budget_section_index
+
+        idx = find_budget_section_index(draft.sections)
+        if idx is not None:
+            rendered = render_pricing_plan_budget(plan_budget)
+            if (draft.sections[idx].content or "").strip() != rendered.strip():
+                sections = list(draft.sections)
+                sections[idx] = sections[idx].model_copy(update={"content": rendered})
+                draft = draft.model_copy(update={"sections": sections})
+                report.logs.append(f"{label}: Cost section re-rendered from pricing plan")
+
     return draft, report
 
 
