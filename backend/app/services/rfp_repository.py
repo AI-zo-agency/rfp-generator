@@ -51,7 +51,14 @@ def _with_supabase_retry(op_name: str, fn):
 
 
 def _db_path() -> Path:
-    path = settings.database_path
+    path = Path(settings.database_path).expanduser()
+    if not path.is_absolute():
+        # Anchor relative DATABASE_PATH to the backend package root, not process
+        # cwd — uvicorn reload and ad-hoc scripts can disagree on cwd.
+        backend_root = Path(__file__).resolve().parents[2]
+        path = (backend_root / path).resolve()
+    else:
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

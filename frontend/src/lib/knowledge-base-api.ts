@@ -57,5 +57,7 @@ export async function connectGoogleDrive(): Promise<{ authLink: string }> {
 }
 
 export async function syncGoogleDrive(): Promise<void> {
+  const { trackClick } = await import("@/lib/zo-analytics");
+  trackClick("kb.sync", { path: "/knowledge-base", funnel: true });
   await backendFetch("/knowledge-base/sync/google-drive", { method: "POST" });
 }

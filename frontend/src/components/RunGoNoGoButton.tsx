@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { withAuthUserEmail } from "@/lib/auth-user-email";
+import { trackClick } from "@/lib/zo-analytics";
 
 interface RunGoNoGoButtonProps {
   rfpId: string;
@@ -122,6 +123,11 @@ export function RunGoNoGoButton({
     stopRef.current = false;
     setAnalyzing(true);
     setError(null);
+    trackClick("rfp.gonogo_run", {
+      path: `/rfps/${rfpId}`,
+      entity_type: "rfp",
+      entity_id: rfpId,
+    });
     try {
       const res = await fetch(`/api/rfps/${rfpId}/analyze`, {
         method: "POST",

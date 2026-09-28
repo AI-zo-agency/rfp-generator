@@ -11,6 +11,10 @@ import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import { IconSwitch } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
 import { prefersReducedMotion } from "../lib/fin-motion";
+import {
+  startWorkspaceAnalytics,
+  trackClick,
+} from "@/lib/zo-analytics";
 import "./QuickBooksLedger.css";
 
 export function FinancialShell({ children }: { children: React.ReactNode }) {
@@ -31,6 +35,12 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.add("fin-lock");
     return () => document.documentElement.classList.remove("fin-lock");
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    startWorkspaceAnalytics("financial", { path: "/financial-insights" });
+    trackClick("financial.enter", { path: "/financial-insights", funnel: true });
+  }, [isAuthenticated]);
 
   useGSAP(
     () => {

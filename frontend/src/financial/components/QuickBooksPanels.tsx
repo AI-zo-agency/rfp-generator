@@ -828,6 +828,12 @@ export function QuickBooksPanels() {
     setSyncing(true);
     setError(null);
     try {
+      const { trackClick } = await import("@/lib/zo-analytics");
+      trackClick("financial.qb_refresh", {
+        path: "/financial-insights",
+        tab: "quickbooks",
+        funnel: true,
+      });
       const res = await fetch(`${API_BASE}/api/v1/financials/quickbooks/refresh`, {
         method: "POST",
       });

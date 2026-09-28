@@ -2765,6 +2765,14 @@ function ProposalDraftWorkspaceInner({
     if (!scanOk) {
       return;
     }
+    void import("@/lib/zo-analytics").then(({ trackClick }) => {
+      trackClick("proposal.review_fix", {
+        path: "/proposals",
+        entity_type: "rfp",
+        entity_id: rfp.id,
+        funnel: true,
+      });
+    });
     setGenerateNotice(null);
     setGenerateError(null);
     setIsFulfillingRfpGaps(true);
@@ -3250,6 +3258,14 @@ function ProposalDraftWorkspaceInner({
     setFullProposalProgress(null);
     setGenerateError(null);
     setGenerateNotice(null);
+    void import("@/lib/zo-analytics").then(({ trackClick }) => {
+      trackClick("proposal.build", {
+        path: "/proposals",
+        entity_type: "rfp",
+        entity_id: rfp.id,
+        funnel: true,
+      });
+    });
 
     // Fresh start: clear the editor immediately so old manuscript cannot flash
     // while the server soft-regenerates Sections 1–3 in place (no DB wipe).
@@ -3819,6 +3835,13 @@ function ProposalDraftWorkspaceInner({
     setDocxDownloadError(null);
     setIsDownloadingDocx(true);
     try {
+      const { trackClick } = await import("@/lib/zo-analytics");
+      trackClick("proposal.exported", {
+        path: "/proposals",
+        entity_type: "rfp",
+        entity_id: rfp.id,
+        funnel: true,
+      });
       const result = await downloadProposalDocx(rfp.id);
       setDocxExportMode(result.mode);
       setDocxDownloaded(true);

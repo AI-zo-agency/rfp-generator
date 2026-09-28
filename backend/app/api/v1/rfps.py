@@ -215,6 +215,23 @@ def get_dashboard() -> DashboardResponse:
 def upsert_rfp_endpoint(record: RfpRecord) -> dict[str, bool]:
     """JustWin sync — upsert by external_id."""
     upsert_rfp(record)
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.justwin_upserted",
+            summary=f"JustWin upsert “{(record.title or record.id)[:80]}”",
+            entity_type="rfp",
+            entity_id=record.id,
+            entity_label=(record.title or record.id)[:300],
+            metadata={
+                "external_id": getattr(record, "external_id", None),
+                "source": "justwin",
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True}
 
 
@@ -233,6 +250,20 @@ async def delete_rfp_endpoint(rfp_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="RFP not found")
 
     logger.info("Deleted RFP %s (%r)", rfp.id, rfp.title)
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.deleted",
+            summary=f"Deleted RFP “{(rfp.title or rfp.id)[:80]}”",
+            entity_type="rfp",
+            entity_id=rfp.id,
+            entity_label=(rfp.title or rfp.id)[:300],
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "deletedId": rfp.id}
 
 
@@ -305,6 +336,19 @@ async def create_manual_rfp(request: Request) -> RfpRecord:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.created_manual",
+            summary=f"Created manual RFP “{record.title}”",
+            entity_type="rfp",
+            entity_id=record.id,
+            entity_label=(record.title or record.id)[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return record
 
 
@@ -312,6 +356,20 @@ async def create_manual_rfp(request: Request) -> RfpRecord:
 def mark_go(rfp_id: str) -> dict[str, str]:
     if not mark_rfp_go(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        from app.services.user_activity import emit_activity
+
+        rfp = get_rfp(rfp_id)
+        emit_activity(
+            workspace="rfp",
+            action="rfp.marked_go",
+            summary="Marked RFP as Go",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=((rfp.title if rfp else None) or rfp_id)[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": "true", "goNoGo": "go"}
 
 
@@ -434,13 +492,59 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
             if not updated:
                 raise GoNoGoError("RFP not found after save", status_code=404)
             logger.info("Go/No-Go background job completed for %s", rfp_id)
+            try:
+                from app.services.user_activity import emit_activity
+
+                rec = getattr(analysis, "recommendation", None)
+                emit_activity(
+                    workspace="rfp",
+                    action="rfp.gonogo_completed",
+                    summary=f"Go/No-Go finished: {rec or 'unknown'}",
+                    entity_type="rfp",
+                    entity_id=rfp_id,
+                    entity_label=(current.title or rfp_id)[:300],
+                    metadata={"recommendation": rec},
+                    outcome="completed",
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except GoNoGoError as exc:
             logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
             _mark_analyze_failed(rfp_id, str(exc))
+            try:
+                from app.services.user_activity import emit_activity
+
+                emit_activity(
+                    workspace="rfp",
+                    action="rfp.gonogo_failed",
+                    summary=f"Go/No-Go failed: {exc}",
+                    entity_type="rfp",
+                    entity_id=rfp_id,
+                    entity_label=(rfp.title or rfp_id)[:300],
+                    metadata={"error": str(exc)[:500]},
+                    outcome="failed",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             raise
         except Exception as exc:
             logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
             _mark_analyze_failed(rfp_id, f"Go/No-Go analysis failed: {exc}")
+            try:
+                from app.services.user_activity import emit_activity
+
+                emit_activity(
+                    workspace="rfp",
+                    action="rfp.gonogo_failed",
+                    summary=f"Go/No-Go failed: {exc}",
+                    entity_type="rfp",
+                    entity_id=rfp_id,
+                    entity_label=(rfp.title or rfp_id)[:300],
+                    metadata={"error": str(exc)[:500]},
+                    outcome="failed",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             raise
 
     def _celery_dispatch() -> object:
@@ -455,6 +559,20 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
         celery_dispatch=_celery_dispatch,
         lock_key=lock_key,
     )
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.gonogo_started",
+            summary=f"Started Go/No-Go analysis",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            outcome="started",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "ok": True,
         "status": "running",
@@ -548,6 +666,20 @@ async def stop_go_no_go_analysis(rfp_id: str) -> dict[str, object]:
     # Overwrite the persisted "in progress" note so GET /analyze/status reports
     # idle on the next poll (the message avoids the "failed" keyword on purpose).
     _mark_analyze_failed(rfp_id, "Go/No-Go analysis stopped by user.")
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.gonogo_stopped",
+            summary="Go/No-Go stopped by user",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            outcome="cancelled",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "ok": True,
         "status": "idle",
@@ -601,6 +733,21 @@ async def upload_rfp_pdf(rfp_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     update_rfp_pdf_path(rfp_id, pdf_path)
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="rfp.pdf_uploaded",
+            summary=f"Uploaded RFP PDF for “{(rfp.title or rfp_id)[:80]}”",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            metadata={"pdf_path": pdf_path[:200] if pdf_path else None},
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": "true", "pdfPath": pdf_path}
 
 

@@ -97,13 +97,26 @@ async def list_knowledge_base_corrections() -> dict[str, object]:
 async def create_knowledge_base_correction(payload: CorrectionRequest) -> dict[str, object]:
     _require_supermemory()
     try:
-        return await kb_corrections.create_correction(
+        result = await kb_corrections.create_correction(
             title=payload.title, note=payload.note
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except supermemory.SupermemoryError as exc:
         raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="kb.correction_saved",
+            summary=f"Saved KB correction “{(payload.title or '').strip()[:80]}”",
+            entity_type="kb_doc",
+            entity_label=(payload.title or "").strip()[:300] or None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 @router.patch("/corrections/{custom_id:path}")
@@ -247,6 +260,20 @@ async def upload_knowledge_base_document(
     payload = KnowledgeBaseDocument.model_validate(doc).model_dump(by_alias=True)
     if note_error:
         payload["noteError"] = note_error
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="kb.doc_uploaded",
+            summary=f"Uploaded KB document “{clean_title}”",
+            entity_type="kb_doc",
+            entity_id=str(doc.get("supermemoryCustomId") or doc.get("id") or ""),
+            entity_label=clean_title[:300],
+            metadata={"category": clean_category},
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return payload
 
 
@@ -265,6 +292,21 @@ async def delete_knowledge_base_document(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except supermemory.SupermemoryError as exc:
         raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="kb.doc_deleted",
+            summary=f"Deleted KB document “{document_id[:80]}”",
+            entity_type="kb_doc",
+            entity_id=document_id[:200],
+            entity_label=document_id[:300],
+            metadata={"custom_id": custom_id or None},
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"deleted": document_id}
 
 
@@ -356,6 +398,18 @@ async def sync_google_drive() -> dict[str, str]:
             status_code=exc.status_code or 502,
             detail=str(exc),
         ) from exc
+    try:
+        from app.services.user_activity import emit_activity
+
+        emit_activity(
+            workspace="rfp",
+            action="kb.drive_synced",
+            summary="Started Google Drive KB sync",
+            entity_type="sync_job",
+            entity_label="Google Drive",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": "true", "message": "Google Drive sync started"}
 
 

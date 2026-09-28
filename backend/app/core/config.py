@@ -258,6 +258,11 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"
 
+    # Activity audit store: auto | sqlite | supabase
+    user_activity_store: str = "auto"
+    # Product analytics store (pageviews/clicks/dwell): auto | sqlite | supabase
+    user_analytics_store: str = "auto"
+
     # Background job queue. Empty (local dev default) = proposal/Go-No-Go jobs
     # run in-process via asyncio.create_task, same as before Celery existed.
     # Set REDIS_URL (Railway managed Redis) to route jobs through Celery

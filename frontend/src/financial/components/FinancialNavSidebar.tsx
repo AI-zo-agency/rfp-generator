@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import {
+  Activity,
   BookOpen,
   Clock3,
   Database,
@@ -57,6 +58,12 @@ export const FINANCIAL_TABS: FinancialNavTab[] = [
     label: "Data Sources Inventory",
     hint: "What is connected, and how fresh",
     Icon: Database,
+  },
+  {
+    id: "activity",
+    label: "User Activity",
+    hint: "Who synced, resolved, or ran AI here",
+    Icon: Activity,
   },
 ];
 
