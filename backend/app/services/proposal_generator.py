@@ -97,16 +97,9 @@ async def _attach_phase4_manuscript_audit(
     presubmit_review: PreSubmitReview | None = None,
 ) -> ProposalResearchCache:
     """Persist whole-manuscript audit findings without mutating draft content."""
-    from datetime import datetime, timezone
 
     from app.models.proposal import ProposalAdversarialAudit
-    from app.services.proposal_manuscript_auditor import (
-        _dedupe_findings,
-        _issue_to_finding,
-        _summary,
-        persist_manuscript_audit,
-        run_manuscript_auditor,
-    )
+    from app.services.proposal_manuscript_auditor import _dedupe_findings, _issue_to_finding, _summary
 
     if presubmit_review is not None and not use_llm:
         findings = _dedupe_findings(
@@ -1709,9 +1702,7 @@ async def generate_sections_1_3(
             "Skipping Sections 1–3 generation for %s (outline_mode=strict_rfp)",
             rfp_id,
         )
-        from datetime import datetime, timezone
 
-        from app.models.proposal import ProposalBrandVoice
 
         now = datetime.now(timezone.utc).isoformat()
         existing = await aget_proposal_draft(rfp_id)
@@ -3166,7 +3157,6 @@ async def _run_phase3_5_budget_inner(
                 "Phase 3 manuscript required before budget skip path.",
                 status_code=400,
             )
-        from app.models.proposal import ProposalBudget
 
         now = datetime.now(timezone.utc).isoformat()
         budget = (
@@ -3235,7 +3225,6 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
 
     research = await aget_research_cache(rfp_id)
     from app.core.config import settings as app_settings
-    from app.services.proposal_presubmit_review import run_presubmit_review_with_manual_flags
 
     extra_issues: list = []
     await _collapse_bio_stubs(rfp_id, draft=draft, log_label="Phase 4 start bio stub")
@@ -3367,7 +3356,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     # drop it otherwise (never invent). Without this the preview panel showed the
     # raw, un-scrubbed count even when Senior Editor's earlier pass had already
     # run — e.g. tags reintroduced by the adversarial-repair step above.
-    from app.services.go_no_go_service import _assess_rfp_content, combine_rfp_text
+    from app.services.go_no_go_service import combine_rfp_text
     from app.services.proposal_budget_content import find_budget_section_index
     from app.services.proposal_verify_optional_scrub import (
         count_verify_tags,
@@ -3655,7 +3644,6 @@ async def run_phase4_finalize_gaps(
         attach_manual_fill_flags_to_review,
         run_submission_gap_finalize_pass,
     )
-    from app.services.proposal_presubmit_review import run_presubmit_review
 
     updated_draft, logs, updated_research = await run_submission_gap_finalize_pass(
         rfp_id,
@@ -3973,9 +3961,6 @@ async def generate_full_proposal(
             # fee tables, then resolve money slots in narrative sections.
             # Pre-v2 budgets (budget gate skipped) stay frozen.
             if research and research.budget and research.budget.pricing_plan:
-                from app.services.proposal_budget_content import (
-                    incorporate_budget_into_draft,
-                )
                 from app.services.proposal_budget_slots import render_draft_budget_slots
 
                 rfp_ctx = load_rfp_for_proposal(rfp_id)[2]
@@ -4148,7 +4133,7 @@ async def generate_full_proposal(
             from app.services.proposal_blocker_prevention import (
                 apply_feedback_blocker_suite,
             )
-            from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+            from app.services.rfp_content import load_local_rfp_text
 
             rfp_final = get_rfp(rfp_id) or rfp
             _d, pdf_t, *_rest = load_local_rfp_text(rfp_final, max_chars=250_000)
@@ -4266,7 +4251,7 @@ async def generate_full_proposal(
                 from app.services.proposal_ralph import (
                     reassert_rfp_page_limit_after_content_passes,
                 )
-                from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+                from app.services.rfp_content import load_local_rfp_text
 
                 _d, pdf_t, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
                 limit_text = combine_rfp_text(

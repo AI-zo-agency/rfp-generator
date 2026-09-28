@@ -196,7 +196,6 @@ async def _scrub_optional_verify_after_fills(
             _assess_rfp_content,
             combine_rfp_text,
         )
-        from app.services.proposal_budget_content import find_budget_section_index
         from app.services.proposal_rfp_optional_claim_scrub import (
             apply_optional_claim_scrub_to_draft,
         )

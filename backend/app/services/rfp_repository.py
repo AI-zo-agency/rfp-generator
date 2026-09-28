@@ -74,7 +74,6 @@ def init_db() -> None:
         try:
             sb.ping()
         except sb.SupabaseDbError as exc:
-            import logging
 
             logging.getLogger(__name__).warning("Supabase ping failed: %s", exc)
         return

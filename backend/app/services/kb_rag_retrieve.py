@@ -602,7 +602,6 @@ async def retrieve_for_question(
     ``expand_queries=False`` when the caller already planned specific queries
     (proposal Sections 1–3 gather) so we do not multiply each into 3–4 searches.
     """
-    import asyncio
 
     from app.services import supermemory
 

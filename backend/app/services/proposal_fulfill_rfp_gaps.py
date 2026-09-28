@@ -497,11 +497,7 @@ async def run_fulfill_rfp_gaps(
     mode='full' runs closing/structure/budget/KPI/VERIFY/pre-submit.
     mode='verify_scrub_only' keeps the lighter scrub + ledger/budget path.
     """
-    from app.services.proposal_generation_cancel import (
-        ProposalGenerationCancelled,
-        bind_active_rfp,
-        unbind_active_rfp,
-    )
+    from app.services.proposal_generation_cancel import bind_active_rfp, unbind_active_rfp
     from app.services.proposal_pipeline_checkpoint import (
         clear_fulfill_scan_activity,
         record_generation_stopped,
@@ -3704,7 +3700,6 @@ async def _run_fulfill_rfp_gaps_body(
 
 
 def re_search_two_year(lowered: str) -> bool:
-    import re
 
     return bool(
         re.search(
@@ -3715,7 +3710,6 @@ def re_search_two_year(lowered: str) -> bool:
 
 
 def re_search_geo_experience(lowered: str, rfp: RfpRecord) -> bool:
-    import re
 
     loc = (rfp.location or "").casefold()
     state_hints = (

@@ -1026,7 +1026,6 @@ def prune_near_duplicate_sections(
     Never deletes Section 1–3 CQ cards. No keyword allow/deny lists.
     """
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
-    from app.services.proposal_section_quality import word_count
 
     drop_ids: set[str] = set()
     dropped_labels: list[str] = []
@@ -1163,7 +1162,6 @@ def detect_possible_scored_duplicate_pairs(
     act on; it never touches `sections`.
     """
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
-    from app.services.proposal_section_quality import word_count
     from difflib import SequenceMatcher
 
     substantial = [
@@ -1242,7 +1240,6 @@ def remove_aggregate_restatement_sections(
     is left in place — its duplicated prose is handled by the in-place trimmer,
     never a whole-section delete.
     """
-    from app.services.proposal_section_quality import word_count
 
     titles = [_section_title(s) for s in sections]
     body_by_title = {_section_title(s): _section_content(s) for s in sections}
@@ -1683,7 +1680,6 @@ def _non_identity_substance_words(content: str) -> int:
     Offeror Identification dump is almost only an identity field table.
     No title keyword deny-lists — content shape decides.
     """
-    from app.services.proposal_section_quality import word_count
 
     body = content or ""
     # Drop every markdown table; leftover is prose / lists / Q&A outside tables.

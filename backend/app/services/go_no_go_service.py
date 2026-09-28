@@ -2935,8 +2935,6 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 
     # Stamp multi-lot labels for bid-scope UI (exact Fit track strings).
     try:
-        from app.services.go_no_go_capability import tracks_in_rows
-
         rows = analysis.capability_matrix or capability_rows or []
         analysis = analysis.model_copy(
             update={"available_tracks": tracks_in_rows(rows)}

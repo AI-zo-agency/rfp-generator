@@ -1852,7 +1852,6 @@ async def apply_scan_ledger_pass(
     Used by both mode=full and mode=verify_scrub_only so unrequested sections
     are trimmed/merged and missing required narrative tabs are added.
     """
-    from datetime import datetime, timezone
 
     from app.services.proposal_repository import asave_proposal_draft, asave_research_cache
 

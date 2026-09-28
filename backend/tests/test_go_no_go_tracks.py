@@ -137,3 +137,16 @@ class SingleScopeRfpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnalyzeRfpScopeTests(unittest.TestCase):
+    """Regression: a function-local ``from ... import tracks_in_rows`` inside
+    ``analyze_rfp`` shadowed the module-level import for the whole function
+    body, so the earlier ``tracks_in_rows(capability_rows)`` call raised
+    UnboundLocalError ("cannot access local variable 'tracks_in_rows'")."""
+
+    def test_analyze_rfp_does_not_shadow_tracks_in_rows(self) -> None:
+        from app.services import go_no_go_service
+
+        local_names = go_no_go_service.analyze_rfp.__code__.co_varnames
+        self.assertNotIn("tracks_in_rows", local_names)

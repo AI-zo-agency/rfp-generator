@@ -852,7 +852,6 @@ def finish_sync_job(
         # Older DBs without rfps_skipped / rfps_created columns.
         # Encode extras in error only when the job succeeded (error is empty).
         if error is None and (rfps_skipped or created != rfps_found):
-            import json
 
             base["error"] = (
                 "ZO_SYNC_META:"

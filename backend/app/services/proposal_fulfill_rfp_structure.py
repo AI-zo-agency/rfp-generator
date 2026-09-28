@@ -422,10 +422,7 @@ async def extract_rfp_submission_format_specs(
     land in different worker processes, in which case the memo misses and the
     call happens twice exactly as before — never worse, sometimes free.
     """
-    from app.services.proposal_rfp_excerpt import (
-        closing_package_excerpt,
-        submission_documents_excerpt,
-    )
+    from app.services.proposal_rfp_excerpt import closing_package_excerpt
 
     body = (rfp_text or "").strip()
     if not body or not llm.is_configured():

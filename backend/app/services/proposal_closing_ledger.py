@@ -494,7 +494,6 @@ def ensure_missing_closing_stubs(
     """Add short MANUAL FILL stubs for missing ledger rows (Generate path)."""
     from datetime import datetime, timezone
 
-    from app.models.proposal import ProposalSection
 
     audits = audit_draft_against_closing_ledger(draft, ledger)
     logs: list[str] = []

@@ -594,7 +594,6 @@ async def _search_hits_all_modes(
     threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
     """v4 hybrid (memories) + documents (chunks). Memories first; chunks fill gaps."""
-    import asyncio
 
     active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
 

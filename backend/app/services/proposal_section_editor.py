@@ -737,7 +737,6 @@ async def _plan_verification_kb_queries(
         rfp_sector=rfp_sector,
         rfp_title=rfp_title,
     )
-    from app.services import llm
 
     if not llm.is_configured():
         return heuristic
@@ -8125,7 +8124,6 @@ async def _seed_empty_static_section(
     persist: bool,
 ) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
     """Write one empty static tab without Phase-3/repair recursion."""
-    from datetime import datetime, timezone
 
     from app.services.agency_facts import (
         default_business_information_markdown,
@@ -10765,10 +10763,6 @@ async def improve_proposal_section(
             )
             return _improve_outcome(updated_section, updated_draft, research, provider, assistant_message, True)
 
-        from app.services.proposal_manual_flags import (
-            extract_manual_fill_tags,
-            fill_manual_fill_tags,
-        )
         from app.services.proposal_manuscript import (
             convert_bare_confirmation_lines,
             convert_inline_confirmation_phrases,
