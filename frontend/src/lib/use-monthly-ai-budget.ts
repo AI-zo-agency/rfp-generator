@@ -15,13 +15,16 @@ export type MonthlyAiBudgetSnapshot = {
   blocked: boolean;
   proposalSpentUsd: number;
   financialSpentUsd: number;
+  outreachSpentUsd: number;
   weekSpentUsd: number;
   weekProposalSpentUsd: number;
   weekFinancialSpentUsd: number;
+  weekOutreachSpentUsd: number;
   dayLimitUsd: number;
   daySpentUsd: number;
   dayProposalSpentUsd: number;
   dayFinancialSpentUsd: number;
+  dayOutreachSpentUsd: number;
 };
 
 const POLL_MS = 120_000;
@@ -48,13 +51,16 @@ function parseBudget(data: Record<string, unknown>): MonthlyAiBudgetSnapshot | n
     blocked: Boolean(data.blocked),
     proposalSpentUsd: Number(data.proposal_spent_usd ?? 0),
     financialSpentUsd: Number(data.financial_spent_usd ?? 0),
+    outreachSpentUsd: Number(data.outreach_spent_usd ?? 0),
     weekSpentUsd: Number(data.week_spent_usd ?? 0),
     weekProposalSpentUsd: Number(data.week_proposal_spent_usd ?? 0),
     weekFinancialSpentUsd: Number(data.week_financial_spent_usd ?? 0),
+    weekOutreachSpentUsd: Number(data.week_outreach_spent_usd ?? 0),
     dayLimitUsd: Number(data.day_limit_usd ?? 0),
     daySpentUsd: Number(data.day_spent_usd ?? 0),
     dayProposalSpentUsd: Number(data.day_proposal_spent_usd ?? 0),
     dayFinancialSpentUsd: Number(data.day_financial_spent_usd ?? 0),
+    dayOutreachSpentUsd: Number(data.day_outreach_spent_usd ?? 0),
   };
 }
 
@@ -128,4 +134,80 @@ export function useMonthlyAiBudget(): MonthlyAiBudgetSnapshot | null {
   }, []);
 
   return budget;
+}
+
+export type WeekCostHistoryRow = {
+  label: string;
+  spentUsd: number;
+  proposalSpentUsd: number;
+  financialSpentUsd: number;
+  outreachSpentUsd: number;
+};
+
+let historyCache: WeekCostHistoryRow[] | null = null;
+let historyInflight: Promise<WeekCostHistoryRow[]> | null = null;
+
+function mapHistory(raw: unknown): WeekCostHistoryRow[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((row) => {
+    const item = (row ?? {}) as Record<string, unknown>;
+    return {
+      label: String(item.label ?? ""),
+      spentUsd: Number(item.spent_usd ?? 0),
+      proposalSpentUsd: Number(item.proposal_spent_usd ?? 0),
+      financialSpentUsd: Number(item.financial_spent_usd ?? 0),
+      outreachSpentUsd: Number(item.outreach_spent_usd ?? 0),
+    };
+  });
+}
+
+/** Prior weeks, loaded once when History is opened. Shared across dashboards. */
+export function useWeekCostHistory(enabled: boolean): {
+  weeks: WeekCostHistoryRow[] | null;
+  loading: boolean;
+  error: string | null;
+} {
+  const [weeks, setWeeks] = useState<WeekCostHistoryRow[] | null>(historyCache);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled || historyCache) {
+      if (historyCache) setWeeks(historyCache);
+      return;
+    }
+    let cancelled = false;
+    if (!historyInflight) {
+      historyInflight = (async () => {
+        const res = await fetch("/api/llm-cost/weekly-history", {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(`Weekly history failed (${res.status})`);
+        const data = (await res.json()) as { weeks?: unknown };
+        historyCache = mapHistory(data.weeks);
+        return historyCache;
+      })().catch((err: unknown) => {
+        historyInflight = null;
+        throw err;
+      });
+    }
+    historyInflight
+      .then((rows) => {
+        if (!cancelled) setWeeks(rows);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        console.warn("[llm-cost] weekly history unavailable:", err);
+        setError(err instanceof Error ? err.message : "History unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  return {
+    weeks,
+    loading: enabled && weeks === null && error === null,
+    error,
+  };
 }

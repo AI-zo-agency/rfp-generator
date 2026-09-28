@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { SidebarAiCostPanel } from "@/components/SidebarAiCostPanel";
 import { cn } from "@/lib/utils";
 import { expoOutEase } from "@/lib/motion";
 import type { FinancialTabId } from "../lib/financial-tab";
@@ -299,6 +300,7 @@ export function FinancialNavSidebar({
               </ul>
             </nav>
           </TooltipProvider>
+          <SidebarAiCostPanel collapsed={railCollapsed} />
         </aside>
       </div>
     </>

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # TopBar/Sidebar/Analytics hits don't each re-scan Supabase.
 _CACHE_TTL_S = 60.0
 _status_cache: tuple[float, dict[str, Any]] | None = None
+_history_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
 def _utcnow() -> datetime:
@@ -32,8 +33,9 @@ def _utcnow() -> datetime:
 
 
 def clear_monthly_budget_cache() -> None:
-    global _status_cache
+    global _status_cache, _history_cache
     _status_cache = None
+    _history_cache = None
 
 
 def _parse_epoch(raw: str) -> datetime | None:
@@ -86,19 +88,36 @@ def _clip_start(window_start: datetime, epoch: datetime | None) -> datetime:
     return window_start
 
 
+def _unpack_period(
+    parts: tuple[Any, ...],
+) -> tuple[float, float, float, list[dict[str, Any]], float]:
+    """Accept 3-, 4-, or 5-tuples so older test doubles still load.
+
+    Real ``_period_spend`` returns
+    (proposal, financial, total, by_user, outreach).
+    """
+    proposal = float(parts[0]) if parts else 0.0
+    financial = float(parts[1]) if len(parts) > 1 else 0.0
+    total = float(parts[2]) if len(parts) > 2 else proposal + financial
+    by_user = parts[3] if len(parts) > 3 and isinstance(parts[3], list) else []
+    outreach = float(parts[4]) if len(parts) > 4 else 0.0
+    return proposal, financial, total, by_user, outreach
+
+
 def _period_spend(
     start: datetime,
     end: datetime,
-) -> tuple[float, float, float, list[dict[str, Any]]]:
-    """Return (proposal_usd, financial_usd, total_usd, proposal_by_user)."""
+) -> tuple[float, float, float, list[dict[str, Any]], float]:
+    """Return (proposal, financial, total, proposal_by_user, outreach)."""
     start_s, end_s = _iso(start), _iso(end)
-    proposal_only, misfiled_financial, by_user = _sum_llm_call_log_split(
+    proposal_only, misfiled_financial, outreach, by_user = _sum_llm_call_log_split(
         start_s, end_s
     )
     financial_table = float(_sum_financial_llm_calls_usd(start_s, end_s))
     proposal = float(proposal_only)
     financial = float(financial_table) + float(misfiled_financial)
-    return proposal, financial, proposal + financial, by_user
+    outreach_usd = float(outreach)
+    return proposal, financial, proposal + financial + outreach_usd, by_user, outreach_usd
 
 
 def _sum_supabase_table(
@@ -131,6 +150,10 @@ def _sum_supabase_table(
     return total
 
 
+# Prospect outreach calls live in llm_call_log under these node names.
+_OUTREACH_LLM_NODES = frozenset({"leads_enrich", "leads_brief"})
+
+
 def _is_financial_node_name(node_name: str) -> bool:
     try:
         from app.services.llm import _is_financial_node
@@ -138,6 +161,15 @@ def _is_financial_node_name(node_name: str) -> bool:
         return bool(_is_financial_node(node_name))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _spend_bucket(node_name: str) -> str:
+    """Ledger product: financial, outreach, or proposal (Ralph)."""
+    if _is_financial_node_name(node_name):
+        return "financial"
+    if (node_name or "").strip() in _OUTREACH_LLM_NODES:
+        return "outreach"
+    return "proposal"
 
 
 def _by_user_rows(totals: dict[str, float]) -> list[dict[str, Any]]:
@@ -150,12 +182,13 @@ def _by_user_rows(totals: dict[str, float]) -> list[dict[str, Any]]:
 
 def _sum_llm_call_log_split(
     start_iso: str, end_iso: str
-) -> tuple[float, float, list[dict[str, Any]]]:
-    """Split proposal ledger into (proposal_usd, misfiled_financial_usd, by_user).
+) -> tuple[float, float, float, list[dict[str, Any]]]:
+    """Split llm_call_log into (proposal, misfiled_financial, outreach, by_user).
 
     Older financial ``chat_json`` calls wrote into ``llm_call_log``. Those rows
-    still count toward the monthly cap but must show under Finance, not Proposals.
-    Proposal rows are also grouped by ``user_email`` in the same scan.
+    still count toward the monthly cap but must show under Finance, not Ralph.
+    Outreach nodes (lead enrich / brief) are their own product. Proposal rows
+    are grouped by ``user_email`` in the same scan.
     """
     from app.services import supabase_db as sb
     from app.services.llm_call_log import ensure_llm_call_log_table
@@ -164,6 +197,7 @@ def _sum_llm_call_log_split(
     ensure_llm_call_log_table()
     proposal = 0.0
     financial = 0.0
+    outreach = 0.0
     by_email: dict[str, float] = {}
 
     def _add_user(email: str, cost: float) -> None:
@@ -200,16 +234,18 @@ def _sum_llm_call_log_split(
                 break
             for row in batch:
                 cost = float(row.get("cost_usd") or 0)
-                node = str(row.get("node_name") or "")
-                if _is_financial_node_name(node):
+                bucket = _spend_bucket(str(row.get("node_name") or ""))
+                if bucket == "financial":
                     financial += cost
+                elif bucket == "outreach":
+                    outreach += cost
                 else:
                     proposal += cost
                     _add_user(str(row.get("user_email") or ""), cost)
             if len(batch) < page:
                 break
             offset += page
-        return proposal, financial, _by_user_rows(by_email)
+        return proposal, financial, outreach, _by_user_rows(by_email)
 
     with _connect() as conn:
         cols = {
@@ -226,8 +262,11 @@ def _sum_llm_call_log_split(
             ).fetchall()
             for cost_usd, node_name, user_email in rows:
                 cost = float(cost_usd or 0)
-                if _is_financial_node_name(str(node_name or "")):
+                bucket = _spend_bucket(str(node_name or ""))
+                if bucket == "financial":
                     financial += cost
+                elif bucket == "outreach":
+                    outreach += cost
                 else:
                     proposal += cost
                     _add_user(str(user_email or ""), cost)
@@ -242,18 +281,21 @@ def _sum_llm_call_log_split(
             ).fetchall()
             for cost_usd, node_name in rows:
                 cost = float(cost_usd or 0)
-                if _is_financial_node_name(str(node_name or "")):
+                bucket = _spend_bucket(str(node_name or ""))
+                if bucket == "financial":
                     financial += cost
+                elif bucket == "outreach":
+                    outreach += cost
                 else:
                     proposal += cost
                     _add_user("", cost)
-    return proposal, financial, _by_user_rows(by_email)
+    return proposal, financial, outreach, _by_user_rows(by_email)
 
 
 def _sum_llm_call_log_usd(start_iso: str, end_iso: str) -> float:
-    """Total USD in llm_call_log (proposal + any misfiled financial rows)."""
-    proposal, financial, _by_user = _sum_llm_call_log_split(start_iso, end_iso)
-    return proposal + financial
+    """Total USD in llm_call_log (proposal + outreach + misfiled financial)."""
+    proposal, financial, outreach, _by_user = _sum_llm_call_log_split(start_iso, end_iso)
+    return proposal + financial + outreach
 
 
 def _sum_financial_llm_calls_usd(start_iso: str, end_iso: str) -> float:
@@ -306,33 +348,44 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
 
     proposal = 0.0
     financial = 0.0
+    outreach = 0.0
+    month_total = 0.0
     week_proposal = 0.0
     week_financial = 0.0
+    week_outreach = 0.0
     week_spent = 0.0
     day_proposal = 0.0
     day_financial = 0.0
+    day_outreach = 0.0
     day_spent = 0.0
     by_user: list[dict[str, Any]] = []
     week_by_user: list[dict[str, Any]] = []
     read_error: str | None = None
     if enabled:
         try:
-            proposal, financial, _total, by_user = _period_spend(
-                window_start, month_end
+            proposal, financial, month_total, by_user, outreach = _unpack_period(
+                _period_spend(window_start, month_end)
             )
-            week_proposal, week_financial, week_spent, week_by_user = _period_spend(
-                week_window_start, week_end
-            )
-            day_proposal, day_financial, day_spent, _day_by_user = _period_spend(
-                day_window_start, day_end
+            (
+                week_proposal,
+                week_financial,
+                week_spent,
+                week_by_user,
+                week_outreach,
+            ) = _unpack_period(_period_spend(week_window_start, week_end))
+            day_proposal, day_financial, day_spent, _day_by_user, day_outreach = (
+                _unpack_period(_period_spend(day_window_start, day_end))
             )
         except Exception as exc:  # noqa: BLE001
             # Stricter: cannot read ledger → treat as blocked.
             read_error = str(exc)[:200]
+            logger.warning("monthly llm budget ledger read failed: %s", read_error)
             proposal = limit
             financial = 0.0
+            outreach = 0.0
+            month_total = limit
 
-    spent = round(proposal + financial, 6)
+    spent = round(month_total, 6)
     remaining = max(0.0, round(limit - spent, 6)) if enabled else 0.0
     blocked = bool(enabled and spent >= limit)
     status: dict[str, Any] = {
@@ -343,6 +396,7 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
         "blocked": blocked,
         "proposal_spent_usd": round(proposal, 6) if enabled else 0.0,
         "financial_spent_usd": round(financial, 6) if enabled else 0.0,
+        "outreach_spent_usd": round(outreach, 6) if enabled else 0.0,
         "proposal_by_user": by_user if enabled else [],
         "week_proposal_by_user": week_by_user if enabled else [],
         "period_start": _iso(window_start),
@@ -350,12 +404,14 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
         "week_spent_usd": round(week_spent, 6) if enabled else 0.0,
         "week_proposal_spent_usd": round(week_proposal, 6) if enabled else 0.0,
         "week_financial_spent_usd": round(week_financial, 6) if enabled else 0.0,
+        "week_outreach_spent_usd": round(week_outreach, 6) if enabled else 0.0,
         "week_period_start": _iso(week_window_start),
         "week_period_end": _iso(week_end),
         "day_limit_usd": round(day_limit, 6) if enabled and day_limit > 0 else 0.0,
         "day_spent_usd": round(day_spent, 6) if enabled else 0.0,
         "day_proposal_spent_usd": round(day_proposal, 6) if enabled else 0.0,
         "day_financial_spent_usd": round(day_financial, 6) if enabled else 0.0,
+        "day_outreach_spent_usd": round(day_outreach, 6) if enabled else 0.0,
         "day_period_start": _iso(day_window_start),
         "day_period_end": _iso(day_end),
         "epoch": _iso(epoch) if epoch else "",
@@ -364,6 +420,66 @@ def get_monthly_budget_status(*, use_cache: bool = True) -> dict[str, Any]:
     }
     _status_cache = (time.monotonic(), status)
     return dict(status)
+
+
+def _week_label(start: datetime, end_exclusive: datetime) -> str:
+    last = end_exclusive - timedelta(days=1)
+    if start.month == last.month and start.year == last.year:
+        return f"{start.strftime('%b')} {start.day}–{last.day}"
+    return f"{start.strftime('%b')} {start.day}–{last.strftime('%b')} {last.day}"
+
+
+def list_prior_weeks(*, count: int = 8) -> list[dict[str, Any]]:
+    """Completed UTC weeks before the current one, newest first.
+
+    Only weeks with spend are returned. The open week stays on the live meter.
+
+    ponytail: one ledger scan per week (at most 8). On-demand history only;
+    fold into a single windowed scan if opening History gets slow.
+    """
+    global _history_cache
+    if _history_cache is not None:
+        cached_at, cached = _history_cache
+        if time.monotonic() - cached_at < _CACHE_TTL_S:
+            return [dict(row) for row in cached]
+
+    now = _utcnow()
+    week_start, _week_end = _week_window(now)
+    epoch = _parse_epoch(str(getattr(settings, "monthly_llm_budget_epoch", "") or ""))
+    rows: list[dict[str, Any]] = []
+    cursor = week_start
+    logger.info(
+        "weekly llm cost history start count=%s week_start=%s",
+        count,
+        _iso(week_start),
+    )
+    for _ in range(max(0, count)):
+        start = cursor - timedelta(days=7)
+        end = cursor
+        if epoch is not None and end <= epoch:
+            break
+        window_start = _clip_start(start, epoch)
+        if window_start >= end:
+            break
+        proposal, financial, total, _users, outreach = _unpack_period(
+            _period_spend(window_start, end)
+        )
+        if total > 0:
+            rows.append(
+                {
+                    "period_start": _iso(window_start),
+                    "period_end": _iso(end),
+                    "label": _week_label(start, end),
+                    "spent_usd": round(total, 6),
+                    "proposal_spent_usd": round(proposal, 6),
+                    "financial_spent_usd": round(financial, 6),
+                    "outreach_spent_usd": round(outreach, 6),
+                }
+            )
+        cursor = start
+    logger.info("weekly llm cost history built week_count=%s", len(rows))
+    _history_cache = (time.monotonic(), rows)
+    return [dict(row) for row in rows]
 
 
 def enforce_monthly_llm_budget() -> None:

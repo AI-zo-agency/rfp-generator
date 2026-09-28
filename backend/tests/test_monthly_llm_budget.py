@@ -41,6 +41,8 @@ def test_status_sums_proposal_and_finance_after_epoch(monkeypatch):
     assert status["week_spent_usd"] == pytest.approx(1.5)
     assert status["week_proposal_spent_usd"] == pytest.approx(1.0)
     assert status["week_financial_spent_usd"] == pytest.approx(0.5)
+    assert status["week_outreach_spent_usd"] == 0.0
+    assert status["outreach_spent_usd"] == 0.0
     assert status["day_limit_usd"] == pytest.approx(5.0)
     assert status["day_spent_usd"] == pytest.approx(0.5)
     assert status["day_proposal_spent_usd"] == pytest.approx(0.4)
@@ -157,3 +159,41 @@ def test_status_includes_proposal_by_user(monkeypatch):
     status = budget.get_monthly_budget_status()
     assert status["proposal_by_user"][0]["email"] == "a@zo.com"
     assert status["week_proposal_by_user"][0]["proposal_spent_usd"] == 2.0
+
+
+def test_spend_bucket_splits_ralph_finance_and_outreach():
+    assert budget._spend_bucket("financial.ai_insights") == "financial"
+    assert budget._spend_bucket("leads_enrich") == "outreach"
+    assert budget._spend_bucket("leads_brief") == "outreach"
+    assert budget._spend_bucket("opportunity_extract") == "proposal"
+
+
+def test_prior_weeks_skip_the_open_week_and_zero_weeks(monkeypatch):
+    budget.clear_monthly_budget_cache()
+    monkeypatch.setattr(
+        budget.settings, "monthly_llm_budget_epoch", "2026-01-01T00:00:00+00:00"
+    )
+    monkeypatch.setattr(
+        budget,
+        "_utcnow",
+        lambda: budget.datetime(2026, 9, 15, 12, 0, tzinfo=budget.timezone.utc),
+    )
+    seen: list[int] = []
+
+    def fake_spend(start, end):
+        seen.append(start.day)
+        # Only the week starting Sep 7 has spend. Open week (Sep 14) is not queried.
+        if start.day == 7:
+            return (10.0, 0.4, 10.5, [], 0.1)
+        return (0.0, 0.0, 0.0, [], 0.0)
+
+    monkeypatch.setattr(budget, "_period_spend", fake_spend)
+    weeks = budget.list_prior_weeks(count=3)
+    assert seen[0] == 7
+    assert 14 not in seen
+    assert len(weeks) == 1
+    assert weeks[0]["label"] == "Sep 7–13"
+    assert weeks[0]["spent_usd"] == pytest.approx(10.5)
+    assert weeks[0]["proposal_spent_usd"] == pytest.approx(10.0)
+    assert weeks[0]["financial_spent_usd"] == pytest.approx(0.4)
+    assert weeks[0]["outreach_spent_usd"] == pytest.approx(0.1)

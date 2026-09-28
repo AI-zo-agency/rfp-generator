@@ -66,6 +66,14 @@ def llm_monthly_budget() -> dict[str, Any]:
     return get_monthly_budget_status()
 
 
+@router.get("/weekly-history")
+def llm_weekly_history() -> dict[str, Any]:
+    """Prior UTC weeks of AI spend. Current week stays on the live meter."""
+    from app.services.monthly_llm_budget import list_prior_weeks
+
+    return {"timezone": "UTC", "weeks": list_prior_weeks()}
+
+
 @router.get("/rfps/{rfp_id}")
 def llm_cost_for_rfp(rfp_id: str) -> dict[str, Any]:
     """LLM spend for one RFP across all generate / scan / chat runs."""

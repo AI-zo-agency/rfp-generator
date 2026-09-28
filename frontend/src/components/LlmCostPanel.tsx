@@ -17,19 +17,16 @@ function fmtUsd(n: number): string {
 // }
 
 export function LlmCostPanel({ summary }: { summary: LlmCostSummary }) {
-  // Temporarily hide all-time Analytics (total spend / proposals / stages / unknown).
-  // const attributed = summary.byProposal.filter((p) => p.rfpId !== "unknown");
-  // const topStages = summary.byNode.slice(0, 12);
-  // const unknownModels = summary.unknownBreakdown.byModel.slice(0, 8);
-  // const unknownDates = summary.unknownBreakdown.byDate.slice(0, 8);
   const budget = summary.monthlyBudget;
+  const weekTotal = budget?.weekSpentUsd ?? budget?.spentUsd ?? 0;
   const usedPct =
     budget && budget.enabled && budget.limitUsd > 0
       ? Math.min(100, Math.round((budget.spentUsd / budget.limitUsd) * 100))
       : 0;
-  const byPerson = (budget?.proposalByUser ?? []).filter((row) =>
+  const byPerson = (budget?.weekProposalByUser ?? budget?.proposalByUser ?? []).filter((row) =>
     row.email.includes("@")
   );
+  const dayLimit = budget?.dayLimitUsd && budget.dayLimitUsd > 0 ? budget.dayLimitUsd : 5;
 
   return (
     <div className="space-y-8">
@@ -42,39 +39,65 @@ export function LlmCostPanel({ summary }: { summary: LlmCostSummary }) {
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
               <p className="text-sm text-zo-text-secondary">
-                Monthly AI budget ({budget.timezone})
+                This week ({budget.timezone})
               </p>
               <p className="mt-2 font-heading text-3xl font-bold">
-                {fmtUsd(budget.spentUsd)}
-                <span className="ml-2 text-lg font-medium text-zo-text-secondary">
-                  / {fmtUsd(budget.limitUsd)}
+                {fmtUsd(weekTotal)}
+              </p>
+              <ul className="mt-3 space-y-1 text-sm text-zo-text-secondary">
+                <li>Ralph · {fmtUsd(budget.weekProposalSpentUsd ?? 0)}</li>
+                <li>Financial · {fmtUsd(budget.weekFinancialSpentUsd ?? 0)}</li>
+                <li>Outreach · {fmtUsd(budget.weekOutreachSpentUsd ?? 0)}</li>
+              </ul>
+            </div>
+            {budget.blocked ? (
+              <p className="text-sm font-semibold text-zo-orange">
+                Monthly cap reached — AI features paused until next UTC month
+              </p>
+            ) : null}
+          </div>
+          <details className="mt-5 border-t border-zo-border pt-4">
+            <summary className="cursor-pointer text-sm font-semibold text-zo-text-secondary">
+              History
+            </summary>
+            <div className="mt-4 space-y-4 text-sm text-zo-text-secondary">
+              <p>
+                Today · {fmtUsd(budget.daySpentUsd ?? 0)} / {fmtUsd(dayLimit)}
+                <span className="mt-1 block">
+                  Ralph {fmtUsd(budget.dayProposalSpentUsd ?? 0)} · Financial{" "}
+                  {fmtUsd(budget.dayFinancialSpentUsd ?? 0)} · Outreach{" "}
+                  {fmtUsd(budget.dayOutreachSpentUsd ?? 0)}
                 </span>
               </p>
-              <p className="mt-1 text-sm text-zo-text-secondary">
-                {budget.blocked
-                  ? "Hard capped — all AI features paused until next UTC month"
-                  : `${fmtUsd(budget.remainingUsd)} remaining this month`}
-              </p>
+              <div>
+                <p>
+                  This month · {fmtUsd(budget.spentUsd)} / {fmtUsd(budget.limitUsd)}
+                  {budget.blocked
+                    ? " · hard capped"
+                    : ` · ${fmtUsd(budget.remainingUsd)} remaining`}
+                </p>
+                <p className="mt-1">
+                  Ralph {fmtUsd(budget.proposalSpentUsd)} · Financial{" "}
+                  {fmtUsd(budget.financialSpentUsd)} · Outreach{" "}
+                  {fmtUsd(budget.outreachSpentUsd ?? 0)}
+                </p>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-zo-surface-secondary">
+                  <div
+                    className="h-full"
+                    style={{
+                      width: `${usedPct}%`,
+                      background: budget.blocked
+                        ? "var(--zo-orange)"
+                        : "var(--zo-teal)",
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs">
+                  Counts spend after deploy epoch · resets {budget.periodEnd.slice(0, 10)}
+                </p>
+              </div>
             </div>
-            <div className="text-right text-sm text-zo-text-secondary">
-              <p>Proposals · {fmtUsd(budget.proposalSpentUsd)}</p>
-              <p>Finance · {fmtUsd(budget.financialSpentUsd)}</p>
-              <p className="mt-1 text-xs">
-                Counts spend after deploy epoch · resets {budget.periodEnd.slice(0, 10)}
-              </p>
-            </div>
-          </div>
-          <div className="mt-4 h-2 overflow-hidden rounded-full bg-zo-surface-secondary">
-            <div
-              className="h-full"
-              style={{
-                width: `${usedPct}%`,
-                background: budget.blocked
-                  ? "var(--zo-orange)"
-                  : "var(--zo-teal)",
-              }}
-            />
-          </div>
+          </details>
         </div>
       ) : null}
 
@@ -82,8 +105,8 @@ export function LlmCostPanel({ summary }: { summary: LlmCostSummary }) {
         <div className="border-b border-zo-border px-6 py-4">
           <h2 className="font-heading text-xl font-bold">Cost per person</h2>
           <p className="mt-1 text-sm text-zo-text-secondary">
-            Proposal AI spend this month by signed-in email (from when attribution
-            started). Older runs without an email are not listed here.
+            Ralph AI spend this week by signed-in email. Earlier weeks and the
+            month total are under History.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -98,7 +121,7 @@ export function LlmCostPanel({ summary }: { summary: LlmCostSummary }) {
               {byPerson.length === 0 ? (
                 <tr>
                   <td colSpan={2} className="px-6 py-8 text-zo-text-secondary">
-                    No attributed user spend yet — run Generate, Scan, Go/No-Go, or
+                    No attributed user spend this week — run Generate, Scan, Go/No-Go, or
                     section chat while signed in.
                   </td>
                 </tr>

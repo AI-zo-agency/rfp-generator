@@ -40,11 +40,22 @@ export interface LlmMonthlyBudget {
   blocked: boolean;
   proposalSpentUsd: number;
   financialSpentUsd: number;
+  outreachSpentUsd?: number;
   periodStart: string;
   periodEnd: string;
   timezone: string;
   /** Proposal spend this month by signed-in email (from deploy attribution onward). */
   proposalByUser: { email: string; proposalSpentUsd: number }[];
+  weekSpentUsd?: number;
+  weekProposalSpentUsd?: number;
+  weekFinancialSpentUsd?: number;
+  weekOutreachSpentUsd?: number;
+  weekProposalByUser?: { email: string; proposalSpentUsd: number }[];
+  dayLimitUsd?: number;
+  daySpentUsd?: number;
+  dayProposalSpentUsd?: number;
+  dayFinancialSpentUsd?: number;
+  dayOutreachSpentUsd?: number;
 }
 
 export interface LlmCostSummary {

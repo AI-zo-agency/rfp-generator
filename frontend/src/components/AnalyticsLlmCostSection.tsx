@@ -50,7 +50,8 @@ function emptySummary(monthlyBudget: LlmMonthlyBudget | null): LlmCostSummary {
 }
 
 /**
- * Analytics LLM section — monthly budget + cost per person only.
+ * Analytics LLM section — current-week spend + cost per person.
+ * Today, this month, and prior weeks live on the sidebar History control.
  * All-time /summary rollup is temporarily disabled (slow + noisy).
  */
 export function AnalyticsLlmCostSection() {
@@ -88,10 +89,18 @@ export function AnalyticsLlmCostSection() {
                 blocked: Boolean(monthlyRaw.blocked),
                 proposalSpentUsd: Number(monthlyRaw.proposal_spent_usd ?? 0),
                 financialSpentUsd: Number(monthlyRaw.financial_spent_usd ?? 0),
+                outreachSpentUsd: Number(monthlyRaw.outreach_spent_usd ?? 0),
                 periodStart: asString(monthlyRaw.period_start),
                 periodEnd: asString(monthlyRaw.period_end),
                 timezone: asString(monthlyRaw.timezone, "UTC"),
                 proposalByUser: mapUserSpend(monthlyRaw.proposal_by_user),
+                weekSpentUsd: Number(monthlyRaw.week_spent_usd ?? 0),
+                weekProposalSpentUsd: Number(monthlyRaw.week_proposal_spent_usd ?? 0),
+                weekFinancialSpentUsd: Number(monthlyRaw.week_financial_spent_usd ?? 0),
+                weekOutreachSpentUsd: Number(monthlyRaw.week_outreach_spent_usd ?? 0),
+                weekProposalByUser: mapUserSpend(monthlyRaw.week_proposal_by_user),
+                dayLimitUsd: Number(monthlyRaw.day_limit_usd ?? 0),
+                daySpentUsd: Number(monthlyRaw.day_spent_usd ?? 0),
               };
         setSummary(emptySummary(monthlyBudget));
       } catch (err) {
