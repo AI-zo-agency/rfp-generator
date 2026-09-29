@@ -483,48 +483,18 @@ def list_prior_weeks(*, count: int = 8) -> list[dict[str, Any]]:
 
 
 def enforce_monthly_llm_budget() -> None:
-    """Raise ``LlmError(429)`` when monthly spend is at/over the hard cap."""
-    limit = float(getattr(settings, "monthly_llm_budget_usd", 0.0) or 0.0)
-    if limit <= 0:
-        return
-    clear_monthly_budget_cache()  # never trust a stale allow right before a call
-    status = get_monthly_budget_status(use_cache=False)
-    if not status.get("blocked"):
-        return
-    from app.services.llm import LlmError
+    """Raise ``LlmError(429)`` when monthly spend is at/over the hard cap.
 
-    spent = float(status.get("spent_usd") or 0)
-    remaining = float(status.get("remaining_usd") or 0)
-    err = status.get("read_error")
-    if err:
-        raise LlmError(
-            (
-                f"Monthly LLM budget guard cannot read cost ledgers ({err}). "
-                f"Hard cap is ${limit:.2f}/month — refusing AI calls until spend "
-                "can be verified."
-            ),
-            status_code=429,
-        )
-    raise LlmError(
-        (
-            f"Monthly LLM budget exceeded: ${spent:.2f} spent "
-            f"(cap ${limit:.2f}/month, ${remaining:.2f} remaining). "
-            "All AI features are paused until next UTC month "
-            f"(resets {status.get('period_end', '')})."
-        ),
-        status_code=429,
-    )
+    **DISABLED** — monthly cap guardrail temporarily removed.
+    """
+    # NOTE: re-enable when ready.
+    return
 
 
 def raise_http_if_monthly_budget_blocked() -> None:
-    """FastAPI preflight — same rule, HTTP 429."""
-    from fastapi import HTTPException
+    """FastAPI preflight — same rule, HTTP 429.
 
-    try:
-        enforce_monthly_llm_budget()
-    except Exception as exc:  # noqa: BLE001
-        from app.services.llm import LlmError
-
-        if isinstance(exc, LlmError) and exc.status_code == 429:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        raise
+    **DISABLED** — monthly cap guardrail temporarily removed.
+    """
+    # NOTE: re-enable when ready.
+    return

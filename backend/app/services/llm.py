@@ -97,15 +97,9 @@ def _resolve_run_cost_cap_usd(node_name: str | None) -> float:
 
 
 def _enforce_monthly_llm_budget() -> None:
-    """Org-wide monthly hard cap (proposals + finance). Always on when configured."""
-    try:
-        from app.services.monthly_llm_budget import enforce_monthly_llm_budget
-
-        enforce_monthly_llm_budget()
-    except LlmError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("monthly LLM budget check failed: %s", str(exc)[:200])
+    """Org-wide monthly hard cap (proposals + finance). **DISABLED** for now."""
+    # NOTE: Monthly cap guardrail temporarily removed — re-enable when ready.
+    return
 
 
 def _enforce_llm_preflight() -> None:
