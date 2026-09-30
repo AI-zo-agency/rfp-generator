@@ -35,3 +35,30 @@ def test_finding_whose_text_is_gone_is_ignored():
 
 def test_clean_section_has_no_issues():
     assert _scan_voice(_draft("Clean text only.")) == []
+
+
+def _em_issues(issues):
+    return [i for i in issues if "em dash" in i.message]
+
+
+def test_em_dash_only_on_tag_and_heading_lines_is_not_flagged():
+    body = (
+        "## Heading — with dash\n"
+        "[MANUAL FILL: fill — this]\n"
+        "  [VERIFY: a — b]\n"
+        "[DESIGNER NOTE: x — y]\n"
+        "Plain sentence."
+    )
+    assert _em_issues(_scan_voice(_draft(body))) == []
+
+
+def test_tag_line_plus_body_em_dash_gives_one_critical_issue():
+    body = "[MANUAL FILL: fill — this]\nWe work fast — every day.\nAnother — one."
+    issues = _em_issues(_scan_voice(_draft(body)))
+    assert len(issues) == 1 and issues[0].severity == "critical"
+
+
+def test_em_dash_in_markdown_table_row_is_flagged():
+    body = "| Phase | Note |\n| --- | --- |\n| One | fast — cheap |"
+    issues = _em_issues(_scan_voice(_draft(body)))
+    assert len(issues) == 1 and issues[0].severity == "critical"

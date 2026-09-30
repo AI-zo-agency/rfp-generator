@@ -280,9 +280,8 @@ def _fix_we_verb_agreement(text: str) -> str:
     return _WE_VERB_AGREEMENT.sub(fix, text)
 
 
-# Rev 3 empty hype + generic AI filler — deterministic strip on persist/generate.
 def apply_writing_standards_mechanics(content: str) -> str:
-    """Deterministic Rev 6 mechanics: company name + no em dashes + voice bans."""
+    """Deterministic Rev 6 mechanics: company name + no em dashes."""
     if not content.strip():
         return content
 

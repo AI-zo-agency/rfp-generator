@@ -611,6 +611,9 @@ def _scan_copy_paste(
     return issues
 
 
+_EM_DASH_SKIP_PREFIXES = ("[MANUAL FILL", "[VERIFY", "[DESIGNER NOTE", "#")
+
+
 def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
     """Em dashes and vendor language (deterministic), plus what the LLM voice pass left."""
     issues: list[PreSubmitIssue] = []
@@ -633,7 +636,10 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
                         sectionTitle=section.title,
                     )
                 )
-            if "—" in body:
+            if any(
+                "—" in ln and not ln.lstrip().startswith(_EM_DASH_SKIP_PREFIXES)
+                for ln in body.splitlines()
+            ):
                 issues.append(
                     PreSubmitIssue(
                         severity="critical",
