@@ -2,7 +2,11 @@
 
 import asyncio
 
+import pytest
+
 from app.services import llm, proposal_voice_llm as pv
+
+pytestmark = pytest.mark.real_voice_llm
 
 SECTION = (
     "This is a process commitment we're prepared to demonstrate, overstating.\n"
@@ -114,3 +118,55 @@ def test_garbage_model_output_is_ignored(monkeypatch):
     monkeypatch.setattr(llm, "chat_json", bad)
     res = asyncio.run(pv.rewrite_for_voice(SECTION))
     assert res.text == SECTION and not res.applied
+
+
+TWO = "First paragraph has enough words to count.\n\nSecond paragraph also has enough words."
+
+
+def _counting_stub(monkeypatch, edits=None, fail=False):
+    calls = []
+
+    async def fake(messages, **k):
+        if messages[0]["content"].startswith("You audit"):
+            return {"verdicts": [{"i": i, "faithful": True} for i in range(50)]}, "stub"
+        if fail:
+            raise RuntimeError("down")
+        block = messages[-1]["content"]
+        calls.append(block)
+        return {"edits": [e for e in (edits or []) if e["find"] in block]}, "stub"
+
+    monkeypatch.setattr(llm, "is_configured", lambda: True)
+    monkeypatch.setattr(llm, "chat_json", fake)
+    return calls
+
+
+def test_reviewed_blocks_are_skipped_and_reported(monkeypatch):
+    calls = _counting_stub(monkeypatch)
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert len(calls) == 2 and len(res.reviewed) == 2
+
+    asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7", reviewed=res.reviewed))
+    assert len(calls) == 2  # nothing new to review
+
+    asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r8", reviewed=res.reviewed))
+    assert len(calls) == 4  # a new revision makes every paragraph unreviewed
+
+
+def test_edited_block_is_recorded_by_its_final_text(monkeypatch):
+    fix = edit("Second paragraph also has enough words.", "Second paragraph has enough words.")
+    _counting_stub(monkeypatch, [fix])
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert res.text.endswith("Second paragraph has enough words.")
+    assert pv.block_hash("Second paragraph has enough words.", "r7") in res.reviewed
+
+
+def test_failed_block_is_not_recorded(monkeypatch):
+    _counting_stub(monkeypatch, fail=True)
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert res.reviewed == [] and "failed" in res.skipped
+
+
+def test_apply_false_records_nothing(monkeypatch):
+    _counting_stub(monkeypatch)
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7", apply=False))
+    assert res.reviewed == []

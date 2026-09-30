@@ -16,7 +16,9 @@ active revision from proposal_brand_voice). Nothing here names a revision.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -114,6 +116,7 @@ class VoiceResult:
     rejected: list[tuple[VoiceEdit, str]] = field(default_factory=list)
     model: str = ""
     skipped: str = ""
+    reviewed: list[str] = field(default_factory=list)
 
     @property
     def logs(self) -> list[str]:
@@ -133,6 +136,12 @@ def _tokens(text: str) -> list[str]:
     """Words and numbers, punctuation stripped. No regex."""
     cleaned = "".join(ch if ch.isalnum() else " " for ch in text)
     return cleaned.split()
+
+
+def block_hash(block: str, rev_id: str = "") -> str:
+    """Stable id for a reviewed paragraph. The revision is part of the hash, so a
+    paragraph reviewed under one revision is unreviewed under another."""
+    return hashlib.sha256(f"{rev_id}\n{block}".encode("utf-8")).hexdigest()[:16]
 
 
 def _new_fact_tokens(replacement: str, section_text: str) -> list[str]:
@@ -287,6 +296,8 @@ async def rewrite_for_voice(
     apply: bool = True,
     standards: str | None = None,
     rfp_id: str | None = None,
+    rev_id: str = "",
+    reviewed: Collection[str] = (),
 ) -> VoiceResult:
     """Fix voice violations in ``text``. With ``apply=False`` only report them.
 
@@ -309,50 +320,62 @@ async def rewrite_for_voice(
         f"Full section, for context only. Edit nothing outside the block you are given:\n\n{text}",
     ]
 
-    blocks = _blocks(text)
+    skip = set(reviewed)
+    blocks = [b for b in _blocks(text) if block_hash(b, rev_id) not in skip]
+    if not blocks:
+        return VoiceResult(text=text)
     reviews = await asyncio.gather(
         *(_review_block(b, instructions=instructions, prefix=prefix, rfp_id=rfp_id) for b in blocks)
     )
 
     result = VoiceResult(text=text)
     errors: list[str] = []
-    cands: list[tuple[VoiceEdit, str]] = []  # hard edits that pass the local guards
-    for block, (edits, model, err) in zip(blocks, reviews):
+    failed: set[int] = set()
+    cands: list[tuple[VoiceEdit, int]] = []  # hard edits that pass the local guards
+    for bi, (edits, model, err) in enumerate(reviews):
         result.model = result.model or model
         if err:
             errors.append(err)
+            failed.add(bi)
         for edit in edits:
             if edit.severity != "hard":
                 result.suggested.append(edit)
                 continue
-            why = _check_edit(edit, text, block)
+            why = _check_edit(edit, text, blocks[bi])
             if why:
                 result.rejected.append((edit, why))
             else:
-                cands.append((edit, block))
+                cands.append((edit, bi))
 
     verdicts: dict[int, tuple[bool, str]] = {}
     if cands:
         try:
-            verdicts = await _verify(cands, prefix=prefix, rfp_id=rfp_id)
+            verdicts = await _verify(
+                [(e, blocks[bi]) for e, bi in cands], prefix=prefix, rfp_id=rfp_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Voice LLM verify failed: %s", str(exc)[:200])
             errors.append(f"verify error: {str(exc)[:120]}")
+            failed |= {bi for _, bi in cands}
 
     out = text
-    for i, (edit, block) in enumerate(cands):
+    finals = list(blocks)
+    for i, (edit, bi) in enumerate(cands):
         ok, reason = verdicts.get(i, (False, "no verdict"))
         if not ok:
             result.rejected.append((edit, f"verifier: {reason}"))
             continue
-        why = _check_edit(edit, out, block)  # an earlier edit may have moved the span
+        why = _check_edit(edit, out, blocks[bi])  # an earlier edit may have moved the span
         if why:
             result.rejected.append((edit, why))
             continue
         result.applied.append(edit)
         if apply:
             out = _apply(out, edit)
+            finals[bi] = _apply(finals[bi], edit)
     result.text = out
+    if apply:
+        result.reviewed = [block_hash(f, rev_id) for bi, f in enumerate(finals) if bi not in failed]
     if errors:
         result.skipped = f"{len(errors)} call(s) failed: {errors[0]}"
     return result
