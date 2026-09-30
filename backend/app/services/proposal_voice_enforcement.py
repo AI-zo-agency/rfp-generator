@@ -326,14 +326,7 @@ def _apply_mechanics_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", 
         if not body.strip():
             sections.append(section)
             continue
-        cleaned = body.replace("—", ",").replace("–", "-")
-        cleaned = re.sub(r"\bZO\s+Agency\b", "zö agency", cleaned)
-        cleaned = re.sub(r"\bZÖ\s+Agency\b", "zö agency", cleaned)
-        cleaned = re.sub(r"\bZö\s+Agency\b", "zö agency", cleaned)
-        cleaned = re.sub(r"\bZo\s+Agency\b", "zö agency", cleaned)
-        cleaned = re.sub(r"\bzo\s+agency\b", "zö agency", cleaned)
-        cleaned = re.sub(r",\s*,", ",", cleaned)
-        cleaned = re.sub(r"[ \t]+,", ",", cleaned)
+        cleaned = apply_writing_standards_mechanics(body)
         if classify_section_register(
             section_id=section.id or "",
             title=section.title or "",
@@ -373,8 +366,8 @@ async def apply_chat_rev6_voice_to_draft(
 
     When ``section_ids`` is provided, only those tabs are scrubbed — chat must not
     rewrite untouched bios / narrative tabs as a side effect of one Improve turn.
-    When ``section_ids`` is None, every non-empty section is scrubbed (legacy /
-    manuscript-wide callers).
+    When ``section_ids`` is None, the mechanics step covers every non-empty section,
+    but the LLM pass reviews write-mode sections only unless they are named.
     """
     from app.models.proposal import ProposalDraft as _Draft
 

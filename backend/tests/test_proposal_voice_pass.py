@@ -98,7 +98,7 @@ def test_stale_findings_are_dropped_and_other_sections_kept(monkeypatch):
     assert [f.section_id for f in out.voice_findings] == ["b"]
 
 
-def test_one_failing_section_does_not_sink_the_others(monkeypatch):
+def test_one_failing_section_does_not_sink_the_others(monkeypatch, caplog):
     def rewrite(text, kw):
         if "boom" in text:
             raise RuntimeError("bad block")
@@ -106,11 +106,14 @@ def test_one_failing_section_does_not_sink_the_others(monkeypatch):
 
     _stub(monkeypatch, rewrite=rewrite)
     d = _draft([_section("a"), _section("b", content="boom goes the enough text")])
-    out, logs = asyncio.run(vp.apply_voice_pass(d))
+    with caplog.at_level("WARNING", logger=vp.logger.name):
+        out, logs = asyncio.run(vp.apply_voice_pass(d))
     assert "plenty of" in out.sections[0].content
     assert out.sections[1].content == "boom goes the enough text"
     assert out.voice_reviewed == ["ok-hash"]
-    assert any(line.startswith("b: voice pass incomplete (error: bad block") for line in logs)
+    # the gap is logged, not returned: callers count returned lines as fixes
+    assert not any("incomplete" in line for line in logs)
+    assert "b: voice pass incomplete (error: bad block" in caplog.text
 
 
 def test_verifier_no_verdict_is_not_a_finding(monkeypatch):

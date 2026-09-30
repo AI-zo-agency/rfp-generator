@@ -1290,31 +1290,31 @@ async def improve_section_endpoint(
                 improve_section_pinned=body.improve_section_pinned,
                 persist=not preview_only,
             )
-        # Preview path skips persist guards — still apply consistency + Rev 6 so
-        # Original vs Revised shows cross-tab-aligned, branded prose for ANY ask.
-        if preview_only and draft_changed:
-            from app.services.proposal_section_editor import (
-                apply_chat_preview_quality_guards,
-                changed_section_ids,
-            )
+            # Preview path skips persist guards — still apply consistency + Rev 6 so
+            # Original vs Revised shows cross-tab-aligned, branded prose for ANY ask.
+            if preview_only and draft_changed:
+                from app.services.proposal_section_editor import (
+                    apply_chat_preview_quality_guards,
+                    changed_section_ids,
+                )
 
-            # Consistency: pin -> open tab only, else draft-wide (as persist does).
-            # Voice: tabs this turn changed (+ pinned tab), same as persist; never
-            # None (that would LLM-review every tab on each preview).
-            draft = await apply_chat_preview_quality_guards(
-                draft,
-                label="chat-preview",
-                section_ids={section_id} if body.improve_section_pinned else None,
-                voice_section_ids=changed_section_ids(
-                    prior_draft,
+                # Consistency: pin -> open tab only, else draft-wide (as persist does).
+                # Voice: tabs this turn changed (+ pinned tab), same as persist; never
+                # None (that would LLM-review every tab on each preview).
+                draft = await apply_chat_preview_quality_guards(
                     draft,
-                    section_id if body.improve_section_pinned else None,
-                ),
-            )
-            section = next(
-                (s for s in draft.sections if s.id == section_id),
-                section,
-            )
+                    label="chat-preview",
+                    section_ids={section_id} if body.improve_section_pinned else None,
+                    voice_section_ids=changed_section_ids(
+                        prior_draft,
+                        draft,
+                        section_id if body.improve_section_pinned else None,
+                    ),
+                )
+                section = next(
+                    (s for s in draft.sections if s.id == section_id),
+                    section,
+                )
     except ProposalError as exc:
         # Policy / rewrite checks must recap in chat — never 422 the UI.
         if exc.status_code in (400, 422) and prior_draft and prior_draft.sections:
@@ -1518,6 +1518,18 @@ async def confirm_chat_preview_endpoint(
         rfp_text=rfp_text,
         label="chat-preview-confirm",
         skip_llm_repairs=True,
+    )
+    # The person approved this text: record it as voice-reviewed so the next scan does
+    # not pay to review (and possibly edit) it again. The confirm payload arrives without
+    # the stored state, so carry that first, else the marks below would hide it.
+    from app.services.proposal_repository import _carry_voice_state
+    from app.services.proposal_section_editor import changed_section_ids
+    from app.services.proposal_voice_pass import mark_sections_reviewed
+
+    _carry_voice_state(guarded, prior)
+    first = guarded.sections[0].id if guarded.sections else None
+    guarded = mark_sections_reviewed(
+        guarded, changed_section_ids(prior, guarded, None if prior else first)
     )
     await asave_proposal_draft(guarded)
     focus = guarded.sections[0] if guarded.sections else None

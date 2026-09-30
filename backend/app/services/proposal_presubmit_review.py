@@ -43,6 +43,7 @@ from app.services.proposal_manuscript_cleanup import (
 )
 from app.services.proposal_evaluation_coverage import find_response_char_limit
 from app.services.proposal_voice_enforcement import contains_vendor_language
+from app.services.proposal_voice_pass import voice_coverage_gaps
 from app.services.proposal_hallucination_detector import (
     detect_hallucinations,
     filter_high_severity_hallucinations,
@@ -611,6 +612,22 @@ def _scan_copy_paste(
     return issues
 
 
+def _scan_voice_coverage(draft: ProposalDraft) -> list[PreSubmitIssue]:
+    """Sections the LLM voice pass never reviewed. Whole-draft only: a one-section
+    mini draft has no reviewed hashes and would flag everything."""
+    titles = {s.id: s.title for s in draft.sections}
+    return [
+        PreSubmitIssue(
+            severity="info",
+            category="voice",
+            message="Voice pass has not reviewed this section",
+            sectionId=sid,
+            sectionTitle=titles.get(sid),
+        )
+        for sid in voice_coverage_gaps(draft)
+    ]
+
+
 _EM_DASH_SKIP_PREFIXES = ("[MANUAL FILL", "[VERIFY", "[DESIGNER NOTE", "#")
 
 
@@ -1117,6 +1134,7 @@ def run_presubmit_review(
         _scan_submission_document_gaps(draft=draft, rfp=rfp, rfp_text=rfp_text or None)
     )
     issues.extend(_scan_voice(draft=draft))
+    issues.extend(_scan_voice_coverage(draft))
     issues.extend(_scan_response_char_limits(draft=draft, rfp_text=rfp_text or None))
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
