@@ -170,3 +170,71 @@ def test_apply_false_records_nothing(monkeypatch):
     _counting_stub(monkeypatch)
     res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7", apply=False))
     assert res.reviewed == []
+
+
+def test_semaphore_survives_separate_event_loops(monkeypatch):
+    """Celery runs each phase under its own asyncio.run; a contended module-level
+    Semaphore would raise "bound to a different event loop" on the second one."""
+    text = "\n\n".join(f"Paragraph number {n} has plenty of words in it." for n in range(12))
+
+    async def slow(messages, **k):
+        await asyncio.sleep(0.01)
+        return {"edits": []}, "stub"
+
+    monkeypatch.setattr(llm, "is_configured", lambda: True)
+    monkeypatch.setattr(llm, "chat_json", slow)
+    for _ in range(2):
+        res = asyncio.run(pv.rewrite_for_voice(text, rev_id="r7"))
+        assert res.skipped == "" and len(res.reviewed) == 12
+
+
+def _verdict_stub(monkeypatch, edits, verdicts):
+    async def fake(messages, **k):
+        if messages[0]["content"].startswith("You audit"):
+            return {"verdicts": verdicts}, "stub"
+        block = messages[-1]["content"]
+        return {"edits": [e for e in edits if e["find"] in block]}, "stub"
+
+    monkeypatch.setattr(llm, "is_configured", lambda: True)
+    monkeypatch.setattr(llm, "chat_json", fake)
+
+
+def test_block_with_no_verdict_stays_unreviewed(monkeypatch):
+    fix = edit("Second paragraph also has enough words.", "Second paragraph has enough words.")
+    _verdict_stub(monkeypatch, [fix], [])
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert res.text == TWO and not res.applied
+    # only the block with no verdict is retried; the clean block is recorded
+    assert res.reviewed == [pv.block_hash("First paragraph has enough words to count.", "r7")]
+
+    solo = "Second paragraph also has enough words."
+    res = asyncio.run(pv.rewrite_for_voice(solo, rev_id="r7"))
+    assert res.reviewed == []
+
+
+def test_string_verdict_index_is_no_verdict(monkeypatch):
+    fix = edit("Second paragraph also has enough words.", "Second paragraph has enough words.")
+    _verdict_stub(monkeypatch, [fix], [{"i": "0", "faithful": True}])
+    res = asyncio.run(pv.rewrite_for_voice("Second paragraph also has enough words."))
+    assert not res.applied and res.reviewed == []
+
+
+def test_faithful_verdict_applies_and_records(monkeypatch):
+    fix = edit("Second paragraph also has enough words.", "Second paragraph has enough words.")
+    _verdict_stub(monkeypatch, [fix], [{"i": 0, "faithful": True}])
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert len(res.applied) == 1 and len(res.reviewed) == 2
+    assert pv.block_hash("Second paragraph has enough words.", "r7") in res.reviewed
+
+
+def test_several_edits_and_a_deletion_record_the_final_text(monkeypatch):
+    block = "Alpha sentence stays here. Beta sentence goes away now. Gamma sentence is long-winded."
+    edits = [
+        edit("Beta sentence goes away now.", ""),
+        edit("Gamma sentence is long-winded.", "Gamma sentence is short."),
+    ]
+    _verdict_stub(monkeypatch, edits, [{"i": 0, "faithful": True}, {"i": 1, "faithful": True}])
+    res = asyncio.run(pv.rewrite_for_voice(block, rev_id="r7"))
+    final = "Alpha sentence stays here. Gamma sentence is short."
+    assert res.text == final
+    assert res.reviewed == [pv.block_hash(final, "r7")]

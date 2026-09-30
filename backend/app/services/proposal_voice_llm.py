@@ -32,7 +32,7 @@ Register = Literal["narrative", "procurement", "cover_letter"]
 NODE_NAME = "proposal_voice_llm"
 _MAX_CONCURRENT_CALLS = 8
 _MIN_WORDS = 4  # "Warmly", "Signature: ..." and similar stubs aren't worth a call
-_sem: asyncio.Semaphore | None = None
+_sem: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None  # one per event loop
 
 _INSTRUCTIONS = """You are the voice editor for zö agency proposals. The standards file above governs; follow it exactly.
 
@@ -64,7 +64,7 @@ What never to change:
 - The strength of a claim. "Gave us practice unifying" cannot become "we unified". A hedge that reflects a real limit ("closest match", "have not yet") stays as strong as it was. Never turn experience into an accomplishment, and never drop a commitment.
 - Facts: names, numbers, dates, dollar amounts, phone numbers, emails, addresses, solicitation numbers, titles, client names, counts. Do not add any fact, claim, credential, or number that is not already in the section. A stated gap (for example no HIPAA-covered engagement) stays stated, once, in plain words.
 - [VERIFY: ...] and [MANUAL FILL: ...] tags, markdown headings, table separator rows, and any tagline the standards' exceptions register names.
-- Words of belief or expectation ("we don't expect", "we believe", "we plan to", "should") are part of the claim. Never replace them with a flat statement of fact ("there will be no delay"). Keep the expectation, or leave the sentence alone.
+- Words of belief or expectation ("we don't expect", "we believe", "we plan to", "we see", "should") are part of the claim. Never replace them with a flat statement of fact ("there will be no delay"). A sentence like "we see three programs that are ready" must not become "Three programs are ready". Keep the expectation or the view, or leave the sentence alone.
 - Counts and named quantities ("five checkpoints, five approvals", "three rounds") are facts and commitments. Keep every one when you rewrite a sentence, even when you shorten it.
 - A list stays a list. When you repair its punctuation, change only the punctuation. Do not add words such as "including" or "such as" that change what the list means.
 - Certifications, attestations, acknowledgements, disclosure statements, and legal clauses the firm signs (sentences that say "zö agency certifies", "acknowledges", "represents", "agrees", or that sit inside a signed form) are RFP-mandated wording. Leave their tense, contractions, and phrasing alone. Fix only a broken sentence or an em dash there.
@@ -91,9 +91,9 @@ Each edit below has an ORIGINAL span, a REPLACEMENT, and the rule the editor cit
 
 "faithful" is true when the REPLACEMENT keeps every fact and every promise of future work, service, or deliverable from the ORIGINAL, adds nothing new, and leaves every claim about past experience exactly as strong as it was.
 
-Faithful: removing a disclaimer about our own wording ("and we won't claim one"); removing a trailing "which is why..." or "the same discipline X" clause; deleting a cut-off fragment with no readable meaning; deleting a to-do about editing this document before it is submitted while keeping the client-facing commitment; contracting words; swapping a process verb for a plain verb of the same meaning.
+Faithful: removing a disclaimer about our own wording ("and we won't claim one"); removing a trailing "which is why..." or "the same discipline X" clause; deleting a cut-off fragment with no readable meaning; deleting a to-do about editing this document before it is submitted while keeping the client-facing commitment; contracting words outside a certification or legal clause the firm signs; swapping a process verb for a plain verb of the same meaning.
 
-Not faithful: "gave us practice" becoming "we did"; dropping a promise ("we'll pair a media buyer with a specialist"); guessing a missing object or adding a commitment that was not there; adding a number, name, or claim; turning an expectation or hedge into a flat statement of fact ("we don't expect any delay" becoming "there will be no delay"); dropping a count or a number of commitments ("five checkpoints, five approvals" becoming "five-checkpoint"); changing the wording of a certification or legal clause the firm signs; adding a word that changes the meaning of a list.
+Not faithful: "gave us practice" becoming "we did"; dropping a promise ("we'll pair a media buyer with a specialist"); guessing a missing object or adding a commitment that was not there; adding a number, name, or claim; turning an expectation or hedge into a flat statement of fact ("we don't expect any delay" becoming "there will be no delay"); turning a statement of our own view or assessment into a flat statement of fact ("we see two options that fit" becoming "two options fit"); dropping a count or a number of commitments ("five checkpoints, five approvals" becoming "five-checkpoint"); changing the wording of a certification or legal clause the firm signs; adding a word that changes the meaning of a list.
 
 Return JSON: {"verdicts": [{"i": 0, "faithful": true, "reason": "short"}]} with one verdict per edit, using the edit numbers given."""
 
@@ -127,9 +127,10 @@ class VoiceResult:
 
 def _get_sem() -> asyncio.Semaphore:
     global _sem
-    if _sem is None:
-        _sem = asyncio.Semaphore(_MAX_CONCURRENT_CALLS)
-    return _sem
+    loop = asyncio.get_running_loop()
+    if _sem is None or _sem[0] is not loop:
+        _sem = (loop, asyncio.Semaphore(_MAX_CONCURRENT_CALLS))
+    return _sem[1]
 
 
 def _tokens(text: str) -> list[str]:
@@ -357,6 +358,8 @@ async def rewrite_for_voice(
             logger.warning("Voice LLM verify failed: %s", str(exc)[:200])
             errors.append(f"verify error: {str(exc)[:120]}")
             failed |= {bi for _, bi in cands}
+        # a candidate the verifier said nothing about is unreviewed, so it is retried next pass
+        failed |= {bi for i, (_, bi) in enumerate(cands) if i not in verdicts}
 
     out = text
     finals = list(blocks)
