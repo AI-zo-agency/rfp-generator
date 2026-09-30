@@ -1,8 +1,11 @@
-"""Live eval for app.services.proposal_voice_llm on the Contra Costa proposal.
+"""Live eval for app.services.proposal_voice_llm on a proposal fixture.
 
-Calls the real light-tier model. Not part of the pytest suite.
+Calls the real light-tier model. Not part of the pytest suite. The default
+fixture is the Contra Costa proposal; other fixtures use --generic to skip the
+proposal-specific phrase lists.
 
     cd backend && ../.venv/bin/python scripts/eval_voice_llm.py
+    cd backend && ../.venv/bin/python scripts/eval_voice_llm.py --fixture tests.fixtures.voice_llm_proposal_2 --generic
 """
 
 from __future__ import annotations
@@ -118,6 +121,8 @@ async def main(fixture: str, generic: bool) -> int:
         for phrase in MUST_STAY:
             if phrase not in combined:
                 failures.append(f"fact lost: {phrase!r}")
+    if "—" in combined:
+        failures.append("em dash still present")
 
     # Idempotency: a second pass over the output should have nothing left to fix.
     second = await asyncio.gather(
