@@ -3433,7 +3433,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     try:
         from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
 
-        draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+        draft, rev6_logs = await apply_rev6_voice_scrub_to_draft(draft)
         if rev6_logs:
             await asave_proposal_draft(draft)
             logger.info(

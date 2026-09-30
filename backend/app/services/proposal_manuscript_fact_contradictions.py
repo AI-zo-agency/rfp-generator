@@ -342,7 +342,7 @@ async def _rewrite_section_for_fact_contradiction(
     updated = section.model_copy(update={"content": new_body, "status": "generated"})
     from app.services.proposal_voice_enforcement import apply_compulsory_rev6_to_section
 
-    updated, _ = apply_compulsory_rev6_to_section(updated)
+    updated, _ = await apply_compulsory_rev6_to_section(updated, rfp_id=rfp.id)
     return (
         updated,
         True,

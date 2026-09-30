@@ -837,7 +837,7 @@ async def _run_fulfill_rfp_gaps_body(
                     apply_rev6_voice_scrub_to_draft,
                 )
 
-                draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+                draft, rev6_logs = await apply_rev6_voice_scrub_to_draft(draft)
                 if rev6_logs:
                     await asave_proposal_draft(draft)
                     report["logs"].append(
@@ -1010,7 +1010,6 @@ async def _run_fulfill_rfp_gaps_body(
                     if idx < len(draft.sections):
                         from app.services.proposal_voice_enforcement import (
                             enforce_narrative_voice,
-                            scrub_rev6_voice_patterns,
                         )
 
                         voice_target = draft.sections[idx]
@@ -1022,23 +1021,16 @@ async def _run_fulfill_rfp_gaps_body(
                                 title=voice_target.title,
                                 zo_mode=voice_target.mode,
                             )
-                            voiced, rev6_section_logs = scrub_rev6_voice_patterns(voiced)
                             voiced = voiced.replace("—", ",").replace("–", "-")
                             if voiced != body:
                                 draft.sections[idx] = voice_target.model_copy(
                                     update={"content": voiced}
                                 )
                                 section = draft.sections[idx]
-                                if rev6_section_logs:
-                                    report["logs"].append(
-                                        f"Rev 6 voice on {voice_target.title or voice_target.id}: "
-                                        + "; ".join(rev6_section_logs[:3])
-                                    )
-                                else:
-                                    report["logs"].append(
-                                        f"Rev 6 voice mechanics on "
-                                        f"{voice_target.title or voice_target.id}"
-                                    )
+                                report["logs"].append(
+                                    f"Rev 6 voice mechanics on "
+                                    f"{voice_target.title or voice_target.id}"
+                                )
 
                     done_id = (
                         draft.sections[idx].id
@@ -1204,7 +1196,7 @@ async def _run_fulfill_rfp_gaps_body(
                             apply_rev6_voice_scrub_to_draft,
                         )
 
-                        draft, won_rev6 = apply_rev6_voice_scrub_to_draft(draft)
+                        draft, won_rev6 = await apply_rev6_voice_scrub_to_draft(draft)
                         if won_rev6:
                             report["logs"].append(
                                 f"Rev 6 zö voice scrub after WON fill: {len(won_rev6)} fix(es)"
@@ -3387,7 +3379,7 @@ async def _run_fulfill_rfp_gaps_body(
     try:
         from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
 
-        draft, final_rev6 = apply_rev6_voice_scrub_to_draft(draft)
+        draft, final_rev6 = await apply_rev6_voice_scrub_to_draft(draft)
         if final_rev6:
             await asave_proposal_draft(draft)
             report["logs"].append(

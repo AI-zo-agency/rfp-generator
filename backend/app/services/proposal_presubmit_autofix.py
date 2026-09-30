@@ -47,7 +47,6 @@ from app.services.proposal_retrieval_graph import (
 )
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
-    scrub_rev6_voice_patterns,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,10 +182,9 @@ def _apply_deterministic_fixes(
         content = voiced
         methods.append("voice_register")
 
-    # Compulsory Rev 6 hard bans (em dash, negation-contrast, hype, hedges).
-    rev6, rev6_logs = scrub_rev6_voice_patterns(content)
-    rev6 = rev6.replace("—", ",").replace("–", "-")
-    if rev6 != content or rev6_logs:
+    # Mechanical Rev 6 bans only. Judgment bans go through the LLM voice pass.
+    rev6 = content.replace("—", ",").replace("–", "-")
+    if rev6 != content:
         content = rev6
         methods.append("rev6_voice")
 
@@ -225,8 +223,7 @@ def _sanitize_after_llm(
         title=section.title,
         zo_mode=section.mode,
     )
-    scrubbed, _ = scrub_rev6_voice_patterns(voiced)
-    return scrubbed.replace("—", ",").replace("–", "-")
+    return voiced.replace("—", ",").replace("–", "-")
 
 
 def _should_run_llm(
@@ -651,7 +648,7 @@ async def run_presubmit_autofix_loop(
     try:
         from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
 
-        working, rev6_logs = apply_rev6_voice_scrub_to_draft(working)
+        working, rev6_logs = await apply_rev6_voice_scrub_to_draft(working)
         if rev6_logs:
             await asave_proposal_draft(working)
             logger.info(

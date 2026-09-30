@@ -98,15 +98,6 @@ def apply_zero_fabrication_guards(
         report.logs.append(f"{label}: integrity — {line}")
 
     try:
-        from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
-
-        draft, voice_logs = apply_rev6_voice_scrub_to_draft(draft)
-        for line in voice_logs:
-            report.logs.append(f"{label}: rev6 voice — {line}")
-    except Exception as exc:  # noqa: BLE001 — never block persist on voice scrub
-        report.logs.append(f"{label}: rev6 voice scrub skipped ({exc})")
-
-    try:
         from app.services.proposal_pointer_page_integrity import (
             apply_pointer_page_integrity_to_draft,
         )

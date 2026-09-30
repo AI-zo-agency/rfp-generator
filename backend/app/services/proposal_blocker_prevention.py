@@ -259,7 +259,7 @@ async def apply_feedback_blocker_suite(
     try:
         from app.services.proposal_voice_enforcement import apply_rev6_voice_scrub_to_draft
 
-        draft, rev6_logs = apply_rev6_voice_scrub_to_draft(draft)
+        draft, rev6_logs = await apply_rev6_voice_scrub_to_draft(draft)
         if rev6_logs:
             logs.append(
                 f"Rev 6 zö voice scrub after contradiction suite: {len(rev6_logs)} fix(es)"

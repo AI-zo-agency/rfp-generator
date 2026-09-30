@@ -806,7 +806,6 @@ async def _run_requirement_aligned_fact_check_agent(
         if content != (section.content or "").strip():
             from app.services.proposal_voice_enforcement import (
                 enforce_narrative_voice,
-                scrub_rev6_voice_patterns,
             )
 
             cleaned = enforce_narrative_voice(
@@ -815,7 +814,6 @@ async def _run_requirement_aligned_fact_check_agent(
                 title=section.title,
                 zo_mode=section.mode,
             )
-            cleaned, _ = scrub_rev6_voice_patterns(cleaned)
             cleaned = cleaned.replace("—", ",").replace("–", "-")
             return section.model_copy(update={"content": cleaned}), True, notes
         return section, False, notes

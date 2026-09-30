@@ -1209,6 +1209,22 @@ def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
     return cleaned, logs
 
 
+_CASE_STUDY_FALSE_FRAMING_RES = (
+    re.compile(r"(?i)\s+instead of starting from a blank page\.?"),
+    re.compile(r"(?i)\ban existing asset we (?:built|worked) on\b"),
+    re.compile(r"(?i)\bbuilt on (?:an |what a client already has as an )?existing asset\b"),
+)
+
+
+def _scrub_case_study_false_framing(text: str) -> tuple[str, list[str]]:
+    logs: list[str] = []
+    for pat in _CASE_STUDY_FALSE_FRAMING_RES:
+        if pat.search(text):
+            text = pat.sub("a prior engagement" if "existing asset" in pat.pattern else " ", text)
+            logs.append("Case study: scrubbed false framing")
+    return re.sub(r"[ \t]{2,}", " ", text), logs
+
+
 def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
     """
     Enforce Challenge → Solution → Client Voice shape.
@@ -1265,9 +1281,7 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
     cleaned = _normalize_inline_case_study_headings(cleaned)
     cleaned, cap_logs = _cap_case_study_section_lengths(cleaned)
     logs.extend(cap_logs)
-    from app.services.proposal_voice_enforcement import scrub_rev6_voice_patterns
-
-    cleaned, framing_logs = scrub_rev6_voice_patterns(cleaned)
+    cleaned, framing_logs = _scrub_case_study_false_framing(cleaned)
     logs.extend(framing_logs)
     return cleaned, logs
 
