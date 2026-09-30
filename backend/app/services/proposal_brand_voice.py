@@ -98,6 +98,11 @@ def load_writing_standards_rev6() -> str:
     return load_writing_standards()
 
 
+def voice_standards_for(rfp_id: str | None = None) -> tuple[str, str]:
+    """(standards text, revision id) that governs one proposal's voice."""
+    return load_writing_standards(), "builtin"
+
+
 def load_writing_standards_rev3() -> str:
     """Backward-compatible alias — always returns governing rev 6."""
     return load_writing_standards()
