@@ -1210,7 +1210,7 @@ def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
 
 
 _CASE_STUDY_FALSE_FRAMING_RES = (
-    re.compile(r"(?i)\s+instead of starting from a blank page\.?"),
+    re.compile(r"(?i)[ \t]+instead of starting from a blank page"),
     re.compile(r"(?i)\ban existing asset we (?:built|worked) on\b"),
     re.compile(r"(?i)\bbuilt on (?:an |what a client already has as an )?existing asset\b"),
 )
@@ -1218,11 +1218,17 @@ _CASE_STUDY_FALSE_FRAMING_RES = (
 
 def _scrub_case_study_false_framing(text: str) -> tuple[str, list[str]]:
     logs: list[str] = []
+    out = text
     for pat in _CASE_STUDY_FALSE_FRAMING_RES:
-        if pat.search(text):
-            text = pat.sub("a prior engagement" if "existing asset" in pat.pattern else " ", text)
+        if pat.search(out):
+            out = pat.sub("a prior engagement" if "existing asset" in pat.pattern else "", out)
             logs.append("Case study: scrubbed false framing")
-    return re.sub(r"[ \t]{2,}", " ", text), logs
+    if not logs:
+        return text, logs
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"[ \t]+([,.;:!?])", r"\1", out)
+    out = "\n".join(line.rstrip(" \t") for line in out.split("\n"))
+    return out, logs
 
 
 def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
