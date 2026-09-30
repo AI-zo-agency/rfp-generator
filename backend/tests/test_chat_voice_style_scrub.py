@@ -9,7 +9,6 @@ from app.services.proposal_section_editor import (
     _try_voice_style_only_pass,
     _user_asks_voice_or_style_only,
 )
-from app.services.proposal_voice_enforcement import apply_chat_rev6_voice_to_draft
 
 
 class VoiceStyleAskDetectionTests(unittest.TestCase):
@@ -42,33 +41,6 @@ class VoiceStyleAskDetectionTests(unittest.TestCase):
             'first agreements as a foundation to build from."'
         )
         self.assertFalse(_user_asks_voice_or_style_only(ask))
-
-
-class ChatRev6ScopedTests(unittest.TestCase):
-    def test_section_ids_limit_scrub(self) -> None:
-        budget = ProposalSection(
-            id="budget",
-            title="Budget",
-            content="We'd rather cut scope than pad fees — ZO Agency.",
-            status="generated",
-        )
-        bio = ProposalSection(
-            id="section-2-bio-ella-lindau",
-            title="2.1 — Ella Lindau",
-            content="Ella leads strategy — ZO Agency trusts her judgment.",
-            status="generated",
-        )
-        draft = ProposalDraft(
-            rfpId="r1",
-            updatedAt="t",
-            sections=[budget, bio],
-        )
-        out, logs = apply_chat_rev6_voice_to_draft(draft, section_ids={"budget"})
-        by_id = {s.id: s.content or "" for s in out.sections}
-        self.assertNotIn("rather than", by_id["budget"].casefold())
-        self.assertIn("—", by_id["section-2-bio-ella-lindau"])
-        self.assertTrue(any(log.startswith("budget:") for log in logs))
-        self.assertFalse(any("ella" in log.casefold() for log in logs))
 
 
 class VoiceStyleOnlyPassTests(unittest.IsolatedAsyncioTestCase):

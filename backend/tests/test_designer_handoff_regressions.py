@@ -32,10 +32,6 @@ from app.services.proposal_state_registration_guard import (
     scrub_unverified_state_registration_claims,
     verified_registration_jurisdictions,
 )
-from app.services.proposal_voice_enforcement import (
-    apply_rev6_voice_scrub_to_draft,
-    scrub_rev6_voice_patterns,
-)
 from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
 
 
@@ -282,61 +278,6 @@ class OptionYearBudgetMathTests(unittest.TestCase):
         total = round(sum(float(i.extended or 0) for i in year1), 2)
         self.assertEqual(total, _YEAR1_RECURRING)
 
-class Rev6WordGlueTests(unittest.TestCase):
-    CASES = [
-        (
-            "sec-2",
-            "One point we want to name directlytely, since each service area will "
-            "likely define 'urgent' differently.",
-            "directlytely",
-        ),
-        (
-            "sec-10",
-            "That is a deliberate design choiceust timing before either gets buried.",
-            "choiceust",
-        ),
-        (
-            "sec-15",
-            "That's a deliberate bid decisionthe same feed slot before it publishes.",
-            "decisionthe",
-        ),
-    ]
-
-    def test_each_reported_glue_artifact_is_repaired(self) -> None:
-        for _sid, raw, bad in self.CASES:
-            with self.subTest(artifact=bad):
-                cleaned, _ = scrub_rev6_voice_patterns(raw)
-                self.assertNotIn(bad, cleaned.casefold())
-                # Must leave readable word boundaries (space after stem).
-                if bad == "choiceust":
-                    self.assertIn("choice just", cleaned.casefold())
-                elif bad == "decisionthe":
-                    self.assertIn("decision the", cleaned.casefold())
-
-    def test_scrub_does_not_create_new_glue_from_not_x_its_y(self) -> None:
-        raw = (
-            "That's a deliberate bid decision not a filler it's the same feed "
-            "slot before it publishes."
-        )
-        cleaned, _ = scrub_rev6_voice_patterns(raw)
-        self.assertNotIn("decisionthe", cleaned.casefold())
-        self.assertNotRegex(cleaned, r"[a-z]{4,}the\b")
-
-    def test_draft_wide_scrub_clears_all_three_sections(self) -> None:
-        draft = ProposalDraft(
-            rfpId="r",
-            updatedAt="t",
-            sections=[
-                ProposalSection(id=sid, title=sid, content=raw)
-                for sid, raw, _ in self.CASES
-            ],
-        )
-        updated, logs = apply_rev6_voice_scrub_to_draft(draft)
-        blob = "\n".join(s.content or "" for s in updated.sections)
-        for _, _, bad in self.CASES:
-            self.assertNotIn(bad, blob.casefold())
-        self.assertTrue(logs or "choice just" in blob.casefold())
-
 
 class LeakAndChromeTests(unittest.TestCase):
     def test_action_needed_table_cell_scrubbed(self) -> None:
@@ -470,27 +411,6 @@ class ParamMatrixRegistrationTests(unittest.TestCase):
                         self.assertNotIn("do not assert", body.casefold())
                     else:
                         self.assertIn("do not assert", body.casefold())
-
-
-class ParamMatrixWordGlueTests(unittest.TestCase):
-    STEMS = (
-        ("decision", "the", "decisionthe"),
-        ("choice", "ust", "choiceust"),
-        ("choice", "just", "choicejust"),
-        ("approach", "the", "approachthe"),
-        ("design", "just", "designjust"),
-    )
-
-    def test_splice_matrix(self) -> None:
-        for stem, tail, glued in self.STEMS:
-            with self.subTest(glued=glued):
-                raw = f"That is a deliberate {glued} timing before launch."
-                cleaned, _ = scrub_rev6_voice_patterns(raw)
-                self.assertNotIn(glued, cleaned.casefold())
-                if tail == "ust":
-                    self.assertIn(f"{stem} just", cleaned.casefold())
-                else:
-                    self.assertIn(f"{stem} {tail}", cleaned.casefold())
 
 
 if __name__ == "__main__":

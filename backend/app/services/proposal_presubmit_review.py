@@ -612,47 +612,53 @@ def _scan_copy_paste(
 
 
 def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
-    from app.services.proposal_voice_enforcement import find_rev6_voice_violations
-
+    """Em dashes and vendor language (deterministic), plus what the LLM voice pass left."""
     issues: list[PreSubmitIssue] = []
+    findings = draft.voice_findings or []
     for section in draft.sections:
-        if not section.content.strip():
+        body = section.content or ""
+        if not body.strip():
             continue
         reg = classify_section_register(
-            section_id=section.id,
-            title=section.title,
-            zo_mode=section.mode,
+            section_id=section.id, title=section.title, zo_mode=section.mode
         )
-        if reg != "narrative":
-            continue
-        if contains_vendor_language(section.content):
-            issues.append(
-                PreSubmitIssue(
-                    severity="warning",
-                    category="voice",
-                    message='Narrative section uses "The Vendor" / third-person procurement language',
-                    sectionId=section.id,
-                    sectionTitle=section.title,
+        if reg == "narrative":
+            if contains_vendor_language(body):
+                issues.append(
+                    PreSubmitIssue(
+                        severity="warning",
+                        category="voice",
+                        message='Narrative section uses "The Vendor" / third-person procurement language',
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                    )
                 )
-            )
-        # Rev 6 hard bans — compulsory; leftover patterns are Review blockers.
-        rev6_hits = find_rev6_voice_violations(section.content)
-        if rev6_hits:
+            if "—" in body:
+                issues.append(
+                    PreSubmitIssue(
+                        severity="critical",
+                        category="voice",
+                        message="Rev 6 zö voice (compulsory) not followed: em dash (—)",
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                    )
+                )
+        for f in findings:
+            if f.section_id != section.id or f.find not in body:
+                continue
+            needs_human = f.kind == "needs_human"
             issues.append(
                 PreSubmitIssue(
-                    severity="critical",
+                    severity="warning" if needs_human else "info",
                     category="voice",
                     message=(
-                        "Rev 6 zö voice (compulsory) not followed: "
-                        + "; ".join(rev6_hits[:4])
-                        + (
-                            f" (+{len(rev6_hits) - 4} more)"
-                            if len(rev6_hits) > 4
-                            else ""
-                        )
+                        f"Voice ({f.rule}): the editor could not decide this one, please check it"
+                        if needs_human
+                        else f"Voice ({f.rule}): suggested rewrite, not applied: {f.detail}"
                     ),
                     sectionId=section.id,
                     sectionTitle=section.title,
+                    excerpt=f.find[:240],
                 )
             )
     return issues
