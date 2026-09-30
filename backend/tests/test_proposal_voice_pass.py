@@ -96,3 +96,33 @@ def test_stale_findings_are_dropped_and_other_sections_kept(monkeypatch):
     d = _draft([_section("a"), _section("b", mode="pull")], voiceFindings=[stale, keep])
     out, _ = asyncio.run(vp.apply_voice_pass(d))
     assert [f.section_id for f in out.voice_findings] == ["b"]
+
+
+def test_one_failing_section_does_not_sink_the_others(monkeypatch):
+    def rewrite(text, kw):
+        if "boom" in text:
+            raise RuntimeError("bad block")
+        return pv.VoiceResult(text=text.replace("enough", "plenty of"), reviewed=["ok-hash"])
+
+    _stub(monkeypatch, rewrite=rewrite)
+    d = _draft([_section("a"), _section("b", content="boom goes the enough text")])
+    out, logs = asyncio.run(vp.apply_voice_pass(d))
+    assert "plenty of" in out.sections[0].content
+    assert out.sections[1].content == "boom goes the enough text"
+    assert out.voice_reviewed == ["ok-hash"]
+    assert any(line.startswith("b: voice pass incomplete (error: bad block") for line in logs)
+
+
+def test_verifier_no_verdict_is_not_a_finding(monkeypatch):
+    def rewrite(text, kw):
+        return pv.VoiceResult(
+            text=text,
+            rejected=[
+                (pv.VoiceEdit("Some text", "x", "hedge", "hard"), "verifier: no verdict"),
+                (pv.VoiceEdit("in it", "y", "hedge", "hard"), "verifier: drops a promise"),
+            ],
+        )
+
+    _stub(monkeypatch, rewrite=rewrite)
+    out, _ = asyncio.run(vp.apply_voice_pass(_draft([_section("a")])))
+    assert [f.find for f in out.voice_findings] == ["in it"]

@@ -8,11 +8,14 @@ repeated calls in one pipeline run cost almost nothing.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Collection
 
 from app.models.proposal import ProposalDraft, ProposalSection, VoiceFinding
 from app.services import proposal_voice_llm as voice_llm
 from app.services.proposal_brand_voice import classify_section_register, voice_standards_for
+
+logger = logging.getLogger(__name__)
 
 MAX_REVIEWED = 4000
 
@@ -44,11 +47,17 @@ def _merge_findings(
         add(f)
     for sid, res in results.items():
         for edit, why in res.rejected:
-            if why.startswith("verifier"):  # local guard rejections are noise, not judgment
+            # local guard rejections and a failed verifier call ("no verdict") are noise, not judgment
+            if why.startswith("verifier") and why != "verifier: no verdict":
                 add(VoiceFinding(sectionId=sid, find=edit.find, rule=edit.rule, kind="needs_human", detail=why))
         for edit in res.suggested:
             add(VoiceFinding(sectionId=sid, find=edit.find, rule=edit.rule, kind="suggestion", detail=edit.replace))
     return out
+
+
+def _failed(section: ProposalSection, exc: BaseException) -> voice_llm.VoiceResult:
+    logger.warning("voice pass failed for section %s: %s", section.id, exc)
+    return voice_llm.VoiceResult(text=section.content, skipped=f"error: {exc}")
 
 
 async def apply_voice_pass(
@@ -73,8 +82,12 @@ async def apply_voice_pass(
                 rfp_id=draft.rfp_id,
             )
             for s in targets
-        )
+        ),
+        return_exceptions=True,
     )
+    results = [
+        _failed(s, r) if isinstance(r, BaseException) else r for s, r in zip(targets, results)
+    ]
     by_id = {s.id: r for s, r in zip(targets, results)}
 
     merged = list(draft.voice_reviewed)
