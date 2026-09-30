@@ -1298,12 +1298,14 @@ async def improve_section_endpoint(
                 changed_section_ids,
             )
 
-            # Scope to tabs this turn changed (+ the pinned tab) — same as persist;
-            # never None here (that would LLM-review every tab on each preview).
+            # Consistency: pin -> open tab only, else draft-wide (as persist does).
+            # Voice: tabs this turn changed (+ pinned tab), same as persist; never
+            # None (that would LLM-review every tab on each preview).
             draft = await apply_chat_preview_quality_guards(
                 draft,
                 label="chat-preview",
-                section_ids=changed_section_ids(
+                section_ids={section_id} if body.improve_section_pinned else None,
+                voice_section_ids=changed_section_ids(
                     prior_draft,
                     draft,
                     section_id if body.improve_section_pinned else None,

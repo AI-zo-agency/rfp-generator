@@ -54,3 +54,45 @@ def test_preview_guard_named_scope_reviews_only_that_section(monkeypatch):
     d = _draft(_section("a", "Alpha text with enough words."), _section("b", "Beta text with enough words."))
     asyncio.run(apply_chat_preview_quality_guards(d, section_ids={"a"}))
     assert seen == ["Alpha text with enough words."]
+
+
+def _stub_consistency_edits_b(monkeypatch):
+    """Consistency stub: always rewrites sibling tab "b" (the cross-tab reach)."""
+    from app.services import proposal_consistency_enforcement as ce
+
+    def fake(draft):
+        secs = [
+            s.model_copy(update={"content": "CONSISTENT b"}) if s.id == "b" else s
+            for s in draft.sections
+        ]
+        return draft.model_copy(update={"sections": secs}), ["b: aligned"]
+
+    monkeypatch.setattr(ce, "apply_consistency_enforcement", fake)
+
+
+def _content(draft, sid):
+    return next(s.content for s in draft.sections if s.id == sid)
+
+
+def test_unpinned_consistency_stays_draft_wide_while_voice_scope_is_separate(monkeypatch):
+    seen = _record_model_calls(monkeypatch)
+    _stub_consistency_edits_b(monkeypatch)
+    d = _draft(_section("a", "Alpha text with enough words."), _section("b", "Beta text with enough words."))
+    out = asyncio.run(apply_chat_preview_quality_guards(d, section_ids=None, voice_section_ids=set()))
+    assert _content(out, "b") == "CONSISTENT b"
+    assert seen == []
+
+
+def test_pinned_consistency_still_restores_sibling_tabs(monkeypatch):
+    _record_model_calls(monkeypatch)
+    _stub_consistency_edits_b(monkeypatch)
+    d = _draft(_section("a", "Alpha text with enough words."), _section("b", "Beta text with enough words."))
+    out = asyncio.run(apply_chat_preview_quality_guards(d, section_ids={"a"}, voice_section_ids={"a"}))
+    assert _content(out, "b") == "Beta text with enough words."
+
+
+def test_voice_follows_section_ids_when_voice_scope_omitted(monkeypatch):
+    seen = _record_model_calls(monkeypatch)
+    d = _draft(_section("a", "Alpha text with enough words."), _section("b", "Beta text with enough words."))
+    asyncio.run(apply_chat_preview_quality_guards(d, section_ids={"b"}))
+    assert seen == ["Beta text with enough words."]

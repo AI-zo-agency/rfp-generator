@@ -7162,6 +7162,9 @@ async def _try_voice_style_only_pass(
 
 
 
+_UNSET = object()  # "voice_section_ids not passed": voice follows section_ids
+
+
 def changed_section_ids(
     prior: ProposalDraft | None,
     current: ProposalDraft,
@@ -7184,23 +7187,22 @@ async def apply_chat_preview_quality_guards(
     *,
     label: str = "chat-preview",
     section_ids: set[str] | list[str] | frozenset[str] | None = None,
+    voice_section_ids: set[str] | list[str] | frozenset[str] | None | object = _UNSET,
 ) -> ProposalDraft:
     """Consistency + Rev 6 on a draft that is NOT yet persisted (preview panel).
 
     Persist path already runs these inside `_persist_section_improve_draft`. Preview
     must still show cross-section-aligned, Rev-6-scrubbed prose before Apply.
 
-    When ``section_ids`` is set (changed tabs + Improve pin), only touch those tabs —
-    never rewrite unrelated forms just because a draft-wide scrub found a touch-up.
-    An empty set touches nothing; ``None`` means the whole draft.
+    When ``section_ids`` is set (Improve pin), the consistency step only touches those
+    tabs — never rewrite unrelated forms just because a draft-wide scrub found a
+    touch-up. ``None`` runs consistency draft-wide (as persist does).
+
+    The voice step uses ``voice_section_ids`` (omitted = follow ``section_ids``):
+    ``None`` = every write-mode section, an empty collection = no sections.
     """
     working = draft
-    # None = whole draft; an empty collection = no sections (never widen it to None).
-    focus = (
-        None
-        if section_ids is None
-        else {str(x) for x in section_ids if str(x).strip()}
-    )
+    focus = {str(x) for x in (section_ids or []) if str(x).strip()} or None
     try:
         from app.services.proposal_consistency_enforcement import (
             apply_consistency_enforcement,
@@ -7242,8 +7244,9 @@ async def apply_chat_preview_quality_guards(
             apply_chat_rev6_voice_to_draft,
         )
 
+        voice_ids = section_ids if voice_section_ids is _UNSET else voice_section_ids
         working, voice_logs = await apply_chat_rev6_voice_to_draft(
-            working, section_ids=focus
+            working, section_ids=voice_ids
         )
         if voice_logs:
             logger.info(
