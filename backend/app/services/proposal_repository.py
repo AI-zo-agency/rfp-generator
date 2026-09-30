@@ -260,7 +260,11 @@ def _carry_voice_state(draft: ProposalDraft, existing: ProposalDraft | None) -> 
 
 
 def _preserve_voice_state(draft: ProposalDraft) -> None:
-    _carry_voice_state(draft, get_proposal_draft(draft.rfp_id))
+    try:
+        existing = get_proposal_draft(draft.rfp_id)
+    except Exception:  # noqa: BLE001 - never block a save on voice-state carry-over
+        return
+    _carry_voice_state(draft, existing)
 
 
 def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:

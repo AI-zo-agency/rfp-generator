@@ -46,3 +46,26 @@ def test_carry_with_no_existing_draft_is_a_no_op():
     incoming = _draft()
     _carry_voice_state(incoming, None)
     assert incoming.voice_reviewed == []
+
+
+def test_preserve_never_blocks_a_save_when_the_stored_read_fails(monkeypatch):
+    from app.services import proposal_repository as repo
+
+    def boom(_rfp_id):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(repo, "get_proposal_draft", boom)
+    incoming = _draft()
+    repo._preserve_voice_state(incoming)
+    assert incoming.voice_reviewed == []
+
+
+def test_preserve_copies_stored_voice_state_onto_an_empty_draft(monkeypatch):
+    from app.services import proposal_repository as repo
+
+    monkeypatch.setattr(
+        repo, "get_proposal_draft", lambda _rfp_id: _draft(voiceReviewed=["h1"])
+    )
+    incoming = _draft()
+    repo._preserve_voice_state(incoming)
+    assert incoming.voice_reviewed == ["h1"]
