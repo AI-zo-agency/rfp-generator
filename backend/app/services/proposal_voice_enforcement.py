@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from app.services.proposal_brand_voice import Register, classify_section_register
+from app.services.proposal_brand_voice import Register, classify_section_register, voice_standards_for
 
 _PROCUREMENT_ENTITY = re.compile(
     r"\b([Tt])he (Vendor|Offeror|Proposer|Respondent|Contractor)('s)?\b"
@@ -717,13 +717,8 @@ def scrub_cover_letter_agency_boilerplate(content: str) -> tuple[str, list[str]]
     return cleaned.strip(), ["Cover letter: removed 'On behalf of zö agency' boilerplate"]
 
 
-def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
-    """Manuscript-wide Rev 6 voice scrub for Complete Scan / ZF persist."""
-    from app.models.proposal import ProposalDraft as _Draft
-
-    if not isinstance(draft, _Draft):
-        return draft, []
-
+def _apply_mechanics_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
+    """Em dash, company-name spelling, and cover-letter boilerplate on every section."""
     logs: list[str] = []
     sections = []
     changed = False
@@ -732,10 +727,7 @@ def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDr
         if not body.strip():
             sections.append(section)
             continue
-        cleaned, section_logs = scrub_rev6_voice_patterns(body)
-        # Em dash + company name without a second full scrub pass.
-        cleaned = cleaned.replace("—", ",")
-        cleaned = cleaned.replace("–", "-")
+        cleaned = body.replace("—", ",").replace("–", "-")
         cleaned = re.sub(r"\bZO\s+Agency\b", "zö agency", cleaned)
         cleaned = re.sub(r"\bZÖ\s+Agency\b", "zö agency", cleaned)
         cleaned = re.sub(r"\bZö\s+Agency\b", "zö agency", cleaned)
@@ -749,14 +741,11 @@ def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDr
             zo_mode=getattr(section, "mode", None) or "write",
         ) == "cover_letter":
             cleaned, cover_logs = scrub_cover_letter_agency_boilerplate(cleaned)
-            section_logs.extend(cover_logs)
+            logs.extend(f"{section.id}: {line}" for line in cover_logs)
         if cleaned != body:
             changed = True
             sections.append(section.model_copy(update={"content": cleaned}))
-            for line in section_logs:
-                logs.append(f"{section.id}: {line}")
-            if cleaned != body and not section_logs:
-                logs.append(f"{section.id}: Rev6: mechanics (em dash / company name)")
+            logs.append(f"{section.id}: Rev6: mechanics (em dash / company name)")
         else:
             sections.append(section)
     if not changed:
@@ -764,7 +753,19 @@ def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDr
     return draft.model_copy(update={"sections": sections}), logs
 
 
-def apply_chat_rev6_voice_to_draft(
+async def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
+    """Manuscript-wide voice pass (LLM) plus mechanics, for Complete Scan and Review."""
+    from app.models.proposal import ProposalDraft as _Draft
+    from app.services.proposal_voice_pass import apply_voice_pass
+
+    if not isinstance(draft, _Draft):
+        return draft, []
+    draft, logs = await apply_voice_pass(draft)
+    draft, mech_logs = _apply_mechanics_to_draft(draft)
+    return draft, logs + mech_logs
+
+
+async def apply_chat_rev6_voice_to_draft(
     draft: "ProposalDraft",
     *,
     section_ids: set[str] | list[str] | frozenset[str] | None = None,
@@ -809,9 +810,12 @@ def apply_chat_rev6_voice_to_draft(
             logs.append(f"{sid}: Rev6 chat voice enforced")
         else:
             sections.append(section)
-    if not changed:
-        return draft, logs
-    return draft.model_copy(update={"sections": sections}), logs
+    if changed:
+        draft = draft.model_copy(update={"sections": sections})
+    from app.services.proposal_voice_pass import apply_voice_pass
+
+    draft, llm_logs = await apply_voice_pass(draft, section_ids=allow)
+    return draft, logs + llm_logs
 
 
 def fix_narrative_register(content: str) -> str:
@@ -862,11 +866,14 @@ def enforce_narrative_voice(
     return fix_narrative_register(content)
 
 
-def apply_compulsory_rev6_to_section(
+async def apply_compulsory_rev6_to_section(
     section: "ProposalSection",
+    *,
+    rfp_id: str | None = None,
 ) -> tuple["ProposalSection", list[str]]:
-    """Hard Rev 6 pass on one section after any LLM edit (chat, contradiction, fill)."""
+    """Voice pass on one section after any LLM edit (chat, contradiction, fill)."""
     from app.models.proposal import ProposalSection as _PS
+    from app.services import proposal_voice_llm as voice_llm
 
     if not isinstance(section, _PS):
         return section, []
@@ -879,11 +886,20 @@ def apply_compulsory_rev6_to_section(
         title=section.title or "",
         zo_mode=getattr(section, "mode", None) or "write",
     )
-    voiced, logs = scrub_rev6_voice_patterns(voiced)
-    voiced = voiced.replace("—", ",").replace("–", "-")
+    standards, rev_id = voice_standards_for(rfp_id)
+    res = await voice_llm.rewrite_for_voice(
+        voiced,
+        register=classify_section_register(
+            section_id=section.id, title=section.title or "", zo_mode=getattr(section, "mode", None) or "write"
+        ),
+        standards=standards,
+        rev_id=rev_id,
+        rfp_id=rfp_id,
+    )
+    voiced = res.text.replace("—", ",").replace("–", "-")
     if voiced == body:
-        return section, logs
-    return section.model_copy(update={"content": voiced}), logs
+        return section, res.logs
+    return section.model_copy(update={"content": voiced}), res.logs
 
 
 def is_duplicate_static_rfp_section(

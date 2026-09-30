@@ -126,3 +126,32 @@ def test_verifier_no_verdict_is_not_a_finding(monkeypatch):
     _stub(monkeypatch, rewrite=rewrite)
     out, _ = asyncio.run(vp.apply_voice_pass(_draft([_section("a")])))
     assert [f.find for f in out.voice_findings] == ["in it"]
+
+
+from app.services import proposal_voice_enforcement as ve
+
+
+def test_draft_scrub_keeps_mechanics_and_runs_the_pass(monkeypatch):
+    _stub(
+        monkeypatch,
+        rewrite=lambda text, kw: pv.VoiceResult(text=text.replace("BAD", "GOOD")),
+    )
+    d = _draft([_section("a", content="BAD work — ZO Agency ships it.")])
+    out, _ = asyncio.run(ve.apply_rev6_voice_scrub_to_draft(d))
+    assert out.sections[0].content == "GOOD work, zö agency ships it."
+
+
+def test_chat_wrapper_scopes_to_the_named_sections(monkeypatch):
+    seen = []
+    _stub(monkeypatch, seen=seen)
+    d = _draft([_section("budget"), _section("bio", content="Bio text — with a dash and enough words.")])
+    out, _ = asyncio.run(ve.apply_chat_rev6_voice_to_draft(d, section_ids={"budget"}))
+    assert len(seen) == 1
+    assert "—" in out.sections[1].content  # untouched tab stays untouched
+
+
+def test_compulsory_section_pass_returns_rewritten_section(monkeypatch):
+    _stub(monkeypatch, rewrite=lambda text, kw: pv.VoiceResult(text=text.replace("BAD", "GOOD")))
+    sec = _section("a", content="BAD approach — see below.")
+    out, _ = asyncio.run(ve.apply_compulsory_rev6_to_section(sec, rfp_id="r1"))
+    assert out.content == "GOOD approach, see below."
