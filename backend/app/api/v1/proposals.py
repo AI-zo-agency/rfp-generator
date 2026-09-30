@@ -1295,12 +1295,19 @@ async def improve_section_endpoint(
         if preview_only and draft_changed:
             from app.services.proposal_section_editor import (
                 apply_chat_preview_quality_guards,
+                changed_section_ids,
             )
 
-            # Improve pin: scrub only the open tab — never rewrite other forms.
-            pin_ids = {section_id} if body.improve_section_pinned else None
+            # Scope to tabs this turn changed (+ the pinned tab) — same as persist;
+            # never None here (that would LLM-review every tab on each preview).
             draft = await apply_chat_preview_quality_guards(
-                draft, label="chat-preview", section_ids=pin_ids
+                draft,
+                label="chat-preview",
+                section_ids=changed_section_ids(
+                    prior_draft,
+                    draft,
+                    section_id if body.improve_section_pinned else None,
+                ),
             )
             section = next(
                 (s for s in draft.sections if s.id == section_id),

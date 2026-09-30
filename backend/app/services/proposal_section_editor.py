@@ -7162,6 +7162,23 @@ async def _try_voice_style_only_pass(
 
 
 
+def changed_section_ids(
+    prior: ProposalDraft | None,
+    current: ProposalDraft,
+    focus_id: str | None = None,
+) -> set[str]:
+    """Ids of sections whose content differs from ``prior`` (new ones count), plus focus."""
+    ids = {focus_id} if focus_id else set()
+    if prior is not None:
+        before = {s.id: (s.content or "") for s in prior.sections}
+        ids |= {
+            s.id
+            for s in current.sections
+            if s.id and before.get(s.id) != (s.content or "")
+        }
+    return ids
+
+
 async def apply_chat_preview_quality_guards(
     draft: ProposalDraft,
     *,
@@ -7173,11 +7190,17 @@ async def apply_chat_preview_quality_guards(
     Persist path already runs these inside `_persist_section_improve_draft`. Preview
     must still show cross-section-aligned, Rev-6-scrubbed prose before Apply.
 
-    When ``section_ids`` is set (Improve pin), only touch those tabs — never rewrite
-    unrelated forms just because a draft-wide scrub found a touch-up.
+    When ``section_ids`` is set (changed tabs + Improve pin), only touch those tabs —
+    never rewrite unrelated forms just because a draft-wide scrub found a touch-up.
+    An empty set touches nothing; ``None`` means the whole draft.
     """
     working = draft
-    focus = {str(x) for x in (section_ids or []) if str(x).strip()} or None
+    # None = whole draft; an empty collection = no sections (never widen it to None).
+    focus = (
+        None
+        if section_ids is None
+        else {str(x) for x in section_ids if str(x).strip()}
+    )
     try:
         from app.services.proposal_consistency_enforcement import (
             apply_consistency_enforcement,
