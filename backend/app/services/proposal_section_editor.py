@@ -7162,7 +7162,7 @@ async def _try_voice_style_only_pass(
 
 
 
-def apply_chat_preview_quality_guards(
+async def apply_chat_preview_quality_guards(
     draft: ProposalDraft,
     *,
     label: str = "chat-preview",
@@ -7219,7 +7219,7 @@ def apply_chat_preview_quality_guards(
             apply_chat_rev6_voice_to_draft,
         )
 
-        working, voice_logs = apply_chat_rev6_voice_to_draft(
+        working, voice_logs = await apply_chat_rev6_voice_to_draft(
             working, section_ids=focus
         )
         if voice_logs:
@@ -7323,7 +7323,7 @@ async def _persist_section_improve_draft(
     elif focus_section_id:
         voice_ids.add(focus_section_id)
     try:
-        updated_draft, voice_logs = apply_chat_rev6_voice_to_draft(
+        updated_draft, voice_logs = await apply_chat_rev6_voice_to_draft(
             updated_draft,
             section_ids=voice_ids,
         )
