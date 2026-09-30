@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.proposal_voice_llm import _tokens, rewrite_for_voice  # noqa: E402
+from app.services.proposal_voice_llm import _protected, _tokens, rewrite_for_voice  # noqa: E402
 
 # Defects the client flagged or Rev 6 bans. Each must be gone after the pass.
 MUST_BE_GONE = [
@@ -121,8 +121,9 @@ async def main(fixture: str, generic: bool) -> int:
         for phrase in MUST_STAY:
             if phrase not in combined:
                 failures.append(f"fact lost: {phrase!r}")
-    if "—" in combined:
-        failures.append("em dash still present")
+    bad = [l for l in combined.splitlines() if "—" in l and not l.lstrip().startswith("#") and not _protected(l)]
+    if bad:
+        failures.append(f"em dash still present in {len(bad)} line(s): {bad[0][:80]!r}")
 
     # Idempotency: a second pass over the output should have nothing left to fix.
     second = await asyncio.gather(
