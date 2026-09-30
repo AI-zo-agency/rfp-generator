@@ -244,6 +244,25 @@ def _preserve_selected_key_personas(draft: ProposalDraft) -> None:
         )
 
 
+def _carry_voice_state(draft: ProposalDraft, existing: ProposalDraft | None) -> None:
+    """Copy voice state from the stored draft when the incoming one has none.
+
+    Generation rebuilds ProposalDraft from scratch and the UI autosave sends a fixed
+    field list, so both arrive without it. Findings that no longer match the text
+    are ignored by the reader, so carrying a stale one is harmless.
+    """
+    if existing is None:
+        return
+    if not draft.voice_reviewed:
+        draft.voice_reviewed = list(existing.voice_reviewed)
+    if not draft.voice_findings:
+        draft.voice_findings = list(existing.voice_findings)
+
+
+def _preserve_voice_state(draft: ProposalDraft) -> None:
+    _carry_voice_state(draft, get_proposal_draft(draft.rfp_id))
+
+
 def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
     """Keep stored section markdown as real tables, never one flattened line."""
     from app.services.proposal_manuscript import repair_flattened_markdown_tables
@@ -259,6 +278,7 @@ def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
 
 def save_proposal_draft(draft: ProposalDraft) -> None:
     _preserve_selected_key_personas(draft)
+    _preserve_voice_state(draft)
     _repair_markdown_tables_in_draft(draft)
     try:
         if _use_supabase():

@@ -889,6 +889,18 @@ class ProposalSection(BaseModel):
     kb_refs: list[str] = Field(default_factory=list, alias="kbRefs")
 
 
+class VoiceFinding(BaseModel):
+    """A voice problem the LLM pass found but did not fix. Shown by Review."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    find: str
+    rule: str
+    kind: Literal["needs_human", "suggestion"]
+    detail: str = ""
+
+
 class ProposalDraftSnapshot(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -946,6 +958,10 @@ class ProposalDraft(BaseModel):
     selected_key_personas: list[str] | None = Field(
         default=None, alias="selectedKeyPersonas"
     )
+    # Content hashes of paragraphs the voice pass already reviewed (the revision
+    # id is part of each hash). Approved copy is never re-reviewed.
+    voice_reviewed: list[str] = Field(default_factory=list, alias="voiceReviewed")
+    voice_findings: list[VoiceFinding] = Field(default_factory=list, alias="voiceFindings")
 
 
 class ProposalGenerateResponse(BaseModel):
