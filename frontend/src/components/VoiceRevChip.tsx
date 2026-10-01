@@ -67,6 +67,7 @@ export function VoiceRevChip({ rfpId }: { rfpId: string }) {
       >
         <span className="hidden text-zo-text-muted sm:inline">Voice</span>
         <select
+          aria-label="Brand voice revision"
           value={pinSelection(pin)}
           disabled={busy}
           onChange={(e) => void change(e.target.value)}

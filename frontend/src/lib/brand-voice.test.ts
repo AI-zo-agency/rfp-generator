@@ -3,6 +3,7 @@ import {
   addedMessage,
   canSetDefault,
   errorMessage,
+  formatAdded,
   pinSelection,
   shortHash,
   showNoDefaultNote,
@@ -159,4 +160,12 @@ describe("voiceOptions", () => {
     const pin = { pinned: { id: "r2", label: "rev 2" }, active };
     expect(voiceOptions(list({ revisions: [rev({ id: "r2", label: "rev 2" })] }), pin)).toHaveLength(1);
   });
+});
+
+describe("formatAdded", () => {
+  test("built-in copy has no date", () => expect(formatAdded("")).toBe("Repo file"));
+  test("an unparseable date is shown as sent, never Invalid Date", () =>
+    expect(formatAdded("yesterday-ish")).toBe("yesterday-ish"));
+  test("a real timestamp becomes a local date", () =>
+    expect(formatAdded("2026-09-30T10:00:00+00:00")).toMatch(/2026|9|30/));
 });

@@ -4394,7 +4394,7 @@ function ProposalDraftWorkspaceInner({
               </button>
             ) : null}
             <div className="proposal-tab-actions-toolbar">
-            <VoiceRevChip rfpId={rfp.id} />
+            <VoiceRevChip key={rfp.id} rfpId={rfp.id} />
             {/* Compact LLM spend chip — opens Advanced options where the full
                 Cost summary lives (kept out of Ask Ralph so chat stays clean). */}
             {rfpCost ? (

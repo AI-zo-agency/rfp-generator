@@ -40,7 +40,7 @@ export function voiceOptions(data: BrandVoiceRevisionList, pin: ProposalVoiceRev
   return options.some((o) => o.id === current.id) ? options : [...options, current];
 }
 
-function nonEmpty(value: unknown): string {
+function stringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
@@ -48,20 +48,20 @@ function nonEmpty(value: unknown): string {
 export function errorMessage(data: unknown, status: number): string {
   const body = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
   const { detail } = body;
-  if (nonEmpty(detail)) return detail as string;
+  if (stringOrEmpty(detail)) return detail as string;
   if (Array.isArray(detail)) {
     // FastAPI validation errors: [{ loc: ["body", "label"], msg: "Field required" }]
     const first = (detail[0] ?? {}) as { loc?: unknown; msg?: unknown };
-    const msg = nonEmpty(first.msg);
+    const msg = stringOrEmpty(first.msg);
     if (msg) {
       const field = Array.isArray(first.loc) ? first.loc[first.loc.length - 1] : undefined;
       return field !== undefined ? `${field}: ${msg}` : msg;
     }
   } else if (detail && typeof detail === "object") {
-    const message = nonEmpty((detail as { message?: unknown }).message);
+    const message = stringOrEmpty((detail as { message?: unknown }).message);
     if (message) return message;
   }
-  return nonEmpty(body.error) || `Request failed (${status})`;
+  return stringOrEmpty(body.error) || `Request failed (${status})`;
 }
 
 /** True while new proposals fall back to the repo copy because no default is stored. */
@@ -77,4 +77,16 @@ export function canSetDefault(rev: BrandVoiceRevision, enabled: boolean): boolea
 
 export function addedMessage(label: string): string {
   return `Added ${label}. Set it as the default below if you want new proposals to use it.`;
+}
+
+/** Matches the backend cap (MAX_BODY_BYTES) so an oversized file is refused before it is uploaded. */
+export const MAX_FILE_BYTES = 200_000;
+export const MAX_NOTES_CHARS = 500;
+export const FILE_TOO_LARGE = "The file is larger than 200 KB.";
+
+/** "Repo file" for the built-in copy, the local date when parseable, else the raw text. */
+export function formatAdded(createdAt: string): string {
+  if (!createdAt) return "Repo file";
+  const d = new Date(createdAt);
+  return Number.isNaN(d.getTime()) ? createdAt : d.toLocaleDateString();
 }

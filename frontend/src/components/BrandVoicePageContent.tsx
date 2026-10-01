@@ -7,6 +7,10 @@ import {
   addedMessage,
   canSetDefault,
   errorMessage,
+  FILE_TOO_LARGE,
+  formatAdded,
+  MAX_FILE_BYTES,
+  MAX_NOTES_CHARS,
   shortHash,
   showNoDefaultNote,
   suggestRevisionLabel,
@@ -120,12 +124,24 @@ function BrandVoiceInner() {
       </header>
 
       {error ? (
-        <p
+        <div
           role="alert"
-          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+          className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
         >
-          {error}
-        </p>
+          <span>{error}</span>
+          {!data ? (
+            <button
+              type="button"
+              className={kbBtnSecondary}
+              onClick={() => {
+                setError("");
+                void load();
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {success ? (
@@ -157,9 +173,9 @@ function BrandVoiceInner() {
             <tr>
               <th scope="col" className="px-4 py-3">Revision</th>
               <th scope="col" className="px-4 py-3">Added</th>
-              <th scope="col" className="px-4 py-3">By</th>
-              <th scope="col" className="px-4 py-3">Notes</th>
-              <th scope="col" className="px-4 py-3">File</th>
+              <th scope="col" className="hidden px-4 py-3 md:table-cell">By</th>
+              <th scope="col" className="hidden px-4 py-3 md:table-cell">Notes</th>
+              <th scope="col" className="hidden px-4 py-3 md:table-cell">File</th>
               <th scope="col" className="px-4 py-3">
                 <span className="sr-only">Actions</span>
               </th>
@@ -184,11 +200,11 @@ function BrandVoiceInner() {
                   ) : null}
                 </td>
                 <td className="px-4 py-3 text-zo-text-muted">
-                  {rev.createdAt ? new Date(rev.createdAt).toLocaleDateString() : "Repo file"}
+                  {formatAdded(rev.createdAt)}
                 </td>
-                <td className="px-4 py-3 text-zo-text-muted">{rev.createdBy}</td>
-                <td className="px-4 py-3 text-zo-text-muted">{rev.notes}</td>
-                <td className="px-4 py-3 font-mono text-xs text-zo-text-muted">
+                <td className="hidden px-4 py-3 text-zo-text-muted md:table-cell">{rev.createdBy}</td>
+                <td className="hidden px-4 py-3 text-zo-text-muted md:table-cell">{rev.notes}</td>
+                <td className="hidden px-4 py-3 font-mono text-xs text-zo-text-muted md:table-cell">
                   {shortHash(rev.sha256)} · {Math.ceil(rev.size / 1024)} KB
                 </td>
                 <td className="px-4 py-3 text-right">
@@ -220,6 +236,13 @@ function BrandVoiceInner() {
               accept=".md,text/markdown,text/plain"
               onChange={(e) => {
                 const f = e.target.files?.[0] ?? null;
+                setError("");
+                setSuccess("");
+                if (f && f.size > MAX_FILE_BYTES) {
+                  setFile(null);
+                  setError(FILE_TOO_LARGE);
+                  return;
+                }
                 setFile(f);
                 if (f && !label) setLabel(suggestRevisionLabel(f.name));
               }}
@@ -230,7 +253,10 @@ function BrandVoiceInner() {
             <input
               value={label}
               maxLength={40}
-              onChange={(e) => setLabel(e.target.value)}
+              onChange={(e) => {
+                setError("");
+                setLabel(e.target.value);
+              }}
               placeholder="rev 7"
               className="w-full max-w-xs rounded-lg border border-zo-border px-3 py-2"
             />
@@ -239,7 +265,11 @@ function BrandVoiceInner() {
             <span className="mb-1 block font-semibold text-foreground">Notes (optional)</span>
             <input
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              maxLength={MAX_NOTES_CHARS}
+              onChange={(e) => {
+                setError("");
+                setNotes(e.target.value);
+              }}
               placeholder="Sent by the client on Sep 30"
               className="w-full rounded-lg border border-zo-border px-3 py-2"
             />
