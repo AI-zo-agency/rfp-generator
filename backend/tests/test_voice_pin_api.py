@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models.proposal import ProposalDraft
+from app.models.proposal import ProposalDraft, VoiceFinding
 
 client = TestClient(app)
 URL = "/api/v1/rfps/r1/proposal/voice-rev"
@@ -43,9 +43,11 @@ def test_get_with_no_pin_reports_null(monkeypatch):
 def test_put_saves_the_new_pin(monkeypatch):
     _revs(monkeypatch)
     saved = []
+    finding = VoiceFinding(sectionId="s1", find="x", rule="r", kind="suggestion")
+    stored = _draft("id1").model_copy(update={"voice_reviewed": ["h1"], "voice_findings": [finding]})
 
     async def fake_get(rfp_id):
-        return _draft("id1")
+        return stored
 
     async def fake_save(draft):
         saved.append(draft)
@@ -55,16 +57,24 @@ def test_put_saves_the_new_pin(monkeypatch):
     r = client.put(URL, json={"revisionId": "id2"})
     assert r.status_code == 200 and r.json()["pinned"]["id"] == "id2"
     assert saved[0].voice_rev_id == "id2"
+    assert saved[0].voice_reviewed == ["h1"] and saved[0].voice_findings == [finding]
 
 
 def test_put_unknown_revision_is_404(monkeypatch):
     _revs(monkeypatch)
+    saved = []
 
     async def fake_get(rfp_id):
         return _draft("id1")
 
+    async def fake_save(draft):
+        saved.append(draft)
+
     monkeypatch.setattr("app.services.proposal_repository.aget_proposal_draft", fake_get)
-    assert client.put(URL, json={"revisionId": "nope"}).status_code == 404
+    monkeypatch.setattr("app.services.proposal_repository.asave_proposal_draft", fake_save)
+    r = client.put(URL, json={"revisionId": "nope"})
+    assert r.status_code == 404 and r.json()["detail"] == "Unknown brand voice revision."
+    assert saved == []
 
 
 def test_put_without_a_draft_is_404(monkeypatch):
@@ -74,4 +84,5 @@ def test_put_without_a_draft_is_404(monkeypatch):
         return None
 
     monkeypatch.setattr("app.services.proposal_repository.aget_proposal_draft", fake_get)
-    assert client.put(URL, json={"revisionId": "id1"}).status_code == 404
+    r = client.put(URL, json={"revisionId": "id1"})
+    assert r.status_code == 404 and r.json()["detail"] == "No proposal draft for this RFP yet."

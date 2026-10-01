@@ -87,7 +87,11 @@ def voice_standards_for(rfp_id: str | None = None) -> tuple[str, str]:
             pinned = getattr(draft, "voice_rev_id", None) if draft else None
         except Exception:  # noqa: BLE001 - a missing draft must not break prompt building
             pinned = None
-    rev = bvr.get_revision(pinned) or bvr.active_revision()
+    try:
+        rev = bvr.get_revision(pinned)
+    except Exception:  # noqa: BLE001 - a failed pin lookup falls back to the default revision
+        rev = None
+    rev = rev or bvr.active_revision()
     return _standards_for_revision(rev.id), rev.id
 
 

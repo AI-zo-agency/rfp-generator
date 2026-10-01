@@ -48,3 +48,14 @@ def test_pin_failure_never_blocks_a_save(monkeypatch):
     d = _draft()
     repo._stamp_voice_rev(d)
     assert d.voice_rev_id is None
+
+
+def test_stored_draft_read_failure_never_blocks_a_save(monkeypatch):
+    def boom(rfp_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(repo, "get_proposal_draft", boom)
+    _active(monkeypatch)
+    d = _draft()
+    repo._stamp_voice_rev(d)
+    assert d.voice_rev_id == "active1"

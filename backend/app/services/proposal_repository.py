@@ -275,7 +275,10 @@ def _stamp_voice_rev(draft: ProposalDraft) -> None:
     """
     if draft.voice_rev_id:
         return
-    existing = get_proposal_draft(draft.rfp_id)
+    try:
+        existing = get_proposal_draft(draft.rfp_id)
+    except Exception:  # noqa: BLE001 - never block a save on the pin
+        existing = None
     if existing is not None and existing.voice_rev_id:
         draft.voice_rev_id = existing.voice_rev_id
         return

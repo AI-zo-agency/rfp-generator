@@ -82,3 +82,28 @@ def test_full_voice_block_uses_the_pinned_revision_and_compact_does_not(monkeypa
     monkeypatch.setattr(repo, "get_proposal_draft", lambda rfp_id: SimpleNamespace(voice_rev_id=b.id))
     assert "(rev 7)" in pbv.format_brand_voice_block(None, rfp_id="r1")
     assert "(rev 7)" not in pbv.format_brand_voice_block(None, rfp_id="r1", compact=True)
+
+
+def test_voice_standards_for_falls_back_when_the_pinned_lookup_fails(monkeypatch):
+    a, b = _seed()
+    monkeypatch.setattr(repo, "get_proposal_draft", lambda rfp_id: SimpleNamespace(voice_rev_id=b.id))
+
+    real_get = bvr.get_revision
+
+    def flaky(rev_id):
+        if rev_id == b.id:
+            raise RuntimeError("db down")
+        return real_get(rev_id)
+
+    monkeypatch.setattr(bvr, "get_revision", flaky)
+    assert pbv.voice_standards_for("r1")[1] == a.id
+
+
+def test_voice_standards_for_falls_back_when_the_draft_read_fails(monkeypatch):
+    a, _ = _seed()
+
+    def boom(rfp_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(repo, "get_proposal_draft", boom)
+    assert pbv.voice_standards_for("r1")[1] == a.id

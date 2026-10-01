@@ -20,6 +20,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_COLUMNS = "id,label,body,sha256,notes,created_by,created_at"  # exactly what _from_row reads
+
 BUILTIN_ID = "builtin"
 _BUILTIN_PATH = Path(__file__).resolve().parents[3] / "branding" / "ZO_BRAND_AND_WRITING_STANDARDS_REV6.md"
 _ACTIVE_TTL_S = 30.0
@@ -175,7 +177,7 @@ def get_revision(rev_id: str | None) -> Revision | None:
         return _by_id[rev_id]
     if not enabled():
         return None
-    rows = _db().table("brand_voice_revisions").select("*").eq("id", rev_id).limit(1).execute().data
+    rows = _db().table("brand_voice_revisions").select(_COLUMNS).eq("id", rev_id).limit(1).execute().data
     if not rows:
         return None
     rev = _by_id[rev_id] = _from_row(rows[0])
@@ -186,7 +188,7 @@ def list_revisions() -> list[Revision]:
     """Newest first. The repo file alone when Supabase is not configured."""
     if not enabled():
         return [builtin()]
-    rows = _db().table("brand_voice_revisions").select("*").order("created_at", desc=True).execute().data
+    rows = _db().table("brand_voice_revisions").select(_COLUMNS).order("created_at", desc=True).execute().data
     return [_by_id.setdefault(str(r["id"]), _from_row(r)) for r in rows]
 
 
