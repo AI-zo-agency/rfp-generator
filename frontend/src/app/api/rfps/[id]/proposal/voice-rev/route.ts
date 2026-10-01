@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
+import { readJson, relayJson, unreachable } from "@/lib/proxy-relay";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
@@ -9,10 +9,9 @@ async function forward(id: string, init: RequestInit) {
       `${BACKEND_URL}/api/v1/rfps/${encodeURIComponent(id)}/proposal/voice-rev`,
       { ...init, cache: "no-store" }
     );
-    return NextResponse.json(await res.json(), { status: res.status });
+    return await relayJson(res);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Backend unreachable";
-    return NextResponse.json({ error: message }, { status: 503 });
+    return unreachable(error);
   }
 }
 
@@ -23,10 +22,11 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const body = await request.json();
+  const parsed = await readJson(request);
+  if (parsed.response) return parsed.response;
   return forward(id, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(parsed.body),
   });
 }

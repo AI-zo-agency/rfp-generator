@@ -1,20 +1,20 @@
-import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
+import { readJson, relayJson, unreachable } from "@/lib/proxy-relay";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
 export async function PUT(request: Request) {
+  const parsed = await readJson(request);
+  if (parsed.response) return parsed.response;
   try {
-    const body = await request.json();
     const res = await longRunningFetch(`${BACKEND_URL}/api/v1/brand-voice/active`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(parsed.body),
       cache: "no-store",
     });
-    return NextResponse.json(await res.json(), { status: res.status });
+    return await relayJson(res);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Backend unreachable";
-    return NextResponse.json({ error: message }, { status: 503 });
+    return unreachable(error);
   }
 }
