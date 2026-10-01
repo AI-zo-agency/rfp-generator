@@ -283,9 +283,12 @@ def _stamp_voice_rev(draft: ProposalDraft) -> None:
         draft.voice_rev_id = existing.voice_rev_id
         return
     try:
-        from app.services.brand_voice_revisions import active_revision
+        from app.services.brand_voice_revisions import BUILTIN_ID, active_revision, enabled
 
-        draft.voice_rev_id = active_revision().id
+        rev = active_revision()
+        if enabled() and rev.id == BUILTIN_ID:
+            return  # no stored default yet: stay unpinned and follow the default, never pin the stub
+        draft.voice_rev_id = rev.id
     except Exception as exc:  # noqa: BLE001 - never block a save on the pin
         logger.warning("voice revision pin skipped for %s: %s", draft.rfp_id, str(exc)[:200])
 

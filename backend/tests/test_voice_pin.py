@@ -59,3 +59,20 @@ def test_stored_draft_read_failure_never_blocks_a_save(monkeypatch):
     d = _draft()
     repo._stamp_voice_rev(d)
     assert d.voice_rev_id == "active1"
+
+
+def test_a_builtin_default_is_never_pinned_when_storage_is_on(monkeypatch):
+    monkeypatch.setattr(repo, "get_proposal_draft", lambda rfp_id: None)
+    monkeypatch.setattr("app.services.brand_voice_revisions.enabled", lambda: True)
+    _active(monkeypatch, "builtin")
+    d = _draft()
+    repo._stamp_voice_rev(d)
+    assert d.voice_rev_id is None
+
+
+def test_builtin_is_pinned_without_storage(monkeypatch):
+    monkeypatch.setattr(repo, "get_proposal_draft", lambda rfp_id: None)
+    _active(monkeypatch, "builtin")
+    d = _draft()
+    repo._stamp_voice_rev(d)
+    assert d.voice_rev_id == "builtin"

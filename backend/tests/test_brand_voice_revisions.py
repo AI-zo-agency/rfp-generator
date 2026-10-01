@@ -126,3 +126,64 @@ def test_active_pointer_read_failure_falls_back(monkeypatch):
 
     monkeypatch.setattr(bvr, "active_pointer_id", boom)
     assert bvr.active_revision().id == bvr.BUILTIN_ID
+
+
+def test_no_pointer_is_cached_so_only_one_read(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bvr, "active_pointer_id", lambda: calls.append(1))
+    assert bvr.active_revision().id == bvr.BUILTIN_ID
+    assert bvr.active_revision().id == bvr.BUILTIN_ID
+    assert len(calls) == 1
+
+
+def test_a_failed_pointer_read_keeps_the_last_known_good_revision(monkeypatch):
+    a = bvr.add_revision(label="rev 6", body=MD, created_by="x")
+    bvr.set_active(a.id, updated_by="x")
+    later = bvr._active[0] + 60  # cache expired
+    monkeypatch.setattr(bvr.time, "monotonic", lambda: later)
+
+    def boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(bvr, "active_pointer_id", boom)
+    assert bvr.active_revision().id == a.id
+
+
+def test_a_failed_pointer_read_retries_after_the_ttl_not_every_call(monkeypatch):
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("db down")
+
+    a = bvr.add_revision(label="rev 6", body=MD, created_by="x")
+    bvr.set_active(a.id, updated_by="x")
+    monkeypatch.setattr(bvr, "active_pointer_id", boom)
+    later = bvr._active[0] + 60
+    monkeypatch.setattr(bvr.time, "monotonic", lambda: later)
+    bvr.active_revision()
+    bvr.active_revision()
+    assert len(calls) == 1
+
+
+def test_a_non_uuid_id_is_not_a_revision():
+    assert bvr.get_revision("nope") is None
+
+
+def test_a_racing_duplicate_insert_is_reported_as_a_duplicate(db):
+    first = bvr.add_revision(label="rev 6", body=MD, created_by="x")
+    db.miss_next_sha_select = True  # the pre-check misses, the unique index catches it
+    with pytest.raises(bvr.DuplicateRevision) as exc:
+        bvr.add_revision(label="again", body=MD, created_by="y")
+    assert exc.value.existing_id == first.id
+
+
+def test_an_insert_failure_that_is_not_a_duplicate_is_raised(db):
+    db.fail = RuntimeError("db down")
+    with pytest.raises(RuntimeError):
+        bvr.add_revision(label="rev 6", body=MD, created_by="x")
+
+
+def test_notes_over_500_characters_are_rejected():
+    with pytest.raises(bvr.RevisionError):
+        bvr.add_revision(label="rev 6", body=MD, created_by="x", notes="n" * 501)

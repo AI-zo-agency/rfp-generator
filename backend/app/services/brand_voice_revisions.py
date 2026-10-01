@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -26,6 +27,7 @@ BUILTIN_ID = "builtin"
 _BUILTIN_PATH = Path(__file__).resolve().parents[3] / "branding" / "ZO_BRAND_AND_WRITING_STANDARDS_REV6.md"
 _ACTIVE_TTL_S = 30.0
 MAX_BODY_BYTES = 200_000
+MAX_NOTES_CHARS = 500
 WORD_SECTIONS = {1, 2, 3, 4, 8, 10}  # writing rules; 5-7 and 9 are look and images
 
 # Used only if the repo file is missing at runtime.
@@ -115,9 +117,11 @@ def words_only(md: str) -> str:
     return text.strip()
 
 
-def validate(label: str, body: str) -> str:
+def validate(label: str, body: str, notes: str = "") -> str:
     """Return the cleaned label, or raise RevisionError."""
     label = (label or "").strip()
+    if len((notes or "").strip()) > MAX_NOTES_CHARS:
+        raise RevisionError(f"Notes must be {MAX_NOTES_CHARS} characters or fewer.")
     if not 1 <= len(label) <= 40:
         raise RevisionError("Label must be 1 to 40 characters.")
     if not body.strip():
@@ -175,6 +179,10 @@ def get_revision(rev_id: str | None) -> Revision | None:
         return builtin()
     if rev_id in _by_id:
         return _by_id[rev_id]
+    try:
+        uuid.UUID(rev_id)  # the id column is a uuid: anything else would be a database error, not a miss
+    except ValueError:
+        return None
     if not enabled():
         return None
     rows = _db().table("brand_voice_revisions").select(_COLUMNS).eq("id", rev_id).limit(1).execute().data
@@ -200,36 +208,51 @@ def active_pointer_id() -> str | None:
 
 
 def active_revision() -> Revision:
-    """The global default. Falls back to the repo file if nothing is set or the read fails."""
+    """The global default. The repo file only if no default was ever readable.
+
+    A failed pointer read keeps the last known pointer, so a Supabase blip never flips
+    proposals to the 20-line built-in stub.
+    """
     global _active
     if not enabled():
         return builtin()
     now = time.monotonic()
+    if _active is None or now - _active[0] >= _ACTIVE_TTL_S:
+        try:
+            _active = (now, active_pointer_id())  # the pointer may be None: cache "not set yet" too
+        except Exception as exc:  # noqa: BLE001 - never block a proposal on the pointer read
+            logger.warning("brand voice active pointer read failed: %s", str(exc)[:200])
+            if _active is not None:
+                _active = (now, _active[1])  # keep last known good, retry after the TTL
     try:
-        if _active is None or now - _active[0] >= _ACTIVE_TTL_S:
-            pointer = active_pointer_id()
-            _active = (now, pointer) if pointer else None
         rev = get_revision(_active[1]) if _active else None
-        if rev:
-            return rev
-    except Exception as exc:  # noqa: BLE001 - never block a proposal on the pointer read
-        logger.warning("brand voice active pointer read failed: %s", str(exc)[:200])
-    return builtin()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brand voice active revision read failed: %s", str(exc)[:200])
+        rev = None
+    return rev or builtin()
 
 
 def add_revision(*, label: str, body: str, created_by: str, notes: str = "") -> Revision:
-    label = validate(label, body)
+    label = validate(label, body, notes)
     sha = sha256_of(body)
-    existing = _db().table("brand_voice_revisions").select("id").eq("sha256", sha).limit(1).execute().data
-    if existing:
+
+    def _existing() -> list[dict[str, Any]]:
+        return _db().table("brand_voice_revisions").select("id").eq("sha256", sha).limit(1).execute().data
+
+    if existing := _existing():
         raise DuplicateRevision(str(existing[0]["id"]))
-    row = (
-        _db()
-        .table("brand_voice_revisions")
-        .insert({"label": label, "body": body, "sha256": sha, "notes": notes.strip(), "created_by": created_by})
-        .execute()
-        .data[0]
-    )
+    try:
+        row = (
+            _db()
+            .table("brand_voice_revisions")
+            .insert({"label": label, "body": body, "sha256": sha, "notes": notes.strip(), "created_by": created_by})
+            .execute()
+            .data[0]
+        )
+    except Exception:
+        if existing := _existing():  # lost a race with an identical upload: the unique index caught it
+            raise DuplicateRevision(str(existing[0]["id"]))
+        raise
     rev = _by_id[str(row["id"])] = _from_row(row)
     return rev
 

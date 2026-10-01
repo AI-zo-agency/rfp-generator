@@ -8,12 +8,15 @@ Older revs are dead on arrival.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any, Literal
 
 from app.models.rfp import RfpRecord
 from app.services import brand_voice_revisions as bvr
 from app.services import proposal_knowledge_base_tools
+
+logger = logging.getLogger(__name__)
 
 Register = Literal["narrative", "procurement", "cover_letter"]
 
@@ -85,11 +88,13 @@ def voice_standards_for(rfp_id: str | None = None) -> tuple[str, str]:
 
             draft = get_proposal_draft(rfp_id)
             pinned = getattr(draft, "voice_rev_id", None) if draft else None
-        except Exception:  # noqa: BLE001 - a missing draft must not break prompt building
+        except Exception as exc:  # noqa: BLE001 - a missing draft must not break prompt building
+            logger.warning("voice pin lookup failed for %s: %s", rfp_id, str(exc)[:200])
             pinned = None
     try:
         rev = bvr.get_revision(pinned)
-    except Exception:  # noqa: BLE001 - a failed pin lookup falls back to the default revision
+    except Exception as exc:  # noqa: BLE001 - a failed pin lookup falls back to the default revision
+        logger.warning("voice revision %s lookup failed for %s: %s", pinned, rfp_id, str(exc)[:200])
         rev = None
     rev = rev or bvr.active_revision()
     return _standards_for_revision(rev.id), rev.id

@@ -20,6 +20,8 @@ from app.services.rfp_repository import list_rfps  # noqa: E402
 
 def main(dry_run: bool) -> None:
     active = bvr.active_revision()
+    if bvr.enabled() and active.id == bvr.BUILTIN_ID:
+        raise SystemExit("No stored default revision yet. Run seed_brand_voice_revisions.py first, then retry.")
     print(f"default revision: {active.label} ({active.id})")
     pinned = skipped = 0
     for rfp in list_rfps():
