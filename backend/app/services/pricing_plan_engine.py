@@ -265,6 +265,23 @@ def price_plan(plan: dict, book: PricingBook, budgets: dict[str, float]) -> dict
     return {"no_fit": no_fit}
 
 
+def cut_suggestions(plan: dict, book: PricingBook, over_by: float, track: str | None = None) -> list[str]:
+    """Largest priced items first, until their term price covers `over_by` (for the go/no-go and internal notes)."""
+    c = compute(plan, book)
+    scope = [
+        (c["amounts"][tid] * (c["months"] if t.get("billing") == "monthly" else 1), tid, t)
+        for tid, t in c["tasks"].items()
+        if tid in c["cost_term"] and (track in (None, TOTAL_KEY) or t.get("track") == track)
+    ]
+    out, saved = [], 0.0
+    for price, tid, t in sorted(scope, key=lambda x: x[0], reverse=True):
+        if saved >= over_by:
+            break
+        out.append(f"{tid} {t.get('deliverable')} saves {usd(price)}")
+        saved += price
+    return out
+
+
 # ---------------------------------------------------------------- wording
 
 

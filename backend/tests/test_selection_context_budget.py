@@ -31,8 +31,8 @@ DIGEST = (
     "\n### 1.3 Business Information\nLegal Name: Z'Onion Creative Group LLC\n"
 )
 PRICING = (
-    "=== 00_Guide_Pricing (Supermemory) ===\n"
-    "Creative Director $185/hr. Senior Designer $140/hr.\n"
+    "=== zö pricing docs (Pricing Book + Rules and Wording) ===\n"
+    "Silver Brand Book $4,800. Blended rate $275 an hour for every role.\n"
 )
 
 # 50k of RFP body is the real ceiling (RFP_PROMPT_MAX_CHARS), and it is
@@ -49,7 +49,7 @@ class BudgetRfpContextTests(unittest.TestCase):
         self.assertNotIn("HARD FACTS", legacy)
         self.assertNotIn("Mapped section requirements", legacy)
         self.assertNotIn("FULL PROPOSAL MANUSCRIPT", legacy)
-        self.assertNotIn("00_Guide_Pricing", legacy)
+        self.assertNotIn("zö pricing docs", legacy)
 
     def test_every_appended_block_survives_budgeting(self) -> None:
         budgeted = _budget_rfp_context(FULL_CONTEXT)
@@ -57,7 +57,7 @@ class BudgetRfpContextTests(unittest.TestCase):
         self.assertIn("Approach and methodology: 40 points", budgeted)
         self.assertIn("Provide legal name, DBA, EIN", budgeted)
         self.assertIn("FULL PROPOSAL MANUSCRIPT", budgeted)
-        self.assertIn("Creative Director $185/hr", budgeted)
+        self.assertIn("Silver Brand Book $4,800", budgeted)
 
     def test_rfp_body_head_is_kept_but_bounded(self) -> None:
         budgeted = _budget_rfp_context(FULL_CONTEXT)
@@ -76,7 +76,7 @@ class BudgetRfpContextTests(unittest.TestCase):
         budgeted = _budget_rfp_context("\n\n".join([RFP_BODY, HARD_FACTS, huge_digest, PRICING]))
         self.assertIn("FULL PROPOSAL MANUSCRIPT", budgeted)
         # A later block must still survive an oversized earlier one.
-        self.assertIn("Creative Director $185/hr", budgeted)
+        self.assertIn("Silver Brand Book $4,800", budgeted)
         self.assertIn("truncated", budgeted)
 
     def test_context_with_no_appended_blocks_is_just_the_body(self) -> None:
@@ -94,7 +94,7 @@ class BudgetRfpContextTests(unittest.TestCase):
             budgeted.index("Mapped section requirements"),
             budgeted.index("FULL PROPOSAL MANUSCRIPT"),
         )
-        self.assertLess(budgeted.index("FULL PROPOSAL MANUSCRIPT"), budgeted.index("00_Guide_Pricing"))
+        self.assertLess(budgeted.index("FULL PROPOSAL MANUSCRIPT"), budgeted.index("zö pricing docs"))
 
 
 if __name__ == "__main__":

@@ -31,21 +31,20 @@ logger = logging.getLogger(__name__)
 
 def _plan_budget_facts(budget: ProposalBudget) -> str:
     """Pass A/B facts for a pricing-plan budget: figures come from the plan itself."""
-    from app.services.pricing_plan_engine import compute, term_value
+    from app.services.pricing_plan_service import plan_term_value
 
     plan = budget.pricing_plan or {}
-    c = compute(plan, (plan.get("kb_snapshot") or {}).get("labor") or {})
     lines = [
-        f"pricingTier: {plan.get('tier') or budget.pricing_tier}",
-        f"termValue (our bid: one-time fees + 12 months of monthly fees): {term_value(c):,.2f}",
-        f"clientMediaPassthrough inside termValue (NOT agency fees): {term_value(c, None, '6.1'):,.2f}",
+        f"pricingVersion: {plan.get('pricing_version') or 'legacy band guide'}",
+        f"termValue (our bid: one-time fees + the term's monthly fees): {plan_term_value(plan):,.2f}",
+        f"clientMediaPassthrough inside termValue (NOT agency fees): {plan_term_value(plan, None, True):,.2f}",
         f"lineItemSum (all table rows): {sum_line_items_extended(budget):,.2f}",
         "Per-event and hourly fees are rates, never summed into termValue.",
     ]
     for ceil in (budget.pricing_asks or {}).get("ceilings") or []:
         pool = " (shared pool, not ours alone)" if ceil.get("shared_pool") else ""
         track = ceil.get("track")
-        mine = f"; our termValue on this track: {term_value(c, track):,.2f}" if track else ""
+        mine = f"; our termValue on this track: {plan_term_value(plan, track):,.2f}" if track else ""
         lines.append(
             f"RFP ceiling — {ceil.get('label')}: {float(ceil.get('amount') or 0):,.2f}{pool}{mine}"
         )

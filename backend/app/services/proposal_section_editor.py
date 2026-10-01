@@ -2159,7 +2159,7 @@ def _rfp_section_requirements_block(
 HARD_FACTS_MARKER = "## HARD FACTS (from full RFP text"
 REQUIREMENTS_MARKER = "--- Mapped section requirements ---"
 MANUSCRIPT_MARKER = "FULL PROPOSAL MANUSCRIPT (every section"
-PRICING_MARKER = "=== 00_Guide_Pricing (Supermemory) ==="
+PRICING_MARKER = "=== zö pricing docs (Pricing Book + Rules and Wording) ==="
 
 _CONTEXT_BLOCK_BUDGETS: tuple[tuple[str, int], ...] = (
     (HARD_FACTS_MARKER, 3_000),
@@ -3761,11 +3761,11 @@ async def _section_chat_advisory_reply(
         )
         src_note = ", ".join(guide_sources[:8]) if guide_sources else "(no sources)"
         guide_block = (
-            f"\n\n=== KB pricing context (00_Guide_Pricing + labor/role billable rates) ===\n"
+            f"\n\n=== KB pricing context (zö Pricing Book + Rules and Wording) ===\n"
             f"{guide_text[:24000]}\n\nKB sources: {src_note}\n"
-            "Advisory rule: for a mandatory hourly rate schedule by classification, "
-            "use Billable Rate rows from the labor/role excerpts above — cite the "
-            "source filename. Never invent $/hr; never use Internal/Raw floor columns.\n"
+            "Advisory rule: zö agency is value-based. Quote catalog prices from the Pricing Book. "
+            "When a rate is asked for, give the one blended rate for every role; never rates by "
+            "role, and never hours, costs or margins. Never invent a price.\n"
         )
 
     # Numbered-section asks: put the target draft FIRST and shrink RFP context so
@@ -9377,10 +9377,8 @@ async def improve_proposal_section(
             stage_two=stage_two,
             focus_hint=user_message[:300],
         )
-        if guide_text.strip() and not guide_text.startswith("(No 00_Guide"):
-            rfp_context = (
-                f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
-            )
+        if guide_text.strip() and not guide_text.startswith("("):
+            rfp_context = f"{rfp_context}\n\n{PRICING_MARKER}\n{guide_text[:20_000]}"
 
     if _is_our_work_section(section):
         from app.services.proposal_case_study_match import match_case_studies_for_rfp

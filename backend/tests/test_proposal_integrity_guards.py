@@ -13,7 +13,6 @@ from app.services.proposal_integrity_guards import (
     case_study_has_required_structure,
     case_study_looks_like_source_dump,
     drop_incomplete_reference_entries,
-    enforce_pricing_tier_for_cost_weight,
     infer_cost_weight_pct,
     prefer_case_study_kb_text,
     references_section_has_preservable_content,
@@ -213,20 +212,6 @@ class TestReferenceIntegrity(unittest.TestCase):
 
 
 class TestPricingTierGuard(unittest.TestCase):
-    def test_force_low_when_cost_heavy(self) -> None:
-        budget = ProposalBudget(
-            rfpId="t1",
-            pricingTier="Average",
-            feeStructure="Pricing is built from the industry Average tier in our approved Pricing Guide.",
-            lineItems=[],
-            updatedAt="2026-01-01T00:00:00Z",
-        )
-        out, logs = enforce_pricing_tier_for_cost_weight(budget, cost_weight_pct=35.0)
-        self.assertEqual(out.pricing_tier, "Low")
-        self.assertTrue(any("Low" in f for f in (out.pricing_flags or [])))
-        self.assertIn("Low tier", out.fee_structure)
-        self.assertTrue(logs)
-
     def test_infer_cost_weight_from_points_phrase(self) -> None:
         text = "Price is worth 350 of 1,000 points — 35%, the single largest scoring category."
         pct = infer_cost_weight_pct(text, None)
