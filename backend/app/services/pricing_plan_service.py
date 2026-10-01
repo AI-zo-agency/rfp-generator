@@ -215,7 +215,7 @@ def _check(plan: dict, asks: dict, book: PricingBook, budgets: dict, rfp_text: s
     try:
         report = price_plan(plan, book, budgets)
         errs, warns = verify_plan(plan, asks, book, budgets=budgets, rfp_text=rfp_text, report=report)
-    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+    except (TypeError, ValueError, KeyError, AttributeError, ArithmeticError) as exc:
         return {"no_fit": {}}, [f"plan is malformed ({type(exc).__name__}: {exc}); return the full plan in the schema"], []
     return report, errs, warns
 
@@ -249,7 +249,7 @@ async def _check_and_repair(
     notes += [{"issue": w, "owner": "Sonja"} for w in last["warnings"] if not w.startswith(_NOT_NOTES)]
     try:
         _price_notes(plan, book, last["report"], notes)
-    except (TypeError, ValueError, KeyError, AttributeError) as exc:  # a malformed plan is already in the errors
+    except (TypeError, ValueError, KeyError, AttributeError, ArithmeticError) as exc:  # already in the errors
         logger.warning("pricing_plan notes skipped: %s", exc)
     return plan, rounds
 

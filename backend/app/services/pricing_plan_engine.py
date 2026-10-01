@@ -151,7 +151,7 @@ def compute(plan: dict, book: PricingBook) -> dict:
     for tid, r in rows.items():
         t, sp = tasks[tid], span[tid]
         # management hours are recovered in the prices of custom work, in proportion to each task's cost
-        alloc = oh_cost * r["cost"] / custom_term if tid in custom else 0.0
+        alloc = oh_cost * r["cost"] / custom_term if tid in custom and custom_term else 0.0
         cost = r["cost"] + alloc
         if r["fixed"] is not None:
             amount = r["fixed"]

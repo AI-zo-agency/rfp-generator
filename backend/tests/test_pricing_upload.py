@@ -50,6 +50,66 @@ class UploadCheck(unittest.TestCase):
         self.assertIsNone(_check_pricing_upload("case_study", "cs.pdf", b"%PDF"))
 
 
+class UploadEndpoint(unittest.IsolatedAsyncioTestCase):
+    """The upload box end to end, with Supermemory mocked."""
+
+    def _file(self, name: str, body: bytes):
+        import io
+
+        from fastapi import UploadFile
+
+        return UploadFile(filename=name, file=io.BytesIO(body))
+
+    async def _post(self, *, title: str, category: str, name: str, body: bytes, notes: str = ""):
+        from app.api.v1 import knowledge_base as kb
+
+        stored = {
+            "id": "m1", "title": "t", "category": "pricing", "categoryTitle": "Pricing", "fileName": name,
+            "mimeType": "text/markdown", "fileSize": len(body), "uploadedAt": "2026-10-01T00:00:00Z",
+            "supermemoryCustomId": "kb:abc", "supermemoryStatus": "queued",
+        }
+        upload = AsyncMock(return_value=stored)
+        note = AsyncMock(return_value=None)
+        with patch.object(kb, "_require_supermemory"), \
+             patch.object(kb.knowledge_base_service, "upload_document", upload), \
+             patch.object(kb, "_create_upload_note", note), \
+             patch.object(kb.pricing_kb, "describe_upload", AsyncMock(return_value="Pricing v2 is live.")):
+            result = await kb.upload_knowledge_base_document(
+                title=title, category=category, notes=notes, file=self._file(name, body)
+            )
+        return result, upload, note
+
+    async def test_pricing_doc_uploads_with_its_own_title_metadata_and_no_note(self) -> None:
+        result, upload, note = await self._post(
+            title="", category="pricing", name="03_Pricing_Internal.md", body=INTERNAL, notes="rate is now $295"
+        )
+        kwargs = upload.await_args.kwargs
+        self.assertEqual((kwargs["category"], kwargs["title"]), ("pricing_internal", "Pricing Internal v2"))
+        self.assertEqual(kwargs["extra_metadata"], {"pricingDoc": "Pricing Internal", "pricingVersion": "v2"})
+        self.assertEqual(note.await_args.kwargs["notes"], "")  # a note could contradict the prices
+        self.assertEqual(result["pricingStatus"], "Pricing v2 is live.")
+
+    async def test_broken_pricing_doc_never_reaches_supermemory(self) -> None:
+        bad = INTERNAL.decode().replace("| Margin floor | 53% |\n", "").encode()
+        with self.assertRaises(HTTPException) as ctx:
+            await self._post(title="", category="pricing", name="x.md", body=bad)
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("Margin floor", ctx.exception.detail)
+
+    async def test_ordinary_doc_still_needs_a_title(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            await self._post(title="", category="reference", name="notes.md", body=b"# Notes\n")
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (400, "Title is required."))
+
+    async def test_ordinary_doc_upload_is_unchanged(self) -> None:
+        result, upload, note = await self._post(
+            title="Case study", category="case_study", name="cs.md", body=b"# Case\n", notes="n"
+        )
+        self.assertEqual(upload.await_args.kwargs["category"], "case_study")
+        self.assertIsNone(upload.await_args.kwargs["extra_metadata"])
+        self.assertNotIn("pricingStatus", result)
+
+
 class Hidden(unittest.TestCase):
     def test_internal_category_is_valid_but_not_a_user_choice(self) -> None:
         from app.services.knowledge_base_document_types import document_type_options

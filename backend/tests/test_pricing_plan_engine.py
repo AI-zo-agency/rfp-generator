@@ -158,6 +158,14 @@ class CatalogAndCustomPricing(unittest.TestCase):
         self.assertEqual(c["amounts"]["A1"], 2100)
         self.assertEqual(term_value(c), 25_200)
 
+    def test_a_zero_cost_custom_task_does_not_crash_and_is_an_error(self) -> None:
+        plan = good_plan()
+        plan["tasks"][1]["build"] = {"hours": {"Designer": 40}, "pos": {}, "hard_cost": 0, "basis": "x"}  # unknown role
+        plan, report = priced(plan)
+        compute(plan, BOOK)
+        errs, _ = check(plan, report=report)
+        self.assertTrue(any("Designer" in e for e in errs))
+
     def test_per_event_fees_are_rates_never_summed(self) -> None:
         plan = good_plan()
         plan["tasks"][1]["billing"] = "per_event"

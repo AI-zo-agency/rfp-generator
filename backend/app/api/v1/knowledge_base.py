@@ -236,7 +236,7 @@ async def get_knowledge_base_documents() -> KnowledgeBaseDocumentsResponse:
 
 @router.post("/documents", status_code=201)
 async def upload_knowledge_base_document(
-    title: str = Form(...),
+    title: str = Form(""),  # optional for pricing docs: the title comes from the doc's own header
     category: str = Form(...),
     notes: str = Form(""),
     file: UploadFile = File(...),
@@ -246,8 +246,6 @@ async def upload_knowledge_base_document(
     clean_title = title.strip()
     clean_category = category.strip()
 
-    if not clean_title:
-        raise HTTPException(status_code=400, detail="Title is required.")
     if not is_valid_category(clean_category):
         raise HTTPException(status_code=400, detail="Select a valid document type.")
 
@@ -263,8 +261,10 @@ async def upload_knowledge_base_document(
     pricing = _check_pricing_upload(clean_category, file.filename, content)
     extra_metadata: dict[str, str] | None = None
     if pricing:
-        clean_category, clean_title, extra_metadata = pricing
+        clean_category, clean_title, extra_metadata = pricing  # the title comes from the doc's own header
         notes = ""  # a note would be injected into every AI call and could contradict the prices
+    if not clean_title:
+        raise HTTPException(status_code=400, detail="Title is required.")
 
     try:
         doc = await knowledge_base_service.upload_document(

@@ -60,8 +60,39 @@ export const KB_DOCUMENT_TYPES: KbDocumentType[] = [
   },
 ];
 
+/** Set by the backend upload check, never picked in the dropdown. */
+const SYSTEM_TYPE_LABELS: Record<string, string> = {
+  pricing_internal: "Pricing (internal)",
+};
+
 export function kbDocumentTypeLabel(value: string): string {
-  return KB_DOCUMENT_TYPES.find((type) => type.value === value)?.label ?? value;
+  return (
+    KB_DOCUMENT_TYPES.find((type) => type.value === value)?.label ??
+    SYSTEM_TYPE_LABELS[value] ??
+    value
+  );
+}
+
+export const KB_ACCEPT_ALL = ".pdf,.doc,.docx,.md,.txt,.xls,.xlsx";
+
+/**
+ * What the upload box asks for. Pricing takes only the three zö template docs
+ * (Markdown), the title comes from the doc's own header, and notes are hidden:
+ * a note is added to every AI call and could contradict the prices.
+ */
+export function kbUploadRules(category: string): {
+  isPricing: boolean;
+  accept: string;
+  titleRequired: boolean;
+  showNotes: boolean;
+} {
+  const isPricing = category === "pricing";
+  return {
+    isPricing,
+    accept: isPricing ? ".md" : KB_ACCEPT_ALL,
+    titleRequired: !isPricing,
+    showNotes: !isPricing,
+  };
 }
 
 /** Legacy folder-prefix categories from earlier uploads */
