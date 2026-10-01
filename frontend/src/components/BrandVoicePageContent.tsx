@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Eye, FileText, Upload, X } from "lucide-react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ConfirmDialogProvider, useConfirmDialog } from "@/components/ConfirmDialog";
 import { kbBtnPrimary, kbBtnSecondary } from "@/lib/kb-brand";
 import {
@@ -31,6 +33,28 @@ const iconBtn =
   "inline-flex size-9 shrink-0 items-center justify-center rounded-[var(--zo-radius-md)] border border-zo-border bg-white text-zo-text-secondary transition-colors hover:border-[rgba(239,80,24,0.4)] hover:bg-[#fff4ef] hover:text-[#ef5018] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ef5018]";
 const compactBtn = "!px-3 !py-2 !text-xs";
 
+const mdComponents: Components = {
+  h1: (p) => <h1 className="mb-4 border-b border-zo-border pb-2 font-heading text-2xl text-foreground" {...p} />,
+  h2: (p) => <h2 className="mb-3 mt-8 font-heading text-xl text-foreground" {...p} />,
+  h3: (p) => <h3 className="mb-2 mt-6 text-base font-semibold text-[#ef5018]" {...p} />,
+  h4: (p) => <h4 className="mb-2 mt-5 text-sm font-semibold text-foreground" {...p} />,
+  p: (p) => <p className="my-3 whitespace-pre-line text-sm leading-7 text-zo-text-secondary" {...p} />,
+  strong: (p) => <strong className="font-semibold text-foreground" {...p} />,
+  ul: (p) => <ul className="my-3 list-disc space-y-1.5 pl-6 text-sm leading-7 text-zo-text-secondary" {...p} />,
+  ol: (p) => <ol className="my-3 list-decimal space-y-1.5 pl-6 text-sm leading-7 text-zo-text-secondary" {...p} />,
+  hr: () => <hr className="my-6 border-zo-border" />,
+  blockquote: (p) => <blockquote className="my-4 border-l-2 border-zo-border pl-4 text-zo-text-muted" {...p} />,
+  code: (p) => <code className="rounded bg-[#f3f4f6] px-1 py-0.5 font-mono text-[0.85em] text-foreground" {...p} />,
+  a: (p) => <a className="text-[#ef5018] underline underline-offset-2" target="_blank" rel="noreferrer" {...p} />,
+  table: (p) => (
+    <div className="my-4 overflow-x-auto rounded-lg border border-zo-border">
+      <table className="w-full text-left text-sm" {...p} />
+    </div>
+  ),
+  th: (p) => <th className="border-b border-zo-border bg-[#fafbfc] px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zo-text-muted" {...p} />,
+  td: (p) => <td className="border-b border-zo-border/60 px-3 py-2 align-top text-zo-text-secondary" {...p} />,
+};
+
 type Viewing = { label: string; body: string | null; error: string };
 
 function RevisionViewer({ viewing, onClose }: { viewing: Viewing | null; onClose: () => void }) {
@@ -46,7 +70,7 @@ function RevisionViewer({ viewing, onClose }: { viewing: Viewing | null; onClose
       ref={ref}
       onClose={onClose}
       aria-label={viewing ? `Brand voice ${viewing.label}` : "Brand voice"}
-      className="m-auto w-[min(56rem,calc(100vw-2rem))] max-h-[85vh] rounded-xl border border-zo-border p-0 shadow-xl backdrop:bg-black/40"
+      className="m-auto w-[min(56rem,calc(100vw-2rem))] max-h-[85vh] overflow-hidden rounded-xl border border-zo-border bg-white p-0 shadow-xl backdrop:bg-black/40"
     >
       {viewing ? (
         <div className="flex max-h-[85vh] flex-col">
@@ -62,9 +86,11 @@ function RevisionViewer({ viewing, onClose }: { viewing: Viewing | null; onClose
             ) : viewing.body === null ? (
               <p className="text-sm text-zo-text-muted">Loading…</p>
             ) : (
-              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
-                {viewing.body}
-              </pre>
+              <article className="mx-auto max-w-3xl">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                  {viewing.body}
+                </ReactMarkdown>
+              </article>
             )}
           </div>
         </div>
