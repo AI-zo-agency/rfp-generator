@@ -394,3 +394,122 @@ def build_book(book_md: str, rules_md: str, internal_md: str) -> PricingBook:
         rules_md=rules_md,
         internal_md=internal_md,
     )
+
+
+# ---------------------------------------------------------------- loading from the knowledge base
+
+
+@dataclass(frozen=True)
+class PricingState:
+    book: PricingBook
+    skipped: dict[str, list[str]]  # newer versions that were passed over -> why
+
+
+_cache: dict[tuple[str, ...], PricingBook] = {}
+_failed: dict[tuple[str, ...], list[str]] = {}
+
+
+def looks_like_pricing_doc(md: str) -> bool:
+    return _fields(md).get("Document") in DOC_NAMES
+
+
+def _version_key(v: str) -> tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", v))
+
+
+def _stamp(doc: dict) -> str:
+    return str(doc.get("updatedAt") or doc.get("createdAt") or "")
+
+
+def _meta(doc: dict) -> dict:
+    return doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+
+
+def pick_sets(docs: list[dict]) -> list[tuple[str, dict[str, dict]]]:
+    """Versions that have all three docs, newest version first. The newest upload wins per doc."""
+    by_version: dict[str, dict[str, dict]] = {}
+    for doc in docs:
+        name, version = _meta(doc).get("pricingDoc"), _meta(doc).get("pricingVersion")
+        if name in DOC_NAMES and version:
+            slot = by_version.setdefault(str(version), {})
+            if name not in slot or _stamp(doc) > _stamp(slot[name]):
+                slot[name] = doc
+    full = [(v, s) for v, s in by_version.items() if len(s) == len(DOC_NAMES)]
+    return sorted(full, key=lambda vs: _version_key(vs[0]), reverse=True)
+
+
+async def _read_original(doc: dict) -> str:
+    """The uploaded file exactly as written (tables intact). Falls back to Supermemory's indexed text."""
+    import httpx
+
+    from app.services import supermemory
+
+    key = supermemory.document_fetch_key(doc)
+    if not key:
+        raise PricingDocError([f"A pricing doc has no fetchable id in Supermemory: {doc.get('title')!r}"])
+    try:
+        url = await supermemory.get_document_file_url(document_key=key)
+        if url:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                return resp.text
+    except (supermemory.SupermemoryError, httpx.HTTPError) as exc:
+        logger.warning("pricing doc %s: file download failed, using indexed text: %s", key, exc)
+    return await supermemory.get_document_content(custom_id=key)
+
+
+async def describe_upload(version: str) -> str:
+    """One plain sentence for the person who just uploaded a doc of `version`."""
+    from app.services import supermemory
+
+    docs = await supermemory.list_all_container_documents(force_refresh=True)
+    have = {n for d in docs if _meta(d).get("pricingVersion") == version and (n := _meta(d).get("pricingDoc")) in DOC_NAMES}
+    missing = [n for n in DOC_NAMES if n not in have]
+    try:
+        state = await load_pricing_book()
+    except Exception:  # noqa: BLE001 - nothing usable yet is a normal first-upload state
+        state = None
+    keeps = f" Budgets keep using {state.book.version}." if state else " No pricing version is live yet."
+    if missing:
+        return f"Uploaded. Still needed for {version}: {', '.join(missing)}.{keeps}"
+    if state and state.book.version == version:
+        old = sorted({str(_meta(d)["pricingVersion"]) for d in docs if _meta(d).get("pricingVersion") not in (None, version)})
+        tail = f" Older docs ({', '.join(old)}) are still in the knowledge base; delete them so agents see one Pricing Book." if old else ""
+        b = state.book
+        return (f"Pricing {version} is live: {len(b.catalog)} catalog items, valid through {b.valid_through:%B %d, %Y}. "
+                f"Budgets now use {version}.{tail}")
+    if state and version in state.skipped:
+        return f"Uploaded, but the {version} set is not usable yet: {'; '.join(state.skipped[version][:5])}.{keeps}"
+    return f"Uploaded. {version} is not newer than the live set.{keeps}"
+
+
+async def load_pricing_book(*, force_refresh: bool = False) -> PricingState:
+    """The newest complete, valid set of pricing docs in the knowledge base."""
+    from app.services import supermemory
+    from app.services.proposal_common import ProposalError
+
+    docs = await supermemory.list_all_container_documents(force_refresh=force_refresh)
+    skipped: dict[str, list[str]] = {}
+    for version, slot in pick_sets(docs):
+        ids = tuple(str(slot[n].get("customId") or slot[n].get("id")) for n in DOC_NAMES)
+        if ids in _cache:
+            return PricingState(_cache[ids], skipped)
+        if ids in _failed:
+            skipped[version] = _failed[ids]
+            continue
+        try:
+            book = build_book(*[await _read_original(slot[n]) for n in DOC_NAMES])
+        except PricingDocError as exc:
+            _failed[ids] = skipped[version] = exc.problems
+            logger.warning("pricing docs %s skipped: %s", version, exc)
+            continue
+        _cache[ids] = book
+        return PricingState(book, skipped)
+    have = sorted({str(_meta(d)["pricingDoc"]) for d in docs if _meta(d).get("pricingDoc")})
+    detail = "; ".join(f"{v}: {'; '.join(p[:3])}" for v, p in skipped.items())
+    raise ProposalError(
+        "Pricing docs not usable. The knowledge base needs the Pricing Book, Rules and Wording and "
+        f"Pricing Internal of the same version (found: {', '.join(have) or 'none'}). {detail}".strip(),
+        status_code=424,
+    )

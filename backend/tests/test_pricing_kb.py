@@ -111,5 +111,65 @@ class UploadCheck(unittest.TestCase):
         self.assertTrue(any("Roles" in p for p in probs))
 
 
+class LoadFromKb(unittest.IsolatedAsyncioTestCase):
+    """Set selection and fallback with a fake knowledge base."""
+
+    def setUp(self) -> None:
+        from app.services import pricing_kb
+
+        pricing_kb._cache.clear()
+        pricing_kb._failed.clear()
+        self.pk = pricing_kb
+
+    def _set(self, version: str, cid: str, internal: str = INTERNAL) -> tuple[list[dict], dict[str, str]]:
+        def stamp(md: str) -> str:
+            return md.replace("| Version | v2 |", f"| Version | {version} |")
+
+        names = self.pk.DOC_NAMES
+        docs = [
+            {"customId": f"kb:{cid}{i}", "updatedAt": "2026-10-01",
+             "metadata": {"pricingDoc": n, "pricingVersion": version}}
+            for i, n in enumerate(names)
+        ]
+        texts = {f"kb:{cid}0": stamp(BOOK), f"kb:{cid}1": stamp(RULES), f"kb:{cid}2": stamp(internal)}
+        return docs, texts
+
+    async def _load(self, docs: list[dict], texts: dict[str, str]):
+        from unittest.mock import AsyncMock, patch
+
+        async def read(doc: dict) -> str:
+            return texts[doc["customId"]]
+
+        with patch("app.services.supermemory.list_all_container_documents", AsyncMock(return_value=docs)), \
+             patch.object(self.pk, "_read_original", read):
+            return await self.pk.load_pricing_book()
+
+    async def test_newest_complete_set_wins(self) -> None:
+        d2, t2 = self._set("v2", "a")
+        d3, t3 = self._set("v3", "b")
+        state = await self._load(d2 + d3, {**t2, **t3})
+        self.assertEqual(state.book.version, "v3")
+
+    async def test_incomplete_newer_set_is_ignored(self) -> None:
+        d2, t2 = self._set("v2", "a")
+        d3, t3 = self._set("v3", "b")
+        state = await self._load(d2 + d3[:2], {**t2, **t3})
+        self.assertEqual(state.book.version, "v2")
+
+    async def test_invalid_newer_set_falls_back_and_says_why(self) -> None:
+        d2, t2 = self._set("v2", "a")
+        d3, t3 = self._set("v3", "b", internal=INTERNAL.replace("| Margin floor | 53% |\n", ""))
+        state = await self._load(d2 + d3, {**t2, **t3})
+        self.assertEqual(state.book.version, "v2")
+        self.assertTrue(any("Margin floor" in p for p in state.skipped["v3"]))
+
+    async def test_nothing_usable_raises_424(self) -> None:
+        from app.services.proposal_common import ProposalError
+
+        with self.assertRaises(ProposalError) as ctx:
+            await self._load([], {})
+        self.assertEqual(ctx.exception.status_code, 424)
+
+
 if __name__ == "__main__":
     unittest.main()
