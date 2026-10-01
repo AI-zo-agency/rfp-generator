@@ -56,3 +56,18 @@ export function errorMessage(data: unknown, status: number): string {
   }
   return nonEmpty(body.error) || `Request failed (${status})`;
 }
+
+/** True while new proposals fall back to the repo copy because no default is stored. */
+export function showNoDefaultNote(data: BrandVoiceRevisionList): boolean {
+  if (!data.enabled) return false; // nothing can be set, so the "no connection" notice covers it
+  return data.activeId === "builtin" || !data.revisions.some((rev) => rev.isActive);
+}
+
+/** Only stored revisions can be made the default, never the repo copy. */
+export function canSetDefault(rev: BrandVoiceRevision, enabled: boolean): boolean {
+  return enabled && !rev.isActive && rev.id !== "builtin";
+}
+
+export function addedMessage(label: string): string {
+  return `Added ${label}. Set it as the default below if you want new proposals to use it.`;
+}

@@ -1,5 +1,15 @@
 import { describe, expect, test } from "vitest";
-import { errorMessage, pinSelection, shortHash, suggestRevisionLabel } from "./brand-voice";
+import {
+  addedMessage,
+  canSetDefault,
+  errorMessage,
+  pinSelection,
+  shortHash,
+  showNoDefaultNote,
+  suggestRevisionLabel,
+  type BrandVoiceRevision,
+  type BrandVoiceRevisionList,
+} from "./brand-voice";
 
 describe("suggestRevisionLabel", () => {
   test("reads the revision number out of the client's file names", () => {
@@ -72,5 +82,59 @@ describe("errorMessage", () => {
     expect(errorMessage(null, 500)).toBe("Request failed (500)");
     expect(errorMessage("oops", 400)).toBe("Request failed (400)");
     expect(errorMessage(undefined, 400)).toBe("Request failed (400)");
+  });
+});
+
+function rev(over: Partial<BrandVoiceRevision> = {}): BrandVoiceRevision {
+  return {
+    id: "r7",
+    label: "rev 7",
+    sha256: "abcdef0123",
+    notes: "",
+    createdBy: "x",
+    createdAt: "2026-09-30T00:00:00Z",
+    size: 1024,
+    isActive: false,
+    ...over,
+  };
+}
+
+function list(over: Partial<BrandVoiceRevisionList> = {}): BrandVoiceRevisionList {
+  return { activeId: "r7", enabled: true, revisions: [rev({ isActive: true })], ...over };
+}
+
+describe("showNoDefaultNote", () => {
+  test("shows while the default is the repo copy", () => {
+    expect(showNoDefaultNote(list({ activeId: "builtin", revisions: [] }))).toBe(true);
+    expect(showNoDefaultNote(list({ activeId: "builtin", revisions: [rev({ id: "builtin", isActive: true })] }))).toBe(true);
+  });
+
+  test("shows when no listed row is the default", () => {
+    expect(showNoDefaultNote(list({ revisions: [rev()] }))).toBe(true);
+  });
+
+  test("hides once a stored revision is the default", () => {
+    expect(showNoDefaultNote(list())).toBe(false);
+  });
+
+  test("hides when revisions cannot be added anyway", () => {
+    expect(showNoDefaultNote(list({ enabled: false, activeId: "builtin", revisions: [] }))).toBe(false);
+  });
+});
+
+describe("canSetDefault", () => {
+  test("only stored, non-default revisions on an enabled environment", () => {
+    expect(canSetDefault(rev(), true)).toBe(true);
+    expect(canSetDefault(rev({ isActive: true }), true)).toBe(false);
+    expect(canSetDefault(rev({ id: "builtin" }), true)).toBe(false);
+    expect(canSetDefault(rev(), false)).toBe(false);
+  });
+});
+
+describe("addedMessage", () => {
+  test("names the new revision and points at the next step", () => {
+    expect(addedMessage("rev 7")).toBe(
+      "Added rev 7. Set it as the default below if you want new proposals to use it."
+    );
   });
 });
