@@ -1659,7 +1659,11 @@ async def _draft_one_added_section(
         section_id=section.id, title=section.title, zo_mode=section.mode
     )
     voice_block = format_brand_voice_block(
-        brand_voice, kb_zo_voice=kb_zo_voice, rfp_client=rfp.client, register=register
+        brand_voice,
+        kb_zo_voice=kb_zo_voice,
+        rfp_client=rfp.client,
+        register=register,
+        rfp_id=rfp.id,
     )
 
     user_block = (

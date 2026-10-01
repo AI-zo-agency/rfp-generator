@@ -710,6 +710,7 @@ def _brand_voice_block(
     *,
     register: str = "narrative",
     rfp_client: str = "",
+    rfp_id: str = "",
 ) -> str:
     from app.services.proposal_brand_voice import Register
 
@@ -722,6 +723,7 @@ def _brand_voice_block(
         brand_voice,
         rfp_client=rfp_client,
         register=reg,
+        rfp_id=rfp_id or None,
     )
 
 
@@ -1437,7 +1439,7 @@ def _build_draft_prompt_zones(
             "COVER LETTER / TRANSMITTAL sections in this batch (Rev 6 signed passage):\n"
             f"{format_register_block('cover_letter')}\n\n"
             f"Brand voice for cover-letter sections:\n"
-            f"{_brand_voice_block(state.get('brand_voice'), register='cover_letter', rfp_client=state['rfp_client'])}\n\n"
+            f"{_brand_voice_block(state.get('brand_voice'), register='cover_letter', rfp_client=state['rfp_client'], rfp_id=state.get('rfp_id', ''))}\n\n"
             "06_WON evidence in these sections is for letter FORM / VOICE only — "
             "rewrite every fact for THIS RFP; never paste a prior won letter.\n\n"
         )
@@ -1446,7 +1448,7 @@ def _build_draft_prompt_zones(
             "NARRATIVE sections in this batch (first person we/our — never The Vendor):\n"
             f"{format_register_block('narrative')}\n\n"
             f"Brand voice for narrative sections:\n"
-            f"{_brand_voice_block(state.get('brand_voice'), register='narrative', rfp_client=state['rfp_client'])}\n\n"
+            f"{_brand_voice_block(state.get('brand_voice'), register='narrative', rfp_client=state['rfp_client'], rfp_id=state.get('rfp_id', ''))}\n\n"
         )
     if procurement_sections:
         zone_c += (

@@ -6027,6 +6027,7 @@ async def _improve_section_selection(
         rfp_client=rfp.client,
         register=register,
         compact=bool(lean),
+        rfp_id=rfp.id,
     )
 
     # Protect MANUAL FILL tags from incidental rewrite (mask → validate → unmask).
@@ -6550,6 +6551,7 @@ async def _redraft_rfp_section(
         kb_zo_voice=kb_zo_voice,
         rfp_client=rfp.client,
         register=register,
+        rfp_id=rfp.id,
     )
 
     original_content = (section.content or "").strip()
@@ -6976,6 +6978,7 @@ async def _improve_static_section(
         kb_zo_voice=kb_zo_voice,
         rfp_client=rfp.client,
         register="narrative",
+        rfp_id=rfp.id,
     )
 
     prior = section.content or ""

@@ -494,6 +494,7 @@ async def _llm_surgical_fix(
         kb_zo_voice=kb_zo_voice,
         rfp_client=rfp.client,
         register=register,
+        rfp_id=rfp.id,
     )
 
     evidence_block = _format_evidence(evidence)

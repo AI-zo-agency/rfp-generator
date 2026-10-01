@@ -9,39 +9,14 @@ Older revs are dead on arrival.
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Literal
 
 from app.models.rfp import RfpRecord
+from app.services import brand_voice_revisions as bvr
 from app.services import proposal_knowledge_base_tools
 
 Register = Literal["narrative", "procurement", "cover_letter"]
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_STANDARDS_PATH = _REPO_ROOT / "branding" / "ZO_BRAND_AND_WRITING_STANDARDS_REV6.md"
-
-# Fallback only if the canonical file is missing at runtime.
-_STANDARDS_FALLBACK = """# zö Brand & Writing Standards
-rev 6 · August 2026 · confidential
-Scope: proposal writing only (not app UI).
-
-## 1. Company name
-Always: zö agency. Lowercase z. Umlaut always. Both words lowercase.
-Never: Zo, ZO, ZÖ Agency, zo agency, Zö Agency.
-
-## 2. Writing rules
-Write plainly. Lead with the point. Short ordinary sentences. American English.
-Never: em dashes; negation-contrast; performative openers; empty words
-(nice, great, amazing, incredible, exciting, passionate, robust, seamless,
-leverage, elevate, unlock, journey, solution, impactful).
-No writing for effect. No process verbs. Be specific. Contract: we'll / I'll.
-Before finish: read aloud and cut. Then stop.
-
-## 3. Voice
-Proposals are deliverables: rules straight. No exclamation points, no emoji, no filler willingness.
-Shape: open with something real; teach by showing; admit a true cost; state the point flat and stop.
-Section 2 hard rules always hold.
-"""
 
 INTERESTING_PROPOSAL_ANSWER_BLOCK = """## INTERESTING PROPOSAL ANSWER (mandatory — still Rev 6 deliverable)
 
@@ -73,25 +48,26 @@ Exempt only the registered tagline: "We are more than your agency. We are your s
 """
 
 
-@lru_cache(maxsize=1)
-def load_writing_standards() -> str:
-    """Rev 6 writing standards — compulsory for every proposal copy pass."""
-    try:
-        text = _STANDARDS_PATH.read_text(encoding="utf-8").strip()
-        if text:
-            return (
-                "## zö Brand & Writing Standards (rev 6 · August 2026) · COMPULSORY for proposals\n"
-                "Highest rev governs. Older files are dead on arrival. "
-                "Scope: proposal writing only. Do not change UI fonts or layout.\n"
-                "Follow company name, writing rules, voice, money, and checklist below.\n\n"
-                f"{text}"
-            )
-    except OSError:
-        pass
+def _render_standards(rev: bvr.Revision) -> str:
     return (
-        "## zö Brand & Writing Standards (rev 6 · August 2026) · COMPULSORY for proposals\n\n"
-        f"{_STANDARDS_FALLBACK}"
+        f"## zö Brand & Writing Standards ({rev.label}) · COMPULSORY for proposals\n"
+        "Highest rev governs. Older files are dead on arrival. "
+        "Scope: proposal writing only. Do not change UI fonts or layout.\n"
+        "Follow company name, writing rules, voice, money, and checklist below.\n\n"
+        f"{bvr.words_only(rev.body)}"
     )
+
+
+@lru_cache(maxsize=16)
+def _standards_for_revision(rev_id: str) -> str:
+    """Revisions never change, so the rendered text is cached by id."""
+    return _render_standards(bvr.get_revision(rev_id) or bvr.builtin())
+
+
+def load_writing_standards(rev_id: str | None = None) -> str:
+    """Writing-rules text for a revision. Default: the active one."""
+    rev = bvr.get_revision(rev_id) or bvr.active_revision()
+    return _standards_for_revision(rev.id)
 
 
 def load_writing_standards_rev6() -> str:
@@ -99,8 +75,20 @@ def load_writing_standards_rev6() -> str:
 
 
 def voice_standards_for(rfp_id: str | None = None) -> tuple[str, str]:
-    """(standards text, revision id) that governs one proposal's voice."""
-    return load_writing_standards(), "builtin"
+    """(standards text, revision id) for a proposal: its pin, else the active default."""
+    if not bvr.enabled():  # no Supabase: the repo file is the only revision, so there is no pin to look up
+        return _standards_for_revision(bvr.BUILTIN_ID), bvr.BUILTIN_ID
+    pinned = None
+    if rfp_id:
+        try:
+            from app.services.proposal_repository import get_proposal_draft
+
+            draft = get_proposal_draft(rfp_id)
+            pinned = getattr(draft, "voice_rev_id", None) if draft else None
+        except Exception:  # noqa: BLE001 - a missing draft must not break prompt building
+            pinned = None
+    rev = bvr.get_revision(pinned) or bvr.active_revision()
+    return _standards_for_revision(rev.id), rev.id
 
 
 def load_writing_standards_rev3() -> str:
@@ -284,6 +272,7 @@ def format_brand_voice_block(
     rfp_client: str = "",
     register: Register = "narrative",
     compact: bool = False,
+    rfp_id: str | None = None,
 ) -> str:
     """Full dual-layer voice block (full rev 6 + interesting answer + core zö + RFP adaptation).
 
@@ -317,7 +306,7 @@ def format_brand_voice_block(
 
     kb_voice = kb_zo_voice or bv.get("kbZoVoice") or bv.get("kb_zo_voice") or ""
     lines = [
-        load_writing_standards(),
+        voice_standards_for(rfp_id)[0],
         "",
         CHAT_REV6_VOICE_HARD_RULES,
         "",

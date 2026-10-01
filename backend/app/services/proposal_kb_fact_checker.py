@@ -717,6 +717,7 @@ async def _run_requirement_aligned_fact_check_agent(
         rfp_client=rfp.client,
         register=register,
         compact=compact_voice,
+        rfp_id=rfp.id,
     )
     req_block = "\n".join(f"- {r}" for r in requirements) or "- (none mapped)"
     focus_block = (

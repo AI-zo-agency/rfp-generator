@@ -421,6 +421,7 @@ def _proposal_voice_block(state: SectionsGraphState) -> str:
         kb_zo_voice=state.get("kb_zo_voice") or "",
         rfp_client=state.get("rfp_client") or "",
         register="narrative",
+        rfp_id=state.get("rfp_id") or None,
     )
     locks_raw = state.get("manuscript_locks")
     locks = None

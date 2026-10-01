@@ -26,9 +26,28 @@ _ACTIVE_TTL_S = 30.0
 MAX_BODY_BYTES = 200_000
 WORD_SECTIONS = {1, 2, 3, 4, 8, 10}  # writing rules; 5-7 and 9 are look and images
 
-# Used only if the repo file is missing at runtime. Task 3 replaces this with the
-# original fallback text moved verbatim out of proposal_brand_voice.py.
-FALLBACK_BODY = "# zö Brand & Writing Standards\n\n## 1. Company name\nAlways: zö agency.\n\n## 2. Writing rules\nWrite plainly."
+# Used only if the repo file is missing at runtime.
+FALLBACK_BODY = """# zö Brand & Writing Standards
+rev 6 · August 2026 · confidential
+Scope: proposal writing only (not app UI).
+
+## 1. Company name
+Always: zö agency. Lowercase z. Umlaut always. Both words lowercase.
+Never: Zo, ZO, ZÖ Agency, zo agency, Zö Agency.
+
+## 2. Writing rules
+Write plainly. Lead with the point. Short ordinary sentences. American English.
+Never: em dashes; negation-contrast; performative openers; empty words
+(nice, great, amazing, incredible, exciting, passionate, robust, seamless,
+leverage, elevate, unlock, journey, solution, impactful).
+No writing for effect. No process verbs. Be specific. Contract: we'll / I'll.
+Before finish: read aloud and cut. Then stop.
+
+## 3. Voice
+Proposals are deliverables: rules straight. No exclamation points, no emoji, no filler willingness.
+Shape: open with something real; teach by showing; admit a true cost; state the point flat and stop.
+Section 2 hard rules always hold.
+"""
 
 
 class RevisionError(ValueError):
