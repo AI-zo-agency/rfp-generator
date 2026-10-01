@@ -25,7 +25,7 @@ CREATE OR REPLACE FUNCTION brand_voice_revisions_immutable() RETURNS trigger AS 
 BEGIN
   RAISE EXCEPTION 'brand_voice_revisions is append-only';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = '';
 
 DROP TRIGGER IF EXISTS brand_voice_revisions_no_change ON brand_voice_revisions;
 CREATE TRIGGER brand_voice_revisions_no_change
