@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ConfirmDialogProvider, useConfirmDialog } from "@/components/ConfirmDialog";
 import { kbBtnPrimary, kbBtnSecondary } from "@/lib/kb-brand";
 import {
@@ -26,6 +26,48 @@ function networkFailure(err: unknown): string {
   return err instanceof Error && err.message ? err.message : "Network error";
 }
 
+type Viewing = { label: string; body: string | null; error: string };
+
+function RevisionViewer({ viewing, onClose }: { viewing: Viewing | null; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dlg = ref.current;
+    if (!dlg) return;
+    if (viewing && !dlg.open) dlg.showModal();
+    if (!viewing && dlg.open) dlg.close();
+  }, [viewing]);
+  return (
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      aria-label={viewing ? `Brand voice ${viewing.label}` : "Brand voice"}
+      className="m-auto w-[min(56rem,calc(100vw-2rem))] max-h-[85vh] rounded-xl border border-zo-border p-0 shadow-xl backdrop:bg-black/40"
+    >
+      {viewing ? (
+        <div className="flex max-h-[85vh] flex-col">
+          <div className="flex items-center justify-between gap-3 border-b border-zo-border px-5 py-3">
+            <h2 className="font-heading text-lg text-foreground">{viewing.label}</h2>
+            <button type="button" className={kbBtnSecondary} onClick={onClose}>
+              Close
+            </button>
+          </div>
+          <div className="overflow-y-auto px-5 py-4">
+            {viewing.error ? (
+              <p role="alert" className="text-sm text-red-800">{viewing.error}</p>
+            ) : viewing.body === null ? (
+              <p className="text-sm text-zo-text-muted">Loading…</p>
+            ) : (
+              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
+                {viewing.body}
+              </pre>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </dialog>
+  );
+}
+
 function BrandVoiceInner() {
   const confirm = useConfirmDialog();
   const [data, setData] = useState<BrandVoiceRevisionList | null>(null);
@@ -36,6 +78,7 @@ function BrandVoiceInner() {
   const [fileKey, setFileKey] = useState(0);
   const [label, setLabel] = useState("");
   const [notes, setNotes] = useState("");
+  const [viewing, setViewing] = useState<Viewing | null>(null);
 
   // Sets an error on failure but never clears one: callers reload after a failed action.
   const load = useCallback(async () => {
@@ -56,6 +99,21 @@ function BrandVoiceInner() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount
     void load();
   }, [load]);
+
+  async function view(id: string, label: string) {
+    setViewing({ label, body: null, error: "" });
+    try {
+      const res = await fetch(`/api/brand-voice/revisions/${encodeURIComponent(id)}`, { cache: "no-store" });
+      if (!res.ok) {
+        setViewing({ label, body: null, error: await failure(res) });
+        return;
+      }
+      const json = (await res.json()) as { body?: string };
+      setViewing({ label, body: json.body ?? "", error: "" });
+    } catch (err) {
+      setViewing({ label, body: null, error: networkFailure(err) });
+    }
+  }
 
   async function activate(id: string, name: string) {
     const ok = await confirm({
@@ -207,7 +265,10 @@ function BrandVoiceInner() {
                 <td className="hidden px-4 py-3 font-mono text-xs text-zo-text-muted md:table-cell">
                   {shortHash(rev.sha256)} · {Math.ceil(rev.size / 1024)} KB
                 </td>
-                <td className="px-4 py-3 text-right">
+                <td className="space-x-2 whitespace-nowrap px-4 py-3 text-right">
+                  <button type="button" className={kbBtnSecondary} onClick={() => void view(rev.id, rev.label)}>
+                    View
+                  </button>
                   {canSetDefault(rev, Boolean(data?.enabled)) ? (
                     <button
                       type="button"
@@ -224,6 +285,8 @@ function BrandVoiceInner() {
           </tbody>
         </table>
       </section>
+
+      <RevisionViewer viewing={viewing} onClose={() => setViewing(null)} />
 
       {data?.enabled ? (
         <form onSubmit={upload} className="zo-card space-y-4 p-6">
