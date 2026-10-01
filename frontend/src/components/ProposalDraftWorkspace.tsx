@@ -99,6 +99,7 @@ import { PacketPlacePreviewModal } from "./PacketPlacePreviewModal";
 import { AlignOutlinePreviewModal } from "./AlignOutlinePreviewModal";
 import type { PacketPlacePreview } from "@/lib/proposal-api";
 import type { AlignOutlinePreview } from "@/lib/proposal-api";
+import { VoiceRevChip } from "@/components/VoiceRevChip";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody, stripManuscriptDisplayArtifacts } from "./MarkdownReportBody";
 import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
@@ -4393,6 +4394,7 @@ function ProposalDraftWorkspaceInner({
               </button>
             ) : null}
             <div className="proposal-tab-actions-toolbar">
+            <VoiceRevChip rfpId={rfp.id} />
             {/* Compact LLM spend chip — opens Advanced options where the full
                 Cost summary lives (kept out of Ask Ralph so chat stays clean). */}
             {rfpCost ? (

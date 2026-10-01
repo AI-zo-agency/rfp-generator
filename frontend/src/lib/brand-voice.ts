@@ -33,6 +33,13 @@ export function pinSelection(pin: ProposalVoiceRev): string {
   return pin.pinned?.id ?? pin.active.id;
 }
 
+/** Select options: the listed revisions, plus the pin if the list no longer returns it. */
+export function voiceOptions(data: BrandVoiceRevisionList, pin: ProposalVoiceRev): RevisionRef[] {
+  const options = data.revisions.map(({ id, label }) => ({ id, label }));
+  const current = pin.pinned ?? pin.active;
+  return options.some((o) => o.id === current.id) ? options : [...options, current];
+}
+
 function nonEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
 }

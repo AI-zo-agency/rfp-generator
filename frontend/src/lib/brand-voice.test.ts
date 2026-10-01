@@ -7,6 +7,7 @@ import {
   shortHash,
   showNoDefaultNote,
   suggestRevisionLabel,
+  voiceOptions,
   type BrandVoiceRevision,
   type BrandVoiceRevisionList,
 } from "./brand-voice";
@@ -136,5 +137,26 @@ describe("addedMessage", () => {
     expect(addedMessage("rev 7")).toBe(
       "Added rev 7. Set it as the default below if you want new proposals to use it."
     );
+  });
+});
+
+describe("voiceOptions", () => {
+  const active = { id: "r2", label: "rev 2" };
+
+  test("lists the revisions as id and label", () => {
+    const options = voiceOptions(list({ revisions: [rev({ id: "r2", label: "rev 2" })] }), { pinned: null, active });
+    expect(options).toEqual([{ id: "r2", label: "rev 2" }]);
+  });
+
+  test("adds the pinned revision when the list no longer returns it", () => {
+    const pin = { pinned: { id: "old", label: "rev 1" }, active };
+    const options = voiceOptions(list({ revisions: [rev({ id: "r2", label: "rev 2" })] }), pin);
+    expect(options.map((o) => o.id)).toContain(pinSelection(pin));
+    expect(options).toContainEqual({ id: "old", label: "rev 1" });
+  });
+
+  test("does not duplicate a pinned revision that is listed", () => {
+    const pin = { pinned: { id: "r2", label: "rev 2" }, active };
+    expect(voiceOptions(list({ revisions: [rev({ id: "r2", label: "rev 2" })] }), pin)).toHaveLength(1);
   });
 });
