@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Eye, FileText, Upload, X } from "lucide-react";
 import { ConfirmDialogProvider, useConfirmDialog } from "@/components/ConfirmDialog";
 import { kbBtnPrimary, kbBtnSecondary } from "@/lib/kb-brand";
 import {
@@ -25,6 +26,10 @@ async function failure(res: Response): Promise<string> {
 function networkFailure(err: unknown): string {
   return err instanceof Error && err.message ? err.message : "Network error";
 }
+
+const iconBtn =
+  "inline-flex size-9 shrink-0 items-center justify-center rounded-[var(--zo-radius-md)] border border-zo-border bg-white text-zo-text-secondary transition-colors hover:border-[rgba(239,80,24,0.4)] hover:bg-[#fff4ef] hover:text-[#ef5018] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ef5018]";
+const compactBtn = "!px-3 !py-2 !text-xs";
 
 type Viewing = { label: string; body: string | null; error: string };
 
@@ -79,6 +84,7 @@ function BrandVoiceInner() {
   const [label, setLabel] = useState("");
   const [notes, setNotes] = useState("");
   const [viewing, setViewing] = useState<Viewing | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Sets an error on failure but never clears one: callers reload after a failed action.
   const load = useCallback(async () => {
@@ -249,7 +255,7 @@ function BrandVoiceInner() {
             ) : null}
             {revisions.map((rev) => (
               <tr key={rev.id} className="border-b border-zo-border/60 last:border-0">
-                <td className="px-4 py-3 font-semibold text-foreground">
+                <td className="whitespace-nowrap px-4 py-3 font-semibold text-foreground">
                   {rev.label}
                   {rev.isActive ? (
                     <span className="ml-2 rounded-full bg-[rgba(239,80,24,0.12)] px-2 py-0.5 text-[11px] font-semibold text-[#ef5018]">
@@ -257,28 +263,38 @@ function BrandVoiceInner() {
                     </span>
                   ) : null}
                 </td>
-                <td className="px-4 py-3 text-zo-text-muted">
+                <td className="whitespace-nowrap px-4 py-3 text-zo-text-muted">
                   {formatAdded(rev.createdAt)}
                 </td>
                 <td className="hidden px-4 py-3 text-zo-text-muted md:table-cell">{rev.createdBy}</td>
-                <td className="hidden px-4 py-3 text-zo-text-muted md:table-cell">{rev.notes}</td>
-                <td className="hidden px-4 py-3 font-mono text-xs text-zo-text-muted md:table-cell">
+                <td className="hidden max-w-[18rem] px-4 py-3 text-zo-text-muted md:table-cell">
+                  <span className="line-clamp-2 [overflow-wrap:anywhere]" title={rev.notes}>{rev.notes}</span>
+                </td>
+                <td className="hidden whitespace-nowrap px-4 py-3 font-mono text-xs text-zo-text-muted md:table-cell">
                   {shortHash(rev.sha256)} · {Math.ceil(rev.size / 1024)} KB
                 </td>
-                <td className="space-x-2 whitespace-nowrap px-4 py-3 text-right">
-                  <button type="button" className={kbBtnSecondary} onClick={() => void view(rev.id, rev.label)}>
-                    View
-                  </button>
-                  {canSetDefault(rev, Boolean(data?.enabled)) ? (
+                <td className="px-4 py-3">
+                  <div className="flex items-center justify-end gap-2">
                     <button
                       type="button"
-                      className={kbBtnSecondary}
-                      disabled={busy}
-                      onClick={() => void activate(rev.id, rev.label)}
+                      className={iconBtn}
+                      aria-label={`View ${rev.label}`}
+                      title={`View ${rev.label}`}
+                      onClick={() => void view(rev.id, rev.label)}
                     >
-                      Set default
+                      <Eye className="size-[18px]" aria-hidden />
                     </button>
-                  ) : null}
+                    {canSetDefault(rev, Boolean(data?.enabled)) ? (
+                      <button
+                        type="button"
+                        className={`${kbBtnSecondary} ${compactBtn} whitespace-nowrap`}
+                        disabled={busy}
+                        onClick={() => void activate(rev.id, rev.label)}
+                      >
+                        Set default
+                      </button>
+                    ) : null}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -291,12 +307,18 @@ function BrandVoiceInner() {
       {data?.enabled ? (
         <form onSubmit={upload} className="zo-card space-y-4 p-6">
           <h2 className="font-heading text-xl text-foreground">Add a revision</h2>
-          <label className="block text-sm">
-            <span className="mb-1 block font-semibold text-foreground">Standards file (.md)</span>
+          <div className="text-sm">
+            <span id="bv-file-label" className="mb-1.5 block font-semibold text-foreground">
+              Standards file (.md)
+            </span>
             <input
               key={fileKey}
+              ref={fileRef}
               type="file"
               accept=".md,text/markdown,text/plain"
+              className="sr-only"
+              aria-labelledby="bv-file-label"
+              tabIndex={-1}
               onChange={(e) => {
                 const f = e.target.files?.[0] ?? null;
                 setError("");
@@ -310,7 +332,42 @@ function BrandVoiceInner() {
                 if (f && !label) setLabel(suggestRevisionLabel(f.name));
               }}
             />
-          </label>
+            <div className="flex flex-wrap items-center gap-3 rounded-[var(--zo-radius-md)] border border-dashed border-zo-border bg-[#fafbfc] p-3">
+              <button
+                type="button"
+                className={`${kbBtnSecondary} ${compactBtn}`}
+                onClick={() => fileRef.current?.click()}
+                disabled={busy}
+              >
+                <Upload className="size-4" aria-hidden />
+                {file ? "Change file" : "Choose file"}
+              </button>
+              {file ? (
+                <span className="flex min-w-0 items-center gap-2 text-foreground">
+                  <FileText className="size-4 shrink-0 text-[#ef5018]" aria-hidden />
+                  <span className="truncate font-medium" title={file.name}>{file.name}</span>
+                  <span className="shrink-0 text-xs text-zo-text-muted">
+                    {Math.max(1, Math.round(file.size / 1024))} KB
+                  </span>
+                  <button
+                    type="button"
+                    className={`${iconBtn} !size-7`}
+                    aria-label="Remove selected file"
+                    title="Remove file"
+                    onClick={() => {
+                      setFile(null);
+                      setFileKey((k) => k + 1);
+                      setError("");
+                    }}
+                  >
+                    <X className="size-4" aria-hidden />
+                  </button>
+                </span>
+              ) : (
+                <span className="text-zo-text-muted">No file chosen. Markdown only, up to 200 KB.</span>
+              )}
+            </div>
+          </div>
           <label className="block text-sm">
             <span className="mb-1 block font-semibold text-foreground">Label</span>
             <input
