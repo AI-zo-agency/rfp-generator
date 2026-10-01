@@ -33,6 +33,17 @@ def _no_live_voice_llm(request, monkeypatch):
     monkeypatch.setattr(proposal_voice_llm, "rewrite_for_voice", _noop)
 
 
+@pytest.fixture(autouse=True)
+def _builtin_voice_revision(request, monkeypatch):
+    """Tests see the repo file as the only revision unless they ask for the fake database."""
+    if request.node.get_closest_marker("real_revisions"):
+        return
+    from app.services import brand_voice_revisions
+
+    monkeypatch.setattr(brand_voice_revisions, "enabled", lambda: False)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_auth: run with the real require_user dependency")
     config.addinivalue_line("markers", "real_voice_llm: exercise proposal_voice_llm itself (the model is stubbed by the test)")
+    config.addinivalue_line("markers", "real_revisions: use the fake Supabase revisions database instead of the repo file")
