@@ -58,7 +58,7 @@ and the knowledge-base searches that would prove each one.
 The knowledge base contains ONLY zö agency materials — company facts
 (01_companyfacts), org structure and bios (02_MasterTemplate, 04_Bio_*),
 case studies (03_CS_*), won/finalist proposals (06_WON_*, 07_FIN_*), and the
-pricing guide (00_Guide_Pricing). The RFP's buyer is NOT in the knowledge base.
+pricing docs (Pricing Book, Rules and Wording). The RFP's buyer is NOT in the knowledge base.
 
 Read the WHOLE excerpt. Enumerate the distinct capabilities the vendor must
 supply — services, staff roles/disciplines, technical/platform requirements,

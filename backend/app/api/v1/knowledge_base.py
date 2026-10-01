@@ -14,10 +14,11 @@ from app.models.knowledge_base import (
     KnowledgeBaseStatus,
 )
 from app.services.knowledge_base_document_types import (
+    PRICING_INTERNAL_CATEGORY,
     document_type_options,
     is_valid_category,
 )
-from app.services import google_drive, supermemory
+from app.services import google_drive, pricing_kb, supermemory
 from app.services import kb_corrections
 from app.services import knowledge_base_service
 
@@ -45,6 +46,28 @@ def _validate_upload_file(filename: str, size: int) -> None:
         )
     if size > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File must be 25 MB or smaller.")
+
+
+def _check_pricing_upload(category: str, filename: str, content: bytes) -> tuple[str, str, dict[str, str]] | None:
+    """None for an ordinary doc. For a pricing doc: (category, title, metadata), or 422 listing every problem.
+
+    Under Pricing only the three zö template docs are accepted, and a template doc under any other
+    type is refused, so two sources of prices can never reach the agents.
+    """
+    is_md = Path(filename).suffix.lower() == ".md"
+    text = content.decode("utf-8", errors="replace") if is_md else ""
+    if category not in {"pricing", PRICING_INTERNAL_CATEGORY}:
+        if is_md and pricing_kb.looks_like_pricing_doc(text):
+            raise HTTPException(422, "Not uploaded. This is a zö pricing doc. Choose the document type Pricing.")
+        return None
+    if not is_md:
+        raise HTTPException(422, "Not uploaded. Pricing docs are Markdown (.md) files in the zö pricing template.")
+    doc, version, problems = pricing_kb.check_doc(text)
+    if doc is None or problems:
+        listed = " ".join(f"{i}) {p}." for i, p in enumerate(problems, 1))
+        raise HTTPException(422, f"Not uploaded. {listed}")
+    cat = PRICING_INTERNAL_CATEGORY if doc == pricing_kb.INTERNAL else "pricing"
+    return cat, f"{doc} {version}", {"pricingDoc": doc, "pricingVersion": version}
 
 
 def _require_supermemory() -> None:
@@ -213,7 +236,7 @@ async def get_knowledge_base_documents() -> KnowledgeBaseDocumentsResponse:
 
 @router.post("/documents", status_code=201)
 async def upload_knowledge_base_document(
-    title: str = Form(...),
+    title: str = Form(""),  # optional for pricing docs: the title comes from the doc's own header
     category: str = Form(...),
     notes: str = Form(""),
     file: UploadFile = File(...),
@@ -223,8 +246,6 @@ async def upload_knowledge_base_document(
     clean_title = title.strip()
     clean_category = category.strip()
 
-    if not clean_title:
-        raise HTTPException(status_code=400, detail="Title is required.")
     if not is_valid_category(clean_category):
         raise HTTPException(status_code=400, detail="Select a valid document type.")
 
@@ -237,12 +258,21 @@ async def upload_knowledge_base_document(
 
     _validate_upload_file(file.filename, len(content))
 
+    pricing = _check_pricing_upload(clean_category, file.filename, content)
+    extra_metadata: dict[str, str] | None = None
+    if pricing:
+        clean_category, clean_title, extra_metadata = pricing  # the title comes from the doc's own header
+        notes = ""  # a note would be injected into every AI call and could contradict the prices
+    if not clean_title:
+        raise HTTPException(status_code=400, detail="Title is required.")
+
     try:
         doc = await knowledge_base_service.upload_document(
             title=clean_title,
             category=clean_category,
             file_name=file.filename,
             file_bytes=content,
+            extra_metadata=extra_metadata,
         )
     except supermemory.SupermemoryError as exc:
         raise HTTPException(
@@ -260,6 +290,12 @@ async def upload_knowledge_base_document(
     payload = KnowledgeBaseDocument.model_validate(doc).model_dump(by_alias=True)
     if note_error:
         payload["noteError"] = note_error
+    if extra_metadata:
+        try:
+            payload["pricingStatus"] = await pricing_kb.describe_upload(extra_metadata["pricingVersion"])
+        except Exception as exc:  # noqa: BLE001 - the upload itself succeeded
+            logger.warning("pricing upload status check failed: %s", exc)
+            payload["pricingStatus"] = "Uploaded. The full set could not be checked yet."
     try:
         from app.services.user_activity import emit_activity
 

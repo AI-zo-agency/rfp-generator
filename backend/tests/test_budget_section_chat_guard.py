@@ -16,10 +16,7 @@ if "langchain_openai" not in sys.modules:
     sys.modules["langchain_openai"] = langchain_openai
 
 from app.models.proposal import BudgetLineItem, ProposalBudget, ProposalSection
-from app.services.proposal_budget_playbook import (
-    apply_budget_freeform_postprocess,
-    refuse_noncompliant_budget_edit,
-)
+from app.services.proposal_budget_playbook import refuse_noncompliant_budget_edit
 
 
 def _budget() -> ProposalBudget:
@@ -95,87 +92,6 @@ class BudgetFreeformIntentTests(unittest.TestCase):
                 section=cost,
             )
         )
-
-    def test_postprocess_drops_mix_table(self) -> None:
-        body = (
-            "### Investment Framing\n\n"
-            "| Component | Share | Amount | Notes |\n"
-            "| --- | ---: | ---: | --- |\n"
-            "| Creative | 50% | $3500 | |\n\n"
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Scope | Fee |\n"
-            "| --- | --- | ---: |\n"
-            "| Discovery | Interviews | $7000 |\n"
-        )
-        out, logs = apply_budget_freeform_postprocess(body, budget=_budget())
-        self.assertNotIn("| Component | Share | Amount |", out)
-        self.assertIn("## Fee Detail by Phase", out)
-        self.assertTrue(logs)
-
-    def test_postprocess_restores_stripped_hourly_schedule(self) -> None:
-        prior = (
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Scope | Fee |\n"
-            "| --- | --- | ---: |\n"
-            "| Discovery | Interviews | $7000 |\n\n"
-            "## Hourly Rate Schedule by Classification\n\n"
-            "| Role / Labor Category | Hourly Rate (billable) | Year-2 % Increase |\n"
-            "| --- | ---: | ---: |\n"
-            "| Account Manager | $275 | — |\n"
-            "| Agency Director | $400 | — |\n"
-        )
-        wiped = (
-            "## Fee Detail by Phase\n\n"
-            "| Phase | Scope | Fee |\n"
-            "| --- | --- | ---: |\n"
-            "| Discovery | Interviews | $7000 |\n\n"
-            "## Hourly Rate Schedule by Classification\n\n"
-            "Confirm before submit — complete hourly rate schedule by classification.\n"
-        )
-        out, logs = apply_budget_freeform_postprocess(
-            wiped, budget=_budget(), prior_text=prior
-        )
-        self.assertTrue(any("Hourly Rate Schedule" in x for x in logs))
-        self.assertIn("| Account Manager | $275 |", out)
-        self.assertIn("| Agency Director | $400 |", out)
-        self.assertNotIn("complete hourly rate schedule by classification", out.casefold())
-
-    def test_normalize_hourly_schedule_strips_manual_fill_name_cells(self) -> None:
-        from app.models.proposal import VerifiedRate
-
-        body = (
-            "## Hourly Rate Schedule by Classification\n\n"
-            "| Role / Labor Category | Team Member Name | Hourly Rate (billable) | Year-2 % Increase | Year-3 % Increase |\n"
-            "| --- | --- | ---: | ---: | ---: |\n"
-            "| Account Manager | Jax Lai / [MANUAL FILL: fabricated name removed] | $275 | | |\n"
-            "| Team member on this engagement | Sonja Anderson | $400 |  |  |\n"
-            "| Art Director | [MANUAL FILL: name not in KB org chart] | $275 | | |\n"
-        )
-        budget = _budget()
-        budget = budget.model_copy(
-            update={
-                "verified_rates": [
-                    VerifiedRate(
-                        personName="", role="Account Manager", hourlyRate=275, source="x"
-                    ),
-                    VerifiedRate(
-                        personName="", role="Agency Director", hourlyRate=400, source="x"
-                    ),
-                    VerifiedRate(
-                        personName="", role="Art Director", hourlyRate=275, source="x"
-                    ),
-                ]
-            }
-        )
-        out, logs = apply_budget_freeform_postprocess(body, budget=budget, prior_text=body)
-        self.assertTrue(logs)
-        self.assertIn("| Account Manager | — | $275 | — | — |", out)
-        self.assertIn("| Agency Director | Sonja Anderson | $400 | — | — |", out)
-        self.assertIn("| Art Director | — | $275 | — | — |", out)
-        self.assertNotIn("MANUAL FILL", out)
-        self.assertNotIn("Team member on this engagement", out)
-        self.assertNotIn("Jax Lai", out)
-
 
 if __name__ == "__main__":
     unittest.main()

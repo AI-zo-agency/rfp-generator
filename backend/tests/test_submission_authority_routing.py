@@ -139,9 +139,9 @@ class IncorporateBudgetSkipsInstrumentNteForPlanTests(unittest.IsolatedAsyncioTe
     async def test_v2_budget_output_equals_plan_render_no_extra_nte_row(self) -> None:
         from app.models.pricing_instrument import PricingInstrument, PricingTrack
         from app.services import proposal_budget_content as pbc
-        from tests.test_pricing_plan_service import _newport_budget, svc
+        from tests.test_pricing_plan_service import new_budget, svc
 
-        budget = _newport_budget()
+        budget = new_budget()
         plan_render = svc.render_pricing_plan_budget(budget)
 
         # Instrument NTE deliberately differs from the plan's own ceiling.

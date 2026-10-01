@@ -41,10 +41,6 @@ _AGENCY_FEE_LINE_RE = re.compile(
     r"\bresearch\b|\breporting\b|\bcreative\b|\bdesign\b|\baccount\s+management\b",
     re.I,
 )
-_PM_LINE_RE = re.compile(
-    r"\bproject\s+management\b|\baccount\s+management\b|\bprogram\s+management\b",
-    re.I,
-)
 _PRICING_FLAG_ADVISORY_RE = re.compile(
     r"PRICING\s+FLAG|"
     r"Sonja\s+review|"
@@ -56,25 +52,8 @@ _PRICING_FLAG_ADVISORY_RE = re.compile(
     r"Attachment\s+\d+",
     re.I | re.M,
 )
-_PM_GUIDE_FLOOR = 7500.0
 # Only true campaign-specific / pilot PM may sit under the $7,500 engagement floor.
 # Do NOT match "short project" alone — guide 9.1 ("short projects 3–6 months") is $7,500–$12,000.
-_PM_CAMPAIGN_SPECIFIC_RE = re.compile(
-    r"campaign-specific|\b9\.2\b|\bpilot\b",
-    re.I,
-)
-
-_ONE_TIME_LINE_RE = re.compile(
-    r"\b(design\s*&\s*setup|setup|development|one-?time|initial\s+setup|"
-    r"newsletter\s+design\s*&\s*setup|landing\s+page\s+design)\b",
-    re.I,
-)
-_RECURRING_LINE_RE = re.compile(
-    r"\bmonthly\b|\bper\s+month\b|\brecurring\b|\bongoing\b",
-    re.I,
-)
-_MONTH_UNIT_RE = re.compile(r"\b(month|months|mo)\b", re.I)
-
 def _usd(value: float) -> str:
     return f"${value:,.0f}"
 
@@ -147,36 +126,6 @@ def direct_expense_subtotal(line_items: list[BudgetLineItem]) -> float:
     return round(total, 2)
 
 
-def collect_pm_ratio_violations(budget: ProposalBudget) -> list[str]:
-    """Flag when PM line items fall outside the 5–8% agency-fee guide."""
-    _, agency_fee, _ = split_line_item_totals(budget.line_items)
-    base = budget.agency_fee_subtotal
-    if base is None:
-        base = agency_fee
-    base = float(base or 0)
-    if base <= 0:
-        return []
-
-    pm_total = 0.0
-    for item in budget.line_items:
-        if _is_pm_line_item(item):
-            pm_total += float(item.extended or 0)
-
-    if pm_total <= 0:
-        return []
-
-    ratio = pm_total / base
-    if 0.05 <= ratio <= 0.08:
-        return []
-
-    return [
-        (
-            f"project management lines (${pm_total:,.0f}) are {ratio * 100:.1f}% of agency fees "
-            f"— pricing guide targets 5–8%. Adjust rates or scope with Sonja before submission."
-        )
-    ]
-
-
 def collect_line_item_math_violations(budget: ProposalBudget) -> list[str]:
     """Flag when extended does not equal rate × quantity (after rounding tolerance)."""
     violations: list[str] = []
@@ -190,28 +139,6 @@ def collect_line_item_math_violations(budget: ProposalBudget) -> list[str]:
         if abs(float(ext) - expected) > 0.02:
             violations.append(
                 f"{item.id}: extended ({ext}) != rate×qty ({expected}) for {item.description[:80]}"
-            )
-    return violations
-
-
-def collect_one_time_recurring_violations(budget: ProposalBudget) -> list[str]:
-    """Flag one-time guide lines priced as ×12 months (SRIA-style error)."""
-    violations: list[str] = []
-    for item in budget.line_items:
-        desc = item.description or ""
-        if _RECURRING_LINE_RE.search(desc):
-            continue
-        if not _ONE_TIME_LINE_RE.search(desc):
-            continue
-        qty = item.quantity
-        unit = (item.unit or "").strip()
-        if qty is not None and float(qty) >= 12:
-            violations.append(
-                f"{item.id}: one-time/setup line multiplied by {qty} — use a monthly guide line or flag scope"
-            )
-        elif _MONTH_UNIT_RE.search(unit) and qty is not None and float(qty) > 1:
-            violations.append(
-                f"{item.id}: one-time/setup line billed across {qty} {unit} — likely misapplied recurring math"
             )
     return violations
 
@@ -371,57 +298,6 @@ def render_budget_markdown_for_validation(budget: ProposalBudget) -> str:
     from app.services.proposal_budget_content import render_budget_markdown
 
     return render_budget_markdown(budget)
-
-
-def _is_pm_line_item(item: BudgetLineItem) -> bool:
-    desc_blob = " ".join(
-        part for part in (item.description, item.role_title or "") if part
-    )
-    if _PM_LINE_RE.search(desc_blob):
-        return True
-    cat = (item.category or "").strip()
-    if not cat:
-        return False
-    if re.fullmatch(r"account\s*&\s*project\s*management", cat, re.I):
-        return False
-    return bool(_PM_LINE_RE.search(cat))
-
-
-def _pm_needs_engagement_floor(item: BudgetLineItem) -> bool:
-    """Full-engagement PM lines must meet guide dollar floor; campaign-specific rows may be smaller."""
-    blob = " ".join(
-        part
-        for part in (
-            item.description,
-            item.role_title or "",
-            item.rate_source or "",
-            item.notes or "",
-            item.category or "",
-        )
-        if part
-    )
-    if _PM_CAMPAIGN_SPECIFIC_RE.search(blob):
-        return False
-    # Guide 9.2 is campaign-specific PM ($5k–$8.5k Average) — below full-engagement floor is OK.
-    if re.search(r"\b9\.2\b", blob):
-        return False
-    return True
-
-
-def collect_pm_floor_violations(budget: ProposalBudget) -> list[str]:
-    violations: list[str] = []
-    for item in budget.line_items:
-        if not _is_pm_line_item(item) or not _pm_needs_engagement_floor(item):
-            continue
-        ext = float(item.extended or 0)
-        if ext <= 0:
-            continue
-        if ext < _PM_GUIDE_FLOOR:
-            violations.append(
-                f"{item.id}: project management at {_usd(ext)} is below 00_Guide_Pricing "
-                f"engagement floor (~{_usd(_PM_GUIDE_FLOOR)}–$12,000 Average tier)"
-            )
-    return violations
 
 
 def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:

@@ -63,7 +63,7 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
         re.compile(r"\b(staff\s+hours|hours\s+per\s+task|billing\s+rates)\b", re.I),
         [
             "zö agency project staffing hours estimate by task role deliverable",
-            "00_Guide_Pricing personnel hours by scope task",
+            "zö agency Pricing Book catalog prices by scope item",
         ],
     ),
     (
@@ -87,8 +87,8 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
     (
         re.compile(r"\b(hourly\s+rate|lump\s*sum|budget|fee|pricing)\b", re.I),
         [
-            "00_Guide_Pricing tier Low Average High labor category rate card lump sum",
-            "00_Guide_Pricing project management account management fee percentage",
+            "zö agency Pricing Book blended rate billing terms lump sum",
+            "zö agency Pricing Book management included in the price",
         ],
     ),
     (

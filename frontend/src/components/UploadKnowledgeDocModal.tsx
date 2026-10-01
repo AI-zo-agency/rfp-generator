@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import {
   KB_DOCUMENT_TYPES,
   SUPERMEMORY_CONTAINER_TAG,
+  kbUploadRules,
 } from "@/lib/kb-document-types";
 
 interface UploadKnowledgeDocModalProps {
@@ -27,10 +28,16 @@ export function UploadKnowledgeDocModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pricingStatus, setPricingStatus] = useState<string | null>(null);
+  const [category, setCategory] = useState("");
+  // Pricing takes only the three zö template docs; the app checks and files each one.
+  const { isPricing, accept, titleRequired, showNotes } = kbUploadRules(category);
 
   const resetForm = useCallback(() => {
     setError(null);
     setNotice(null);
+    setPricingStatus(null);
+    setCategory("");
     setSubmitting(false);
   }, []);
 
@@ -73,6 +80,7 @@ export function UploadKnowledgeDocModal({
         error?: string;
         detail?: string;
         noteError?: string;
+        pricingStatus?: string;
       };
 
       if (!response.ok) {
@@ -83,6 +91,17 @@ export function UploadKnowledgeDocModal({
 
       const { trackClick } = await import("@/lib/zo-analytics");
       trackClick("kb.upload", { path: "/knowledge-base", funnel: true });
+
+      if (data.pricingStatus) {
+        // Stay open so the person reads whether the pricing set is live, still incomplete, or not usable.
+        setPricingStatus(data.pricingStatus);
+        form.reset();
+        setCategory("");
+        onSuccess?.();
+        router.refresh();
+        setSubmitting(false);
+        return;
+      }
 
       if (data.noteError) {
         setNotice(`Document uploaded, but the note was not saved: ${data.noteError}`);
@@ -158,15 +177,25 @@ export function UploadKnowledgeDocModal({
               Title
               <input
                 name="title"
-                required
-                placeholder="e.g. City of San Leandro — won proposal"
+                required={titleRequired}
+                placeholder={
+                  isPricing
+                    ? "Filled in from the file (Pricing Book v2, …)"
+                    : "e.g. City of San Leandro — won proposal"
+                }
                 className={fieldClass}
               />
             </label>
 
             <label className="block text-sm font-medium text-foreground">
               Document type
-              <select name="category" required defaultValue="" className={fieldClass}>
+              <select
+                name="category"
+                required
+                value={category}
+                onChange={(event) => setCategory(event.target.value)}
+                className={fieldClass}
+              >
                 <option value="" disabled>
                   Select type…
                 </option>
@@ -182,35 +211,56 @@ export function UploadKnowledgeDocModal({
               </span>
             </label>
 
+            {isPricing && (
+              <div className="rounded-xl border border-zo-border bg-zo-orange/5 px-4 py-3 text-xs leading-relaxed text-zo-text-secondary">
+                <p className="font-semibold text-foreground">
+                  Pricing takes only the three zö pricing docs (Markdown .md)
+                </p>
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-4">
+                  <li>Pricing Book, Rules and Wording, and Pricing Internal.</li>
+                  <li>All three carry the same Version at the top (for example v3).</li>
+                  <li>
+                    Upload one at a time. The app checks each file, files it, and
+                    tells you when the new version is live. Until all three are in,
+                    budgets keep using the current version.
+                  </li>
+                  <li>If a file is refused, fix the lines it names and upload again.</li>
+                </ul>
+              </div>
+            )}
+
             <label className="block text-sm font-medium text-foreground">
               Document
               <input
                 name="file"
                 type="file"
                 required
-                accept=".pdf,.doc,.docx,.md,.txt,.xls,.xlsx"
+                accept={accept}
                 className="mt-1.5 block w-full text-sm text-zo-text-secondary file:mr-4 file:rounded-lg file:border-0 file:bg-zo-orange/10 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-zo-orange hover:file:bg-zo-orange/15"
               />
               <span className="mt-1.5 block text-xs text-zo-text-muted">
-                PDF, Word, Excel, Markdown, or text — max 25 MB. Large PDFs may
-                take up to a minute to index in Supermemory.
+                {isPricing
+                  ? "Markdown (.md) only — max 25 MB."
+                  : "PDF, Word, Excel, Markdown, or text — max 25 MB. Large PDFs may take up to a minute to index in Supermemory."}
               </span>
             </label>
 
-            <label className="block text-sm font-medium text-foreground">
-              Notes / corrections (optional)
-              <textarea
-                name="notes"
-                rows={3}
-                placeholder='e.g. "Ron Comer has retired" - anything in the knowledge base this makes out of date'
-                className={`${fieldClass} resize-y`}
-              />
-              <span className="mt-1.5 block text-xs text-zo-text-muted">
-                Notes are treated as authoritative — agents follow them over any
-                older document that says otherwise. Manage them in Standing
-                corrections.
-              </span>
-            </label>
+            {showNotes && (
+              <label className="block text-sm font-medium text-foreground">
+                Notes / corrections (optional)
+                <textarea
+                  name="notes"
+                  rows={3}
+                  placeholder='e.g. "Ron Comer has retired" - anything in the knowledge base this makes out of date'
+                  className={`${fieldClass} resize-y`}
+                />
+                <span className="mt-1.5 block text-xs text-zo-text-muted">
+                  Notes are treated as authoritative — agents follow them over any
+                  older document that says otherwise. Manage them in Standing
+                  corrections.
+                </span>
+              </label>
+            )}
 
             {error && (
               <p className="rounded-xl border border-zo-error/30 bg-zo-error/10 px-4 py-3 text-sm text-zo-error">
@@ -221,6 +271,15 @@ export function UploadKnowledgeDocModal({
             {notice && (
               <p className="rounded-xl border border-zo-warning/30 bg-zo-warning/10 px-4 py-3 text-sm text-zo-warning">
                 {notice}
+              </p>
+            )}
+
+            {pricingStatus && (
+              <p
+                role="status"
+                className="rounded-xl border border-zo-success/30 bg-zo-success/10 px-4 py-3 text-sm text-zo-success"
+              >
+                {pricingStatus}
               </p>
             )}
           </div>

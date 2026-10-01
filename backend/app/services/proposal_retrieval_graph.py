@@ -87,7 +87,7 @@ Return ONLY JSON:
 BATCH_QUERY_PLANNER_PROMPT = """Plan Supermemory search queries for ALL listed proposal sections in one pass.
 Return exactly 3 queries per section (client, sector, location, requirements, retrievalFocus).
 Target specific KB buckets when relevant: 02 master template, 03_CS case studies, 04 bios, 
-06_WON, 07_FIN rates, 00_Guide_Pricing, certifications, references, portfolio/writing samples.
+06_WON, 07_FIN rates, Pricing Book, certifications, references, portfolio/writing samples.
 
 Return ONLY JSON:
 {

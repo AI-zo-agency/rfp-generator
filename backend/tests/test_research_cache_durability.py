@@ -1,13 +1,13 @@
-"""Task 1b: six research-cache fields must survive a Sections 1-3 regeneration.
+"""Task 1b: five research-cache fields must survive a Sections 1-3 regeneration.
 
 _generate_sections_1_3_inner (proposal_generator.py:1741, and identically the
 _persist_sections_1_3_partial rebuild at :968) constructs a fresh
 ProposalResearchCache from a hand-written whitelist of prior fields. Task 1
 fixed requirement_ledger by adding it to merge_research_preserve_audit_fields.
-The same hole still drops six more fields that are never in the rebuild
+The same hole still drops five more fields that are never in the rebuild
 whitelist and never protected by the merge helper:
 
-    pricing_rate_card, manuscript_locks, proof_points, section_queries,
+    manuscript_locks, proof_points, section_queries,
     loss_lessons, evidence_allocation
 
 Every test here is a REAL sqlite round trip via proposal_repository
@@ -24,54 +24,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.core import config
-from app.models.pricing_rate_card import PricingRate, PricingRateCard
 from app.models.proposal import (
     LossLesson,
     ManuscriptLocks,
     ProofPoint,
     ProposalResearchCache,
-    RfpSectionMap,
 )
 from app.services import proposal_repository as repo
 
 
-def _rate(rate_id: str, service: str, low: float, high: float) -> PricingRate:
-    return PricingRate(
-        rate_id=rate_id,
-        service=service,
-        tier="Average",
-        unit="fixed",
-        amount=round((low + high) / 2.0, 2),
-        amount_low=low,
-        amount_high=high,
-        menu_id="",
-        source_doc="00_Guide_Pricing",
-        confidence=0.95,
-        notes="",
-    )
-
-
 # Verified live KB tier data.
-RATE_CARD = PricingRateCard(
-    rates=[
-        _rate(
-            "guide-1.1-average",
-            "Stakeholder Interviews (Discovery & Research)",
-            6000,
-            8000,
-        ),
-        _rate("guide-2.1-average", "Strategic Plan Document Production", 6000, 9000),
-        _rate("guide-3.1-average", "Implementation Roadmap", 12000, 18000),
-        _rate(
-            "guide-9.1-average",
-            "Project Management & Administration (Short Projects)",
-            7500,
-            12000,
-        ),
-    ]
-)
-
-
 def _sections_1_3_rebuild_payload(rfp_id: str, prior: ProposalResearchCache, when: str) -> ProposalResearchCache:
     """Mirrors the EXACT whitelist _generate_sections_1_3_inner (proposal_generator.py:1741)
     and _persist_sections_1_3_partial (:968) construct — forwards rfpSections/questions/
@@ -108,59 +70,6 @@ class ResearchCacheDurabilityTestBase(unittest.IsolatedAsyncioTestCase):
         for p in reversed(self._patchers):
             p.stop()
         self._tmpdir.cleanup()
-
-
-class PricingRateCardSurvivesRegenerationTests(ResearchCacheDurabilityTestBase):
-    async def test_pricing_rate_card_survives_sections_1_3_regeneration(self) -> None:
-        rfp_id = "rfp-rate-card"
-        await repo.asave_research_cache(
-            ProposalResearchCache(
-                rfpId=rfp_id,
-                rfpSections=[RfpSectionMap(id="sec-1", title="Attachments")],
-                pricingRateCard=RATE_CARD.model_dump(by_alias=True),
-                updatedAt="2026-08-05T00:00:00Z",
-            )
-        )
-        prior = await repo.aget_research_cache(rfp_id)
-        self.assertIsNotNone(prior.pricing_rate_card)
-
-        await repo.asave_research_cache(
-            _sections_1_3_rebuild_payload(rfp_id, prior, "2026-08-05T01:00:00Z")
-        )
-
-        after = await repo.aget_research_cache(rfp_id)
-        self.assertIsNotNone(
-            after.pricing_rate_card,
-            "pricing_rate_card was wiped by a routine sections-1-3 regeneration",
-        )
-        self.assertEqual(
-            [r["service"] for r in after.pricing_rate_card["rates"]],
-            [r.service for r in RATE_CARD.rates],
-        )
-
-    async def test_a_freshly_built_rate_card_still_overwrites_the_stored_one(self) -> None:
-        rfp_id = "rfp-rate-card-refresh"
-        stale = PricingRateCard(rates=[_rate("stale-1", "Stale Service", 1, 2)])
-        fresh = PricingRateCard(rates=[_rate("fresh-1", "Fresh Service", 3, 4)])
-        await repo.asave_research_cache(
-            ProposalResearchCache(
-                rfpId=rfp_id,
-                pricingRateCard=stale.model_dump(by_alias=True),
-                updatedAt="2026-08-05T00:00:00Z",
-            )
-        )
-        await repo.asave_research_cache(
-            ProposalResearchCache(
-                rfpId=rfp_id,
-                pricingRateCard=fresh.model_dump(by_alias=True),
-                updatedAt="2026-08-05T02:00:00Z",
-            )
-        )
-        reloaded = await repo.aget_research_cache(rfp_id)
-        self.assertEqual(
-            [r["service"] for r in reloaded.pricing_rate_card["rates"]],
-            ["Fresh Service"],
-        )
 
 
 class ManuscriptLocksSurviveRegenerationTests(ResearchCacheDurabilityTestBase):

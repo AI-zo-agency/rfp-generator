@@ -117,12 +117,6 @@ _COST_LABEL_RE = re.compile(
     re.I,
 )
 
-_AVG_TIER_CLAIM_RE = re.compile(
-    r"(?i)\b(?:industry\s+)?Average\s+tier\b|"
-    r"Pricing\s+is\s+built\s+from\s+the\s+industry\s+Average",
-)
-
-
 def scrub_reference_withholding(content: str) -> tuple[str, list[str]]:
     """Replace 'upon request' contact deferrals + cut unverified pre-clear claims."""
     text = content or ""
@@ -849,65 +843,6 @@ def infer_cost_weight_pct(
     if cost_pts <= 0:
         return None
     return round(100.0 * cost_pts / total, 1)
-
-
-def enforce_pricing_tier_for_cost_weight(
-    budget: ProposalBudget,
-    *,
-    cost_weight_pct: float | None,
-) -> tuple[ProposalBudget, list[str]]:
-    """Force Low tier when RFP cost weight ≥25% (Pricing Guide Decision Guide)."""
-    logs: list[str] = []
-    if cost_weight_pct is None or cost_weight_pct < 25:
-        return budget, logs
-
-    tier = (budget.pricing_tier or "").strip()
-    if tier.casefold() == "low":
-        rationale = (budget.rfp_budget_notes or "").strip()
-        note = (
-            f"Cost weight ~{cost_weight_pct:.0f}% (≥25%) → Low tier per Pricing Guide "
-            "Decision Guide."
-        )
-        if note.casefold() not in rationale.casefold():
-            updated_notes = f"{note}\n{rationale}".strip() if rationale else note
-            budget = budget.model_copy(update={"rfp_budget_notes": updated_notes[:4000]})
-            logs.append(note)
-        return budget, logs
-
-    flags = list(budget.pricing_flags or [])
-    flag = (
-        f"[PRICING FLAG: Cost weight ~{cost_weight_pct:.0f}% (≥25%) — "
-        f"Pricing Guide requires Low tier; was '{tier or 'unset'}'. "
-        "Auto-set to Low. Confirm with Sonja before submission.]"
-    )
-    if flag not in flags:
-        flags.append(flag)
-
-    notes = (budget.rfp_budget_notes or "").strip()
-    override_note = (
-        f"AUTO TIER OVERRIDE: cost weight ~{cost_weight_pct:.0f}% ≥25% → Low tier "
-        f"(was {tier or 'unset'}) per 00_Guide_Pricing Decision Guide."
-    )
-    notes = f"{override_note}\n{notes}".strip() if notes else override_note
-
-    # Fix narrative that still claims Average tier.
-    fee = budget.fee_structure or ""
-    if _AVG_TIER_CLAIM_RE.search(fee):
-        fee = _AVG_TIER_CLAIM_RE.sub("Low tier", fee)
-
-    budget = budget.model_copy(
-        update={
-            "pricing_tier": "Low",
-            "pricing_flags": flags,
-            "rfp_budget_notes": notes[:4000],
-            "fee_structure": fee,
-        }
-    )
-    logs.append(
-        f"Forced pricing tier Low (was {tier or 'unset'}) — cost weight "
-        f"{cost_weight_pct:.0f}% ≥25%"
-    )
-    return budget, logs
 
 
 _FORBIDDEN_CASE_STUDY_HEADINGS = frozenset(

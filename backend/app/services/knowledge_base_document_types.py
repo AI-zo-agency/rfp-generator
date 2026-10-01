@@ -15,6 +15,11 @@ KNOWLEDGE_BASE_DOCUMENT_TYPES: dict[str, str] = {
     "reference": "Reference / Guides",
 }
 
+# Set by the upload check, never picked by a user. Hidden from every agent search
+# (see supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS); only the pricing engine reads it.
+PRICING_INTERNAL_CATEGORY = "pricing_internal"
+SYSTEM_CATEGORIES: dict[str, str] = {PRICING_INTERNAL_CATEGORY: "Pricing (internal)"}
+
 LEGACY_CATEGORY_LABELS: dict[str, str] = {
     "00_": "Reference / Guides",
     "01_": "Verified Facts",
@@ -38,13 +43,18 @@ def container_tag() -> str:
 def category_title(value: str) -> str:
     return (
         KNOWLEDGE_BASE_DOCUMENT_TYPES.get(value)
+        or SYSTEM_CATEGORIES.get(value)
         or LEGACY_CATEGORY_LABELS.get(value)
         or value
     )
 
 
 def is_valid_category(value: str) -> bool:
-    return value in KNOWLEDGE_BASE_DOCUMENT_TYPES or value in LEGACY_CATEGORY_LABELS
+    return (
+        value in KNOWLEDGE_BASE_DOCUMENT_TYPES
+        or value in SYSTEM_CATEGORIES
+        or value in LEGACY_CATEGORY_LABELS
+    )
 
 
 def document_type_options() -> list[dict[str, str]]:

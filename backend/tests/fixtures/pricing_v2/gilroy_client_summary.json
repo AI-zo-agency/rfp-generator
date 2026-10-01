@@ -1,0 +1,123 @@
+{
+ "engagement_type": "Monthly Retainer",
+ "periods": 10,
+ "pillars": [
+  {
+   "name": "Website Maintenance & Optimization",
+   "cost": 6835.0,
+   "price_input": 1700,
+   "contract_price": 17000,
+   "margin_pct": 0.5979,
+   "below_floor": false,
+   "floor_price_input_unit": 1454.26
+  },
+  {
+   "name": "Social Media Growth & Content Execution",
+   "cost": 14480,
+   "price_input": 3600,
+   "contract_price": 36000,
+   "margin_pct": 0.5978,
+   "below_floor": false,
+   "floor_price_input_unit": 3080.85
+  },
+  {
+   "name": "Attendee Engagement & On-Site Experience",
+   "cost": 6440.0,
+   "price_input": 1600,
+   "contract_price": 16000,
+   "margin_pct": 0.5975,
+   "below_floor": false,
+   "floor_price_input_unit": 1370.21
+  },
+  {
+   "name": "Sponsor Development & Corporate Activation",
+   "cost": 9555.0,
+   "price_input": 2400,
+   "contract_price": 24000,
+   "margin_pct": 0.6019,
+   "below_floor": false,
+   "floor_price_input_unit": 2032.98
+  },
+  {
+   "name": "Community & Nonprofit Partnership Alignment",
+   "cost": 3535.0,
+   "price_input": 900,
+   "contract_price": 9000,
+   "margin_pct": 0.6072,
+   "below_floor": false,
+   "floor_price_input_unit": 752.13
+  },
+  {
+   "name": "Reporting, Measurement & Account Management",
+   "cost": 8035.0,
+   "price_input": 2000,
+   "contract_price": 20000,
+   "margin_pct": 0.5982,
+   "below_floor": false,
+   "floor_price_input_unit": 1709.57
+  }
+ ],
+ "total_cost": 48880.0,
+ "total_price": 122000,
+ "margin_pct": 0.5993,
+ "in_house_hours": 453.0,
+ "price_per_in_house_hour": 269.32,
+ "price_per_month": 12200,
+ "nonprofit": {
+  "contract_price": 107360.0,
+  "margin_pct": 0.5447,
+  "price_per_month": 10736.0
+ },
+ "by_period": [
+  {
+   "period": "Nov 2026",
+   "cost": 4947.5,
+   "margin_pct": 0.5945
+  },
+  {
+   "period": "Dec 2026",
+   "cost": 4985.0,
+   "margin_pct": 0.5914
+  },
+  {
+   "period": "Jan 2027",
+   "cost": 6165.0,
+   "margin_pct": 0.4947
+  },
+  {
+   "period": "Feb 2027",
+   "cost": 3562.5,
+   "margin_pct": 0.708
+  },
+  {
+   "period": "Mar 2027",
+   "cost": 3482.5,
+   "margin_pct": 0.7145
+  },
+  {
+   "period": "Apr 2027",
+   "cost": 3392.5,
+   "margin_pct": 0.7219
+  },
+  {
+   "period": "May 2027",
+   "cost": 4545.0,
+   "margin_pct": 0.6275
+  },
+  {
+   "period": "Jun 2027",
+   "cost": 4455.0,
+   "margin_pct": 0.6348
+  },
+  {
+   "period": "Jul 2027",
+   "cost": 4365.0,
+   "margin_pct": 0.6422
+  },
+  {
+   "period": "Aug 2027",
+   "cost": 8980.0,
+   "margin_pct": 0.2639
+  }
+ ]
+}

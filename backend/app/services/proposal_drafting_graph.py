@@ -156,7 +156,7 @@ YOU MUST NEVER:
 6. Round or approximate numbers - use exact figures from evidence or [VERIFY: field]
 7. Spell names incorrectly (check exact spelling in bio file evidence)
 8. Claim "X years of Y experience" unless that exact phrasing is in verified evidence
-9. Invent agency hourly rates, fee tables, or markups not grounded in 00_Guide_Pricing evidence / pricing plan
+9. Invent agency prices, hourly rates, fee tables, or markups not grounded in the Pricing Book evidence / pricing plan
 10. Invent percent-time / FTE / "X% of their time" allocations for named people (e.g. 10%/35%/25%) — omit the column if the RFP does not require it; if required use [VERIFY: percent time] only
 
 VERIFIED FACTS ONLY (from evidence corpus):
@@ -180,7 +180,7 @@ IF YOU CANNOT VERIFY A COMPANY FACT IN EVIDENCE:
 ALLOWED WITHOUT inventing company facts (plan-driven structure):
 - Use stated spend ceilings / envelopes from HARD FACTS or Proposal Memory as facts about the buyer's budget — never invent ceilings
 - Describe methodology phases, timeline logic, governance cadence, and persuasion structure from Delivery Plan + Winning Pattern as OUR plan — never as a paraphrase of the RFP scope list
-- For Budget narrative: use transparency/pass-through language + 00_Guide_Pricing excerpts when present; defer invented role-hour fee tables to Phase 3.5
+- For Budget narrative: use transparency/pass-through language + Pricing Book excerpts when present; never show hours or roles; defer fee tables to Phase 3.5
 - NEVER return empty content for Understanding / Methodology / Timeline / Budget — write the proposal answer (what we will do and prove). Requirements / Opportunity Understanding are a private coverage checklist only — NEVER copy or paraphrase them into the body. Use [VERIFY] only for discrete missing facts
 
 """ + ANTI_RFP_ECHO_RULES + """
@@ -215,7 +215,7 @@ Rules (strict):
 28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose as if it were THIS proposal. Exception for COVER LETTER / TRANSMITTAL: when 06_WON cover/transmittal exemplars are in evidence, mirror their letter FORM and correspondence voice only — rewrite every fact for THIS RFP.
 29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview / Executive Summary) MUST be drafted even when evidence is thin or empty. Read RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory as private direction — then write ONLY the proposal answer (our diagnosis, plan, proof, commitments). Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body. NEVER fill thin evidence by echoing the RFP.
 30. Understanding / Executive Summary sections must open with zö's proposal stance: what we will do, why it fits, and proof. Do NOT open by paraphrasing the client's ask, what they already built, or what they need. The evaluator already has the RFP.
-31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
+31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in the pricing docs when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
 32. Do NOT invent dashboards, reporting diagrams, org charts, timeline graphics, or "see attached" visuals. Describe reporting cadence in prose unless KB evidence / RFP-required template exists.
 33. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. NEVER replace an entire scored RFP tab with only "see Section 1" / "Sections 1.1–1.5 below" pointer text — evaluators read each tab separately; substance is required even when long. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler. Offeror / Vendor / Company Identification forms: ONE short FIELD|RESPONSE table synced from Section 1.3 Business Information + a one-line cross-reference — NEVER a second full company profile / Who We Are dump.
 34. LENGTH (Ralph): wordTarget is a HARD CEILING. Hit the scored RFP asks, then stop. Never write extra pages "for the designer to cut later." Dense and short beats long and repetitive.
@@ -225,7 +225,7 @@ Rules (strict):
 38. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
 39. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%". When cost/price is ≥25% of total points, narrative must not claim Average tier — Low tier is required by the Pricing Guide Decision Guide.
 40. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
-41. HOURLY RATES: Never invent individual ZO member $/hr or blended $/hr ranges. Prefer Billable rates from the === LABOR COST (pinned role billable card) === block when present; otherwise labor-category / work rates from 00_Guide_Pricing evidence; else [MANUAL FILL: SONJA — approved hourly rate — {role}]. namedPerson is a staffing note only. Never put Internal Rate / Raw Floor / "internal billable" figures in client-facing copy.
+41. HOURLY RATES: Never invent individual ZO member $/hr or rates by role. When a rate is asked for, use the one blended rate from the Pricing Book for every role; else [MANUAL FILL: SONJA — approved hourly rate]. namedPerson is a staffing note only. Never put hours, costs, margins or internal figures in client-facing copy.
 42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones. NEVER assert past technical deliveries (specific platforms, integrations, audit workflows) that the included case studies / bios / companyfacts do not evidence — use adjacent verified experience or [VERIFY].
 44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
@@ -1165,7 +1165,7 @@ async def _ensure_jit_evidence(
     )
 
     # Cover / transmittal: always pull 06_WON letter exemplars (form models), like
-    # budget always pulls 00_Guide_Pricing — even when shared corpus is thin.
+    # budget always pulls the pricing docs — even when shared corpus is thin.
     if is_cover_letter:
         from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
         from app.services.proposal_intelligence.schemas import RetrievalEntry
@@ -1208,7 +1208,7 @@ async def _ensure_jit_evidence(
         if tagged:
             return tagged
 
-    # Budget narrative must ground in 00_Guide_Pricing — always supplement.
+    # Budget narrative must ground in the pricing docs — always supplement.
     if is_budget_section:
         from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
         from app.services.proposal_intelligence.schemas import RetrievalEntry
@@ -1216,14 +1216,14 @@ async def _ensure_jit_evidence(
         pricing_entry = RetrievalEntry.model_validate(
             {
                 "sectionId": section_id,
-                "requiredAssets": ["00_Guide_Pricing pricing guide"],
+                "requiredAssets": ["Pricing Book"],
                 "queries": [
-                    "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
-                    "00_Guide_Pricing transparent compensation pass-through media markup agency fees",
+                    "zö agency Pricing Book catalog prices blended rate billing terms",
+                    "zö agency Rules and Wording approved wording billing outside the price change orders",
                 ],
                 "priority": "required",
                 "expectedSources": ["pricing"],
-                "whyNeeded": "Budget narrative must follow pricing guide rules",
+                "whyNeeded": "Budget narrative must follow the pricing docs",
             }
         )
         start = len(corpus) + 1

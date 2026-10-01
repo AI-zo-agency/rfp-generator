@@ -76,11 +76,11 @@ class SearchHeadTests(unittest.TestCase):
         self.assertTrue(head.startswith("Do we have insurance info?"))
         self.assertNotIn("industry standards", head)
 
-    def test_cost_tab_still_adds_pricing_guide(self) -> None:
+    def test_cost_tab_still_adds_pricing_docs(self) -> None:
         from app.services.kb_rag_retrieve import expand_kb_queries
 
         queries = expand_kb_queries('Section: "Cost Proposal".')
-        self.assertTrue(any("pricing guide" in item for item in queries))
+        self.assertTrue(any("Pricing Book" in item for item in queries))
 
 
 class ContextBlocksTests(unittest.TestCase):

@@ -13,6 +13,14 @@ export interface KbCategoryGroup {
 
 const CATEGORY_ORDER = KB_DOCUMENT_TYPES.map((type) => type.value);
 
+/**
+ * The internal pricing doc has its own backend category (that is how agent search
+ * hides it), but people think of it as Pricing, so the page shows one Pricing group.
+ */
+export function displayCategory(category: string): string {
+  return category === "pricing_internal" ? "pricing" : category;
+}
+
 function categorySortIndex(category: string): number {
   const index = CATEGORY_ORDER.indexOf(category);
   return index === -1 ? CATEGORY_ORDER.length + 1 : index;
@@ -24,7 +32,7 @@ export function groupDocumentsByCategory(
   const groups = new Map<string, KbCategoryGroup>();
 
   for (const document of documents) {
-    const category = document.category;
+    const category = displayCategory(document.category);
     const existing = groups.get(category);
     if (existing) {
       existing.documents.push(document);
@@ -32,8 +40,11 @@ export function groupDocumentsByCategory(
     }
     groups.set(category, {
       category,
+      // A merged group takes the canonical label, not the first document's own title.
       categoryTitle:
-        document.categoryTitle || resolveCategoryLabel(category) || category,
+        (category === document.category ? document.categoryTitle : "") ||
+        resolveCategoryLabel(category) ||
+        category,
       documents: [document],
     });
   }
@@ -57,7 +68,8 @@ export function categoryCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const document of documents) {
-    counts.set(document.category, (counts.get(document.category) ?? 0) + 1);
+    const category = displayCategory(document.category);
+    counts.set(category, (counts.get(category) ?? 0) + 1);
   }
   return counts;
 }
@@ -67,7 +79,7 @@ export function filterDocumentsByCategory(
   category: string | "all"
 ): KnowledgeBaseDocument[] {
   if (category === "all") return documents;
-  return documents.filter((document) => document.category === category);
+  return documents.filter((document) => displayCategory(document.category) === category);
 }
 
 export function readStoredViewMode(): KbViewMode {

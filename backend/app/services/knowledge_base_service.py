@@ -200,6 +200,7 @@ async def upload_document(
     category: str,
     file_name: str,
     file_bytes: bytes,
+    extra_metadata: dict[str, str] | None = None,
 ) -> dict[str, object]:
     if not is_valid_category(category):
         raise ValueError("Invalid document type")
@@ -214,6 +215,7 @@ async def upload_document(
         category_title=category_label,
         file_name=file_name,
         file_bytes=file_bytes,
+        extra_metadata=extra_metadata,
     )
 
     memory_id = str(result.get("id") or "")

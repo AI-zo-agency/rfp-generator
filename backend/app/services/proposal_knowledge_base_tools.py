@@ -132,7 +132,7 @@ def normalize_zo_kb_query(
 
     lower = raw.casefold()
     # Pricing guide: keep ONLY guide + pricing vocabulary — never buyer/RFP title.
-    if "00_guide_pricing" in lower or "00_guide" in lower:
+    if "00_guide" in lower or "pricing book" in lower or "rules and wording" in lower:
         return sanitize_pricing_guide_query(
             raw, rfp_client=rfp_client, rfp_title=rfp_title
         )
@@ -211,8 +211,8 @@ def normalize_zo_kb_query(
 
 
 _DEFAULT_PRICING_QUERY = (
-    "00_Guide_Pricing tier ranges Low Average High discovery strategy "
-    "content digital media project management fees"
+    "zö agency Pricing Book catalog prices blended rate billing terms "
+    "digital media management fees"
 )
 
 
@@ -259,12 +259,10 @@ def sanitize_pricing_guide_query(
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–,")
     if not cleaned:
         out = _DEFAULT_PRICING_QUERY
-    elif re.search(r"\b00[_ ]?guide[_ ]?pricing\b", cleaned, re.I):
+    elif re.search(r"\b00[_ ]?guide[_ ]?pricing\b|\bpricing book\b", cleaned, re.I):
         out = cleaned
     else:
-        out = f"00_Guide_Pricing {cleaned}"
-    # Normalize accidental glued guide line ids (9.19.2 → 9.1 9.2)
-    out = re.sub(r"\b(\d+\.\d+)(\d+\.\d+)\b", r"\1 \2", out)
+        out = f"zö agency Pricing Book {cleaned}"
     if out.casefold() != raw.casefold():
         logger.info(
             "Pricing guide query sanitized: %r → %r",

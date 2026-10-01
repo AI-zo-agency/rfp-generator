@@ -65,7 +65,6 @@ from app.services.proposal_retrieval_graph import (
 from app.services.proposal_budget_playbook import (
     BUDGET_COMPLIANCE_ADVISORY_RULES,
     BUDGET_EXPLAIN_ADVISORY_RULES,
-    apply_budget_freeform_postprocess,
     augment_cost_section_requirements,
     budget_chat_should_collapse_duplicate_cost_tabs,
     budget_playbook_prompt_block,
@@ -750,7 +749,7 @@ async def _plan_verification_kb_queries(
         focus.append(excerpt[:400])
     focus.append(
         "Prefer 01_companyfacts / 04_Bio / ClientList for contact phone/email. "
-        "Use 03_CS only for case-study claims. Use 00_Guide_Pricing ONLY if the "
+        "Use 03_CS only for case-study claims. Use the Pricing Book ONLY if the "
         "user ask is about fees/rates/budget."
     )
 
@@ -801,6 +800,8 @@ async def _plan_verification_kb_queries(
         if not allow_guide and "00_guide_pricing" in key.replace(" ", "_"):
             continue
         if not allow_guide and "guide_pricing" in key.replace(" ", ""):
+            continue
+        if not allow_guide and "pricing_book" in key.replace(" ", "_"):
             continue
         seen.add(key)
         merged.append(q)
@@ -2159,7 +2160,7 @@ def _rfp_section_requirements_block(
 HARD_FACTS_MARKER = "## HARD FACTS (from full RFP text"
 REQUIREMENTS_MARKER = "--- Mapped section requirements ---"
 MANUSCRIPT_MARKER = "FULL PROPOSAL MANUSCRIPT (every section"
-PRICING_MARKER = "=== 00_Guide_Pricing (Supermemory) ==="
+PRICING_MARKER = "=== zö pricing docs (Pricing Book + Rules and Wording) ==="
 
 _CONTEXT_BLOCK_BUDGETS: tuple[tuple[str, int], ...] = (
     (HARD_FACTS_MARKER, 3_000),
@@ -3761,11 +3762,11 @@ async def _section_chat_advisory_reply(
         )
         src_note = ", ".join(guide_sources[:8]) if guide_sources else "(no sources)"
         guide_block = (
-            f"\n\n=== KB pricing context (00_Guide_Pricing + labor/role billable rates) ===\n"
+            f"\n\n=== KB pricing context (zö Pricing Book + Rules and Wording) ===\n"
             f"{guide_text[:24000]}\n\nKB sources: {src_note}\n"
-            "Advisory rule: for a mandatory hourly rate schedule by classification, "
-            "use Billable Rate rows from the labor/role excerpts above — cite the "
-            "source filename. Never invent $/hr; never use Internal/Raw floor columns.\n"
+            "Advisory rule: zö agency is value-based. Quote catalog prices from the Pricing Book. "
+            "When a rate is asked for, give the one blended rate for every role; never rates by "
+            "role, and never hours, costs or margins. Never invent a price.\n"
         )
 
     # Numbered-section asks: put the target draft FIRST and shrink RFP context so
@@ -6844,27 +6845,6 @@ async def _redraft_rfp_section(
         if refusal:
             raise ProposalError(refusal, status_code=422)
 
-        # Budget-shape postprocess only for pricing-plan budgets; a pre-v2 Cost
-        # section is frozen and edited as ordinary manuscript text.
-        plan_budget = research.budget if research else None
-        if section_is_budget_related(section) and plan_budget and plan_budget.pricing_plan:
-            content, budget_logs = apply_budget_freeform_postprocess(
-                content,
-                budget=plan_budget,
-                prior_text=original_content,
-            )
-            for line in budget_logs:
-                logger.info("budget freeform postprocess: %s", line)
-            refusal = refuse_noncompliant_budget_edit(
-                (compliance_user_message or user_message),
-                content,
-                prior_text=original_content,
-                budget=research.budget if research else None,
-                section=section,
-            )
-            if refusal:
-                raise ProposalError(refusal, status_code=422)
-
         if redraft_is_inadequate(section, content, original_content=original_content):
             logger.warning(
                 "User Revise output too short for %s (%d words, keys=%s) — retrying chat_json",
@@ -9406,10 +9386,8 @@ async def improve_proposal_section(
             stage_two=stage_two,
             focus_hint=user_message[:300],
         )
-        if guide_text.strip() and not guide_text.startswith("(No 00_Guide"):
-            rfp_context = (
-                f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
-            )
+        if guide_text.strip() and not guide_text.startswith("("):
+            rfp_context = f"{rfp_context}\n\n{PRICING_MARKER}\n{guide_text[:20_000]}"
 
     if _is_our_work_section(section):
         from app.services.proposal_case_study_match import match_case_studies_for_rfp

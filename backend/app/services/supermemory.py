@@ -29,15 +29,18 @@ _doc_content_cache: dict[str, str] = {}
 _doc_list_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 # v4 hybrid search does not match type=knowledge_base filters; exclude intake RFP docs instead.
+# Also hides the internal pricing doc (costs, margins, vendors) from every agent search.
 KNOWLEDGE_BASE_SEARCH_FILTERS: dict[str, Any] = {
-    "AND": [{"key": "type", "value": "rfp", "negate": True}]
+    "AND": [
+        {"key": "type", "value": "rfp", "negate": True},
+        {"key": "category", "value": "pricing_internal", "negate": True},
+    ]
 }
 
 
 def is_knowledge_base_hit(hit: dict[str, Any]) -> bool:
     metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
-    doc_type = metadata.get("type")
-    return doc_type != "rfp"
+    return metadata.get("type") != "rfp" and metadata.get("category") != "pricing_internal"
 
 
 class SupermemoryError(Exception):
@@ -889,6 +892,7 @@ async def ingest_knowledge_base_file(
     category_title: str,
     file_name: str,
     file_bytes: bytes,
+    extra_metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     custom_id = f"kb:{document_id}"
     return await upload_file_document(
@@ -901,5 +905,6 @@ async def ingest_knowledge_base_file(
             "category": category,
             "categoryTitle": category_title,
             "fileName": file_name,
+            **(extra_metadata or {}),
         },
     )

@@ -126,33 +126,6 @@ def apply_zero_fabrication_guards(
                 f"{label}: reconciled budget summary prose in {reconciled} section(s)"
             )
 
-        from app.services.proposal_budget_content import (
-            find_budget_section_index,
-            scrub_duplicate_budget_breakdown_tables,
-        )
-
-        budget_idx = find_budget_section_index(draft.sections)
-        if budget_idx is not None:
-            section = draft.sections[budget_idx]
-            scrubbed_body, mix_logs = scrub_duplicate_budget_breakdown_tables(
-                section.content or ""
-            )
-            from app.services.proposal_budget_playbook import (
-                normalize_hourly_rate_schedule_table,
-            )
-
-            scrubbed_body, norm_logs = normalize_hourly_rate_schedule_table(
-                scrubbed_body, budget=resolved_budget
-            )
-            if mix_logs or norm_logs:
-                sections = list(draft.sections)
-                sections[budget_idx] = section.model_copy(
-                    update={"content": scrubbed_body}
-                )
-                draft = draft.model_copy(update={"sections": sections})
-                for line in [*mix_logs, *norm_logs]:
-                    report.logs.append(f"{label}: budget breakdown — {line}")
-
     try:
         from app.services.proposal_anti_rfp_echo import (
             opportunity_understanding_directives,
