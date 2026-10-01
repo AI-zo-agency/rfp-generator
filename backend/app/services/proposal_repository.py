@@ -267,6 +267,26 @@ def _preserve_voice_state(draft: ProposalDraft) -> None:
     _carry_voice_state(draft, existing)
 
 
+def _stamp_voice_rev(draft: ProposalDraft) -> None:
+    """Pin the proposal to a standards revision the first time it is saved.
+
+    Generation rebuilds ProposalDraft and the UI autosave drops unknown fields, so
+    both arrive without the pin: take it from the stored draft. Never overwrites a pin.
+    """
+    if draft.voice_rev_id:
+        return
+    existing = get_proposal_draft(draft.rfp_id)
+    if existing is not None and existing.voice_rev_id:
+        draft.voice_rev_id = existing.voice_rev_id
+        return
+    try:
+        from app.services.brand_voice_revisions import active_revision
+
+        draft.voice_rev_id = active_revision().id
+    except Exception as exc:  # noqa: BLE001 - never block a save on the pin
+        logger.warning("voice revision pin skipped for %s: %s", draft.rfp_id, str(exc)[:200])
+
+
 def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
     """Keep stored section markdown as real tables, never one flattened line."""
     from app.services.proposal_manuscript import repair_flattened_markdown_tables
@@ -283,6 +303,7 @@ def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
 def save_proposal_draft(draft: ProposalDraft) -> None:
     _preserve_selected_key_personas(draft)
     _preserve_voice_state(draft)
+    _stamp_voice_rev(draft)
     _repair_markdown_tables_in_draft(draft)
     try:
         if _use_supabase():

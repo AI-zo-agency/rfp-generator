@@ -2265,3 +2265,40 @@ async def save_proposal_key_personas_direct(
     return await save_proposal_key_personas(rfp_id, payload)
 
 
+
+
+class ProposalVoiceRevBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    revision_id: str = Field(alias="revisionId")
+
+
+def _voice_rev_ref(rev) -> dict[str, str] | None:
+    return {"id": rev.id, "label": rev.label} if rev else None
+
+
+@router.get("/{rfp_id}/proposal/voice-rev")
+async def get_proposal_voice_rev(rfp_id: str) -> dict[str, object]:
+    """Which standards revision this proposal is pinned to, and the current default."""
+    from app.services import brand_voice_revisions as bvr
+    from app.services.proposal_repository import aget_proposal_draft
+
+    draft = await aget_proposal_draft(rfp_id)
+    pinned = bvr.get_revision(draft.voice_rev_id) if draft and draft.voice_rev_id else None
+    return {"pinned": _voice_rev_ref(pinned), "active": _voice_rev_ref(bvr.active_revision())}
+
+
+@router.put("/{rfp_id}/proposal/voice-rev")
+async def set_proposal_voice_rev(rfp_id: str, body: ProposalVoiceRevBody) -> dict[str, object]:
+    """Re-pin one proposal to another revision. Voice review restarts on its next pass."""
+    from app.services import brand_voice_revisions as bvr
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+
+    draft = await aget_proposal_draft(rfp_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No proposal draft for this RFP yet.")
+    rev = bvr.get_revision(body.revision_id)
+    if rev is None:
+        raise HTTPException(status_code=404, detail="Unknown brand voice revision.")
+    await asave_proposal_draft(draft.model_copy(update={"voice_rev_id": rev.id}))
+    return {"pinned": _voice_rev_ref(rev), "active": _voice_rev_ref(bvr.active_revision())}

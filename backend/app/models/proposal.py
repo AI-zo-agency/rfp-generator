@@ -962,6 +962,8 @@ class ProposalDraft(BaseModel):
     # id is part of each hash). Approved copy is never re-reviewed.
     voice_reviewed: list[str] = Field(default_factory=list, alias="voiceReviewed")
     voice_findings: list[VoiceFinding] = Field(default_factory=list, alias="voiceFindings")
+    # The standards revision this proposal is written under. Stamped on first save.
+    voice_rev_id: str | None = Field(default=None, alias="voiceRevId")
 
 
 class ProposalGenerateResponse(BaseModel):
