@@ -35,6 +35,9 @@ class LoadV2(unittest.TestCase):
         self.assertEqual((s.target_multiple, s.blended_rate, s.min_price_per_hour), (3.7, 275, 220))
         self.assertAlmostEqual(s.nonprofit_discount, 0.12)
         self.assertAlmostEqual(s.traditional_commission, 0.15)
+        self.assertAlmostEqual(s.no_budget_cost_share, 0.40)
+        self.assertAlmostEqual(s.budget_fit_share, 0.90)
+        self.assertEqual(self.b.markup_tiers, (1.43, 1.67, 2.13, 2.5, 3.0, 3.7))
         self.assertEqual(self.b.negotiated_rates, {"city of bend": 250})
 
     def test_catalog_all_in_costs_match_the_clients_numbers(self) -> None:

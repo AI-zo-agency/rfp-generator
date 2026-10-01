@@ -202,6 +202,62 @@ class CatalogAndCustomPricing(unittest.TestCase):
         self.assertEqual(render(plan, ASKS, BOOK), render(plan, ASKS, again))
 
 
+def mugs_plan(engagement: str = "procurement") -> dict:
+    """Methodology 4g: 10,000 mugs at $6 cost is $60,000 of cost."""
+    plan = good_plan()
+    plan["engagement_type"] = engagement
+    plan["tasks"] = [{"task_id": "A1", "group": "Swag", "deliverable": "10,000 mugs", "scope_ids": ["S1", "S2"],
+                      "billing": "one_time", "quantity": 1,
+                      "build": {"hours": {"AM": 10}, "pos": {}, "hard_cost": 60_000, "basis": "supplier quote"}}]
+    return plan
+
+
+class RulesComeFromTheDocs(unittest.TestCase):
+    def test_markup_tiers_and_the_two_budget_settings_are_read_from_the_docs(self) -> None:
+        self.assertEqual(BOOK.markup_tiers, (1.43, 1.67, 2.13, 2.5, 3.0, 3.7))
+        self.assertAlmostEqual(BOOK.settings.no_budget_cost_share, 0.40)
+        self.assertAlmostEqual(BOOK.settings.budget_fit_share, 0.90)
+
+    def test_changing_a_setting_in_the_doc_changes_the_price(self) -> None:
+        internal = (FIX / "03_Pricing_Internal.md").read_text().replace(
+            "| Share of a printed budget to price at | 90% |", "| Share of a printed budget to price at | 80% |")
+        book80 = build_book((FIX / "01_Pricing_Book.md").read_text(), (FIX / "02_Rules_and_Wording.md").read_text(), internal)
+        plan90, plan80 = good_plan(), good_plan()
+        price_plan(plan90, BOOK, {"__total__": 30_000})
+        price_plan(plan80, book80, {"__total__": 30_000})
+        self.assertLess(term_value(compute(plan80, book80)), term_value(compute(plan90, BOOK)))
+
+    def test_snapshot_keeps_the_tiers(self) -> None:
+        again = PricingBook.from_snapshot(json.loads(json.dumps(BOOK.snapshot(set()))))
+        self.assertEqual(again.markup_tiers, BOOK.markup_tiers)
+        self.assertEqual(again.settings, BOOK.settings)
+
+
+class Procurement(unittest.TestCase):
+    def test_a_large_order_under_a_buyer_budget_may_run_below_the_floor_flagged_for_sonja(self) -> None:
+        plan = mugs_plan()
+        report = price_plan(plan, BOOK, {"__total__": 100_000})
+        self.assertEqual(report["no_fit"], {})
+        c = compute(plan, BOOK)
+        self.assertLessEqual(term_value(c), 100_000)
+        self.assertGreaterEqual(c["multiples"]["__total__"], 1.43)
+        errs, warns = check(plan, budgets={"__total__": 100_000}, report=report)
+        self.assertEqual(errs, [])
+        self.assertTrue(any("large procurement order" in w for w in warns))
+
+    def test_without_a_budget_procurement_still_starts_near_cost_over_0_40(self) -> None:
+        plan = mugs_plan()
+        price_plan(plan, BOOK, {})
+        self.assertAlmostEqual(compute(plan, BOOK)["multiples"]["__total__"], 2.5)
+
+    def test_the_same_order_as_a_fixed_quote_still_does_not_fit_100k(self) -> None:
+        plan = mugs_plan("fixed_quote")
+        report = price_plan(plan, BOOK, {"__total__": 100_000})
+        self.assertIn("__total__", report["no_fit"])
+        errs, _ = check(plan, budgets={"__total__": 100_000}, report=report)
+        self.assertTrue(any("does not fit the budget" in e for e in errs))
+
+
 class Guardrails(unittest.TestCase):
     def test_a_good_plan_passes(self) -> None:
         plan, report = priced(good_plan())

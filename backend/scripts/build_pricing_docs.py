@@ -212,6 +212,8 @@ def build(files: dict[str, str]) -> dict[str, str]:
             ["Margin floor", "53%"], ["Target multiplier", "3.7"], ["Blended rate", "275"],
             ["Minimum price per in-house hour", "220"], ["Nonprofit discount", "12%"],
             ["Traditional media commission", "15%"],
+            ["Cost share of price when no budget is printed", "40%"],
+            ["Share of a printed budget to price at", "90%"],
         ]),
         "## Negotiated rates\n\n" + table(["Client", "Rate"], [["City of Bend", "250"]]),
         "## Roles\n\n" + table(["Key", "Role", "Loaded cost per hour"],

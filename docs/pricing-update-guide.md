@@ -28,7 +28,8 @@ The three docs are a set. They must all carry the same **Version**.
 
 ## Rules the app checks
 
-- The Settings table needs: Margin floor, Target multiplier, Blended rate, Minimum price per in-house hour, Nonprofit discount, Traditional media commission. Percentages need a `%` sign.
+- The Settings table needs: Margin floor, Target multiplier, Blended rate, Minimum price per in-house hour, Nonprofit discount, Traditional media commission, Cost share of price when no budget is printed (40% means price = cost ÷ 0.40), and Share of a printed budget to price at (90%). Percentages need a `%` sign.
+- The Markup tiers table needs at least one multiplier (like `3.7×`). Procurement orders may price down to the lowest tier.
 - Every catalog code in the Pricing Book needs a cost row in Pricing Internal (Catalog costs), and the other way round.
 - Role keys in Catalog costs (DS, PD, WD, DG, AM, PM, LD) must match the Roles table.
 - The last row of Digital media fees has `above` in the first column.

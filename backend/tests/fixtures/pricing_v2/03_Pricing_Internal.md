@@ -19,6 +19,8 @@
 | Minimum price per in-house hour | 220 |
 | Nonprofit discount | 12% |
 | Traditional media commission | 15% |
+| Cost share of price when no budget is printed | 40% |
+| Share of a printed budget to price at | 90% |
 
 ## Negotiated rates
 

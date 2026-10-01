@@ -32,6 +32,8 @@ SETTINGS = {  # name -> is a percentage
     "Minimum price per in-house hour": False,
     "Nonprofit discount": True,
     "Traditional media commission": True,
+    "Cost share of price when no budget is printed": True,  # custom work starts near cost / this (cost ÷ 0.40)
+    "Share of a printed budget to price at": True,
 }
 BILLING_NAMES = (
     "Standard 50/25/25", "Production 100", "Government Monthly", "Retainer Monthly", "Lump Sum at Completion",
@@ -66,6 +68,8 @@ class Settings:
     min_price_per_hour: float
     nonprofit_discount: float
     traditional_commission: float
+    no_budget_cost_share: float
+    budget_fit_share: float
 
     @property
     def cost_ratio(self) -> float:
@@ -115,6 +119,7 @@ class PricingBook:
     book_md: str
     rules_md: str
     internal_md: str
+    markup_tiers: tuple[float, ...] = ()  # multiples on cost, lowest first (contractors, print, procurement)
 
     def all_in_cost(self, item: CatalogItem) -> float:
         hours = sum(self.roles[k].loaded * h for k, h in item.hours.items())
@@ -136,6 +141,7 @@ class PricingBook:
             "media_fees": [{**asdict(t), "up_to": None if t.up_to == float("inf") else t.up_to} for t in self.media_fees],
             "billing_terms": self.billing_terms,
             "wording": self.wording,
+            "markup_tiers": list(self.markup_tiers),
         }
 
     @classmethod
@@ -153,6 +159,7 @@ class PricingBook:
             billing_terms=d["billing_terms"],
             wording=d["wording"],
             book_md="", rules_md="", internal_md="",
+            markup_tiers=tuple(d["markup_tiers"]),
         )
 
 
@@ -317,7 +324,11 @@ def _parse_internal(d: _Doc) -> dict:
         if v is not None:
             roles[r["Key"]] = Role(r["Role"], v)
     d.rows("Vendors", ("PO type", "Usual vendor", "Rate"))
-    d.rows("Markup tiers", ("Multiplier", "Gross profit", "When to use"))
+    tiers = []
+    for r in d.rows("Markup tiers", ("Multiplier", "Gross profit", "When to use"), allow_empty=False):
+        v = d.num("Markup tiers", "Multiplier", r["Multiplier"].replace("×", "").replace("x", ""))
+        if v is not None:
+            tiers.append(v)
     costs: dict[str, dict] = {}
     role_cols = list(roles)
     columns = ["Code", *role_cols, *PO_COLUMNS, "Other POs", "Hard cost"]
@@ -332,7 +343,7 @@ def _parse_internal(d: _Doc) -> dict:
         body = d.section(h)
         if body is not None and not body:
             d.bad(f"'{h}' is empty")
-    return {"settings": settings, "negotiated": negotiated, "roles": roles, "costs": costs}
+    return {"settings": settings, "negotiated": negotiated, "roles": roles, "costs": costs, "tiers": tiers}
 
 
 PARSERS = {BOOK: _parse_book, RULES: _parse_rules, INTERNAL: _parse_internal}
@@ -411,7 +422,10 @@ def build_book(book_md: str, rules_md: str, internal_md: str) -> PricingBook:
             margin_floor=s["Margin floor"], target_multiple=s["Target multiplier"],
             blended_rate=s["Blended rate"], min_price_per_hour=s["Minimum price per in-house hour"],
             nonprofit_discount=s["Nonprofit discount"], traditional_commission=s["Traditional media commission"],
+            no_budget_cost_share=s["Cost share of price when no budget is printed"],
+            budget_fit_share=s["Share of a printed budget to price at"],
         ),
+        markup_tiers=tuple(sorted(internal["tiers"])),
         roles=internal["roles"],
         negotiated_rates=internal["negotiated"],
         catalog={

@@ -132,6 +132,15 @@ def _build(t: dict, book: PricingBook) -> dict | None:
     return row
 
 
+def floor_multiple(plan: dict, book: PricingBook) -> float:
+    """The lowest multiple on cost a plan may price at: cost / 0.47, or for procurement the lowest markup tier
+    (large orders may run at 40% or 30% gross profit, with Sonja's approval)."""
+    base = 1 / book.settings.cost_ratio
+    if plan.get("engagement_type") == "procurement" and book.markup_tiers:
+        return min(base, min(book.markup_tiers))
+    return base
+
+
 def compute(plan: dict, book: PricingBook) -> dict:
     """Derive every money figure from the plan. The LLM's numbers are inputs, never outputs."""
     n = months(plan)
@@ -145,7 +154,8 @@ def compute(plan: dict, book: PricingBook) -> dict:
     custom = [tid for tid, r in rows.items() if r["kind"] == "custom" and tid in summed]
     custom_term = sum(rows[tid]["cost"] * span[tid] for tid in custom)
     multiples = (plan.get("pricing") or {}).get("multiples") or {}
-    fallback = min(book.settings.target_multiple, max(1 / book.settings.cost_ratio, 1 / 0.40))
+    floor_m = floor_multiple(plan, book)
+    fallback = min(book.settings.target_multiple, max(floor_m, 1 / book.settings.no_budget_cost_share))
 
     amounts, revenue, cost_term, hours_term = {}, {}, {}, {}
     for tid, r in rows.items():
@@ -157,7 +167,7 @@ def compute(plan: dict, book: PricingBook) -> dict:
             amount = r["fixed"]
         else:
             m = multiples.get(t.get("track") if t.get("track") in multiples else TOTAL_KEY, fallback)
-            floor = cost / book.settings.cost_ratio
+            floor = cost * floor_m
             amount = _round_price(cost * m, floor, t.get("billing", "one_time"))
         amounts[tid] = amount
         if tid in summed:
@@ -230,11 +240,11 @@ def budgets_from_asks(asks: dict, target_budget_usd: float | None = None) -> dic
 def price_plan(plan: dict, book: PricingBook, budgets: dict[str, float]) -> dict:
     """Choose the cost multiple for custom work per budget scope (methodology section 9) and record it in the plan.
 
-    Start at the target multiple. Over the budget: come down to about 90% of it, never below the floor.
-    No budget: start near cost / 0.40. Returns {"no_fit": {scope: {...}}} when even the floor is over budget.
+    Start at the target multiple. Over the budget: come down to about 90% of it (a setting), never below the floor.
+    No budget: start near cost / 0.40 (a setting). Procurement may go down to the lowest markup tier. Returns {"no_fit": {scope: {...}}} when even the floor is over budget.
     """
     s = book.settings
-    floor_m, target_m = 1 / s.cost_ratio, s.target_multiple
+    floor_m, target_m = floor_multiple(plan, book), s.target_multiple
     plan.pop("pricing", None)
     c = compute(plan, book)  # custom tasks fall back to a multiple here; only fixed prices and costs are used below
     scopes: dict[str, dict] = {}
@@ -251,11 +261,11 @@ def price_plan(plan: dict, book: PricingBook, budgets: dict[str, float]) -> dict
     for key, sc in scopes.items():
         budget = budgets.get(key) if key else None
         if budget is None:
-            m = min(target_m, max(floor_m, 1 / 0.40))
+            m = min(target_m, max(floor_m, 1 / s.no_budget_cost_share))
         elif sc["fixed"] + sc["custom"] * target_m <= budget:
             m = target_m
         else:
-            goal = 0.9 * budget - sc["fixed"]
+            goal = s.budget_fit_share * budget - sc["fixed"]
             m = max(goal / sc["custom"], floor_m) if sc["custom"] else floor_m
             floor_total = sc["fixed"] + sc["custom"] * floor_m
             if floor_total > budget:
@@ -441,11 +451,13 @@ def verify_plan(
     by_group = {g: [tid for tid in priced if (c["tasks"][tid].get("group") or "Other") == g] for g in m["groups"]}
     for name, g in (*m["groups"].items(), ("the total", m["total"])):
         tids = priced if name == "the total" else by_group[name]
-        out = errs if not catalog_only(tids) else warns
+        procurement = plan.get("engagement_type") == "procurement"
+        out = errs if not (catalog_only(tids) or procurement) else warns
         if g["margin"] is not None and g["margin"] < s.margin_floor - 1e-9:
             out.append(f"{name} holds {g['margin']:.1%} gross profit, below the {s.margin_floor:.0%} floor — "
-                       "fix the build or the scope, or raise it for Sonja")
-        if g["per_hour"] is not None and g["per_hour"] < s.min_price_per_hour:
+                       + ("a large procurement order may run lower; Sonja approves" if procurement
+                          else "fix the build or the scope, or raise it for Sonja"))
+        if not procurement and g["per_hour"] is not None and g["per_hour"] < s.min_price_per_hour:
             out.append(f"{name} prices at ${g['per_hour']:,.0f} per in-house hour, under ${s.min_price_per_hour:,.0f} — "
                        "hours are probably missing or the price is short")
     # budget
