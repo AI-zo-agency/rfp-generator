@@ -814,11 +814,6 @@ class ProposalResearchCache(BaseModel):
         alias="evidenceAllocation",
         description="EvidenceAllocationLedger payload (W6) — exclusive ownership of reusable assets.",
     )
-    pricing_rate_card: dict[str, Any] | None = Field(
-        default=None,
-        alias="pricingRateCard",
-        description="KB-extracted PricingRateCard (T5.1) persisted for binding + agents.",
-    )
     pricing_contract: dict[str, Any] | None = Field(
         default=None,
         alias="pricingContract",

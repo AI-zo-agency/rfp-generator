@@ -41,8 +41,6 @@ def merge_research_preserve_audit_fields(
         updates["pricing_sync_report"] = existing.pricing_sync_report
     if incoming.requirement_ledger is None and existing.requirement_ledger is not None:
         updates["requirement_ledger"] = existing.requirement_ledger
-    if incoming.pricing_rate_card is None and existing.pricing_rate_card is not None:
-        updates["pricing_rate_card"] = existing.pricing_rate_card
     if incoming.manuscript_locks is None and existing.manuscript_locks is not None:
         updates["manuscript_locks"] = existing.manuscript_locks
     if incoming.evidence_allocation is None and existing.evidence_allocation is not None:

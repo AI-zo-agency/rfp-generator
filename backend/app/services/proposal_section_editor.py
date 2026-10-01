@@ -65,7 +65,6 @@ from app.services.proposal_retrieval_graph import (
 from app.services.proposal_budget_playbook import (
     BUDGET_COMPLIANCE_ADVISORY_RULES,
     BUDGET_EXPLAIN_ADVISORY_RULES,
-    apply_budget_freeform_postprocess,
     augment_cost_section_requirements,
     budget_chat_should_collapse_duplicate_cost_tabs,
     budget_playbook_prompt_block,
@@ -6843,27 +6842,6 @@ async def _redraft_rfp_section(
         )
         if refusal:
             raise ProposalError(refusal, status_code=422)
-
-        # Budget-shape postprocess only for pricing-plan budgets; a pre-v2 Cost
-        # section is frozen and edited as ordinary manuscript text.
-        plan_budget = research.budget if research else None
-        if section_is_budget_related(section) and plan_budget and plan_budget.pricing_plan:
-            content, budget_logs = apply_budget_freeform_postprocess(
-                content,
-                budget=plan_budget,
-                prior_text=original_content,
-            )
-            for line in budget_logs:
-                logger.info("budget freeform postprocess: %s", line)
-            refusal = refuse_noncompliant_budget_edit(
-                (compliance_user_message or user_message),
-                content,
-                prior_text=original_content,
-                budget=research.budget if research else None,
-                section=section,
-            )
-            if refusal:
-                raise ProposalError(refusal, status_code=422)
 
         if redraft_is_inadequate(section, content, original_content=original_content):
             logger.warning(
