@@ -66,7 +66,6 @@
 ### Government contract
 
 - Invoices go out on the last day of each month, Net 15 unless the contract sets other terms.
-- [The rest of the lines for the engagement type.]
 
 ### Time & Materials, Time & Deliverables, Not to Exceed
 
@@ -80,13 +79,13 @@
 
 ### Outside the price
 
-> Outside the [retainer / quote]: [ad spend, which runs on [client]'s card on the ad account; PR and media relations; printing; new photo or video shoots; any website rebuild]. Each gets a written estimate you approve before work starts.
+> Outside the [retainer or quote]: [outside items]. Each gets a written estimate you approve before work starts.
 
 ### Travel
 
 - Included: "Travel for [event or meeting] is included."
 - Billed separately: "Travel is $1,000 per person per travel day."
-- Government travel rules required by the RFP: "Travel bills at cost under [the RFP's rule, such as GSA rates], with written approval before booking."
+- Government travel rules required by the RFP: "Travel bills at cost under [travel rule], with written approval before booking."
 
 ### Nonprofit discount
 

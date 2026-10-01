@@ -1,0 +1,636 @@
+{
+ "client": "Gilroy Garlic Festival",
+ "project": "Strategic Marketing, Sponsorship Expansion and Partnership Services",
+ "date": "2026-09-24",
+ "version": "v1",
+ "engagement_type": "Monthly Retainer",
+ "periods": [
+  "Nov 2026",
+  "Dec 2026",
+  "Jan 2027",
+  "Feb 2027",
+  "Mar 2027",
+  "Apr 2027",
+  "May 2027",
+  "Jun 2027",
+  "Jul 2027",
+  "Aug 2027"
+ ],
+ "people": [
+  "LD",
+  "AM",
+  "PM",
+  "WD",
+  "DS",
+  "PD",
+  "DG"
+ ],
+ "po_vendors": [
+  "Creative Director",
+  "Strategist",
+  "Copywriter"
+ ],
+ "pillars": [
+  {
+   "name": "Website Maintenance & Optimization",
+   "price": 1700
+  },
+  {
+   "name": "Social Media Growth & Content Execution",
+   "price": 3600
+  },
+  {
+   "name": "Attendee Engagement & On-Site Experience",
+   "price": 1600
+  },
+  {
+   "name": "Sponsor Development & Corporate Activation",
+   "price": 2400
+  },
+  {
+   "name": "Community & Nonprofit Partnership Alignment",
+   "price": 900
+  },
+  {
+   "name": "Reporting, Measurement & Account Management",
+   "price": 2000
+  }
+ ],
+ "nonprofit_option": true,
+ "tasks": [
+  {
+   "pillar": "Website Maintenance & Optimization",
+   "task": "Security patches, plugin updates and backups",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "WD": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Website Maintenance & Optimization",
+   "task": "Uptime monitoring and response",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "WD": 0.5
+   },
+   "po": {},
+   "hard": 20,
+   "note": "Monitoring tool, $20 a month. Hosting stays with Flywheel, paid by the Festival."
+  },
+  {
+   "pillar": "Website Maintenance & Optimization",
+   "task": "Ticket, merchandise and vendor-application flow audit and fixes",
+   "periods": [
+    0,
+    1,
+    2
+   ],
+   "hours": {
+    "WD": 4,
+    "PD": 2
+   },
+   "po": {
+    "Creative Director": 50
+   },
+   "hard": 0,
+   "note": "Front-loaded, Nov-Jan."
+  },
+  {
+   "pillar": "Website Maintenance & Optimization",
+   "task": "Media releases, historical archive pages and volunteer spotlights, 2 a month",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "PD": 1.5
+   },
+   "po": {
+    "Copywriter": 100
+   },
+   "hard": 0,
+   "note": "Copywriter PO, 2 hours a month at $50."
+  },
+  {
+   "pillar": "Website Maintenance & Optimization",
+   "task": "Monthly analytics review, conversion by funnel stage",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DG": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "Year-round content calendar build",
+   "periods": [
+    0,
+    1
+   ],
+   "hours": {
+    "AM": 1
+   },
+   "po": {
+    "Strategist": 250
+   },
+   "hard": 0,
+   "note": "Strategist PO, 2 hours a month at $125, Nov-Dec."
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "Weekly content from the photo and video archive, Instagram and Facebook",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DS": 5
+   },
+   "po": {
+    "Copywriter": 100,
+    "Creative Director": 25
+   },
+   "hard": 0,
+   "note": "About 13 posts a month. Copywriter PO 2 hours, Creative Director review 0.5 hours."
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "Community replies and DMs, daily",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "PD": 6
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "National Garlic Day and pre-Festival ramp",
+   "periods": [
+    5,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DS": 2,
+    "PD": 2
+   },
+   "po": {},
+   "hard": 0,
+   "note": "Apr, Jun, Jul, Aug."
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "Boosted post setup and monitoring",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DG": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": "Boost spend goes on the Festival's card on the ad account."
+  },
+  {
+   "pillar": "Social Media Growth & Content Execution",
+   "task": "Monthly calendar review with Festival staff",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "AM": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Attendee Engagement & On-Site Experience",
+   "task": "On-site technology vendor coordination (cashless payment, digital wayfinding)",
+   "periods": [
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "AM": 2,
+    "PM": 2.5
+   },
+   "po": {},
+   "hard": 0,
+   "note": "May-Aug."
+  },
+  {
+   "pillar": "Attendee Engagement & On-Site Experience",
+   "task": "Data capture touchpoints: QR check-ins, email opt-in, post-event survey",
+   "periods": [
+    6,
+    7
+   ],
+   "hours": {
+    "WD": 3,
+    "PD": 3
+   },
+   "po": {
+    "Copywriter": 50
+   },
+   "hard": 0,
+   "note": "Build in May-Jun."
+  },
+  {
+   "pillar": "Attendee Engagement & On-Site Experience",
+   "task": "Survey and QR tools",
+   "periods": [
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {},
+   "po": {},
+   "hard": 75,
+   "note": "$75 a month, May-Aug. Expected."
+  },
+  {
+   "pillar": "Attendee Engagement & On-Site Experience",
+   "task": "Festival weekend on site, one z\u00f6 agency lead",
+   "periods": [
+    9
+   ],
+   "hours": {
+    "AM": 20
+   },
+   "po": {},
+   "hard": 1100,
+   "note": "Travel from Bend at cost: flight, hotel, per diem. Expected."
+  },
+  {
+   "pillar": "Attendee Engagement & On-Site Experience",
+   "task": "Attendee data into the CRM, what to fix and expand",
+   "periods": [
+    9
+   ],
+   "hours": {
+    "DG": 6
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Sponsor tier structure refresh",
+   "periods": [
+    1,
+    2
+   ],
+   "hours": {
+    "LD": 1.5
+   },
+   "po": {
+    "Strategist": 375
+   },
+   "hard": 0,
+   "note": "Strategist PO, 3 hours a month at $125, Dec-Jan."
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Sponsor packet, three visual tiers",
+   "periods": [
+    1,
+    2
+   ],
+   "hours": {
+    "DS": 8
+   },
+   "po": {
+    "Creative Director": 75,
+    "Copywriter": 150
+   },
+   "hard": 0,
+   "note": "Weeks 6-8 from award."
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Updated sponsor collateral",
+   "periods": [
+    2,
+    3
+   ],
+   "hours": {
+    "DS": 4,
+    "PD": 3
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Digital sponsor newsletter, monthly",
+   "periods": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "PD": 3
+   },
+   "po": {
+    "Copywriter": 100,
+    "Creative Director": 50
+   },
+   "hard": 0,
+   "note": "8 issues. Matches catalog line C4g."
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Social takeover slots for sponsors",
+   "periods": [
+    5,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "PD": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Sponsor Development & Corporate Activation",
+   "task": "Sponsor delivery tracking and analytics",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DG": 1,
+    "AM": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Community & Nonprofit Partnership Alignment",
+   "task": "Charitable-impact storytelling packages, quarterly",
+   "periods": [
+    2,
+    4,
+    6,
+    8
+   ],
+   "hours": {
+    "DS": 3
+   },
+   "po": {
+    "Copywriter": 150,
+    "Creative Director": 25
+   },
+   "hard": 0,
+   "note": "4 packages."
+  },
+  {
+   "pillar": "Community & Nonprofit Partnership Alignment",
+   "task": "Winery, downtown merchant and tourism partner outreach",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "AM": 1,
+    "LD": 0.5
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Community & Nonprofit Partnership Alignment",
+   "task": "Distribution through social and email",
+   "periods": [
+    2,
+    4,
+    6,
+    8
+   ],
+   "hours": {
+    "PD": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Reporting, Measurement & Account Management",
+   "task": "Onboarding audit: website, CMS, social and content strategy",
+   "periods": [
+    0
+   ],
+   "hours": {
+    "WD": 4,
+    "DG": 4,
+    "AM": 3
+   },
+   "po": {
+    "Strategist": 375
+   },
+   "hard": 0,
+   "note": "Weeks 1-6."
+  },
+  {
+   "pillar": "Reporting, Measurement & Account Management",
+   "task": "Monthly performance report",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "DG": 1.5,
+    "AM": 0.5
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Reporting, Measurement & Account Management",
+   "task": "Close-out report across all five pillars",
+   "periods": [
+    9
+   ],
+   "hours": {
+    "DG": 8,
+    "DS": 4,
+    "AM": 4,
+    "LD": 2
+   },
+   "po": {},
+   "hard": 0,
+   "note": "Due within 30 days of the Festival."
+  },
+  {
+   "pillar": "Reporting, Measurement & Account Management",
+   "task": "Project management",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "PM": 2
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  },
+  {
+   "pillar": "Reporting, Measurement & Account Management",
+   "task": "Agency Director oversight",
+   "periods": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "hours": {
+    "LD": 1
+   },
+   "po": {},
+   "hard": 0,
+   "note": ""
+  }
+ ]
+}

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,38 @@ class PricingBook:
 
     def is_expired(self, today: date) -> bool:
         return today > self.valid_through
+
+    def snapshot(self, codes: set[str]) -> dict:
+        """What a saved budget needs to re-render and re-price the same way without the KB."""
+        return {
+            "version": self.version,
+            "effective": self.effective.isoformat(),
+            "valid_through": self.valid_through.isoformat(),
+            "settings": asdict(self.settings),
+            "roles": {k: asdict(r) for k, r in self.roles.items()},
+            "negotiated_rates": self.negotiated_rates,
+            "catalog": {c: asdict(i) for c, i in self.catalog.items() if c in codes},
+            "media_fees": [{**asdict(t), "up_to": None if t.up_to == float("inf") else t.up_to} for t in self.media_fees],
+            "billing_terms": self.billing_terms,
+            "wording": self.wording,
+        }
+
+    @classmethod
+    def from_snapshot(cls, d: dict) -> PricingBook:
+        return cls(
+            version=d["version"],
+            effective=date.fromisoformat(d["effective"]),
+            valid_through=date.fromisoformat(d["valid_through"]),
+            settings=Settings(**d["settings"]),
+            roles={k: Role(**r) for k, r in d["roles"].items()},
+            negotiated_rates=d["negotiated_rates"],
+            catalog={c: CatalogItem(**i) for c, i in d["catalog"].items()},
+            media_fees=[MediaTier(float("inf") if t["up_to"] is None else t["up_to"], t["percent"], t["minimum"])
+                        for t in d["media_fees"]],
+            billing_terms=d["billing_terms"],
+            wording=d["wording"],
+            book_md="", rules_md="", internal_md="",
+        )
 
 
 # ---------------------------------------------------------------- markdown helpers

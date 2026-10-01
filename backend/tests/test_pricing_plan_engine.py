@@ -1,290 +1,368 @@
-"""Pricing plan engine: KB parse, tier, checks, render (no LLM)."""
+"""Pricing plan engine (methodology v2): cost build-up, rule-based prices, guardrails, client-safe render."""
 
 from __future__ import annotations
 
 import copy
 import json
 import unittest
+from datetime import date
 from pathlib import Path
 
+from app.services.pricing_kb import PricingBook, build_book
 from app.services.pricing_plan_engine import (
+    budgets_from_asks,
+    billing_terms_name,
+    blended_rate,
     compute,
-    decide_tier,
-    parse_guide,
-    parse_labor,
+    internal_summary,
+    margins,
+    media_fee,
+    price_plan,
     render,
-    render_internal_notes,
     term_value,
     verify_asks,
     verify_plan,
+    wording_text,
 )
 
-FIX = Path(__file__).parent / "fixtures" / "pricing_plan"
+FIX = Path(__file__).parent / "fixtures" / "pricing_v2"
+BOOK = build_book(*[(FIX / n).read_text() for n in ("01_Pricing_Book.md", "02_Rules_and_Wording.md", "03_Pricing_Internal.md")])
+TODAY = date(2026, 10, 1)
+ASKS = {"priced_scope": [{"id": "S1"}, {"id": "S2"}], "ceilings": [], "asks": []}
 
 
-def _json(name: str) -> dict:
-    return json.loads((FIX / name).read_text())
-
-
-GUIDE = parse_guide((FIX / "guide.md").read_text())
-LABOR = parse_labor((FIX / "labor.md").read_text())
-ALL_VERBATIM = " ".join(
-    "{{VERBATIM:%s}}" % k for k in ("investment_framing", "scope_protection", "reimbursables", "revisions")
-)
-
-
-def plan_988_within_rules() -> dict:
-    """988 LLM plan reached 75% of the ceiling only through its media assumption.
-
-    More fee work (PM and PSA production hours, still inside the High bands) so fees alone
-    land at ~66% of the non-media ceiling.
-    """
-    plan = _json("988_plan.json")
-    for t in plan["tasks"]:
-        for m in t.get("staffing") or []:
-            if (t["task_id"], m["role"]) == ("A11", "Account Manager"):
-                m["hours"] = 325
-            if (t["task_id"], m["role"]) == ("A12a", "Digital Team"):
-                m["hours"] = 110
-    return plan
-
-
-def _mini_plan(**task_overrides) -> dict:
-    task = {
-        "task_id": "A1", "group": "Social", "deliverable": "Social package x12", "track": "P1",
-        "billing": "one_time", "guide_id": "4.5", "quantity": 12, "unit_price": None, "scope_ids": ["S1"],
-        "staffing": [{"role": "Copywriter", "hours": 80}, {"role": "Art Director", "hours": 60}],
-    }
-    task.update(task_overrides)
+def good_plan() -> dict:
     return {
-        "tasks": [task],
-        "form_fills": [],
-        "sections": [{"heading": "1. Cost", "body_md": "{{TASK_TABLE}}\n" + ALL_VERBATIM}],
-        "internal_notes": [],
+        "engagement_type": "fixed_quote", "client_kind": "private", "client_name": "Acme Remodeling", "term_months": 12,
+        "tasks": [
+            {"task_id": "A1", "group": "Brand", "deliverable": "Silver brand book", "scope_ids": ["S1"],
+             "billing": "one_time", "catalog_code": "1b", "catalog_item": "Silver Brand Book", "quantity": 1},
+            {"task_id": "A2", "group": "Web", "deliverable": "Two landing pages", "scope_ids": ["S2"],
+             "billing": "one_time", "quantity": 1,
+             "build": {"hours": {"DS": 20, "WD": 30}, "pos": {"Creative Director": 150, "Copywriter": 400},
+                       "hard_cost": 0, "basis": "task library: website, two pages"}},
+        ],
+        "overhead": {"hours": {"PM": 8, "AM": 8, "LD": 3}, "basis": "management for a 3-month project"},
+        "fills": {"midpoint milestone": "design approval", "outside items": "ad spend, printing and new photo shoots"},
+        "form_fills": [], "internal_notes": [],
+        "sections": [{"heading": "Investment", "body_md": (
+            "{{TASK_TABLE}}\n\nThe project total is {{TOTAL}}.\n\n{{VERBATIM:billing}}\n\n"
+            "{{VERBATIM:outside}}\n\n{{VERBATIM:changes}}")}],
     }
 
 
-MINI_ASKS = {
-    "ceilings": [{"label": "P1", "amount": 50000, "scope": "annual", "track": "P1"}],
-    "priced_scope": [{"id": "S1", "item": "social"}],
-    "tier_facts": {"client_scale": "city"},
-}
+def priced(plan: dict, budgets: dict | None = None) -> tuple[dict, dict]:
+    report = price_plan(plan, BOOK, budgets or {})
+    return plan, report
 
 
-class KbParseTests(unittest.TestCase):
-    def test_every_menu_line_has_three_bands_except_media(self) -> None:
-        self.assertGreaterEqual(len(GUIDE["items"]), 40)
-        missing = [k for k, v in GUIDE["items"].items() if len(v["tiers"]) != 3]
-        self.assertEqual(missing, ["6.1"])
-        self.assertEqual(GUIDE["items"]["4.5"]["tiers"]["Average"], (2900.0, 3800.0))
-
-    def test_all_verbatim_blocks_found(self) -> None:
-        self.assertEqual(
-            set(GUIDE["verbatim"]),
-            {"investment_framing", "scope_protection", "reimbursables", "revisions", "media"},
-        )
-
-    def test_labor_billable_rates(self) -> None:
-        self.assertEqual(LABOR["Agency Director"], 400.0)
-        self.assertEqual(LABOR["Account Manager"], 275.0)
-        self.assertEqual(len(LABOR), 10)
+def check(plan: dict, asks: dict = ASKS, budgets: dict | None = None, report: dict | None = None, **kw):
+    return verify_plan(plan, asks, BOOK, budgets=budgets or {}, report=report, today=kw.pop("today", TODAY), **kw)
 
 
-class TierTests(unittest.TestCase):
-    def test_cost_weight_25_forces_low(self) -> None:
-        self.assertEqual(decide_tier({"cost_weight_pct": 30})[0], "Low")
+class Parity(unittest.TestCase):
+    """The client's own workbook script on its Gilroy example is the oracle for cost, hours and floor."""
 
-    def test_state_agency_with_two_complexity_signals_is_high(self) -> None:
-        asks = {"tier_facts": {
-            "client_scale": "state_agency",
-            "multicultural_or_bilingual": {"value": True},
-            "statewide_or_regional": {"value": True},
-        }}
-        self.assertEqual(decide_tier(asks)[0], "High")
+    @classmethod
+    def setUpClass(cls) -> None:
+        g = json.loads((FIX / "gilroy_plan.json").read_text())
+        cls.client = json.loads((FIX / "gilroy_client_summary.json").read_text())
+        tasks = []
+        for i, t in enumerate(g["tasks"]):
+            n = len(t["periods"])  # hours and POs in the example are per active period
+            tasks.append({
+                "task_id": f"G{i}", "group": t["pillar"], "deliverable": t["task"], "billing": "one_time",
+                "scope_ids": ["S1"],
+                "build": {"hours": {k: v * n for k, v in t["hours"].items()},
+                          "pos": {k: v * n for k, v in t["po"].items()}, "hard_cost": t["hard"] * n, "basis": "example"},
+            })
+        cls.plan = {"engagement_type": "monthly_retainer", "client_kind": "nonprofit", "term_months": 10, "tasks": tasks}
+        price_plan(cls.plan, BOOK, {})
+        cls.c = compute(cls.plan, BOOK)
+        cls.m = margins(cls.c)
 
-    def test_default_is_average(self) -> None:
-        self.assertEqual(decide_tier({"cost_weight_pct": 15, "tier_facts": {"client_scale": "large_county"}})[0], "Average")
+    def test_total_cost_and_hours_match_the_client(self) -> None:
+        self.assertAlmostEqual(self.m["total"]["cost"], self.client["total_cost"], places=2)
+        self.assertAlmostEqual(self.m["total"]["hours"], self.client["in_house_hours"], places=2)
 
-    def test_small_county_straightforward_is_low(self) -> None:
-        self.assertEqual(decide_tier({"tier_facts": {"client_scale": "small_county"}})[0], "Low")
+    def test_cost_by_pillar_matches_the_client(self) -> None:
+        for p in self.client["pillars"]:
+            self.assertAlmostEqual(self.m["groups"][p["name"]]["cost"], p["cost"], places=2, msg=p["name"])
+
+    def test_floor_price_matches_the_client(self) -> None:
+        for p in self.client["pillars"]:
+            ours = self.m["groups"][p["name"]]["cost"] / BOOK.settings.cost_ratio
+            self.assertAlmostEqual(ours, p["floor_price_input_unit"] * 10, delta=0.5, msg=p["name"])
+
+    def test_clients_own_prices_hold_the_floor_in_our_margin_math(self) -> None:
+        total_margin = 1 - self.client["total_cost"] / self.client["total_price"]
+        self.assertAlmostEqual(total_margin, self.client["margin_pct"], places=3)
 
 
-class VerifyTests(unittest.TestCase):
-    def test_988_llm_plan_fails_only_because_media_carried_utilization(self) -> None:
-        errs, _ = verify_plan(_json("988_plan.json"), _json("988_asks.json"), GUIDE, LABOR)
-        self.assertEqual(len(errs), 1, errs)
-        self.assertIn("excluding media — must be 65-85%", errs[0])
+class CatalogAndCustomPricing(unittest.TestCase):
+    def test_catalog_item_sells_at_its_book_price(self) -> None:
+        plan, _ = priced(good_plan())
+        c = compute(plan, BOOK)
+        self.assertEqual(c["amounts"]["A1"], 4800)
+        self.assertEqual(c["cost_term"]["A1"], 1520)  # all-in cost from the catalog costs table
 
-    def test_988_plan_with_enough_fee_work_passes(self) -> None:
-        errs, _ = verify_plan(plan_988_within_rules(), _json("988_asks.json"), GUIDE, LABOR)
+    def test_custom_price_without_a_budget_starts_near_cost_over_0_40(self) -> None:
+        plan, _ = priced(good_plan())
+        c = compute(plan, BOOK)
+        cost = c["cost_term"]["A2"]  # includes the management overhead share
+        self.assertAlmostEqual(c["multiples"]["__total__"], 2.5)
+        self.assertAlmostEqual(c["amounts"]["A2"], cost * 2.5, delta=100)
+        self.assertGreaterEqual(c["amounts"]["A2"], cost / 0.47)
+
+    def test_budget_with_room_prices_at_the_target(self) -> None:
+        plan, report = priced(good_plan(), {"__total__": 100_000})
+        self.assertEqual(report["no_fit"], {})
+        self.assertAlmostEqual(compute(plan, BOOK)["multiples"]["__total__"], 3.7)
+
+    def test_over_budget_comes_down_to_about_90_percent(self) -> None:
+        plan, report = priced(good_plan(), {"__total__": 24_000})
+        c = compute(plan, BOOK)
+        self.assertEqual(report["no_fit"], {})
+        self.assertAlmostEqual(term_value(c), 21_600, delta=200)
+        self.assertLess(compute(plan, BOOK)["multiples"]["__total__"], 3.7)
+
+    def test_the_floor_stops_the_price_coming_down(self) -> None:
+        plan, report = priced(good_plan(), {"__total__": 20_000})
+        c = compute(plan, BOOK)
+        self.assertEqual(report["no_fit"], {})  # the floor total still fits under the budget
+        self.assertLessEqual(term_value(c), 20_000)
+        self.assertAlmostEqual(c["multiples"]["__total__"], 1 / 0.47, places=3)
+        self.assertGreaterEqual(margins(c)["groups"]["Web"]["margin"], 0.53 - 1e-9)
+
+    def test_scope_that_cannot_fit_is_reported_with_the_floor(self) -> None:
+        plan, report = priced(good_plan(), {"__total__": 9_000})
+        info = report["no_fit"]["__total__"]
+        self.assertGreater(info["floor_total"], 9_000)
+        errs, _ = check(plan, budgets={"__total__": 9_000}, report=report)
+        self.assertTrue(any("does not fit the budget" in e for e in errs))
+
+    def test_management_hours_are_recovered_in_custom_prices(self) -> None:
+        without = good_plan()
+        without["overhead"]["hours"] = {"PM": 0, "AM": 0, "LD": 0}
+        a, _ = priced(without)
+        b, _ = priced(good_plan())
+        self.assertGreater(compute(b, BOOK)["amounts"]["A2"], compute(a, BOOK)["amounts"]["A2"])
+
+    def test_monthly_catalog_item_counts_twelve_months(self) -> None:
+        plan = good_plan()
+        plan["tasks"] = [{"task_id": "A1", "group": "SEO", "deliverable": "SEO", "scope_ids": ["S1", "S2"], "billing": "monthly",
+                          "catalog_code": "7c", "catalog_item": "SEO Basic", "quantity": 1}]
+        plan["overhead"] = {"hours": {"PM": 1, "AM": 1, "LD": 1}, "basis": "x"}
+        priced(plan)
+        c = compute(plan, BOOK)
+        self.assertEqual(c["amounts"]["A1"], 2100)
+        self.assertEqual(term_value(c), 25_200)
+
+    def test_per_event_fees_are_rates_never_summed(self) -> None:
+        plan = good_plan()
+        plan["tasks"][1]["billing"] = "per_event"
+        priced(plan)
+        c = compute(plan, BOOK)
+        self.assertNotIn("A2", c["cost_term"])
+        self.assertEqual(term_value(c), 4800)
+
+    def test_blended_rate_and_negotiated_client(self) -> None:
+        self.assertEqual(blended_rate({"client_name": "Acme"}, BOOK), 275)
+        self.assertEqual(blended_rate({"client_name": "City of Bend, Oregon"}, BOOK), 250)
+
+    def test_media_fees(self) -> None:
+        self.assertEqual(media_fee(BOOK, 5_000), 2_000)  # 20% is $1,000, the $2,000 minimum applies
+        self.assertEqual(media_fee(BOOK, 12_000), 2_160)  # 18% in the $10,000 to $15,000 band
+        self.assertEqual(media_fee(BOOK, 250_000), 25_000)  # the top band, 10%
+
+    def test_traditional_media_counts_the_whole_budget_but_earns_the_commission(self) -> None:
+        plan = good_plan()
+        plan["tasks"].append({"task_id": "A3", "group": "Media", "deliverable": "Radio and print", "scope_ids": ["S2"],
+                              "billing": "one_time", "quantity": 1, "media_kind": "traditional", "media_spend": 100_000,
+                              "build": {"hours": {"AM": 10}, "pos": {}, "hard_cost": 0, "basis": "placement"}})
+        priced(plan)
+        c = compute(plan, BOOK)
+        self.assertEqual(c["amounts"]["A3"], 100_000)
+        self.assertEqual(c["revenue"]["A3"], 15_000)
+        self.assertEqual(term_value(c, None, True), 100_000)
+
+    def test_snapshot_reprices_identically_without_the_kb(self) -> None:
+        plan, _ = priced(good_plan(), {"__total__": 20_000})
+        snap = BOOK.snapshot({"1b"})
+        again = PricingBook.from_snapshot(json.loads(json.dumps(snap)))
+        a, b = compute(plan, BOOK), compute(plan, again)
+        self.assertEqual(a["amounts"], b["amounts"])
+        self.assertEqual(render(plan, ASKS, BOOK), render(plan, ASKS, again))
+
+
+class Guardrails(unittest.TestCase):
+    def test_a_good_plan_passes(self) -> None:
+        plan, report = priced(good_plan())
+        errs, warns = check(plan, report=report)
+        self.assertEqual(errs, [])
+        self.assertTrue(any("unanchored" in w for w in warns))
+
+    def test_catalog_code_must_match_the_item_name(self) -> None:
+        plan = good_plan()
+        plan["tasks"][0]["catalog_item"] = "Gold Brand Book"
+        errs, _ = check(priced(plan)[0])
+        self.assertTrue(any("1b" in e and "Silver Brand Book" in e for e in errs))
+
+    def test_unknown_catalog_code(self) -> None:
+        plan = good_plan()
+        plan["tasks"][0]["catalog_code"] = "99z"
+        errs, _ = check(plan)
+        self.assertTrue(any("99z" in e for e in errs))
+
+    def test_management_hours_are_required(self) -> None:
+        plan = good_plan()
+        plan["overhead"] = {"hours": {"PM": 5}, "basis": "x"}
+        errs, _ = check(priced(plan)[0])
+        self.assertTrue(any("account management" in e and "AM" in e for e in errs))
+
+    def test_custom_build_needs_a_basis_and_known_roles(self) -> None:
+        plan = good_plan()
+        plan["tasks"][1]["build"]["basis"] = ""
+        plan["tasks"][1]["build"]["hours"]["Designer"] = 5
+        errs, _ = check(plan)
+        self.assertTrue(any("basis" in e for e in errs))
+        self.assertTrue(any("Designer" in e for e in errs))
+
+    def test_price_per_in_house_hour_floor(self) -> None:
+        plan = good_plan()
+        plan["tasks"][1]["build"] = {"hours": {"DS": 200}, "pos": {}, "hard_cost": 0, "basis": "x"}
+        plan, report = priced(plan, {"__total__": 12_000})
+        errs, _ = check(plan, budgets={"__total__": 12_000}, report=report)
+        self.assertTrue(any("per in-house hour" in e or "floor" in e for e in errs))
+
+    def test_quantity_needs_a_basis(self) -> None:
+        plan = good_plan()
+        plan["tasks"][0]["quantity"] = 3
+        errs, _ = check(plan)
+        self.assertTrue(any("quantity_basis" in e for e in errs))
+        plan["tasks"][0].update(quantity_basis="assumption")
+        errs, warns = check(priced(plan)[0])
+        self.assertEqual([e for e in errs if "quantity" in e], [])
+        self.assertTrue(any("assumption" in w for w in warns))
+
+    def test_quantity_quote_must_be_in_the_rfp(self) -> None:
+        plan = good_plan()
+        plan["tasks"][0].update(quantity=3, quantity_basis="rfp", quantity_quote="three brand books")
+        errs, _ = check(plan, rfp_text="The city wants one brand book.")
+        self.assertTrue(any("quantity_quote" in e for e in errs))
+        errs, _ = check(priced(plan)[0], rfp_text="The city wants three brand books.")
+        self.assertEqual([e for e in errs if "quantity" in e], [])
+
+    def test_prose_never_carries_dollars_hours_or_internals(self) -> None:
+        for bad in ("It costs $5,000.", "Our margin is healthy.", "Curt Schultz leads it.", "Billed at an hour rate."):
+            plan = good_plan()
+            plan["sections"][0]["body_md"] += "\n\n" + bad
+            errs, _ = check(priced(plan)[0])
+            self.assertTrue(errs, bad)
+
+    def test_a_client_named_morgan_is_fine(self) -> None:
+        plan = good_plan()
+        plan["sections"][0]["body_md"] += "\n\nWe look forward to serving Morgan County."
+        errs, _ = check(priced(plan)[0])
         self.assertEqual(errs, [])
 
-    def test_988_asks_quotes_are_verbatim(self) -> None:
-        self.assertEqual(verify_asks(_json("988_asks.json"), (FIX / "988_rfp.txt").read_text()), [])
+    def test_staffing_table_token_is_refused(self) -> None:
+        plan = good_plan()
+        plan["sections"][0]["body_md"] += "\n\n{{STAFFING_TABLE}}"
+        errs, _ = check(priced(plan)[0])
+        self.assertTrue(any("STAFFING_TABLE" in e for e in errs))
 
-    def test_invented_quote_rejected(self) -> None:
-        asks = _json("988_asks.json")
-        asks["asks"][0]["quote"] = "Contractor shall bill a flat monthly retainer of any amount"
-        errs = verify_asks(asks, (FIX / "988_rfp.txt").read_text())
-        self.assertTrue(any("quote not found" in e for e in errs))
+    def test_required_wording_and_unfilled_slots(self) -> None:
+        plan = good_plan()
+        del plan["fills"]["midpoint milestone"]
+        errs, _ = check(priced(plan)[0])
+        self.assertTrue(any("midpoint milestone" in e for e in errs))
+        plan = good_plan()
+        plan["sections"][0]["body_md"] = "{{TASK_TABLE}}"
+        errs, _ = check(priced(plan)[0])
+        self.assertEqual(sum("missing {{VERBATIM" in e for e in errs), 3)
 
-    def test_dupage_form_must_tie_out_to_track_tasks(self) -> None:
-        errs, _ = verify_plan(_json("dupage_plan.json"), _json("dupage_asks.json"), GUIDE, LABOR)
-        self.assertTrue(any("must tie out" in e for e in errs), errs)
+    def test_below_floor_catalog_item_is_flagged_not_blocked_during_the_hold(self) -> None:
+        plan = good_plan()
+        plan["tasks"][0].update(catalog_code="2a", catalog_item="Logo: Bronze")
+        plan, report = priced(plan)
+        errs, warns = check(plan, report=report)
+        self.assertTrue(any("2a" in w and "flag for Sonja" in w for w in warns))
+        self.assertEqual([e for e in errs if "2a" in e], [])
+        errs, _ = check(plan, today=date(2027, 1, 2))
+        self.assertTrue(any("2a" in e and "hold has ended" in e for e in errs))
 
-    def test_price_outside_band_rejected(self) -> None:
-        plan = _mini_plan(staffing=[{"role": "Copywriter", "hours": 1}])
-        errs, _ = verify_plan(plan, MINI_ASKS, GUIDE, LABOR)
-        self.assertTrue(any("outside 4.5 Average band" in e for e in errs), errs)
+    def test_over_a_printed_budget_is_an_error(self) -> None:
+        plan, report = priced(good_plan(), {"__total__": 100_000})
+        plan["tasks"][0]["catalog_code"] = "1d"
+        plan["tasks"][0]["catalog_item"] = "Platinum Brand Book"
+        errs, _ = check(plan, budgets={"__total__": 12_000}, report={"no_fit": {}})
+        self.assertTrue(any("exceeds the budget" in e for e in errs))
 
-    def test_off_card_role_rejected(self) -> None:
-        plan = _mini_plan(staffing=[{"role": "Wizard", "hours": 100}])
-        errs, _ = verify_plan(plan, MINI_ASKS, GUIDE, LABOR)
-        self.assertTrue(any("not on Labor Cost card" in e for e in errs), errs)
+    def test_asks_need_a_client_kind(self) -> None:
+        errs = verify_asks({"priced_scope": [{"id": "S1"}], "ceilings": [], "asks": [], "client": {"kind": "city"}}, "rfp")
+        self.assertTrue(any("client.kind" in e for e in errs))
 
-    def test_literal_dollar_in_prose_rejected(self) -> None:
-        plan = _mini_plan()
-        plan["sections"][0]["body_md"] += "\nOnly $5,000 per month."
-        errs, _ = verify_plan(plan, MINI_ASKS, GUIDE, LABOR)
-        self.assertIn("prose contains a literal dollar figure — use tokens", errs)
 
-    def test_all_inclusive_rfp_forbids_reimbursables(self) -> None:
-        asks = {**MINI_ASKS, "all_inclusive_pricing": {"value": True}}
-        errs, _ = verify_plan(_mini_plan(), asks, GUIDE, LABOR)
-        self.assertTrue(any("all-inclusive" in e for e in errs), errs)
+class ClientSafeRender(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plan, _ = priced(good_plan())
+        self.out = render(self.plan, ASKS, BOOK)
 
-    def test_own_ceiling_must_be_65_to_85_percent_used(self) -> None:
-        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 200000, "scope": "annual", "track": "P1"}]}
-        errs, _ = verify_plan(_mini_plan(), asks, GUIDE, LABOR)
-        self.assertTrue(any("must be 65-85%" in e for e in errs), errs)
+    def test_shows_prices_and_a_total(self) -> None:
+        self.assertIn("$4,800", self.out)
+        self.assertIn("| | **Total** |", self.out)
 
-    def test_target_budget_anchors_when_no_ceiling(self) -> None:
-        asks = {**MINI_ASKS, "ceilings": []}
-        errs, _ = verify_plan(_mini_plan(track=None), asks, GUIDE, LABOR, target_budget_usd=100000)
-        self.assertTrue(any("target budget" in e for e in errs), errs)
-        errs, _ = verify_plan(_mini_plan(track=None), asks, GUIDE, LABOR, target_budget_usd=38500)
+    def test_never_shows_hours_costs_margins_or_roles(self) -> None:
+        # the approved wording may say "$275 an hour" for change orders, so only internal terms are checked
+        for leak in ("hours", "margin", "cost", "loaded", "Creative Director", "PM", "1,520", "Overhead", "in-house"):
+            self.assertNotIn(leak, self.out, leak)
+
+    def test_wording_comes_from_the_rules_doc_with_slots_filled(self) -> None:
+        self.assertIn("25% at design approval", self.out)
+        self.assertIn("Outside the quote: ad spend, printing and new photo shoots", self.out)
+
+    def test_rates_asked_for_are_the_blended_rate_for_every_role(self) -> None:
+        plan = good_plan()
+        plan["hourly_roles"] = ["Designer", "Developer"]
+        plan["sections"][0]["body_md"] += "\n\n{{RATE_TABLE}}"
+        out = render(priced(plan)[0], ASKS, BOOK)
+        self.assertIn("| Designer | $275 |", out)
+        self.assertIn("| Developer | $275 |", out)
+
+    def test_buyer_form_hours_cells_stay_blank_for_sonja(self) -> None:
+        asks = {**ASKS, "buyer_form": {"name": "Cost Form", "columns": ["HOURS", "PRICE"], "rows": [
+            {"row_id": "R1", "label": "Design", "unit": "EA"}]}}
+        plan = good_plan()
+        plan["form_fills"] = [{"row_id": "R1", "column": "HOURS", "kind": "hours", "task_ids": ["A2"]},
+                              {"row_id": "R1", "column": "PRICE", "kind": "task_price", "task_ids": ["A2"]}]
+        plan["sections"][0]["body_md"] += "\n\n{{FORM}}"
+        plan, _ = priced(plan)
+        out = render(plan, asks, BOOK)
+        self.assertIn("[MANUAL FILL]", out)
+        errs, warns = check(plan, asks)
         self.assertEqual(errs, [])
+        self.assertTrue(any("publishes prices only" in w for w in warns))
 
-    def test_monthly_fees_count_against_ceiling(self) -> None:
-        plan = _mini_plan(billing="monthly", quantity=1, unit_price=3500, staffing=[])
-        over = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 40000, "scope": "annual", "track": "P1"}]}
-        errs, _ = verify_plan(plan, over, GUIDE, LABOR)
-        self.assertTrue(any("exceeds ceiling" in e for e in errs), errs)
-        ok = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 56000, "scope": "annual", "track": "P1"}]}
-        self.assertEqual(verify_plan(plan, ok, GUIDE, LABOR)[0], [])
+    def test_government_billing_replaces_the_deposit_lines(self) -> None:
+        plan = good_plan()
+        plan["client_kind"] = "government"
+        text = wording_text(plan, BOOK, "billing")
+        self.assertIn("last day of each month", text)
+        self.assertNotIn("due on signing", text)
+        self.assertEqual(billing_terms_name(plan), "Government Monthly")
 
-    def test_per_event_fees_warn_under_ceiling(self) -> None:
-        plan = _mini_plan()
-        plan["tasks"].append({**plan["tasks"][0], "task_id": "A2", "billing": "per_event", "quantity": 1,
-                              "unit_price": 3500, "staffing": []})
-        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 50000, "scope": "annual", "track": "P1"}]}
-        _, warns = verify_plan(plan, asks, GUIDE, LABOR)
-        self.assertIn("per-event/hourly fees are not counted against P1", warns)
+    def test_internal_summary_holds_the_numbers_the_client_never_sees(self) -> None:
+        s = internal_summary(self.plan, BOOK)
+        self.assertIn("INTERNAL — DO NOT PLACE", s)
+        self.assertIn("All-in cost", s)
+        self.assertIn("nonprofit option (12% off)", s)
 
-    def test_media_does_not_count_toward_utilization(self) -> None:
-        plan = _mini_plan()
-        plan["tasks"].append({"task_id": "M1", "group": "Media", "deliverable": "Paid media", "track": "P1",
-                              "billing": "one_time", "guide_id": "6.1", "quantity": 1, "unit_price": 31500,
-                              "scope_ids": ["S1"], "staffing": []})
-        plan["sections"][0]["body_md"] += "\n{{VERBATIM:media}}"
-        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 100000, "scope": "annual", "track": "P1"}]}
-        errs, _ = verify_plan(plan, asks, GUIDE, LABOR)  # 70% only because of media
-        self.assertTrue(any("must be 65-85%" in e for e in errs), errs)
-        asks["ceilings"][0]["amount"] = 80000  # fees 38,500 of 48,500 non-media = 79%
-        self.assertEqual(verify_plan(plan, asks, GUIDE, LABOR)[0], [])
-
-    def test_dollar_and_jargon_checked_in_headings_deliverables_groups(self) -> None:
-        for field, value, want in (
-            ("heading", "Budget $5,000", "literal dollar figure"),
-            ("deliverable", "Social pack $500", "literal dollar figure"),
-            ("group", "Guide lines", "internal jargon"),
-        ):
-            plan = _mini_plan()
-            target = plan["sections"][0] if field == "heading" else plan["tasks"][0]
-            target[field] = value
-            errs, _ = verify_plan(plan, MINI_ASKS, GUIDE, LABOR)
-            self.assertTrue(any(want in e and field in e for e in errs), (field, errs))
-
-    def test_required_staffing_ask_needs_staffing_on_every_priced_task(self) -> None:
-        plan = _mini_plan(staffing=[], unit_price=3200)
-        asks = {**MINI_ASKS, "asks": [{"id": "K1", "kind": "hours_per_task", "required": True}]}
-        errs, _ = verify_plan(plan, asks, GUIDE, LABOR)
-        self.assertIn("A1: RFP requires hours/staffing per task", errs)
-
-    def test_term_value_is_one_time_plus_a_year_of_monthly(self) -> None:
-        c = compute(_json("newport_plan.json"), LABOR)
-        monthly = sum(a for tid, a in c["amounts"].items() if c["tasks"][tid]["billing"] == "monthly")
-        self.assertEqual(term_value(c), 12 * monthly)
-
-    def test_no_ceiling_no_target_warns_unanchored(self) -> None:
-        _, warns = verify_plan(_json("newport_plan.json"), _json("newport_asks.json"), GUIDE, LABOR)
-        self.assertTrue(any(w.startswith("unanchored") for w in warns), warns)
-
-
-class RenderTests(unittest.TestCase):
-    def test_988_render_has_totals_verbatim_and_no_tokens(self) -> None:
-        md = render(_json("988_plan.json"), _json("988_asks.json"), GUIDE, LABOR)
-        self.assertNotIn("{{", md)
-        self.assertIn("$717,650", md)
-        self.assertIn("**Total not-to-exceed** | **$950,000**", md)
-        for key in ("investment_framing", "scope_protection", "revisions"):
-            self.assertIn(GUIDE["verbatim"][key][:60], md)
-        self.assertNotIn("DO NOT PLACE", md)
-        self.assertNotIn("Sonja", md)
-
-    def test_internal_notes_render_separately(self) -> None:
-        plan = {**_json("988_plan.json"), "tier": "High", "tier_basis": "state_agency, 2 complexity signals"}
-        md = render_internal_notes(plan)
-        self.assertIn("**INTERNAL — DO NOT PLACE**", md)
-        self.assertIn("Tier: **High** — state_agency, 2 complexity signals", md)
-        self.assertIn("| Sonja |", md)
-
-    def test_task_table_groups_non_contiguous_tasks_together(self) -> None:
-        plan = _mini_plan()
-        base = plan["tasks"][0]
-        plan["tasks"] = [
-            {**base, "task_id": "A1", "group": "Social"},
-            {**base, "task_id": "A2", "group": "Video"},
-            {**base, "task_id": "A3", "group": "Social"},
-        ]
-        md = render(plan, {**MINI_ASKS, "ceilings": []}, GUIDE, LABOR)
-        self.assertEqual(md.count("**Social**"), 1)
-        self.assertLess(md.index("| A3 |"), md.index("| A2 |"))
-
-    def test_monthly_table_shows_term_value(self) -> None:
-        plan = _mini_plan(billing="monthly", quantity=1, unit_price=3500, staffing=[])
-        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 56000, "scope": "annual", "track": "P1"}]}
-        md = render(plan, asks, GUIDE, LABOR)
-        self.assertIn("| | **Priced work (term value)** | **$42,000** |", md)
-        self.assertIn("| | Held for scope confirmed on approval | $14,000 |", md)
-
-    def test_total_token_matches_task_table_term_value(self) -> None:
-        base = _mini_plan()["tasks"][0]
-        plan = _mini_plan()
-        plan["tasks"] = [
-            {**base, "task_id": "A1", "billing": "monthly", "quantity": 1, "unit_price": 1000, "staffing": []},
-            {**base, "task_id": "A2", "billing": "one_time", "quantity": 1, "unit_price": 5000, "staffing": []},
-        ]
-        plan["sections"][0]["body_md"] += "\n{{TOTAL:P1}} of {{CEILING:P1}}, {{UNALLOCATED:P1}} unallocated."
-        asks = {**MINI_ASKS, "ceilings": [{"label": "P1", "amount": 30000, "scope": "annual", "track": "P1"}]}
-        md = render(plan, asks, GUIDE, LABOR)
-        term = 5000 + 12 * 1000
-        self.assertIn("**Priced work (term value)** | **$17,000**", md)
-        self.assertIn(f"${term:,.0f} of $30,000, $13,000 unallocated.", md)
-
-    def test_form_row_ties_out(self) -> None:
-        plan = _mini_plan()
-        plan["form_fills"] = [
-            {"row_id": "R1", "column": col, "kind": kind, "task_ids": ["A1"]}
-            for col, kind in (("QTY", "hours"), ("PRICE", "rate"), ("EXTENDED PRICE", "extended"))
-        ]
-        plan["sections"][0]["body_md"] += "\n{{FORM}}"
-        asks = {**MINI_ASKS, "buyer_form": {
-            "name": "Form", "columns": ["QTY", "PRICE", "EXTENDED PRICE"],
-            "rows": [{"row_id": "R1", "label": "Hourly Rate P1", "unit": "HR", "track": "P1"}],
-        }}
-        self.assertEqual(verify_plan(plan, asks, GUIDE, LABOR)[0], [])
-        self.assertIn("| Hourly Rate P1 | HR | 140 | $275 | $38,500 |", render(plan, asks, GUIDE, LABOR))
+    def test_budgets_from_asks(self) -> None:
+        asks = {"ceilings": [{"label": "Total", "amount": 120_000}, {"label": "Pool", "amount": 5_000_000, "shared_pool": True}]}
+        self.assertEqual(budgets_from_asks(asks), {"__total__": 120_000})
+        self.assertEqual(budgets_from_asks({"ceilings": []}, 50_000), {"__total__": 50_000})
+        self.assertEqual(budgets_from_asks({"ceilings": []}), {})
 
 
 if __name__ == "__main__":

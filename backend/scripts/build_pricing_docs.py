@@ -32,6 +32,15 @@ LEAK = re.compile(
 )
 
 
+SLOT_FIXES = [
+    ("\n- [The rest of the lines for the engagement type.]", ""),
+    ("[retainer / quote]", "[retainer or quote]"),
+    ("[ad spend, which runs on [client]'s card on the ad account; PR and media relations; printing; "
+     "new photo or video shoots; any website rebuild]", "[outside items]"),
+    ("[the RFP's rule, such as GSA rates]", "[travel rule]"),
+]
+
+
 def read_package(path: Path) -> dict[str, str]:
     with zipfile.ZipFile(path) as z:
         return {Path(n).name: z.read(n).decode() for n in z.namelist() if n.endswith((".md", ".json"))}
@@ -159,6 +168,11 @@ def build(files: dict[str, str]) -> dict[str, str]:
                       ("Nonprofit discount", "Nonprofit discount"), ("Change orders", "Change orders"),
                       ("Rates, when an RFP asks for them", "Rates"), ("Tagline", "Tagline")):
         approved[name] = blocks[key]
+    # The engine fills simple [slot] names from the plan; the client's free-text brackets become slots.
+    for old, new in SLOT_FIXES:
+        hit = [k for k, v in approved.items() if old in v]
+        assert hit, f"slot text not found in the approved wording: {old[:50]!r}"
+        approved = {k: v.replace(old, new) for k, v in approved.items()}
     guide = sections(files["page-copy-guide.md"])
     rules = "\n\n".join([
         header("Rules and Wording", *stamp,
