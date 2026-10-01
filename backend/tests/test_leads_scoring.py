@@ -76,3 +76,32 @@ def test_preparation_facts_include_monid_company_and_person_data():
         "job_title": "Purchasing Manager",
         "job_title_levels": "manager",
     }
+
+
+def test_disqualify_catches_the_junk_found_in_the_live_hubspot_list():
+    """Patterns from the real 1,296-contact HubSpot export (Sep 2026)."""
+    junk = {
+        "accounts.payable@everfastfiber.com": "role inbox",
+        "#helpdesk@hamptonlumber.com": "role inbox",
+        "hsdprocurement@maricopa.gov": "role inbox",
+        "billing_requests@miro.com": "role inbox",
+        "sonja@zo.agency": "zö/E2M team",
+        "vivek@e2msolutions.com": "zö/E2M team",
+        "epson1@mailph.custhelp.com": "vendor",          # subdomain of a vendor
+        "client-mtviewheating-aaaa@ci-web-group.org.slack.com": "forwarding",
+        "case+26-934668260@progressive.assuredclaims.net": "machine",
+        "phantizy@comcast.net": "personal",
+    }
+    for email, expected in junk.items():
+        reason = disqualify({"email": email})
+        assert reason and expected in reason, (email, reason)
+
+
+def test_disqualify_keeps_real_people_whose_address_contains_a_role_word():
+    for email in (
+        "aaurand@bendoregon.gov",
+        "apond@deschutesbrewery.com",     # starts with "ap", but is a person
+        "carrie.shilhanek@umatilla.gov",
+        "teamcathy@promotionsnow.example",  # "team" glued to a name is not a role word
+    ):
+        assert disqualify({"email": email}) is None, email

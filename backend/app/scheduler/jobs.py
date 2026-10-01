@@ -49,6 +49,25 @@ JOBS: tuple[ScheduledJob, ...] = (
         timezone="America/Los_Angeles",
         timeout_seconds=600,
     ),
+    # Read-only HubSpot mirror for the Lead Finder. Incremental every 15 min so a
+    # call logged in HubSpot shows up in the queue quickly; a nightly full pass
+    # catches contacts deleted or merged in HubSpot.
+    ScheduledJob(
+        id="hubspot_incremental",
+        path="/api/v1/leads/hubspot/sync",
+        cron="*/15 * * * *",
+        timezone="America/Los_Angeles",
+        body={"mode": "auto"},
+        timeout_seconds=300,
+    ),
+    ScheduledJob(
+        id="hubspot_nightly",
+        path="/api/v1/leads/hubspot/sync",
+        cron="30 23 * * *",
+        timezone="America/Los_Angeles",
+        body={"mode": "full"},
+        timeout_seconds=600,
+    ),
     ScheduledJob(
         id="agency_weekly_snapshot",
         path="/api/v1/financials/agency/ai-insights/snapshot",

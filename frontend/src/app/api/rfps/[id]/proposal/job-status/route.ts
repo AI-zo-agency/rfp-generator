@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -13,7 +14,7 @@ export async function GET(
     process.env.BACKEND_URL ||
     "http://localhost:8001";
   try {
-    const res = await fetch(
+    const res = await authedFetch(
       `${backendUrl}/api/v1/rfps/${id}/proposal/job-status`,
       {
         headers: { Accept: "application/json" },

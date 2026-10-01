@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -16,7 +17,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const response = await fetch(
+    const response = await authedFetch(
       `${BACKEND_URL}/api/v1/rfps/${id}/analyze/status`,
       {
         method: "GET",

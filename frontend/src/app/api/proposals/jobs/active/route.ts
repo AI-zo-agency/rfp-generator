@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -13,7 +14,7 @@ export async function GET(request: NextRequest) {
   try {
     const includeGoNoGo = request.nextUrl.searchParams.get("includeGoNoGo");
     const query = includeGoNoGo ? `?includeGoNoGo=${includeGoNoGo}` : "";
-    const response = await fetch(`${BACKEND_URL}/api/v1/proposals/jobs/active${query}`, {
+    const response = await authedFetch(`${BACKEND_URL}/api/v1/proposals/jobs/active${query}`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",

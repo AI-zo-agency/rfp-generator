@@ -1,17 +1,19 @@
-"""Wave 3 PoC endpoints — Lead Finder & Outreach Matcher.
+"""Wave 3 endpoints — Lead Finder & Outreach Matcher.
 
-Static fixture for the contact list; AI (OpenRouter) for enrichment and
-brief synthesis. See app/leads/scoring.py and app/leads/ai.py for the
-swap points once HubSpot/Apollo credentials land.
+Contacts come from the read-only HubSpot mirror (app/leads/hubspot.py) once it
+is configured and synced, else the static fixture. AI (OpenRouter) for
+enrichment fallback and brief synthesis.
 """
 
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from pydantic import BaseModel
 
 from app.leads import ai
 from app.leads import case_studies
+from app.leads import hubspot
 from app.leads import monid
 from app.leads.scoring import (
     WEIGHTS_RATIONALE,
@@ -26,13 +28,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads", tags=["leads"])
 
 
+def _dataset() -> dict[str, Any]:
+    """HubSpot mirror when set up, else the fixture. A broken mirror is an error,
+    never a silent fall back to fixture data dressed up as real contacts."""
+    fixture = load_dataset()
+    try:
+        mirror = hubspot.load_mirror_dataset()
+    except Exception as exc:
+        logger.error("operation=leads_dataset status=mirror_failed error=%s", exc)
+        raise HTTPException(status_code=503, detail="HubSpot contact mirror is unavailable") from exc
+    if mirror is None:
+        return {**fixture, "source": "static-fixture"}
+    # Case-study titles are zö's own, not HubSpot's; keep them as the Supermemory fallback.
+    return {**mirror, "case_studies": fixture.get("case_studies", {})}
+
+
+class HubSpotSyncBody(BaseModel):
+    mode: str = "auto"
+
+
+@router.post("/hubspot/sync")
+def hubspot_sync(payload: HubSpotSyncBody | None = None) -> dict:
+    """Refresh the HubSpot mirror: the scheduler (X-Cron-Secret) or the Lead Finder's
+    Refresh button (signed-in user). Both are checked by app/api/auth_guard.py."""
+    mode = payload.mode if payload else "auto"
+    if mode not in ("auto", "full"):
+        raise HTTPException(status_code=422, detail="mode must be 'auto' or 'full'")
+    if not hubspot.configured():
+        raise HTTPException(status_code=503, detail="HUBSPOT_API_KEY is not set")
+    try:
+        return hubspot.run_sync(mode)
+    except hubspot.HubSpotError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("")
 def list_leads() -> dict:
-    data = load_dataset()
+    data = _dataset()
     leads = build_leads(data)
     scored = [lead for lead in leads if not lead.disqualified_reason]
     return {
-        "source": "static-fixture",
+        "source": data["source"],
+        "synced_at": data.get("synced_at"),
         "rationale": WEIGHTS_RATIONALE,
         "stats": {
             "total": len(leads),
@@ -66,7 +103,7 @@ def list_leads() -> dict:
 
 
 def _find_lead(contact_id: str):
-    data = load_dataset()
+    data = _dataset()
     for lead in build_leads(data):
         if lead.contact["id"] == contact_id:
             if lead.disqualified_reason:

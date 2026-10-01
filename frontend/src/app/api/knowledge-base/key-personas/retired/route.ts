@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -8,7 +9,7 @@ const BACKEND_URL =
 export async function PATCH(request: Request) {
   try {
     const body = await request.json();
-    const res = await fetch(`${BACKEND_URL}/api/v1/knowledge-base/key-personas/retired`, {
+    const res = await authedFetch(`${BACKEND_URL}/api/v1/knowledge-base/key-personas/retired`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(body),

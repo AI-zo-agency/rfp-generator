@@ -1,8 +1,8 @@
 """Lead prioritization for Wave 3 (Lead Finder & Outreach Matcher) — PoC.
 
-Pure functions over a static fixture. No HubSpot API, no Apollo, no RB2B.
-Swap `load_dataset` for real connectors once credentials land; nothing else
-in this module needs to change.
+Pure functions over a dataset of {companies, contacts}. The router feeds it
+the HubSpot mirror (app/leads/hubspot.py) when configured, else the static
+fixture that `load_dataset` reads.
 
 Scoring weights are derived from what zö's HubSpot actually contains
 (see WEIGHTS_RATIONALE) and are meant to be argued with, not trusted.
@@ -52,21 +52,52 @@ CORE_STATES = {"OR", "WA"}
 SECONDARY_STATES = {"CA", "ID"}
 
 # Contacts we never brief, regardless of firmographics.
-ROLE_LOCALPARTS = {
-    "accountrep", "accounts", "accounting", "admin", "billing", "contact",
-    "hello", "help", "info", "invoices", "mail", "marketing", "noreply",
-    "no-reply", "office", "receivables", "sales", "success", "support",
+# Shared inboxes: matched against each part of the address split on . _ - + #,
+# so "accounts.payable@", "#helpdesk@" and "billing_requests@" all count.
+ROLE_WORDS = {
+    "accountrep", "accounts", "accounting", "ach", "admin", "administrator", "ads",
+    "ap", "ar", "bids", "billing", "board", "businessservices", "care", "careers",
+    "cheers", "communications", "connect", "contact", "customercare",
+    "customerservice", "dispatch", "email", "events", "frontdesk", "hello", "help",
+    "helpdesk", "hr", "info", "invoices", "jobs", "mail", "management", "marketing",
+    "media", "membership", "news", "noreply", "no-reply", "office", "operations",
+    "orders", "partners", "pm", "press", "procurement", "purchasing", "receivables",
+    "reception", "sales", "staff", "success", "support", "team", "webmaster",
+    "wordpress",
 }
+# Department inboxes with a prefix glued on, e.g. "hsdprocurement@maricopa.gov".
+ROLE_SUFFIXES = ("procurement", "purchasing", "customerservice", "customercare", "helpdesk")
 PERSONAL_DOMAINS = {
-    "aol.com", "gmail.com", "hotmail.com", "icloud.com", "live.com",
-    "me.com", "msn.com", "outlook.com", "yahoo.com",
+    "aol.com", "att.net", "btinternet.com", "comcast.net", "gmail.com",
+    "hotmail.com", "icloud.com", "live.com", "me.com", "msn.com", "outlook.com",
+    "protonmail.com", "sbcglobal.net", "verizon.net", "yahoo.com", "ymail.com",
 }
+# zö and E2M staff show up as contacts when they are cc'd; they are not prospects.
+INTERNAL_DOMAINS = {"zo.agency", "e2msolutions.com", "e2m.solutions"}
 # zö's own suppliers and tooling — they are in the CRM as counterparties,
-# not as prospects. Grow this list as the team spots more.
-VENDOR_DOMAINS = {"e2m.solutions", "simpli.fi"}
+# not as prospects. Subdomains match too. Grow this list as the team spots more.
+VENDOR_DOMAINS = {
+    "4imprint.com", "assuredclaims.net", "ciwebgroup.com", "ci-web-group.org",
+    "custhelp.com", "ebix.com", "functionpoint.com", "hubspot.com", "meltwater.com",
+    "miro.com", "mirren.com", "mypromooffice.com", "paychex.com", "promotionsnow.com",
+    "simpli.fi", "whatconverts.com",
+}
+# Forwarding/relay addresses (Slack email bridges and similar), not people.
+RELAY_DOMAINS = {"slack.com"}
 
 _HEX_LOCALPART = re.compile(r"^[0-9a-f]{16,}$")
+_TICKET_LOCALPART = re.compile(r"\+.*\d{6,}")  # case+26-934668260@
 _TRACKER_DOMAIN = re.compile(r"(^|\.)replies?\.", re.IGNORECASE)
+_LOCALPART_PARTS = re.compile(r"[._\-+#]+")
+
+
+def _domain_in(domain: str, domains: set[str]) -> bool:
+    return any(domain == d or domain.endswith("." + d) for d in domains)
+
+
+def _role_inbox(localpart: str) -> bool:
+    parts = [p for p in _LOCALPART_PARTS.split(localpart) if p]
+    return any(p in ROLE_WORDS for p in parts) or localpart.endswith(ROLE_SUFFIXES)
 
 
 @dataclass
@@ -92,8 +123,10 @@ def email_domain(email: str) -> str:
 def disqualify(contact: dict[str, Any]) -> str | None:
     """Return a reason to skip this contact, or None to keep it.
 
-    This is the gate the 1,137-row contact list badly needs: role inboxes,
-    machine-generated rows, personal addresses, and zö's own vendors.
+    Roughly 1 in 4 HubSpot contacts are not people zö could reach out to:
+    shared inboxes, auto-generated addresses, personal addresses, zö/E2M staff,
+    and zö's own vendors. The reason is shown in the Lead Finder so a wrong call
+    is easy to spot and fix here.
     """
     email = (contact.get("email") or "").strip().lower()
     if not email or "@" not in email:
@@ -101,13 +134,17 @@ def disqualify(contact: dict[str, Any]) -> str | None:
     localpart, domain = email.split("@", 1)
     if _TRACKER_DOMAIN.search(domain):
         return "email-tracker address, not a person"
-    if _HEX_LOCALPART.match(localpart):
+    if _domain_in(domain, RELAY_DOMAINS):
+        return "forwarding address, not a person"
+    if _HEX_LOCALPART.match(localpart) or _TICKET_LOCALPART.search(localpart):
         return "machine-generated contact row"
-    if localpart in ROLE_LOCALPARTS:
+    if _domain_in(domain, INTERNAL_DOMAINS):
+        return "zö/E2M team member, not a prospect"
+    if _role_inbox(localpart):
         return f"role inbox ({localpart}@), not an individual"
     if domain in PERSONAL_DOMAINS:
         return "personal email domain, no company context"
-    if domain in VENDOR_DOMAINS:
+    if _domain_in(domain, VENDOR_DOMAINS):
         return "zö vendor/supplier, not a prospect"
     return None
 
@@ -172,15 +209,20 @@ def build_leads(
     dataset: dict[str, Any] | None = None,
     today: date | None = None,
 ) -> list[Lead]:
-    """Join contacts to companies on email domain, gate, score, sort."""
+    """Join contacts to companies (HubSpot association, else email domain), gate, score, sort."""
     data = dataset if dataset is not None else load_dataset()
     today = today or datetime.now(timezone.utc).date()
-    by_domain = {c["domain"].lower(): c for c in data.get("companies", [])}
+    companies = data.get("companies", [])
+    by_id = {c["id"]: c for c in companies if c.get("id")}
+    by_domain = {c["domain"].lower(): c for c in companies if c.get("domain")}
 
     leads: list[Lead] = []
     for contact in data.get("contacts", []):
-        company = by_domain.get(email_domain(contact.get("email") or ""))
-        reason = disqualify(contact)
+        company = by_id.get(contact.get("company_id") or "") or by_domain.get(
+            email_domain(contact.get("email") or "")
+        )
+        # The team's own HubSpot flags (Vendor, Do Not Contact...) win over the heuristics.
+        reason = contact.get("excluded_reason") or disqualify(contact)
         if reason:
             leads.append(Lead(contact=contact, company=company, disqualified_reason=reason))
             continue

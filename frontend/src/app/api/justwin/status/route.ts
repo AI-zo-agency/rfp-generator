@@ -3,6 +3,7 @@ import {
   JUSTWIN_SYNC_DISABLED_MESSAGE,
   JUSTWIN_SYNC_ENABLED,
 } from "@/lib/justwin-config";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -46,8 +47,8 @@ export async function GET() {
     // Prefer an in-flight job so the global widget / modal stay accurate even
     // if "latest" briefly lags after enqueue.
     const [runningRes, latestRes] = await Promise.all([
-      fetch(`${BACKEND_URL}/api/v1/sync-jobs/running`, { cache: "no-store" }),
-      fetch(`${BACKEND_URL}/api/v1/sync-jobs/latest`, { cache: "no-store" }),
+      authedFetch(`${BACKEND_URL}/api/v1/sync-jobs/running`, { cache: "no-store" }),
+      authedFetch(`${BACKEND_URL}/api/v1/sync-jobs/latest`, { cache: "no-store" }),
     ]);
     const runningData = runningRes.ok
       ? ((await runningRes.json()) as { job?: Record<string, unknown> })

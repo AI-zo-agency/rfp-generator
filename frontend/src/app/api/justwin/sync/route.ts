@@ -3,6 +3,7 @@ import {
   JUSTWIN_SYNC_DISABLED_MESSAGE,
   JUSTWIN_SYNC_ENABLED,
 } from "@/lib/justwin-config";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -32,7 +33,7 @@ export async function POST(request: Request) {
   const tab = body.tab || "all";
 
   try {
-    const backendRes = await fetch(`${BACKEND_URL}/api/v1/sync-jobs/trigger`, {
+    const backendRes = await authedFetch(`${BACKEND_URL}/api/v1/sync-jobs/trigger`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ syncMode, syncDate, tab }),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   useMonthlyAiBudget,
   useWeekCostHistory,
@@ -131,40 +131,14 @@ function HistoryBlock({ budget }: { budget: MonthlyAiBudgetSnapshot }) {
   );
 }
 
-/**
- * Sidebar AI spend. Open view is the current UTC week, split by product.
- * Today, this month, and prior weeks sit under History.
- */
-export function SidebarAiCostPanel({
-  collapsed,
-  className = "",
+function AiCostCard({
+  budget,
+  frame,
 }: {
-  collapsed: boolean;
-  className?: string;
+  budget: MonthlyAiBudgetSnapshot;
+  frame: string;
 }) {
-  const budget = useMonthlyAiBudget();
   const [historyOpen, setHistoryOpen] = useState(false);
-  if (!budget?.enabled || budget.limitUsd <= 0) return null;
-  const frame = className || (collapsed ? "mx-2 mb-4" : "mx-3 mb-4");
-
-  if (collapsed) {
-    return (
-      <div
-        className={`${frame} rounded-xl border px-2 py-3 text-center`}
-        style={{
-          borderColor: budget.blocked
-            ? "color-mix(in srgb, var(--zo-orange) 55%, var(--zo-border))"
-            : "var(--shell-border, var(--zo-border))",
-        }}
-        title={`This week ${fmtUsd(budget.weekSpentUsd)} · Ralph ${fmtUsd(budget.weekProposalSpentUsd)} · Financial ${fmtUsd(budget.weekFinancialSpentUsd)} · Outreach ${fmtUsd(budget.weekOutreachSpentUsd)}`}
-      >
-        <p className="text-[10px] font-bold uppercase tracking-wider text-zo-text-muted">AI</p>
-        <p className="mt-1 text-xs font-semibold tabular-nums text-foreground">
-          {fmtUsd(budget.weekSpentUsd)}
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div
@@ -209,4 +183,105 @@ export function SidebarAiCostPanel({
       {historyOpen ? <HistoryBlock budget={budget} /> : null}
     </div>
   );
+}
+
+/**
+ * Header chip. The full breakdown opens under the bar so the sticky row
+ * stays one line on a phone. The header's backdrop-blur is the fixed
+ * containing block, so `top-full` lands just below it.
+ */
+function AiCostMenu({ budget }: { budget: MonthlyAiBudgetSnapshot }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointer(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#274742]/20 bg-white px-2.5 text-xs font-bold text-[#274742] transition hover:bg-[#edf3f1]"
+        aria-expanded={open}
+        aria-controls="ai-cost-menu"
+        aria-label={`AI cost this week ${fmtUsd(budget.weekSpentUsd)}`}
+        onClick={() => {
+          setOpen((prev) => {
+            const next = !prev;
+            console.debug("[ai-cost] menu", { open: next });
+            return next;
+          });
+        }}
+      >
+        <span className="text-[10px] font-bold uppercase tracking-wide text-[#52635f]">AI</span>
+        <span className="tabular-nums">{fmtUsd(budget.weekSpentUsd)}</span>
+        <span aria-hidden className={`text-[10px] leading-none transition ${open ? "rotate-180" : ""}`}>
+          ▾
+        </span>
+      </button>
+      {open ? (
+        <div
+          id="ai-cost-menu"
+          className="fixed inset-x-4 top-full z-50 mt-2 sm:absolute sm:inset-x-auto sm:right-0 sm:w-64"
+        >
+          <AiCostCard budget={budget} frame="mx-0 mb-0 w-full bg-white shadow-[0_16px_40px_rgba(10,15,26,0.14)]" />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Sidebar AI spend. Open view is the current UTC week, split by product.
+ * Today, this month, and prior weeks sit under History.
+ * `menu` is the header placement: a spend chip, breakdown on demand.
+ */
+export function SidebarAiCostPanel({
+  collapsed,
+  className = "",
+  variant = "card",
+}: {
+  collapsed: boolean;
+  className?: string;
+  variant?: "card" | "menu";
+}) {
+  const budget = useMonthlyAiBudget();
+  if (!budget?.enabled || budget.limitUsd <= 0) return null;
+  const frame = className || (collapsed ? "mx-2 mb-4" : "mx-3 mb-4");
+
+  if (variant === "menu") return <AiCostMenu budget={budget} />;
+
+  if (collapsed) {
+    return (
+      <div
+        className={`${frame} rounded-xl border px-2 py-3 text-center`}
+        style={{
+          borderColor: budget.blocked
+            ? "color-mix(in srgb, var(--zo-orange) 55%, var(--zo-border))"
+            : "var(--shell-border, var(--zo-border))",
+        }}
+        title={`This week ${fmtUsd(budget.weekSpentUsd)} · Ralph ${fmtUsd(budget.weekProposalSpentUsd)} · Financial ${fmtUsd(budget.weekFinancialSpentUsd)} · Outreach ${fmtUsd(budget.weekOutreachSpentUsd)}`}
+      >
+        <p className="text-[10px] font-bold uppercase tracking-wider text-zo-text-muted">AI</p>
+        <p className="mt-1 text-xs font-semibold tabular-nums text-foreground">
+          {fmtUsd(budget.weekSpentUsd)}
+        </p>
+      </div>
+    );
+  }
+
+  return <AiCostCard budget={budget} frame={frame} />;
 }

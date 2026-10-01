@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
@@ -14,7 +15,7 @@ export async function GET(
     : "";
 
   try {
-    const response = await fetch(
+    const response = await authedFetch(
       `${BACKEND_URL}/api/v1/knowledge-base/documents/${encodeURIComponent(id)}/open${query}`,
       { redirect: "manual", cache: "no-store" }
     );

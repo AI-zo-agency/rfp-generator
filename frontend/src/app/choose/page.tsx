@@ -13,6 +13,7 @@ import {
   IconRfp,
 } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
+import { clearSession } from "@/lib/auth-session";
 
 interface StoredUser {
   email?: string;
@@ -51,8 +52,7 @@ export default function ChooseWorkspacePage() {
   }, [router]);
 
   const handleLogout = () => {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_user");
+    clearSession();
     router.push("/login");
   };
 

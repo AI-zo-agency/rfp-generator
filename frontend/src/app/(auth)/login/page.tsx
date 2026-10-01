@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { loginUser } from "@/lib/api/auth";
+import { saveSession } from "@/lib/auth-session";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -27,8 +28,7 @@ export default function LoginPage() {
 
     try {
       const data = await loginUser(email, password);
-      localStorage.setItem("auth_token", data.session.access_token);
-      localStorage.setItem("auth_user", JSON.stringify(data.user));
+      saveSession(data.session, data.user);
       router.push("/choose");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to log in";

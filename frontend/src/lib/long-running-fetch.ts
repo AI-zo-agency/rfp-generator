@@ -37,6 +37,38 @@ function resolveTimeoutMs(explicit?: number): number {
   return 0;
 }
 
+/**
+ * Headers from the incoming browser request that FastAPI needs: the user's
+ * token (FastAPI rejects calls without one) and X-User-Email for spend
+ * attribution. The token comes from the Authorization header on fetch() calls,
+ * or the `zo_token` cookie on plain page loads and links.
+ */
+export async function forwardedHeaders(): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  try {
+    const { headers: nextHeaders, cookies } = await import("next/headers");
+    const h = await nextHeaders();
+    const email = (h.get("x-user-email") || "").trim().toLowerCase();
+    if (email.includes("@")) out["X-User-Email"] = email.slice(0, 320);
+    const auth = h.get("authorization");
+    const cookieToken = (await cookies()).get("zo_token")?.value;
+    if (auth) out.Authorization = auth;
+    else if (cookieToken) out.Authorization = `Bearer ${cookieToken}`;
+  } catch {
+    /* not in a Next.js request context */
+  }
+  return out;
+}
+
+/** Plain fetch to FastAPI, plus the forwarded user token. Same timeouts as fetch. */
+export async function authedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  for (const [key, value] of Object.entries(await forwardedHeaders())) {
+    if (!headers.has(key)) headers.set(key, value);
+  }
+  return fetch(input, { ...init, headers });
+}
+
 export async function longRunningFetch(
   input: string | URL,
   init?: LongRunningFetchInit
@@ -50,21 +82,8 @@ export async function longRunningFetch(
       ? AbortSignal.timeout(timeoutMs)
       : undefined);
 
-  // Forward browser X-User-Email (set by client) → FastAPI for spend attribution.
-  let emailHeaders: Record<string, string> = {};
-  try {
-    const { headers: nextHeaders } = await import("next/headers");
-    const h = await nextHeaders();
-    const email = (h.get("x-user-email") || "").trim().toLowerCase();
-    if (email.includes("@")) {
-      emailHeaders = { "X-User-Email": email.slice(0, 320) };
-    }
-  } catch {
-    /* not in a Next.js request context */
-  }
-
   const mergedHeaders = {
-    ...emailHeaders,
+    ...(await forwardedHeaders()),
     ...(initHeaders
       ? Object.fromEntries(new Headers(initHeaders).entries())
       : {}),

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -17,7 +18,7 @@ export async function POST(
   const email = (request.headers.get("x-user-email") || "").trim().toLowerCase();
 
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/analyze`, {
+    const response = await authedFetch(`${BACKEND_URL}/api/v1/rfps/${id}/analyze`, {
       method: "POST",
       headers: {
         Accept: "application/json",

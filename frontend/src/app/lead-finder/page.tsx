@@ -1,4 +1,5 @@
 import { backendJson } from "@/lib/backend-api";
+import { SessionRenew } from "@/components/SessionRenew";
 import {
   LeadFinderClient,
   type LeadsPayload,
@@ -12,7 +13,8 @@ export const metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function LeadFinderPage() {
-  const { data, error } = await backendJson<LeadsPayload>("/leads");
+  const { data, error, status } = await backendJson<LeadsPayload>("/leads");
+  if (status === 401) return <SessionRenew />;
   if (!data) {
     return (
       <div className="mx-auto max-w-5xl p-8">

@@ -16,6 +16,7 @@ import {
   trackClick,
 } from "@/lib/zo-analytics";
 import "./QuickBooksLedger.css";
+import { clearSession } from "@/lib/auth-session";
 
 export function FinancialShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -55,8 +56,7 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
   );
 
   const handleLogout = () => {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_user");
+    clearSession();
     router.push("/login");
   };
 

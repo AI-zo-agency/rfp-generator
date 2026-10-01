@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authedFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
@@ -10,7 +11,7 @@ export async function GET(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(
+    const res = await authedFetch(
       `${BACKEND_URL}/api/v1/proposals/${encodeURIComponent(id)}/key-personas`,
       {
         headers: { Accept: "application/json" },
@@ -36,7 +37,7 @@ export async function POST(
     const body = await request.json();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
-    const res = await fetch(
+    const res = await authedFetch(
       `${BACKEND_URL}/api/v1/proposals/${encodeURIComponent(id)}/key-personas`,
       {
         method: "POST",

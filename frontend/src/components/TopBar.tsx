@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { IconSwitch } from "./ui/icons";
+import { clearSession } from "@/lib/auth-session";
 
 interface TopBarProps {
   collapsed: boolean;
@@ -13,8 +14,7 @@ export function TopBar({ collapsed, onToggleSidebar }: TopBarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_user");
+    clearSession();
     router.push("/login");
   };
 

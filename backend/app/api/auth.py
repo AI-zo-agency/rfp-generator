@@ -62,6 +62,29 @@ async def signup(req: AuthRequest, supabase: Client = Depends(get_supabase_clien
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.options("/refresh")
+async def refresh_options():
+    return {}
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+def _session_payload(res) -> dict:
+    return {
+        "session": {
+            "access_token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
+            "expires_at": res.session.expires_at,
+        },
+        "user": {
+            "id": res.user.id,
+            "email": res.user.email,
+        },
+    }
+
+
 @router.post("/login")
 async def login(req: AuthRequest, supabase: Client = Depends(get_supabase_client)):
     try:
@@ -72,17 +95,17 @@ async def login(req: AuthRequest, supabase: Client = Depends(get_supabase_client
                 "password": req.password,
             },
         )
-        return {
-            "session": {
-                "access_token": res.session.access_token,
-                "refresh_token": res.session.refresh_token,
-                "expires_at": res.session.expires_at,
-            },
-            "user": {
-                "id": res.user.id,
-                "email": res.user.email,
-            },
-        }
+        return _session_payload(res)
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+
+@router.post("/refresh")
+async def refresh(req: RefreshRequest, supabase: Client = Depends(get_supabase_client)):
+    """Trade a refresh token for a new access token; access tokens last about an hour."""
+    try:
+        res = await asyncio.to_thread(supabase.auth.refresh_session, req.refresh_token)
+        return _session_payload(res)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Session expired, sign in again")
 
