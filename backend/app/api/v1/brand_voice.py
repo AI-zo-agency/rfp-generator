@@ -5,15 +5,31 @@ The platform is used only by admins, so any signed-in user may add and activate 
 
 from __future__ import annotations
 
+import logging
+from typing import Callable, TypeVar
+
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services import brand_voice_revisions as bvr
 from app.services.user_activity import emit_activity
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/brand-voice", tags=["brand-voice"])
+T = TypeVar("T")
 
 _NO_STORE = "Revisions need Supabase, and this environment has none configured."
+
+
+def _storage(fn: Callable[[], T]) -> T:
+    """Run a storage call; a database failure becomes a clear 503 instead of a plain-text 500."""
+    try:
+        return fn()
+    except (HTTPException, bvr.RevisionError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brand voice revision storage failed: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="Revision storage is unavailable. Try again.")
 
 
 def _email(request: Request) -> str:
@@ -39,13 +55,13 @@ def list_revisions() -> dict:
     return {
         "activeId": active.id,
         "enabled": bvr.enabled(),
-        "revisions": [_summary(r, active.id) for r in bvr.list_revisions()],
+        "revisions": [_summary(r, active.id) for r in _storage(bvr.list_revisions)],
     }
 
 
 @router.get("/revisions/{revision_id}")
 def get_revision(revision_id: str) -> dict:
-    rev = bvr.get_revision(revision_id)
+    rev = _storage(lambda: bvr.get_revision(revision_id))
     if rev is None:
         raise HTTPException(status_code=404, detail="Revision not found.")
     return {**_summary(rev, bvr.active_revision().id), "body": rev.body}
@@ -60,14 +76,16 @@ async def add_revision(
 ) -> dict:
     if not bvr.enabled():
         raise HTTPException(status_code=503, detail=_NO_STORE)
-    raw = await file.read()
+    raw = await file.read(bvr.MAX_BODY_BYTES + 1)  # never hold more than the cap
+    if len(raw) > bvr.MAX_BODY_BYTES:
+        raise HTTPException(status_code=422, detail="The file is larger than 200 KB.")
     try:
         body = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise HTTPException(status_code=422, detail="The file must be UTF-8 text (.md).")
     actor = _email(request) or "unknown"
     try:
-        rev = bvr.add_revision(label=label, body=body, created_by=actor, notes=notes)
+        rev = _storage(lambda: bvr.add_revision(label=label, body=body, created_by=actor, notes=notes))
     except bvr.DuplicateRevision as exc:
         raise HTTPException(status_code=409, detail={"message": str(exc), "existingId": exc.existing_id})
     except bvr.RevisionError as exc:
@@ -96,7 +114,7 @@ def set_active(request: Request, body: SetActiveBody) -> dict:
         raise HTTPException(status_code=503, detail=_NO_STORE)
     actor = _email(request) or "unknown"
     try:
-        rev = bvr.set_active(body.revision_id, updated_by=actor)
+        rev = _storage(lambda: bvr.set_active(body.revision_id, updated_by=actor))
     except bvr.RevisionError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     emit_activity(

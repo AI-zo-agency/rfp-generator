@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -105,3 +107,49 @@ def test_without_supabase_edits_answer_503(monkeypatch):
     assert client.put("/api/v1/brand-voice/active", headers=AUTH, json={"revisionId": "x"}).status_code == 503
     body = client.get("/api/v1/brand-voice/revisions", headers=AUTH).json()
     assert body["enabled"] is False and body["revisions"][0]["id"] == "builtin"
+
+
+def test_a_non_uuid_id_is_404_on_every_route(monkeypatch):
+    async def fake_get(rfp_id):
+        return SimpleNamespace(voice_rev_id=None)
+
+    monkeypatch.setattr("app.services.proposal_repository.aget_proposal_draft", fake_get)
+    assert client.get("/api/v1/brand-voice/revisions/not-a-uuid", headers=AUTH).status_code == 404
+    assert client.put("/api/v1/brand-voice/active", headers=AUTH, json={"revisionId": "not-a-uuid"}).status_code == 404
+    r = client.put("/api/v1/rfps/r1/proposal/voice-rev", headers=AUTH, json={"revisionId": "not-a-uuid"})
+    assert r.status_code == 404
+
+
+def _break_storage(monkeypatch):
+    broken = FakeDb()
+    broken.fail = RuntimeError("connection reset")
+    monkeypatch.setattr(bvr, "_db", lambda: broken)
+    bvr._reset_caches()  # revisions are cached by id; a cold process is what meets the outage
+
+
+def test_a_storage_failure_is_a_503_with_a_clear_message(monkeypatch):
+    rid = _upload().json()["id"]
+    _break_storage(monkeypatch)
+    expected = "Revision storage is unavailable. Try again."
+    for r in (
+        client.get("/api/v1/brand-voice/revisions", headers=AUTH),
+        client.get(f"/api/v1/brand-voice/revisions/{rid}", headers=AUTH),
+        _upload(body=MD + "\nMore.\n"),
+        client.put("/api/v1/brand-voice/active", headers=AUTH, json={"revisionId": rid}),
+    ):
+        assert r.status_code == 503 and r.json()["detail"] == expected
+
+
+def test_an_oversized_upload_is_422():
+    r = _upload(body=MD + "x" * 200_001)
+    assert r.status_code == 422 and "200 KB" in r.json()["detail"]
+
+
+def test_notes_over_500_characters_are_422():
+    r = client.post(
+        "/api/v1/brand-voice/revisions",
+        headers=AUTH,
+        files={"file": ("r.md", MD.encode("utf-8"), "text/markdown")},
+        data={"label": "rev 8", "notes": "n" * 501},
+    )
+    assert r.status_code == 422
