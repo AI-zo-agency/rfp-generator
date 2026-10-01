@@ -44,7 +44,7 @@ _WRITING_EVIDENCE_PATTERNS = (
 _BUCKET_HINTS: dict[str, tuple[str, ...]] = {
     "won_patterns": ("06_won", "won proposal", "winning proposal"),
     "methodology": ("methodology", "delivery process", "project approach", "phases"),
-    "pricing": ("00_guide_pricing", "07_fin", "rate card", "pricing guide", "hourly rate"),
+    "pricing": ("pricing book", "rules and wording", "00_guide_pricing", "07_fin", "rate card", "pricing guide", "hourly rate"),
     "playbooks": ("playbook", "risk playbook", "qa playbook", "communication", "training playbook"),
     "standards": ("qa standard", "accessibility", "wcag", "security process", "iso"),
 }

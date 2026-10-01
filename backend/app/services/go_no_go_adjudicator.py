@@ -220,8 +220,8 @@ def _normalize(text: str) -> str:
 # against 00_Guide_Pricing.docx purely because the guide's text mentioned those
 # words. Pricing sheets are not delivery evidence, whatever they contain.
 _NON_CAPABILITY_SOURCE_RE = re.compile(
-    r"(?i)(?:^|[^a-z0-9])(?:00_guide_pricing|05_pricing|pricing[_\s-]*guide|"
-    r"rate[_\s-]*card|price[_\s-]*(?:list|sheet))"
+    r"(?i)(?:^|[^a-z0-9])(?:00_guide_pricing|05_pricing|pricing[_\s-]*(?:guide|book|internal)|"
+    r"rules[_\s-]*and[_\s-]*wording|rate[_\s-]*card|price[_\s-]*(?:list|sheet))"
 )
 
 

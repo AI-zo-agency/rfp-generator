@@ -9,13 +9,11 @@ from app.models.rfp import RfpRecord
 from app.services.proposal_budget_content import budget_section_score
 
 BUDGET_EXPLAIN_ADVISORY_RULES = """=== BUDGET EXPLAIN MODE (mandatory when user asks totals / why / validity) ===
-- Ground every rate and line-item claim in the 00_Guide_Pricing (KB) excerpts provided — cite menu ids (e.g. 4.4, 9.1) when discussing a line.
-- Use the CANONICAL BUDGET OBJECT and pricingFlags as source of truth for totals — never claim "clean" or "handled correctly" if flags or automated checks contradict you.
-- If pricingFlags mention auto-scaled PM, that IS reverse-engineering per playbook — say so plainly; do not claim "no reverse-engineering."
-- Email Newsletter Design & Setup (guide 4.4) is a one-time deliverable unless KB shows an explicit monthly email-management line — never defend qty×12 on setup.
-- PM for full engagements must meet 00_Guide_Pricing dollar floor (~$7,500–$12,000 Average) AND 5–8% band — do not claim PM "passes" when extended is below floor.
-- Separate valid reasoning (model, tier, pass-through, qualifying language) from invalid lines — list both honestly.
-- If KB excerpts are missing, say pricing guide was not retrieved — do not invent guide ranges."""
+- zö agency is value-based. Explain totals from the CANONICAL BUDGET OBJECT and pricingFlags — never claim "clean" or "handled correctly" if flags or automated checks contradict you.
+- Catalog items sell at their Pricing Book price. Custom work is priced by code from the work behind it. Say what the client gets; never state hours, roles, costs, margins or loaded rates — those stay internal.
+- When a rate is asked for, there is one blended rate for every role. Never give rates by role.
+- Separate valid reasoning (engagement type, media pass-through, approved wording) from invalid lines — list both honestly.
+- If the pricing docs were not retrieved, say so — do not invent prices."""
 
 BUDGET_COMPLIANCE_ADVISORY_RULES = """=== BUDGET / COST RFP COMPLIANCE (Check RFP / meet the RFP / gaps) ===
 Hard rules — never conflate separate RFP asks:
@@ -35,10 +33,10 @@ Hard rules — never conflate separate RFP asks:
    is also required — flag that as a high-priority responsiveness gap, same tier
    as a missing cost table format.
 
-4. RATES FROM KB ONLY. Do not invent $/hr. If the draft lacks a required rate
-   schedule, search the packed KB pricing + labor/role billable excerpts (cite
-   source filenames) — never fabricate classifications or dollars, and never use
-   Internal Rate / Raw floor columns for the client schedule.
+4. RATES: zö agency gives one blended rate for every role, never rates by role. A
+   required rate schedule is answered with that blended rate on every line (the
+   negotiated rate where the client has one). Never invent classifications or
+   dollars. A form that asks for hours per task is raised for Sonja, not filled.
 
 5. When HARD FLAGS list a mandatory hourly schedule / assumptions ask, open with
    that gap — do not lead with "fee method is flexible so rates are optional."
@@ -46,49 +44,44 @@ Hard rules — never conflate separate RFP asks:
 
 BUDGET_PLAYBOOK_CANONICAL = """=== ZÖ PRICING PLAYBOOK (mandatory for budget/fee work) ===
 
-1. Pricing model first — before line items
-   - No fee method / innovation invited (e.g. SRIA) → service-menu from Pricing Guide, not default hourly.
-   - RFP asks hourly / rate schedule by classification → billable $/hr from KB
-     labor/role rate excerpts (and 00_Guide_Pricing labor rows when present).
-     Never invent named ZO person $/hr; never use Internal/Raw floor columns.
-   - Media placement → pass-through immediately, not agency revenue.
-   - Phased RFP → phase subtotals (discovery → strategy → execution), not a flat annual menu only.
+1. Value-based
+   - Show a price for each item or phase, then the total. Descriptions say what the client gets.
+   - Hours, roles, costs, margins and loaded rates never appear in client text.
 
-2. Pick Low / Average / High deliberately (guide criteria)
-   - Low: cost ≥25% of score, tight budget, commoditized scope, crowded field.
-   - Average: default municipal RFP, moderate budget, good sector match.
-   - High: creativity/expertise weighted, large/complex client, premium positioning.
-   - State tier + one-sentence rationale before building the table.
+2. Prices come from the pricing docs
+   - Catalog items sell at their Pricing Book price. Custom work is built from the work (hours by
+     role, POs, hard costs) and priced by code between the floor and the target.
+   - Never invent a price or a rate.
 
-3. One-time vs recurring — before quantity × rate
-   - Design & Setup, Development, Package → usually one-time (qty 1).
-   - Monthly Management / Monthly Content Package → recurring; use the guide's monthly line.
-   - Never multiply a one-time guide line by 12 to fake recurring — flag missing guide coverage instead.
+3. Under the budget
+   - When the RFP prints a budget, come in under it (about 90%), never below the floor.
+   - If the floor is above the budget, the scope does not fit the money: report it and name the cuts.
 
-4. Agency revenue vs client pass-through
-   - Client media/ad budget is client money at net; commission (e.g. 85/15) is agency revenue.
-   - Keep pass-through separate so agency fee subtotal is not inflated by media that was never zö's fee.
+4. Rates
+   - When asked, one blended rate for every role; never rates by role.
+   - A client with a negotiated rate (City of Bend) gets that rate.
 
-5. Project management sanity check
-   - PM target 5–8% of total project investment; floor ~$7,500–$12,000 for real engagements.
-   - If PM is squeezed to hit a total, the total/scope/tier is wrong — do not quietly cut PM to fit.
+5. Agency revenue vs client pass-through
+   - Traditional media is client money: the outlet gets 85%, zö bills the 15% commission.
+   - Digital media is a monthly management fee; ad spend runs on the client's card.
+   - Keep pass-through separate so the agency fee is not inflated by media that was never zö's fee.
 
-6. Never reverse-engineer a line to hit a total
-   - Every line traces independently to a guide range. If sum vs RFP ceiling is off, change tier or scope.
+6. Management is in the price
+   - Project management, account management and Agency Director oversight are never separate lines.
 
-7. Qualifying language on every budget page
-   - Investment framing, scope protection, reimbursables, revision rounds — use pre-approved guide wording.
+7. Approved wording
+   - Billing and terms, outside the price, change orders, travel: use the approved blocks.
+   - Two revision rounds plus a final review.
 
-8. Flag, don't fill, out-of-guide scope
-   - [PRICING FLAG: description — outside approved parameters, Sonja review required]
+8. Flag, don't fill
+   - [PRICING FLAG: description — below the floor or outside the pricing docs, Sonja review required]
 
-9. Stress-test before submission
-   - At/under RFP ceiling; 50% wages / 30% G&A / 20% profit; 15–20% room to scope up after award.
+9. Never reverse-engineer a line to hit a total
 """
 
 OPTION_C_CHAT_POLICY = """=== OPTION C — CHAT / REVISE ENFORCEMENT ===
-- REFUSE: invented dollar amounts with no guide/KB source; reverse-engineered line rates to hit a user-requested total; $0 agency revenue when commission/fees apply; one-time setup lines priced as ×12 months without a monthly guide line.
-- FLAG ONLY: scope genuinely outside 00_Guide_Pricing — use [PRICING FLAG: … — Sonja review required], do not guess.
+- REFUSE: invented dollar amounts with no pricing-doc source; reverse-engineered line prices to hit a user-requested total; $0 agency revenue when commission/fees apply; hours, costs or margins in client text; rates by role.
+- FLAG ONLY: scope genuinely outside the pricing docs — use [PRICING FLAG: … — Sonja review required], do not guess.
 - Otherwise apply safe playbook edits and explain tradeoffs in the assistant reply when you push back.
 """
 
@@ -98,23 +91,17 @@ Obey the user's verbatim ask with the SMALLEST change. Prefer editing one table/
 You MAY:
 - add/rename/reorder columns or rows the user asked for
 - clarify Scope cell wording / layout
-- pull person/role names from KB roster / MasterTemplate / bios when the ask needs names
-  (Name cells: verified person name only, otherwise "—" — NEVER put MANUAL FILL / VERIFY /
-   "Needs your input" / "Confirm before submit" inside a rate-table cell)
 
 You MUST NOT:
-- delete or blank the Hourly Rate Schedule billable $ rows that already exist
-- replace a filled Hourly Rate Schedule with MANUAL FILL / "confirm before submit" prose
-- invent person names (no Jax / fake roster) — unknown → "—"
+- delete or blank rate schedule $ rows that already exist
+- replace a filled rate schedule with MANUAL FILL / "confirm before submit" prose
+- invent person names — unknown → "—"
 - invent new dollar amounts, rates, hourly figures, or line items
 - change any Fee / Amount / Total cell away from the CANONICAL BUDGET OBJECT
-- rewrite Fee Detail by Phase when the user only asked about the Hourly Rate Schedule
-- add Investment Framing Component|Share|Amount mix tables when Fee Detail by Phase exists
+- show hours, roles, costs or margins
 - reverse-engineer fees to hit a target total
-- paraphrase Investment Framing, Scope Protection, Reimbursable Expenses, or Revision Rounds
-  — those four blocks are Pricing Guide USE VERBATIM (post-process restores them)
+- paraphrase the approved wording blocks (billing and terms, outside the price, change orders)
 
-Prefer ONE fee breakdown: **Fee Detail by Phase** from the ledger.
 Preserve Proposed Investment totals exactly as in the canonical object.
 """
 

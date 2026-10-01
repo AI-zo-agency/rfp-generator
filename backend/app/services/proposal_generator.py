@@ -3000,7 +3000,7 @@ async def run_phase3_5_budget(
     force: bool = False,
     target_budget_usd: float | None | object = _UNSET,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
-    """Phase 3.5: Stage 3 budget from 00_Guide_Pricing, incorporate into manuscript, sync fee narrative.
+    """Phase 3.5: Stage 3 budget from the pricing docs, incorporate into manuscript, sync fee narrative.
 
     ``force=True`` (chat-initiated rebuild) runs Pricing Guide generation even when
     submission authority marked cost/pricing ambiguous — Sonja explicitly asked.

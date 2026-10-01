@@ -103,7 +103,7 @@ def expand_kb_queries(question: str, *, max_queries: int = 4) -> list[str]:
 
     budget_kw = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
     if any(kw in intent for kw in budget_kw):
-        queries.append("zö agency pricing guide rates fees hourly")
+        queries.append("zö agency Pricing Book catalog prices blended rate billing terms")
 
     seen: set[str] = set()
     out: list[str] = []
@@ -230,7 +230,7 @@ def prefer_agency_evidence_filename(name: str) -> float:
         score -= 1.5
     if "00_guide" in n and "pricing" not in n and "writing" not in n:
         score -= 1.5
-    if "00_guide_pricing" in n or "guide_pricing" in n:
+    if "pricing book" in n or "rules and wording" in n or "guide_pricing" in n:
         score += 2.0
     return score
 
@@ -328,8 +328,8 @@ def rank_hits_for_question(
             + _hit_score(hit)
             + (1.5 if _looks_like_kb_filename(label) else -2.0)
         )
-        # Pricing guide is THE authoritative source for any budget/pricing question
-        if ask_about_budget and "guide_pricing" in label.casefold():
+        # The pricing docs are THE authoritative source for any budget/pricing question
+        if ask_about_budget and re.search(r"pricing book|rules and wording|guide_pricing", label.casefold()):
             rank += 20.0
         if supermemory.is_chunk_hit(hit):
             rank += 3.0

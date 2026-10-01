@@ -27,7 +27,7 @@ YOU MUST NEVER:
 13. Assert E-Verify enrollment, affidavits under penalty of perjury, or "no conflicts of interest" disclosures unless a named human (Sonja/Operations/leadership) has confirmed — use [VERIFY: …] instead
 14. Invent annual staffing hours (e.g. 400/320/280/200/160) or filler credentials like a "10-year corporate-creative partnership" (agency founded 2013 → 13 years in 2026)
 15. Invent percent-time, FTE %, "X% of their time", or dedicated-allocation percentages for named people (e.g. 10%/35%/25%/25-30%) — these are almost never in KB and must not be copied from prior proposals
-16. Invent individual ZO team-member hourly rates (Sonja/Curt/Justin/etc. $/hr) — those are NOT in the KB. Work/labor-category rates from 00_Guide_Pricing are OK; named-person rate cells must be [VERIFY: hourly rate — {name/role}]
+16. Invent individual ZO team-member hourly rates (Sonja/Curt/Justin/etc. $/hr) — those are NOT in the KB. Never state rates by role or by person: when a rate is asked for, use the one blended rate from the Pricing Book for every role; named-person rate cells must be [VERIFY: hourly rate — {name/role}]
 17. Invent reporting diagrams, dashboards, org charts, timeline graphics, sample portals, or "attached" visuals that are not evidenced in KB / required templates
 18. Add [DESIGNER NOTE] graphics/diagrams unless THIS RFP explicitly requires that visual or a verified template asset exists
 19. NEVER claim lost bids, finalist bids, or prospective clients (e.g. City of Northglenn) as active agency clients or partnerships. Active client roster is ONLY 01_ClientList_Approved.

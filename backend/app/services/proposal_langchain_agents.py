@@ -883,9 +883,9 @@ async def plan_section_queries_agent(
         # use the normal planner (roster / bios) — do not force Guide-only queries.
         if user_asks_budget_fee_structure_mutation(ask_for_budget):
             guide_queries = [
-                "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
-                "00_Guide_Pricing 9.1 9.2 Project Management 5-8 percent floor Average tier",
-                "00_Guide_Pricing transparent compensation pass-through agency fees qualifying language",
+                "zö agency Pricing Book catalog prices blended rate billing terms",
+                "zö agency Pricing Book management included in the price",
+                "zö agency Rules and Wording approved wording outside the price change orders",
             ]
             used = {q.strip().lower() for q in prior_queries}
             return [q for q in guide_queries if q.lower() not in used][:4]

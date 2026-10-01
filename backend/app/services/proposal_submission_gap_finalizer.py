@@ -51,8 +51,8 @@ _GAP_EVIDENCE_QUERIES: dict[str, list[str]] = {
         "zö agency HR employee demographics total employees",
     ],
     "budget": [
-        "00_Guide_Pricing project management account management fee percentage agency",
-        "00_Guide_Pricing labor category hourly rate card Low Average High",
+        "zö agency Pricing Book management included in the price",
+        "zö agency Pricing Book blended rate billing terms",
     ],
     "psa_acknowledgment": [
         "zö agency insurance workers compensation compliance contract acknowledgments",
@@ -66,7 +66,7 @@ _GAP_EVIDENCE_QUERIES: dict[str, list[str]] = {
         "zö agency 02 master 06_WON 07_FIN team certifications",
     ],
     "budget_revenue": [
-        "00_Guide_Pricing commission agency fee revenue line items",
+        "zö agency Pricing Book traditional media commission digital management fee",
         "zö agency 07_FIN budget pricing fee schedule",
     ],
 }

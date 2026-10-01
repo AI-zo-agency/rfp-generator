@@ -56,8 +56,8 @@ NEVER invent dollar amounts, dates, signature IDs, notary numbers, or client fac
 Prefer fixAction=rewrite for critical/major issues. Only use verify when a single
 discrete unknown field is missing — never "fix" a contradiction by sprinkling
 [VERIFY] into every table cell (especially Estimated Hours / fee tables).
-For missing staff hours: rewrite to use labor-category / Guide_Pricing language
-OR omit the hours column and explain the compensation model — do not invent hours.
+For missing staff hours: zö agency never publishes hours. Omit the hours column and
+explain the compensation model (a price per item or phase) — do not invent hours.
 
 Return ONLY JSON:
 {
@@ -212,8 +212,8 @@ async def _rewrite_section_for_contradiction(
         "For schedule overruns: replace the invented multi-week calendar span with a "
         "short dates/milestones line using timing within the RFP award→launch window.\n"
         "For fee/hours contradictions: replace the fabricated hour grid span with "
-        "transparent compensation / pass-through language and Guide_Pricing labor "
-        "categories when present.\n"
+        "transparent compensation / pass-through language (a price per item or "
+        "phase, no hours).\n"
         "These rules govern how you write; they are never content. The [VERIFY: ...] "
         "tag is the only trace of a gap; never explain or preface it.\n"
         + TARGETED_EDIT_CONTRACT

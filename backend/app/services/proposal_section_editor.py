@@ -750,7 +750,7 @@ async def _plan_verification_kb_queries(
         focus.append(excerpt[:400])
     focus.append(
         "Prefer 01_companyfacts / 04_Bio / ClientList for contact phone/email. "
-        "Use 03_CS only for case-study claims. Use 00_Guide_Pricing ONLY if the "
+        "Use 03_CS only for case-study claims. Use the Pricing Book ONLY if the "
         "user ask is about fees/rates/budget."
     )
 
@@ -801,6 +801,8 @@ async def _plan_verification_kb_queries(
         if not allow_guide and "00_guide_pricing" in key.replace(" ", "_"):
             continue
         if not allow_guide and "guide_pricing" in key.replace(" ", ""):
+            continue
+        if not allow_guide and "pricing_book" in key.replace(" ", "_"):
             continue
         seen.add(key)
         merged.append(q)

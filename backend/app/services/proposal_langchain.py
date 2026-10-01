@@ -337,10 +337,10 @@ def build_proposal_tools(
         return text[:8000]
 
     async def search_pricing_guide(topic: str = "") -> str:
-        """Search ONLY 00_Guide_Pricing (Low/Average/High tiers, menu rates, PM floor).
+        """Search ONLY the zö pricing docs (Pricing Book catalog prices, billing terms, Rules and Wording).
 
-        Pass pricing vocabulary only (tiers, rates, PM floor). NEVER pass the RFP
-        client name or RFP title — the guide has no client-specific prices.
+        Pass pricing vocabulary only (catalog items, rates, billing terms). NEVER pass the RFP
+        client name or RFP title — the pricing docs have no client-specific prices.
         Do NOT call for narrative strategy / partnership / voice restores.
         """
         raw_topic = (topic or "").strip()
@@ -348,10 +348,10 @@ def build_proposal_tools(
             return (
                 "(search_pricing_guide skipped — topic is not a fee/rate/tier ask. "
                 "For narrative restores use search_rfp_requirements or search_knowledge_base; "
-                "do not pull 00_Guide_Pricing.)"
+                "do not pull the pricing docs.)"
             )
         hint = proposal_knowledge_base_tools.sanitize_pricing_guide_query(
-            raw_topic or "tier ranges Low Average High discovery strategy fees",
+            raw_topic or "catalog prices blended rate billing terms media management fees",
             rfp_client=client,
             rfp_title=title,
         )
@@ -375,7 +375,7 @@ def build_proposal_tools(
             rfp_sector=sector,
             rfp_title=title,
         )
-        return text2 or "(No 00_Guide_Pricing content found.)"
+        return text2 or "(No pricing docs content found.)"
 
     tools = [
         StructuredTool.from_function(
@@ -423,9 +423,9 @@ def build_proposal_tools(
                 coroutine=search_pricing_guide,
                 name="search_pricing_guide",
                 description=(
-                    "Search 00_Guide_Pricing only — Low/Average/High tiers and approved "
-                    "rate menu. ONLY for Budget/Cost/fee asks. Args: pricing terms ONLY "
-                    "(e.g. 'Average tier PM floor discovery'). NEVER for narrative "
+                    "Search the zö pricing docs only — Pricing Book catalog prices, billing "
+                    "terms and approved wording. ONLY for Budget/Cost/fee asks. Args: pricing "
+                    "terms ONLY (e.g. 'SEO monthly price', 'billing terms'). NEVER for narrative "
                     "strategy/partnership/voice restores. NEVER include RFP client name."
                 ),
             )
@@ -434,11 +434,15 @@ def build_proposal_tools(
 
 
 def _pricing_guide_topic_is_about_fees(topic: str) -> bool:
-    """Reject narrative topics that agents mis-route into 00_Guide_Pricing."""
+    """Reject narrative topics that agents mis-route into the pricing docs."""
     raw = (topic or "").casefold()
     if not raw.strip():
         return True
     fee_tokens = (
+        "catalog",
+        "blended",
+        "billing terms",
+        "pricing book",
         "tier",
         "rate",
         "rates",

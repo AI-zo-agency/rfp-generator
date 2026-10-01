@@ -82,7 +82,7 @@ async def _plan_queries_for_section(
         "confirm or refute the FACTUAL claims in it (people, tools delivered, "
         "certs, clients, metrics, insurance, contacts).\n"
         "Rules:\n"
-        "- Max 4 queries. Prefer 01_companyfacts / 03_CS / 04_Bio / Guide_Pricing "
+        "- Max 4 queries. Prefer 01_companyfacts / 03_CS / 04_Bio / Pricing Book "
         "style phrasing as zö materials are written.\n"
         "- Do NOT invent client- or person-specific anchors that are not already "
         "named in the section.\n"
