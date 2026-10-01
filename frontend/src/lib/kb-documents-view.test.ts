@@ -33,6 +33,22 @@ describe("kb-documents-view", () => {
     expect(groups[0]?.documents).toHaveLength(2);
   });
 
+  it("shows the internal pricing doc inside the Pricing group, not as its own category", () => {
+    const documents = [
+      doc({ id: "1", category: "pricing_internal", categoryTitle: "Pricing (internal)", uploadedAt: "2026-10-02T00:00:00Z" }),
+      doc({ id: "2", category: "pricing", categoryTitle: "Pricing" }),
+      doc({ id: "3", category: "reference", categoryTitle: "Reference / Guides" }),
+    ];
+
+    const groups = groupDocumentsByCategory(documents);
+    expect(groups.map((group) => group.category)).toEqual(["pricing", "reference"]);
+    expect(groups[0]?.categoryTitle).toBe("Pricing");
+    expect(groups[0]?.documents.map((d) => d.id)).toEqual(["1", "2"]);
+    expect(categoryCounts(documents).get("pricing")).toBe(2);
+    expect(categoryCounts(documents).has("pricing_internal")).toBe(false);
+    expect(filterDocumentsByCategory(documents, "pricing").map((d) => d.id)).toEqual(["1", "2"]);
+  });
+
   it("filters documents by selected category", () => {
     const documents = [
       doc({ id: "1", category: "pricing" }),
