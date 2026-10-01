@@ -14,7 +14,7 @@ import math
 import re
 from datetime import date
 
-from app.services.pricing_kb import PO_COLUMNS, WORDING, PricingBook
+from app.services.pricing_kb import PO_COLUMNS, PricingBook
 
 ENGAGEMENT_TYPES = (
     "fixed_quote", "monthly_retainer", "time_materials", "time_deliverables", "not_to_exceed", "procurement",

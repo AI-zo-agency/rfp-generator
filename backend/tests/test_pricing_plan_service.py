@@ -136,7 +136,11 @@ class BudgetBuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_internal_notes_and_summary_go_to_flags_not_render(self) -> None:
         budget = await build_budget()
-        self.assertTrue(any("priced with Pricing v2" in f and "gross profit" in f for f in budget.pricing_flags))
+        self.assertTrue(any("priced with Pricing v2" in f for f in budget.pricing_flags))
+        # flags reach every user of the app: never margins, costs or hours
+        flags = " ".join(budget.pricing_flags).lower()
+        for leak in ("gross profit", "margin", "in-house", "all-in", "hours"):
+            self.assertNotIn(leak, flags)
         self.assertNotIn("DO NOT PLACE", svc.render_pricing_plan_budget(budget))
         self.assertIn("INTERNAL — DO NOT PLACE", budget.pricing_plan["internal_summary"])
 

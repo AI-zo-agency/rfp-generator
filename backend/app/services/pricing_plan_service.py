@@ -21,7 +21,6 @@ from app.services.pricing_plan_engine import (
     compute,
     cut_suggestions,
     internal_summary,
-    margins,
     price_plan,
     render,
     term_value,
@@ -329,13 +328,9 @@ def plan_to_line_items(plan: dict, book: PricingBook) -> list[BudgetLineItem]:
 def _budget_from_plan(rfp_id: str, asks: dict, plan: dict, flags: list[str], book: PricingBook) -> ProposalBudget:
     own = [x for x in asks.get("ceilings", []) if not x.get("shared_pool")]
     flags = [*flags, *(f"[PRICING NOTE — {n.get('owner', '')}: {n.get('issue', '')}]" for n in plan.get("internal_notes", []))]
-    c = compute(plan, book)
-    total = margins(c)["total"]
-    if total["margin"] is not None:
-        flags.append(
-            f"[PRICING NOTE — priced with Pricing {book.version}: {usd(term_value(c))} over the term, "
-            f"{total['margin']:.1%} gross profit, {total['hours']:,.0f} in-house hours]"
-        )
+    # Flags are shown to everyone who opens the proposal: no margins, costs or hours here.
+    # Those stay in plan["internal_summary"].
+    flags.append(f"[PRICING NOTE — priced with Pricing {book.version}: {usd(term_value(compute(plan, book)))} over the term]")
     return ProposalBudget(
         rfp_id=rfp_id,
         updated_at=datetime.now(timezone.utc).isoformat(),
