@@ -36,3 +36,64 @@ def test_won_unmatched_kept_when_no_customer():
     result = match_won_deals(deals, companies={}, invoices=[], as_of=date(2026, 10, 5))
     assert 2 in {d["hs_id"] for d in result.unmatched}
     assert result.matched_ids == set()
+
+
+def test_won_below_80_percent_stays_unmatched():
+    deals = [{
+        "hs_id": 3,
+        "amount": 10000,
+        "closedate": date(2026, 8, 1),
+        "hs_is_closed_won": True,
+        "company_hs_id": 7,
+        "dealname": "Acme",
+    }]
+    companies = {7: {"name": "Acme Corp"}}
+    invoices = [{
+        "customer_name": "Acme Corp",
+        "txn_date": "2026-08-10",
+        "total_amt": 7000,
+        "is_deleted": False,
+    }]
+    result = match_won_deals(deals, companies=companies, invoices=invoices, as_of=date(2026, 10, 5))
+    assert result.matched_ids == set()
+    assert 3 in {d["hs_id"] for d in result.unmatched}
+
+
+def test_invoice_before_close_window_ignored():
+    deals = [{
+        "hs_id": 4,
+        "amount": 10000,
+        "closedate": date(2026, 8, 1),
+        "hs_is_closed_won": True,
+        "company_hs_id": 7,
+        "dealname": "Acme",
+    }]
+    companies = {7: {"name": "Acme Corp"}}
+    invoices = [{
+        "customer_name": "Acme Corp",
+        "txn_date": "2026-01-01",
+        "total_amt": 10000,
+        "is_deleted": False,
+    }]
+    result = match_won_deals(deals, companies=companies, invoices=invoices, as_of=date(2026, 10, 5))
+    assert result.matched_ids == set()
+
+
+def test_deleted_invoice_ignored():
+    deals = [{
+        "hs_id": 5,
+        "amount": 10000,
+        "closedate": date(2026, 8, 1),
+        "hs_is_closed_won": True,
+        "company_hs_id": 7,
+        "dealname": "Acme",
+    }]
+    companies = {7: {"name": "Acme Corp"}}
+    invoices = [{
+        "customer_name": "Acme Corp",
+        "txn_date": "2026-08-10",
+        "total_amt": 10000,
+        "is_deleted": True,
+    }]
+    result = match_won_deals(deals, companies=companies, invoices=invoices, as_of=date(2026, 10, 5))
+    assert result.matched_ids == set()

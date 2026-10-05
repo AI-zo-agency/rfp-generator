@@ -99,13 +99,19 @@ def _month_key(d: date) -> str:
 
 
 def _attribution_month(deal: dict[str, Any], *, as_of: date) -> date | None:
-    """Close month for HubSpot layers; stale open past closes roll into as_of month."""
+    """Close month for HubSpot layers; stale past closes roll into as_of month.
+
+    Applies to still-open deals and to Closed Won still awaiting invoice (matched
+    ids are filtered before this runs). Past-month locking must not erase uninvoiced wins.
+    """
     close = _as_date(deal.get("closedate"))
     if not close:
         return None
     as_of_month = date(as_of.year, as_of.month, 1)
     close_month = date(close.year, close.month, 1)
-    if close_month < as_of_month and not deal.get("hs_is_closed"):
+    if close_month < as_of_month and (
+        not deal.get("hs_is_closed") or deal.get("hs_is_closed_won")
+    ):
         return as_of_month
     return close_month
 

@@ -100,3 +100,100 @@ def test_face_amount_never_enters_unweighted():
         weekly_outflow=0,
     )
     assert sum(w["from_new_billing"] for w in weeks) == pytest.approx(240_000.0)
+
+
+def test_matched_won_excluded_from_monthly_and_cash():
+    as_of = date(2026, 10, 5)
+    won = _deal(
+        hs_id=42,
+        amount=20000,
+        stage_probability=1.0,
+        hs_is_closed=True,
+        hs_is_closed_won=True,
+        closedate=date(2026, 10, 20),
+    )
+    months = F.monthly_points(
+        qb_booked={"2026-10": 0.0},
+        deals=[won],
+        stages={},
+        as_of=as_of,
+        year=2026,
+        matched_won_ids={42},
+    )
+    assert months["2026-10"]["won_awaiting_invoice"] == 0.0
+    weeks = F.cash_weeks(
+        as_of=as_of,
+        cash_on_hand=0,
+        open_ar=[],
+        deals=[won],
+        stages={},
+        collection_curve={"median_days": 0, "cumulative_pct": {"0": 100.0}},
+        weekly_outflow=0,
+        matched_won_ids={42},
+    )
+    assert sum(w["from_new_billing"] for w in weeks) == 0.0
+
+
+def test_zero_amount_and_missing_close_contribute_nothing():
+    as_of = date(2026, 10, 5)
+    deals = [
+        _deal(amount=0, stage_probability=1.0),
+        _deal(hs_id=2, amount=5000, closedate=None, stage_probability=1.0),
+    ]
+    months = F.monthly_points(
+        qb_booked={}, deals=deals, stages={}, as_of=as_of, year=2026
+    )
+    assert F.year_point(months) == 0.0
+    weeks = F.cash_weeks(
+        as_of=as_of,
+        cash_on_hand=100,
+        open_ar=[],
+        deals=deals,
+        stages={},
+        collection_curve={"median_days": 0, "cumulative_pct": {"0": 100.0}},
+        weekly_outflow=0,
+    )
+    # Missing close falls back to as_of → can land in horizon at lag 0
+    assert weeks[0]["closing_balance"] >= 100
+
+
+def test_deal_beyond_13_weeks_excluded_from_cash():
+    as_of = date(2026, 10, 5)
+    deals = [_deal(closedate=date(2027, 3, 1), amount=50000, stage_probability=1.0)]
+    weeks = F.cash_weeks(
+        as_of=as_of,
+        cash_on_hand=0,
+        open_ar=[],
+        deals=deals,
+        stages={},
+        collection_curve={"median_days": 0, "cumulative_pct": {"0": 100.0}},
+        weekly_outflow=0,
+    )
+    assert sum(w["from_new_billing"] for w in weeks) == 0.0
+
+
+def test_probability_above_one_is_clamped():
+    assert F.weighted_contribution(_deal(stage_probability=1.5), stages={}) == 10000.0
+
+
+def test_unmatched_won_with_past_close_rolls_into_as_of_month():
+    as_of = date(2026, 10, 5)
+    won = _deal(
+        hs_id=9,
+        amount=25000,
+        stage_probability=1.0,
+        hs_is_closed=True,
+        hs_is_closed_won=True,
+        closedate=date(2026, 3, 15),
+    )
+    months = F.monthly_points(
+        qb_booked={"2026-03": 100.0, "2026-10": 0.0},
+        deals=[won],
+        stages={},
+        as_of=as_of,
+        year=2026,
+        matched_won_ids=set(),
+    )
+    assert months["2026-03"]["point"] == 100.0  # QB only, no HubSpot rewrite
+    assert months["2026-10"]["won_awaiting_invoice"] == 25000.0
+    assert F.year_point(months) == 100.0 + 25000.0
