@@ -19,6 +19,7 @@ import type { IWorkerTimesheetsResponse, PeriodGranularity } from "../types/iwor
 import { AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
+import { ForecastPanels } from "./ForecastPanels";
 import { expoOutEase } from "@/lib/motion";
 import { TeamworkPanels } from "./TeamworkPanels";
 import { ClientMapPanels } from "./ClientMapPanels";
@@ -45,7 +46,7 @@ function persistFinancialNav(patch: {
 }
 
 export function FinancialInsightsClient({
-  initialTab = "quickbooks",
+  initialTab = "forecast",
   initialAgencyView = "jobs",
   initialView = "position",
 }: {
@@ -282,6 +283,16 @@ export function FinancialInsightsClient({
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
+            {activeTab === "forecast" ? (
+              <TabFade
+                active
+                className="min-h-0 flex-1 overflow-clip"
+                id="financial-panel-forecast"
+              >
+                <ForecastPanels />
+              </TabFade>
+            ) : null}
+
             {activeTab === "agency" ? (
               <TabFade
                 active

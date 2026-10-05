@@ -45,7 +45,6 @@ const VIEWS = [
   { id: "revenue", label: "Revenue" },
   { id: "clients", label: "Clients" },
   { id: "costs", label: "Costs" },
-  { id: "forecast", label: "Forecast" },
 ] as const;
 
 /* ── chart chrome ──────────────────────────────────────────────────────── */
@@ -406,7 +405,7 @@ const CONFIDENCE_WORDS: Record<string, string> = {
  * earns the right to be the single number, and their disagreement is the most
  * honest confidence signal available.
  */
-function ForecastView({ data }: { data: QuickBooksOverview }) {
+export function ForecastView({ data }: { data: QuickBooksOverview }) {
   const f = data.forecast;
   const currentYear = new Date().getFullYear();
   const isPastYear = data.year < currentYear;
@@ -608,10 +607,23 @@ function WeeklyCashForecast({
       </div>
 
       {composition ? (
-        <p className="qb-muted" style={{ marginTop: "0.35rem", fontSize: "0.85rem" }}>
-          Booked {usd(composition.qb_booked)}
-          {" · "}Won awaiting invoice {usd(composition.won_awaiting_invoice)}
-          {" · "}Weighted pipeline {usd(composition.weighted_open)}
+        <div style={{ marginTop: "0.35rem" }}>
+          <p className="qb-muted" style={{ fontSize: "0.85rem" }}>
+            Booked {usd(composition.qb_booked)}
+            {" · "}Won awaiting invoice {usd(composition.won_awaiting_invoice)}
+            {" · "}Weighted pipeline {usd(composition.weighted_open)}
+          </p>
+          <p className="qb-muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
+            Built from <strong>QuickBooks</strong> booked revenue and{" "}
+            <strong>HubSpot</strong> deals (stage-weighted open pipeline + Closed Won
+            not yet invoiced). Orange bars are HubSpot-timed new billing, not a guess
+            from last year.
+          </p>
+        </div>
+      ) : llm ? (
+        <p className="qb-muted" style={{ marginTop: "0.35rem", fontSize: "0.8rem" }}>
+          HubSpot deals are not in this run yet — outlook is QuickBooks history only.
+          Sync HubSpot to add pipeline.
         </p>
       ) : null}
 
@@ -636,7 +648,9 @@ function WeeklyCashForecast({
         }
         hint={
           grain === "weekly"
-            ? "Dark green is money from invoices you have already sent — that is close to certain. Orange is money from work you have not billed yet, so it depends on the months ahead going normally. Bars below the line are money going out."
+            ? composition
+              ? "Dark green is QuickBooks invoices already sent. Orange is HubSpot-weighted deals expected to bill and collect. Bars below the line are money going out."
+              : "Dark green is money from invoices you have already sent — that is close to certain. Orange is money from work you have not billed yet, so it depends on the months ahead going normally. Bars below the line are money going out."
             : "Coral is the model forecast. Teal is what booked. The trail-3 line is the average of the last three closed months."
         }
       >
@@ -1360,11 +1374,6 @@ export function QuickBooksPanels() {
                 )}
               </Panel>
             </div>
-          </TabsContent>
-
-          {/* ── forecast ── */}
-          <TabsContent value="forecast" className="qb-view">
-            <ForecastView data={data} />
           </TabsContent>
             </>
           ) : null}

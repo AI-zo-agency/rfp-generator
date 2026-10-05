@@ -9,6 +9,7 @@ import {
   FolderKanban,
   LayoutDashboard,
   PanelLeft,
+  TrendingUp,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -29,6 +30,12 @@ export interface FinancialNavTab {
 }
 
 export const FINANCIAL_TABS: FinancialNavTab[] = [
+  {
+    id: "forecast",
+    label: "Forecast",
+    hint: "Cash and year outlook from books + pipeline",
+    Icon: TrendingUp,
+  },
   {
     id: "agency",
     label: "Agency",

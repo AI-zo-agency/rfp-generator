@@ -10,12 +10,13 @@ describe("parseFinancialTab", () => {
   it("keeps a known sidebar tab", () => {
     expect(parseFinancialTab("teamwork")).toBe("teamwork");
     expect(parseFinancialTab("agency")).toBe("agency");
+    expect(parseFinancialTab("forecast")).toBe("forecast");
     expect(parseFinancialTab("activity")).toBe("activity");
   });
 
-  it("falls back to quickbooks so unknown or missing values cannot crash the page", () => {
-    expect(parseFinancialTab(null)).toBe("quickbooks");
-    expect(parseFinancialTab("not-a-tab")).toBe("quickbooks");
+  it("falls back to forecast so unknown or missing values cannot crash the page", () => {
+    expect(parseFinancialTab(null)).toBe("forecast");
+    expect(parseFinancialTab("not-a-tab")).toBe("forecast");
   });
 
   it("maps legacy ai tab URLs to iworker", () => {
@@ -51,8 +52,12 @@ describe("applyFinancialNavSearch", () => {
     expect(applyFinancialNavSearch("", { tab: "teamwork" })).toBe("?tab=teamwork");
   });
 
-  it("omits the default QuickBooks tab from the URL", () => {
-    expect(applyFinancialNavSearch("tab=teamwork", { tab: "quickbooks" })).toBe("");
+  it("omits the default Forecast tab from the URL", () => {
+    expect(applyFinancialNavSearch("tab=teamwork", { tab: "forecast" })).toBe("");
+  });
+
+  it("writes QuickBooks when leaving the default Forecast tab", () => {
+    expect(applyFinancialNavSearch("", { tab: "quickbooks" })).toBe("?tab=quickbooks");
   });
 
   it("writes the inner Projects view and clears it when leaving Teamwork", () => {
@@ -60,7 +65,7 @@ describe("applyFinancialNavSearch", () => {
       "?tab=teamwork&view=projects",
     );
     expect(
-      applyFinancialNavSearch("tab=teamwork&view=projects", { tab: "quickbooks" }),
+      applyFinancialNavSearch("tab=teamwork&view=projects", { tab: "forecast" }),
     ).toBe("");
   });
 

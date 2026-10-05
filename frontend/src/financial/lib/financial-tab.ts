@@ -1,4 +1,5 @@
 export const FINANCIAL_TAB_IDS = [
+  "forecast",
   "agency",
   "quickbooks",
   "teamwork",
@@ -23,7 +24,7 @@ export type TeamworkViewId = (typeof TEAMWORK_VIEW_IDS)[number];
 
 export function parseFinancialTab(raw: string | null | undefined): FinancialTabId {
   if (raw === "ai") return "iworker";
-  return FINANCIAL_TAB_IDS.includes(raw as FinancialTabId) ? (raw as FinancialTabId) : "quickbooks";
+  return FINANCIAL_TAB_IDS.includes(raw as FinancialTabId) ? (raw as FinancialTabId) : "forecast";
 }
 
 export function parseAgencyView(raw: string | null | undefined): AgencyViewId {
@@ -40,7 +41,7 @@ export function applyFinancialNavSearch(
 ): string {
   const params = new URLSearchParams(currentSearch.replace(/^\?/, ""));
   if (patch.tab !== undefined) {
-    if (patch.tab === "quickbooks") params.delete("tab");
+    if (patch.tab === "forecast") params.delete("tab");
     else params.set("tab", patch.tab);
     const currentView = params.get("view");
     if (
