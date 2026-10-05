@@ -989,10 +989,22 @@ def get_sources_status():
             {
                 "name": "HubSpot CRM",
                 "type": "Sales / Deals",
-                "status": "Pending Integration (Phase 1/2)",
-                "active_data": False,
-                "details": "Not connected yet. Dummy data disabled.",
-                "last_sync": "N/A"
+                "status": (
+                    "Connected"
+                    if _hubspot_deals_active()
+                    else ("Configured (contacts)" if settings.hubspot_api_key.strip() else "Pending Integration (Phase 1/2)")
+                ),
+                "active_data": _hubspot_deals_active() or bool(settings.hubspot_api_key.strip()),
+                "details": (
+                    "Deals + contacts mirrored for Lead Finder and hybrid forecast."
+                    if _hubspot_deals_active()
+                    else (
+                        "Contacts/companies mirrored; run HubSpot sync after deals migration for forecast."
+                        if settings.hubspot_api_key.strip()
+                        else "Not connected yet. Set HUBSPOT_API_KEY on the backend."
+                    )
+                ),
+                "last_sync": "Every 15 min + nightly" if settings.hubspot_api_key.strip() else "N/A",
             },
             {
                 "name": "Teamwork.com",
@@ -1008,6 +1020,28 @@ def get_sources_status():
             },
         ]
     }
+
+
+def _hubspot_deals_active() -> bool:
+    """True when the deals mirror has at least one row."""
+    if not settings.hubspot_api_key.strip():
+        return False
+    try:
+        from app.services.supabase_db import _get_client
+
+        rows = (
+            _get_client()
+            .table("hs_deals")
+            .select("hs_id")
+            .eq("archived", False)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return bool(rows)
+    except Exception:  # noqa: BLE001 — sources page must not 500
+        return False
 
 
 @router.get("/teamwork/status")

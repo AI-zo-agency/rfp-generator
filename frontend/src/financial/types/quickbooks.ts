@@ -219,6 +219,14 @@ export interface QuickBooksOverview {
         remaining_months: number | null;
         confidence: "low" | "medium" | "high" | null;
       } | null;
+      /** HubSpot + QB hybrid year composition (omitted on pure LLM forecasts). */
+      composition?: {
+        qb_booked: number;
+        won_awaiting_invoice: number;
+        weighted_open: number;
+      } | null;
+      unmatched_won?: { hs_id: number; dealname: string | null; amount: number }[] | null;
+      source?: string | null;
       /**
        * The same forecast in plain English, written by the prose model rather
        * than the forecasting one. This is what the tab shows; `assumptions` and

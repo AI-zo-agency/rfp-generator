@@ -507,6 +507,7 @@ function WeeklyCashForecast({
   const plain = llm?.plain ?? null;
   const pyYear = f?.year ?? null;
   const monthly = f?.monthly ?? null;
+  const composition = llm?.composition ?? null;
 
   const weeks = useMemo(
     () =>
@@ -605,6 +606,14 @@ function WeeklyCashForecast({
           />
         ) : null}
       </div>
+
+      {composition ? (
+        <p className="qb-muted" style={{ marginTop: "0.35rem", fontSize: "0.85rem" }}>
+          Booked {usd(composition.qb_booked)}
+          {" · "}Won awaiting invoice {usd(composition.won_awaiting_invoice)}
+          {" · "}Weighted pipeline {usd(composition.weighted_open)}
+        </p>
+      ) : null}
 
       <Panel
         title={
