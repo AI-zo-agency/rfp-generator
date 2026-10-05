@@ -47,10 +47,16 @@ COMPANY_PROPS = [
     "numberofemployees", "hs_lastmodifieddate",
     "type", "relationship_type", "status",  # see company_exclusion
 ]
+DEAL_PROPS = [
+    "dealname", "amount", "dealstage", "pipeline", "closedate",
+    "hs_is_closed", "hs_is_closed_won", "hs_is_closed_lost",
+    "hs_deal_stage_probability", "hubspot_owner_id", "hs_lastmodifieddate",
+]
 # object type -> (properties, modified-date property used for incremental search)
 OBJECTS: dict[str, tuple[list[str], str]] = {
     "companies": (COMPANY_PROPS, "hs_lastmodifieddate"),
     "contacts": (CONTACT_PROPS, "lastmodifieddate"),
+    "deals": (DEAL_PROPS, "hs_lastmodifieddate"),
 }
 
 US_STATES = {
@@ -110,6 +116,8 @@ def _next_after(page: dict[str, Any]) -> str | None:
 def iter_all(http: httpx.Client, object_type: str) -> Iterator[dict[str, Any]]:
     props, _ = OBJECTS[object_type]
     params: dict[str, Any] = {"limit": 100, "properties": ",".join(props), "archived": "false"}
+    if object_type == "deals":
+        params["associations"] = "companies"
     while True:
         page = _call(http, "GET", f"/crm/v3/objects/{object_type}", params=params)
         yield from page.get("results") or []
@@ -132,6 +140,8 @@ def search_since(http: httpx.Client, object_type: str, since: datetime) -> list[
         "properties": props,
         "limit": 200,
     }
+    # Search API does not return associations; deal company ids are filled on full sync
+    # or left null until the next full nightly. Incremental still gets amounts/stages.
     rows: list[dict[str, Any]] = []
     while True:
         page = _call(http, "POST", f"/crm/v3/objects/{object_type}/search", json=body)
@@ -180,9 +190,31 @@ def _int(value: Any) -> int | None:
         return None
 
 
+def _float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _hs_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("true", "1", "yes")
+
+
 def _text(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _associated_company_id(obj: dict[str, Any]) -> int | None:
+    associations = obj.get("associations") or {}
+    companies = associations.get("companies") or {}
+    results = companies.get("results") or []
+    if not results:
+        return None
+    return _int(results[0].get("id"))
 
 
 def normalize_state(value: Any) -> str | None:
@@ -231,6 +263,47 @@ def company_row(obj: dict[str, Any], labels: dict[str, str], synced_at: str) -> 
     }
 
 
+def deal_row(obj: dict[str, Any], owners: dict[str, str], synced_at: str) -> dict[str, Any]:
+    p = obj.get("properties") or {}
+    return {
+        "hs_id": int(obj["id"]),
+        "dealname": _text(p.get("dealname")),
+        "amount": _float(p.get("amount")),
+        "dealstage": _text(p.get("dealstage")),
+        "pipeline": _text(p.get("pipeline")),
+        "closedate": _text(p.get("closedate")),
+        "hs_is_closed": _hs_bool(p.get("hs_is_closed")),
+        "hs_is_closed_won": _hs_bool(p.get("hs_is_closed_won")),
+        "hs_is_closed_lost": _hs_bool(p.get("hs_is_closed_lost")),
+        "stage_probability": _float(p.get("hs_deal_stage_probability")),
+        "company_hs_id": _associated_company_id(obj),
+        "owner_name": owners.get(str(p.get("hubspot_owner_id") or "")) or None,
+        "properties": p,
+        "hs_updated_at": obj.get("updatedAt") or p.get("hs_lastmodifieddate"),
+        "archived": bool(obj.get("archived")),
+        "synced_at": synced_at,
+    }
+
+
+def stage_rows(pipeline: dict[str, Any], synced_at: str) -> list[dict[str, Any]]:
+    pipe_id = str(pipeline.get("id") or "")
+    pipe_label = _text(pipeline.get("label"))
+    rows: list[dict[str, Any]] = []
+    for stage in pipeline.get("stages") or []:
+        meta = stage.get("metadata") or {}
+        rows.append({
+            "pipeline_id": pipe_id,
+            "stage_id": str(stage.get("id") or ""),
+            "pipeline_label": pipe_label,
+            "stage_label": _text(stage.get("label")),
+            "probability": _float(meta.get("probability")),
+            "is_closed": _hs_bool(meta.get("isClosed")),
+            "display_order": _int(stage.get("displayOrder")),
+            "synced_at": synced_at,
+        })
+    return rows
+
+
 def _parse_ts(value: Any) -> datetime | None:
     if not value:
         return None
@@ -246,9 +319,23 @@ def _db():
     return _get_client()
 
 
-def _upsert(db: Any, table: str, rows: list[dict[str, Any]]) -> None:
+def _upsert(db: Any, table: str, rows: list[dict[str, Any]], *, on_conflict: str = "hs_id") -> None:
     for start in range(0, len(rows), _UPSERT_BATCH):
-        db.table(table).upsert(rows[start : start + _UPSERT_BATCH], on_conflict="hs_id").execute()
+        db.table(table).upsert(
+            rows[start : start + _UPSERT_BATCH], on_conflict=on_conflict
+        ).execute()
+
+
+def sync_deal_stages(http: httpx.Client, db: Any, synced_at: str) -> int:
+    """Refresh pipeline stage catalog (labels + probabilities)."""
+    page = _call(http, "GET", "/crm/v3/pipelines/deals")
+    rows: list[dict[str, Any]] = []
+    for pipe in page.get("results") or []:
+        rows.extend(stage_rows(pipe, synced_at))
+    if rows:
+        _upsert(db, "hs_deal_stages", rows, on_conflict="pipeline_id,stage_id")
+    logger.info("operation=hubspot_sync_deal_stages count=%s", len(rows))
+    return len(rows)
 
 
 def _select_all(db: Any, table: str, columns: str, **eq: Any) -> list[dict[str, Any]]:
@@ -291,7 +378,8 @@ def run_sync(mode: str = "auto") -> dict[str, Any]:
         with _client() as http:
             owners = owner_names(http)
             labels = industry_labels(http)
-            for object_type in ("companies", "contacts"):
+            sync_deal_stages(http, db, synced_at)
+            for object_type in ("companies", "contacts", "deals"):
                 mark = marks.get(object_type)
                 raw = None
                 if mode != "full" and mark:
@@ -301,6 +389,8 @@ def run_sync(mode: str = "auto") -> dict[str, Any]:
                     raw = list(iter_all(http, object_type))
                 if object_type == "contacts":
                     rows = [contact_row(o, owners, synced_at) for o in raw]
+                elif object_type == "deals":
+                    rows = [deal_row(o, owners, synced_at) for o in raw]
                 else:
                     rows = [company_row(o, labels, synced_at) for o in raw]
                 _upsert(db, f"hs_{object_type}", rows)
@@ -309,7 +399,7 @@ def run_sync(mode: str = "auto") -> dict[str, Any]:
 
                 if full:
                     counts[f"{object_type}_removed"] = _drop_stale(db, object_type, synced_at)
-                newest = max((_parse_ts(r["hs_updated_at"]) for r in rows if r["hs_updated_at"]), default=None)
+                newest = max((_parse_ts(r["hs_updated_at"]) for r in rows if r.get("hs_updated_at")), default=None)
                 if newest and (mark is None or newest > mark):
                     db.table("hubspot_sync_state").upsert(
                         {"object_type": object_type, "watermark": newest.isoformat()},
@@ -331,6 +421,8 @@ def run_sync(mode: str = "auto") -> dict[str, Any]:
             "contacts_upserted": counts.get("contacts_upserted"),
             "companies_upserted": counts.get("companies_upserted"),
             "contacts_archived": counts.get("contacts_removed"),
+            "deals_upserted": counts.get("deals_upserted"),
+            "deals_archived": counts.get("deals_removed"),
         }).eq("id", run_id).execute()
     logger.info("operation=hubspot_sync mode=%s status=completed %s", mode, counts)
     return {"run_id": run_id, "mode": mode, **counts}
@@ -339,12 +431,12 @@ def run_sync(mode: str = "auto") -> dict[str, Any]:
 def _drop_stale(db: Any, object_type: str, synced_at: str) -> int:
     """After a full pass, anything not touched this run is gone from HubSpot.
 
-    Contacts are archived (step 2's lead_intel will reference them); companies are
-    deleted so a removed company stops matching in the domain join.
+    Contacts and deals are archived (downstream may still reference them); companies
+    are deleted so a removed company stops matching in the domain join.
     """
-    if object_type == "contacts":
+    if object_type in ("contacts", "deals"):
         gone = (
-            db.table("hs_contacts").update({"archived": True})
+            db.table(f"hs_{object_type}").update({"archived": True})
             .lt("synced_at", synced_at).eq("archived", False).execute().data
         )
     else:

@@ -88,9 +88,10 @@ class Settings(BaseSettings):
     # Monid — server-side company enrichment only. Never expose this to the frontend.
     monid_api_key: str = ""
     monid_base_url: str = "https://api.monid.ai"
-    # HubSpot private-app token for the Wave 3 lead mirror. Read scopes only:
-    # crm.objects.contacts.read, crm.objects.companies.read, crm.objects.owners.read,
-    # crm.schemas.companies.read. Empty = Lead Finder keeps the static fixture.
+    # HubSpot private-app token for the Wave 3 lead mirror (+ deals for forecast).
+    # Read scopes only: crm.objects.contacts.read, crm.objects.companies.read,
+    # crm.objects.owners.read, crm.schemas.companies.read, crm.objects.deals.read,
+    # crm.schemas.deals.read (pipelines). Empty = Lead Finder keeps the static fixture.
     hubspot_api_key: str = ""
     # Role-tier router: heavy = Sonnet-class (writing/judgment); light = Haiku-class (plan/gate).
     # Empty heavy → fall back to openrouter_model. Empty light → fall back to heavy.
