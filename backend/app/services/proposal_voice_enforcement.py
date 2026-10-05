@@ -280,6 +280,85 @@ def _fix_we_verb_agreement(text: str) -> str:
     return _WE_VERB_AGREEMENT.sub(fix, text)
 
 
+# Clear hard bans the LLM voice pass is supposed to catch. Keep this list to
+# shapes that are almost never legitimate commercial wording — "not subject to"
+# / NTE / "has not posted" stay out on purpose (see hard_voice_ban_hits allowlist).
+_HARD_BAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "negation-contrast",
+        re.compile(
+            r"\b("
+            r"rather than|instead of|"
+            r"not just|not only|not simply|not merely|"
+            r"more than just|beyond just|"
+            r"isn'?t just|isn'?t only|wasn'?t just|"
+            r"don'?t just|doesn'?t just"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "significance-close",
+        re.compile(
+            r"\b("
+            r"worth noting|worth naming|keep in mind|"
+            r"that'?s the kind of|which is what makes"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "empty-word",
+        re.compile(
+            r"\b("
+            r"robust|seamless|leverage|unlock|impactful|exciting|passionate|"
+            r"amazing|incredible|elevate"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("em-dash", re.compile(r"—")),
+)
+
+# Commercial / procurement phrasing that looks like negation but is allowed.
+_HARD_BAN_ALLOW = re.compile(
+    r"(?i)not subject to|not-?to-?exceed|there is no separate|no unresolved|"
+    r"has not posted|only upon|not included in|not applicable"
+)
+
+
+def hard_voice_ban_hits(text: str) -> list[tuple[str, str]]:
+    """Deterministic hard-ban hits still in ``text``: (rule, excerpt).
+
+    Used to (1) refuse marking a paragraph reviewed when the LLM left a ban in
+    place, (2) reopen previously-reviewed dirty paragraphs, and (3) fail
+    pre-submit voice scan. Mechanical only — no rewrite.
+    """
+    if not (text or "").strip():
+        return []
+    allow_spans = [m.span() for m in _HARD_BAN_ALLOW.finditer(text)]
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for rule, pat in _HARD_BAN_PATTERNS:
+        for m in pat.finditer(text):
+            if any(a0 <= m.start() < a1 for a0, a1 in allow_spans):
+                continue
+            # Em dashes on tag / heading lines are left for line-aware scan.
+            if rule == "em-dash":
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                line_end = text.find("\n", m.start())
+                line = text[line_start : len(text) if line_end < 0 else line_end]
+                if line.lstrip().startswith(("#", "[MANUAL FILL", "[VERIFY", "[DESIGNER NOTE")):
+                    continue
+            key = (rule, m.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            excerpt = re.sub(r"\s+", " ", text[max(0, m.start() - 40) : m.end() + 40]).strip()
+            out.append((rule, excerpt[:240]))
+    return out
+
+
 def apply_writing_standards_mechanics(content: str) -> str:
     """Deterministic Rev 6 mechanics: company name + no em dashes."""
     if not content.strip():

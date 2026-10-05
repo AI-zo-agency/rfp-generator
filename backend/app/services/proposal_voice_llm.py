@@ -24,6 +24,7 @@ from typing import Literal
 
 from app.services import llm
 from app.services.proposal_brand_voice import load_writing_standards
+from app.services.proposal_voice_enforcement import hard_voice_ban_hits
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,13 @@ async def rewrite_for_voice(
     ]
 
     skip = set(reviewed)
-    blocks = [b for b in _blocks(text) if block_hash(b, rev_id) not in skip]
+    # Re-open a previously reviewed paragraph when a hard ban is still in it —
+    # otherwise a miss by the LLM freezes the violation forever.
+    blocks = [
+        b
+        for b in _blocks(text)
+        if block_hash(b, rev_id) not in skip or hard_voice_ban_hits(b)
+    ]
     if not blocks:
         return VoiceResult(text=text)
     reviews = await asyncio.gather(
@@ -378,7 +385,13 @@ async def rewrite_for_voice(
             finals[bi] = _apply(finals[bi], edit)
     result.text = out
     if apply:
-        result.reviewed = [block_hash(f, rev_id) for bi, f in enumerate(finals) if bi not in failed]
+        # Only hash as reviewed when the paragraph is actually clean. An empty
+        # edit list on a dirty block must not poison voice_reviewed.
+        result.reviewed = [
+            block_hash(f, rev_id)
+            for bi, f in enumerate(finals)
+            if bi not in failed and not hard_voice_ban_hits(f)
+        ]
     if errors:
         result.skipped = f"{len(errors)} call(s) failed: {errors[0]}"
     return result

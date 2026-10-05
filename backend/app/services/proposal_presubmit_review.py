@@ -628,11 +628,10 @@ def _scan_voice_coverage(draft: ProposalDraft) -> list[PreSubmitIssue]:
     ]
 
 
-_EM_DASH_SKIP_PREFIXES = ("[MANUAL FILL", "[VERIFY", "[DESIGNER NOTE", "#")
-
-
 def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
-    """Em dashes and vendor language (deterministic), plus what the LLM voice pass left."""
+    """Hard voice bans (deterministic) plus what the LLM voice pass left."""
+    from app.services.proposal_voice_enforcement import hard_voice_ban_hits
+
     issues: list[PreSubmitIssue] = []
     findings = draft.voice_findings or []
     for section in draft.sections:
@@ -653,17 +652,20 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
                         sectionTitle=section.title,
                     )
                 )
-            if any(
-                "—" in ln and not ln.lstrip().startswith(_EM_DASH_SKIP_PREFIXES)
-                for ln in body.splitlines()
-            ):
+            # One critical issue per rule still present — excerpt is the first hit.
+            seen_rules: set[str] = set()
+            for rule, excerpt in hard_voice_ban_hits(body):
+                if rule in seen_rules:
+                    continue
+                seen_rules.add(rule)
                 issues.append(
                     PreSubmitIssue(
                         severity="critical",
                         category="voice",
-                        message="Rev 6 zö voice (compulsory) not followed: em dash (—)",
+                        message=f"zö voice (compulsory) not followed: {rule}",
                         sectionId=section.id,
                         sectionTitle=section.title,
+                        excerpt=excerpt,
                     )
                 )
         for f in findings:

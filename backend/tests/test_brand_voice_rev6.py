@@ -74,10 +74,9 @@ class TestReviewFixAntiEcho:
             ],
         )
         issues = _scan_voice(draft)
-        rev6 = [i for i in issues if "Rev 6" in (i.message or "")]
-        assert rev6, "expected Rev 6 voice issues"
-        assert all(i.severity == "critical" for i in rev6)
-        assert all(i.category == "voice" for i in rev6)
+        voice = [i for i in issues if i.category == "voice" and "em-dash" in (i.message or "")]
+        assert voice, "expected em-dash voice issues"
+        assert all(i.severity == "critical" for i in voice)
 
     def test_autofix_deterministic_scrubs_rev6(self) -> None:
         from app.models.proposal import ProposalSection

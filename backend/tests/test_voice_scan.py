@@ -11,9 +11,21 @@ def _draft(content, findings=()):
     )
 
 
-def test_em_dash_is_critical_and_says_rev_6():
+def test_em_dash_is_critical_and_names_rule():
     issues = _scan_voice(_draft("We work fast — every day of the week."))
-    assert any(i.severity == "critical" and "Rev 6" in i.message and "em dash" in i.message for i in issues)
+    assert any(i.severity == "critical" and "em-dash" in i.message for i in issues)
+
+
+def test_negation_contrast_is_critical():
+    issues = _scan_voice(
+        _draft("We'll build the nav around three paths rather than a single generic menu.")
+    )
+    assert any(i.severity == "critical" and "negation-contrast" in i.message for i in issues)
+    assert any(i.excerpt and "rather than" in i.excerpt for i in issues)
+
+
+def test_commercial_not_subject_to_is_not_flagged_as_negation():
+    assert _scan_voice(_draft("Rates are not subject to adjustment during the base year.")) == []
 
 
 def test_needs_human_finding_is_a_warning():
@@ -38,7 +50,7 @@ def test_clean_section_has_no_issues():
 
 
 def _em_issues(issues):
-    return [i for i in issues if "em dash" in i.message]
+    return [i for i in issues if "em-dash" in i.message]
 
 
 def test_em_dash_only_on_tag_and_heading_lines_is_not_flagged():

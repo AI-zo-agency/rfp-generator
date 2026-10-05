@@ -1,8 +1,8 @@
 """Draft-level voice pass: run the LLM voice editor over a manuscript.
 
-Replaces the regex scrub. Only paragraphs not reviewed before are sent to the model
-(hashes live on ProposalDraft.voice_reviewed), so approved copy stays approved and
-repeated calls in one pipeline run cost almost nothing.
+Only paragraphs that are clean and already reviewed are skipped
+(``ProposalDraft.voice_reviewed``). A reviewed paragraph that still trips a
+hard ban is sent again — otherwise a miss freezes the violation.
 """
 
 from __future__ import annotations

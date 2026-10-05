@@ -1564,9 +1564,15 @@ function ProposalDraftWorkspaceInner({
   const captureReviewPreviewSelection = useCallback(() => {
     if (!activeReviewSection) return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setReviewPreviewSelection(null);
+      return;
+    }
     const text = sel.toString().replace(/\u00a0/g, " ");
-    if (text.trim().length < 1) return;
+    if (text.trim().length < 1) {
+      setReviewPreviewSelection(null);
+      return;
+    }
 
     const anchorNode = sel.anchorNode;
     const article = document.getElementById(activeReviewSection.id);
@@ -1578,7 +1584,10 @@ function ProposalDraftWorkspaceInner({
       const anyProse = document.querySelector(
         ".proposal-content-article--read .proposal-prose--manuscript"
       );
-      if (!anyProse || !anyProse.contains(anchorNode)) return;
+      if (!anyProse || !anyProse.contains(anchorNode)) {
+        setReviewPreviewSelection(null);
+        return;
+      }
     }
 
     const range0 = sel.getRangeAt(0);
@@ -1599,7 +1608,10 @@ function ProposalDraftWorkspaceInner({
       const er = el?.getBoundingClientRect();
       if (er && (er.width >= 1 || er.height >= 1)) rect = er;
     }
-    if (rect.width < 1 && rect.height < 1) return;
+    if (rect.width < 1 && rect.height < 1) {
+      setReviewPreviewSelection(null);
+      return;
+    }
 
     const anchor = {
       top: rect.top,
@@ -1674,6 +1686,23 @@ function ProposalDraftWorkspaceInner({
   useEffect(() => {
     setReviewPreviewSelection(null);
   }, [activeReviewSectionId]);
+
+  // Dismiss B/I/Change… bubble when the DOM selection collapses (click away /
+  // deselect). Only for formatted-view selections that carry an anchor —
+  // textarea selections use native selectionStart/End and must not be cleared
+  // by window.getSelection().
+  const hasDomSelectionBubble = Boolean(reviewPreviewSelection?.anchor);
+  useEffect(() => {
+    if (!hasDomSelectionBubble) return;
+    const clearIfGone = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+        setReviewPreviewSelection(null);
+      }
+    };
+    document.addEventListener("selectionchange", clearIfGone);
+    return () => document.removeEventListener("selectionchange", clearIfGone);
+  }, [hasDomSelectionBubble]);
 
   // After "Edit source" (or a toolbar format that opens it), focus the textarea.
   useEffect(() => {
@@ -5477,6 +5506,8 @@ function ProposalDraftWorkspaceInner({
                                 start: el.selectionStart,
                                 end: el.selectionEnd,
                               });
+                            } else {
+                              setReviewPreviewSelection(null);
                             }
                           }}
                           onChange={(e) =>

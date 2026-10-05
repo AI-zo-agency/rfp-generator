@@ -148,6 +148,28 @@ def test_reviewed_blocks_are_skipped_and_reported(monkeypatch):
     asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7", reviewed=res.reviewed))
     assert len(calls) == 2  # nothing new to review
 
+
+def test_dirty_block_is_not_marked_reviewed(monkeypatch):
+    """Empty edit list on a hard-ban paragraph must not poison voice_reviewed."""
+    dirty = "We'll build the nav around three paths rather than a single generic menu for residents."
+    calls = _counting_stub(monkeypatch, edits=[])
+    res = asyncio.run(pv.rewrite_for_voice(dirty, rev_id="r7"))
+    assert res.reviewed == []
+    assert len(calls) == 1
+
+
+def test_dirty_reviewed_block_is_reopened(monkeypatch):
+    dirty = "We'll build the nav around three paths rather than a single generic menu for residents."
+    poisoned = [pv.block_hash(dirty, "r7")]
+    calls = _counting_stub(monkeypatch, edits=[])
+    asyncio.run(pv.rewrite_for_voice(dirty, rev_id="r7", reviewed=poisoned))
+    assert len(calls) == 1  # re-opened despite prior hash
+
+
+def test_new_revision_reopens_all_blocks(monkeypatch):
+    calls = _counting_stub(monkeypatch)
+    res = asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r7"))
+    assert len(calls) == 2 and len(res.reviewed) == 2
     asyncio.run(pv.rewrite_for_voice(TWO, rev_id="r8", reviewed=res.reviewed))
     assert len(calls) == 4  # a new revision makes every paragraph unreviewed
 
