@@ -397,6 +397,7 @@ async def refresh_current_year(
                 months.append(existing[key])
 
     months.sort(key=lambda m: m["month"])
+    _overlay_hubspot_months(realm_id, year, as_of, months)
     if months:
         _store(realm_id, year, months)
     logger.info(
@@ -416,6 +417,49 @@ async def refresh_current_year(
         "refreshed": refreshed,
         "months": len(months),
     }
+
+
+def _overlay_hubspot_months(
+    realm_id: str,
+    year: int,
+    as_of: date,
+    months: list[dict[str, Any]],
+) -> None:
+    """Replace open-month forecast points with HubSpot hybrid when available."""
+    from app.financial.hs_forecast import build_hubspot_forecast
+    from app.financial import qb_repository as qb_repo
+
+    cached = qb_repo.get_panel_cache(realm_id, year) or {}
+    overview = cached.get("payload") or {}
+    try:
+        hybrid = build_hubspot_forecast(realm_id, overview, year=year, as_of=as_of)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "operation=monthly_forecast_hubspot_overlay status=failed reason=%s",
+            str(exc)[:200],
+        )
+        return
+    if not hybrid:
+        return
+    by_key = hybrid.get("months") or {}
+    for row in months:
+        key = row.get("month")
+        closed = (year, int(key.split("-")[1])) < (as_of.year, as_of.month) if key else True
+        if closed:
+            continue
+        h = by_key.get(key) if isinstance(key, str) else None
+        if not h:
+            continue
+        row["forecast"] = round(float(h["point"]), 2)
+        row["method"] = "hubspot_qb_hybrid"
+        row["confidence"] = "medium"
+        row["reasoning"] = "QB booked + HubSpot weighted pipeline"
+        row["error_pct"] = _error_pct(row.get("actual"), row["forecast"])
+    logger.info(
+        "operation=monthly_forecast_hubspot_overlay realm_id=%s year=%s status=ok",
+        realm_id,
+        year,
+    )
 
 
 def generate_and_store_current(realm_id: str, year: int, as_of: str) -> str:

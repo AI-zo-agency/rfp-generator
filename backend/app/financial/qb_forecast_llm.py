@@ -669,12 +669,31 @@ def generate_and_store(
     Never raises. Called from a sync worker thread with no running event loop,
     so `asyncio.run` is safe — the same arrangement `qb_insights` uses.
     """
+    from app.financial.hs_forecast import build_hubspot_forecast
+
     model = resolve_llm_model("light", node_name=CASH_NODE)
+    as_of_d = _as_date(as_of) or date.today()
+    evidence: dict[str, Any] = {}
     try:
         evidence = build_evidence(
-            realm_id, overview, year=year, as_of=_as_date(as_of) or date.today()
+            realm_id, overview, year=year, as_of=as_of_d
         )
-        payload = asyncio.run(_generate(evidence, year))
+        hybrid = build_hubspot_forecast(
+            realm_id, overview, year=year, as_of=as_of_d
+        )
+        if hybrid:
+            payload = {
+                "cash_13w": hybrid["cash_13w"],
+                "year": hybrid["year"],
+                "composition": hybrid["composition"],
+                "unmatched_won": hybrid["unmatched_won"],
+                "source": "hubspot_qb_hybrid",
+            }
+            # Enrich narrative prompt with composition layers.
+            payload["plain"] = asyncio.run(_narrate_hybrid(payload, hybrid, year))
+            model = f"{model}+hs_hybrid"
+        else:
+            payload = asyncio.run(_generate(evidence, year))
     except Exception as exc:  # noqa: BLE001 — a bad forecast must not fail the sync
         logger.warning(
             "operation=qb_forecast_llm realm_id=%s as_of=%s status=failed reason=%s",
@@ -696,7 +715,11 @@ def generate_and_store(
             scope_key=realm_id,
             as_of=as_of,
             payload=payload,
-            evidence={"year": year, "months": len(evidence.get("months") or [])},
+            evidence={
+                "year": year,
+                "months": len(evidence.get("months") or []),
+                "hubspot_hybrid": bool(payload.get("source") == "hubspot_qb_hybrid"),
+            },
             provider="openrouter",
             model=model,
             status="ok" if status == "ok" else "failed",
@@ -709,8 +732,40 @@ def generate_and_store(
         return "failed"
     logger.info(
         "operation=qb_forecast_llm realm_id=%s as_of=%s status=%s model=%s "
-        "cash=%s year=%s",
+        "cash=%s year=%s hybrid=%s",
         realm_id, as_of, status, model,
         bool(payload.get("cash_13w")), bool(payload.get("year")),
+        payload.get("source") == "hubspot_qb_hybrid",
     )
     return status
+
+
+async def _narrate_hybrid(
+    payload: dict[str, Any],
+    hybrid: dict[str, Any],
+    year: int,
+) -> dict[str, Any] | None:
+    """Narrative only — numbers already fixed in payload."""
+    comp = hybrid.get("composition") or {}
+    unmatched = hybrid.get("unmatched_won") or []
+    extra = (
+        f"\nComposition of the {year} total: "
+        f"booked so far ${_money(comp.get('qb_booked')):,.0f}; "
+        f"won but not yet invoiced ${_money(comp.get('won_awaiting_invoice')):,.0f}; "
+        f"weighted open pipeline ${_money(comp.get('weighted_open')):,.0f}."
+    )
+    if unmatched:
+        names = ", ".join(
+            str(u.get("dealname") or u.get("hs_id")) for u in unmatched[:5]
+        )
+        extra += f" Unmatched Closed Won still counted: {names}."
+    base = narrative_prompt(payload, year)
+    try:
+        prose, _provider = await _ask(
+            _NARRATIVE_SYSTEM,
+            base.replace("\n\nExplain this to him.", extra + "\n\nExplain this to him."),
+            NARRATIVE_NODE,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return prose or None

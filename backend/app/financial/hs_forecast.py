@@ -7,6 +7,7 @@ docs/superpowers/specs/2026-10-05-hubspot-forecast-design.md
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,14 @@ logger = logging.getLogger(__name__)
 INVOICE_LAG_DAYS = 7
 WEEKS = 13
 STAGE_FALLBACK = {"early": 0.10, "mid": 0.50, "late": 0.80, "won": 1.0, "lost": 0.0}
+
+_MONTH_NUM = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+_MONTH_LABEL_RE = re.compile(
+    r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})$"
+)
 
 _EARLY = ("contact", "discussion", "meeting", "opportunity", "identified")
 _MID = ("summary", "proposal", "strategy", "submitted", "top")
@@ -270,3 +279,179 @@ def trough_from_weeks(weeks: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     best = min(weeks, key=lambda w: w["closing_balance"])
     return {"amount": best["closing_balance"], "week": best["week"]}
+
+
+def load_deals() -> list[dict[str, Any]]:
+    """Active (non-archived) deals from the HubSpot mirror."""
+    from app.services.supabase_db import _get_client
+
+    db = _get_client()
+    rows: list[dict[str, Any]] = []
+    page = 1000
+    while True:
+        chunk = (
+            db.table("hs_deals")
+            .select("*")
+            .eq("archived", False)
+            .order("hs_id")
+            .range(len(rows), len(rows) + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        rows.extend(chunk)
+        if len(chunk) < page:
+            break
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        close = r.get("closedate")
+        out.append({
+            **r,
+            "amount": _money(r.get("amount")),
+            "stage_probability": (
+                None if r.get("stage_probability") is None else _money(r.get("stage_probability"))
+            ),
+            "closedate": _as_date(close),
+            "hs_is_closed": bool(r.get("hs_is_closed")),
+            "hs_is_closed_won": bool(r.get("hs_is_closed_won")),
+            "hs_is_closed_lost": bool(r.get("hs_is_closed_lost")),
+        })
+    return out
+
+
+def load_stages() -> dict[tuple[str, str], dict[str, Any]]:
+    from app.services.supabase_db import _get_client
+
+    db = _get_client()
+    rows = db.table("hs_deal_stages").select("*").execute().data or []
+    return {
+        (str(r["pipeline_id"]), str(r["stage_id"])): {
+            "probability": r.get("probability"),
+            "label": r.get("stage_label"),
+            "stage_label": r.get("stage_label"),
+            "is_closed": bool(r.get("is_closed")),
+        }
+        for r in rows
+    }
+
+
+def load_companies() -> dict[int, dict[str, Any]]:
+    from app.services.supabase_db import _get_client
+
+    db = _get_client()
+    rows = db.table("hs_companies").select("hs_id,name,domain").execute().data or []
+    return {int(r["hs_id"]): r for r in rows if r.get("hs_id") is not None}
+
+
+def qb_booked_by_month(overview: dict[str, Any], year: int) -> dict[str, float]:
+    """TOTAL INCOME by YYYY-MM from overview monthly_trend."""
+    out: dict[str, float] = {}
+    months = ((overview.get("monthly_trend") or {}).get("months") or [])
+    for row in months:
+        label = str(row.get("month") or "").strip()
+        m = _MONTH_LABEL_RE.match(label)
+        if m:
+            y, mo = int(m.group(2)), _MONTH_NUM[m.group(1)]
+            if y == year:
+                out[f"{y:04d}-{mo:02d}"] = _money(row.get("amount"))
+        elif label.startswith(f"{year}-"):
+            out[label[:7]] = _money(row.get("amount"))
+    return out
+
+
+def build_hubspot_forecast(
+    realm_id: str,
+    overview: dict[str, Any],
+    *,
+    year: int,
+    as_of: date,
+) -> dict[str, Any] | None:
+    """Hybrid year/monthly/cash from HubSpot deals + QB. None if no deals."""
+    from app.financial import qb_repository as repo
+    from app.financial.hs_forecast_match import match_won_deals
+    from app.financial.qb_forecast_llm import (
+        collection_curve,
+        monthly_outflow,
+        open_invoices,
+    )
+
+    try:
+        deals = load_deals()
+    except Exception as exc:  # noqa: BLE001 — mirror may lack table yet
+        logger.warning("operation=hs_forecast_load_deals status=failed reason=%s", str(exc)[:200])
+        return None
+    if not deals:
+        logger.info("operation=hs_forecast realm_id=%s status=empty reason=no_deals", realm_id)
+        return None
+
+    try:
+        stages = load_stages()
+        companies = load_companies()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("operation=hs_forecast_load_meta status=failed reason=%s", str(exc)[:200])
+        stages, companies = {}, {}
+
+    invoices = repo.list_invoices(realm_id)
+    match = match_won_deals(deals, companies=companies, invoices=invoices, as_of=as_of)
+    qb_booked = qb_booked_by_month(overview, year)
+    months = monthly_points(
+        qb_booked=qb_booked,
+        deals=deals,
+        stages=stages,
+        as_of=as_of,
+        year=year,
+        matched_won_ids=match.matched_ids,
+    )
+    y_point = year_point(months)
+    remaining_months = 12 - as_of.month + 1
+
+    curve = collection_curve(realm_id)
+    outflow_meta = monthly_outflow(realm_id)
+    by_m = list((outflow_meta.get("by_month") or {}).values())
+    monthly_burn = (sorted(by_m)[len(by_m) // 2] if by_m else 0.0)
+    weekly_out = monthly_burn / 4.3
+
+    liquidity = overview.get("liquidity") or {}
+    weeks = cash_weeks(
+        as_of=as_of,
+        cash_on_hand=_money(liquidity.get("cash")),
+        open_ar=open_invoices(realm_id, as_of=as_of),
+        deals=deals,
+        stages=stages,
+        collection_curve=curve,
+        weekly_outflow=weekly_out,
+        matched_won_ids=match.matched_ids,
+    )
+    trough = trough_from_weeks(weeks)
+    comp = composition(months)
+    logger.info(
+        "operation=hs_forecast realm_id=%s year=%s status=ok year_point=%.0f "
+        "weighted_open=%.0f won_awaiting=%.0f unmatched_won=%s",
+        realm_id, year, y_point, comp["weighted_open"],
+        comp["won_awaiting_invoice"], len(match.unmatched),
+    )
+    return {
+        "cash_13w": {
+            "weeks": weeks,
+            "trough": trough,
+            "low": None,
+            "high": None,
+            "assumptions": "HubSpot weighted pipeline + QB AR/outflow (deterministic)",
+            "risks": [
+                "Close dates are sales dates, not cash dates",
+                "Unmatched Closed Won still counted at full amount",
+            ],
+        },
+        "year": {
+            "point": y_point,
+            "low": None,
+            "high": None,
+            "remaining_months": remaining_months,
+            "confidence": "medium",
+            "reasoning": "QB booked YTD + HubSpot Closed Won awaiting invoice + weighted open",
+        },
+        "composition": comp,
+        "unmatched_won": match.unmatched,
+        "months": months,
+        "matched_won_ids": sorted(match.matched_ids),
+    }
