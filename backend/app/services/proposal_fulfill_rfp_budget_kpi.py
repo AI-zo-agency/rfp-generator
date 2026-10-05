@@ -161,6 +161,10 @@ def restore_unresolved_budget_token_tabs(
     Writers invent slot names (brand_development, media_placements) that are not
     money-slot keys. The Budget step can still go green on a sibling fee table
     while Cost Proposal stays as raw templates.
+
+    Full ``render_budget_markdown`` overwrite is allowed ONLY on the canonical
+    fee tab (``find_budget_section_index``). Sibling Cost Analysis / rationale
+    tabs get slot fills only — never a second copy of the pricing-plan ledger.
     """
     from app.services.proposal_budget_slots import (
         find_unresolved_budget_slots,
@@ -172,6 +176,7 @@ def restore_unresolved_budget_token_tabs(
         return draft, logs  # pre-v2 budgets are frozen as saved
     markdown: str | None = None
     sections = list(draft.sections)
+    canonical_idx = find_budget_section_index(sections)
     changed = False
     for idx, section in enumerate(sections):
         body = section.content or ""
@@ -179,7 +184,10 @@ def restore_unresolved_budget_token_tabs(
             continue
         filled, _unresolved = render_budget_slots(body, budget)  # type: ignore[arg-type]
         leftover = find_unresolved_budget_slots(filled)
-        if leftover and budget_section_score(section.title) > 0:
+        # ponytail: one gate — only the Phase 3.5 write target may absorb the
+        # full ledger. Upgrade path: stamp submissionInstrument=cost on that
+        # tab and skip title scoring here.
+        if leftover and budget_section_score(section.title) > 0 and idx == canonical_idx:
             if markdown is None:
                 markdown = render_budget_markdown(
                     budget,
@@ -187,6 +195,11 @@ def restore_unresolved_budget_token_tabs(
                     pricing_instrument=pricing_instrument,
                 )  # type: ignore[arg-type]
             filled = markdown
+        elif leftover and idx != canonical_idx and budget_section_score(section.title) > 0:
+            logs.append(
+                f"Budget: left unresolved money slots in sibling “{section.title or section.id}” "
+                "(canonical fee tab only gets full ledger overwrite)."
+            )
         if filled != body:
             sections[idx] = section.model_copy(
                 update={"content": filled, "status": "generated"}
