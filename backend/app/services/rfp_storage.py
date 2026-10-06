@@ -49,6 +49,10 @@ def rfp_object_key(rfp_id: str) -> str:
     return f"{rfp_id}/rfp.pdf"
 
 
+def rfp_ocr_cache_object_key(rfp_id: str) -> str:
+    return f"{rfp_id}/rfp.ocr.txt"
+
+
 def is_supabase_path(pdf_path: str | None) -> bool:
     return bool(pdf_path and pdf_path.startswith(SUPABASE_PATH_PREFIX))
 
@@ -88,6 +92,7 @@ def save_rfp_pdf(rfp_id: str, content: bytes) -> str:
         key = rfp_object_key(rfp_id)
         supabase_storage.upload_pdf(object_key=key, content=content)
         _pdf_bytes_cache_invalidate(rfp_id)
+        delete_rfp_ocr_cache(rfp_id)
         return to_supabase_path(key)
 
     pdf_dir = settings.pdf_storage_path / rfp_id
@@ -95,7 +100,42 @@ def save_rfp_pdf(rfp_id: str, content: bytes) -> str:
     target = pdf_dir / "rfp.pdf"
     target.write_bytes(content)
     _pdf_bytes_cache_invalidate(rfp_id)
+    delete_rfp_ocr_cache(rfp_id)
     return str(target)
+
+
+def load_rfp_ocr_cache_bytes(rfp_id: str) -> bytes | None:
+    if use_supabase():
+        try:
+            return supabase_storage.download_bytes(rfp_ocr_cache_object_key(rfp_id))
+        except supabase_storage.SupabaseStorageError:
+            return None
+    path = settings.pdf_storage_path / rfp_id / "rfp.ocr.txt"
+    if path.is_file():
+        return path.read_bytes()
+    return None
+
+
+def save_rfp_ocr_cache_bytes(rfp_id: str, content: bytes) -> None:
+    if use_supabase():
+        supabase_storage.upload_bytes(
+            object_key=rfp_ocr_cache_object_key(rfp_id),
+            content=content,
+            content_type="text/plain; charset=utf-8",
+        )
+        return
+    pdf_dir = settings.pdf_storage_path / rfp_id
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    (pdf_dir / "rfp.ocr.txt").write_bytes(content)
+
+
+def delete_rfp_ocr_cache(rfp_id: str) -> None:
+    if use_supabase():
+        supabase_storage.delete_object(rfp_ocr_cache_object_key(rfp_id))
+        return
+    path = settings.pdf_storage_path / rfp_id / "rfp.ocr.txt"
+    if path.is_file():
+        path.unlink(missing_ok=True)
 
 
 def load_rfp_pdf_bytes(rfp_id: str, pdf_path: str | None) -> bytes | None:
@@ -124,6 +164,7 @@ def load_rfp_pdf_bytes(rfp_id: str, pdf_path: str | None) -> bytes | None:
 
 def delete_rfp_pdf(rfp_id: str, pdf_path: str | None) -> None:
     _pdf_bytes_cache_invalidate(rfp_id)
+    delete_rfp_ocr_cache(rfp_id)
     if pdf_path and is_supabase_path(pdf_path):
         if use_supabase():
             supabase_storage.delete_pdf(supabase_object_key_from_path(pdf_path))

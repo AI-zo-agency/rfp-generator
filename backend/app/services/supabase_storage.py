@@ -45,21 +45,34 @@ def _get_client():
     return _client
 
 
-def upload_pdf(*, object_key: str, content: bytes) -> None:
+def upload_bytes(
+    *,
+    object_key: str,
+    content: bytes,
+    content_type: str = "application/octet-stream",
+) -> None:
     bucket = settings.supabase_rfp_bucket
     client = _get_client()
     try:
         client.storage.from_(bucket).upload(
             object_key,
             content,
-            file_options={"content-type": "application/pdf", "upsert": "true"},
+            file_options={"content-type": content_type, "upsert": "true"},
         )
     except Exception as exc:
         logger.exception("Supabase upload failed for %s", object_key)
         raise SupabaseStorageError(f"Supabase upload failed: {exc}") from exc
 
 
-def download_pdf(object_key: str) -> bytes:
+def upload_pdf(*, object_key: str, content: bytes) -> None:
+    upload_bytes(
+        object_key=object_key,
+        content=content,
+        content_type="application/pdf",
+    )
+
+
+def download_bytes(object_key: str) -> bytes:
     bucket = settings.supabase_rfp_bucket
     client = _get_client()
     try:
@@ -68,11 +81,15 @@ def download_pdf(object_key: str) -> bytes:
         logger.warning("Supabase download failed for %s: %s", object_key, exc)
         raise SupabaseStorageError(f"Supabase download failed: {exc}", status_code=404) from exc
     if not data:
-        raise SupabaseStorageError("Empty PDF from Supabase", status_code=404)
+        raise SupabaseStorageError("Empty object from Supabase", status_code=404)
     return bytes(data)
 
 
-def delete_pdf(object_key: str) -> None:
+def download_pdf(object_key: str) -> bytes:
+    return download_bytes(object_key)
+
+
+def delete_object(object_key: str) -> None:
     if not is_configured():
         return
     bucket = settings.supabase_rfp_bucket
@@ -81,6 +98,10 @@ def delete_pdf(object_key: str) -> None:
         client.storage.from_(bucket).remove([object_key])
     except Exception as exc:
         logger.warning("Supabase delete failed for %s: %s", object_key, exc)
+
+
+def delete_pdf(object_key: str) -> None:
+    delete_object(object_key)
 
 
 def create_signed_url(object_key: str, *, expires_in: int = 3600) -> str:

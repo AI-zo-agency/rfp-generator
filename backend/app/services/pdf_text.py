@@ -1,7 +1,10 @@
 from io import BytesIO
 from pathlib import Path
+import logging
 
 from pypdf import PdfReader
+
+logger = logging.getLogger(__name__)
 
 IMAGE_ONLY_TEXT_THRESHOLD = 100
 
@@ -37,12 +40,36 @@ def extract_pdf_text_from_bytes(content: bytes, *, max_chars: int = 120_000) -> 
     if not content or not content.startswith(b"%PDF"):
         return ""
 
-    reader = PdfReader(BytesIO(content))
+    try:
+        reader = PdfReader(BytesIO(content))
+    except Exception as exc:  # noqa: BLE001 — corrupt / encrypted / truncated
+        logger.warning("pdf_text open failed: %s", str(exc)[:200])
+        return ""
+
+    if getattr(reader, "is_encrypted", False):
+        # Empty password sometimes unlocks owner-only restrictions; never prompt.
+        try:
+            unlocked = bool(reader.decrypt(""))  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            unlocked = False
+        if not unlocked:
+            logger.info("pdf_text skipped encrypted PDF")
+            return ""
+
     parts: list[str] = []
     total = 0
+    try:
+        pages = reader.pages
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_text pages failed: %s", str(exc)[:200])
+        return ""
 
-    for page in reader.pages:
-        text = (page.extract_text() or "").strip()
+    for page in pages:
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pdf_text page extract failed: %s", str(exc)[:160])
+            continue
         if not text:
             continue
         remaining = max_chars - total

@@ -733,7 +733,7 @@ async def _post_chat(
     base_url: str,
     api_key: str,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     provider: str,
     extra_headers: dict[str, str] | None = None,
     max_tokens: int | None = None,
@@ -742,7 +742,7 @@ async def _post_chat(
     cache_prefix: str | Sequence[str] | None = None,
     ttl_1h: bool | None = None,
     reasoning_effort: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1862,6 +1862,58 @@ async def chat_text(
         "All configured LLM providers failed: " + "; ".join(errors),
         status_code=502,
     )
+
+
+async def chat_text_vision(
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    max_tokens: int | None = None,
+    temperature: float = 0.1,
+    node_name: str | None = "rfp_pdf_ocr",
+    rfp_id: str | None = None,
+    run_id: str | None = None,
+) -> tuple[str, str]:
+    """OpenRouter-only plain-text chat for multimodal (image) messages.
+
+    Skips Gemini/Fireworks — those paths expect string content, not image parts.
+    """
+    _enforce_llm_preflight()
+    _enforce_run_cost_cap(node_name, run_id)
+    openrouter_key = _openrouter_key()
+    if not openrouter_key:
+        raise LlmError(
+            "OPENROUTER_API_KEY required for vision OCR",
+            status_code=503,
+        )
+    started = time.perf_counter()
+    raw, usage = await _post_chat(
+        base_url=settings.openrouter_base_url,
+        api_key=openrouter_key,
+        model=model,
+        messages=messages,
+        provider="OpenRouter",
+        extra_headers={
+            "HTTP-Referer": settings.app_url,
+            "X-Title": settings.app_name,
+        },
+        max_tokens=max_tokens,
+        temperature=temperature,
+        json_mode=False,
+        cache_prefix=None,
+        ttl_1h=False,
+    )
+    _record_successful_call(
+        model=model,
+        tier="light",
+        provider="openrouter",
+        usage=usage,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        node_name=node_name,
+        rfp_id=rfp_id,
+        run_id=run_id,
+    )
+    return raw, "openrouter"
 
 
 def _strip_code_fence(text: str) -> str:

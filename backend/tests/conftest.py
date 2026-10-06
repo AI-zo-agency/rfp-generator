@@ -47,3 +47,4 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "real_auth: run with the real require_user dependency")
     config.addinivalue_line("markers", "real_voice_llm: exercise proposal_voice_llm itself (the model is stubbed by the test)")
     config.addinivalue_line("markers", "real_revisions: use the fake Supabase revisions database instead of the repo file")
+    config.addinivalue_line("markers", "live_ocr: call OpenRouter vision OCR (costs tokens)")
