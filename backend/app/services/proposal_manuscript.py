@@ -1037,7 +1037,7 @@ def scrub_empty_numbered_table_rows(text: str) -> str:
 
 
 def scrub_client_facing_section_artifacts(text: str) -> str:
-    """Strip evidence markers + pricing flags from manuscript section bodies.
+    """Strip pricing flags + instruction leaks from manuscript section bodies.
 
     This is the AUTHORING-time scrub, applied when a section is generated or
     edited (proposal_budget_content.py, proposal_self_edit_loop.py,
@@ -1049,9 +1049,9 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     is safe because it is never a legitimate handoff — it is purely an internal
     pricing-review note.
 
-    For the literal document that leaves the building (DOCX / Google Doc
-    export), use scrub_text_for_client_export below, which also strips the
-    handoff tags this function preserves.
+    [E#] evidence markers are KEPT here so the review UI can render citation
+    badges against evidenceCorpus. Export (DOCX / Google Doc) still strips them
+    via scrub_text_for_client_export.
 
     Order matters:
       0. convert instruction-shaped paragraphs/blockquotes ("ACTION REQUIRED
@@ -1063,7 +1063,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
          rule_ids (dotted snake_case + tab) so the display copy is human-readable
       3. strip inline [REMOVE:] / [NOTE:] / [TODO:] instruction tags — never
          legitimate authoring artifacts
-      4. drop evidence markers and internal pricing flags (existing behavior)
+      4. drop internal pricing flags (evidence [E#] markers stay for review UI)
       5. collapse standalone empty subheadings ("Client Voice" with no body)
       6. normalize bold/plain "Designer Note:" prose into [DESIGNER NOTE: …]
          so the manuscript UI renders the callout box
@@ -1090,7 +1090,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     cleaned = convert_unresolved_template_tokens(cleaned)
     cleaned = strip_leaked_manual_fill_identifiers(cleaned)
     cleaned = strip_inline_instruction_tags(cleaned)
-    cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
+    cleaned = strip_internal_pricing_flags(cleaned)
     cleaned = collapse_empty_subheadings(cleaned)
     cleaned = collapse_duplicate_consecutive_headings(cleaned)
     cleaned = repair_truncated_manual_fill_tags(cleaned)
@@ -1245,11 +1245,14 @@ def find_instruction_leaks(text: str) -> list[str]:
 
 
 def scrub_text_for_client_export(text: str) -> str:
-    """Full export-time scrub: everything scrub_client_facing_section_artifacts
-    strips from saved draft content, plus the internal handoff tags that are
-    allowed to persist through authoring but must never reach an exported
-    document (DOCX, Google Doc, plain text)."""
-    return strip_internal_handoff_tags(scrub_client_facing_section_artifacts(text or ""))
+    """Full export-time scrub: authoring scrub + evidence [E#] markers + handoff tags.
+
+    Saved drafts may keep [E#] for in-app citation badges; export must never
+    ship those markers (DOCX, Google Doc, plain text).
+    """
+    cleaned = scrub_client_facing_section_artifacts(text or "")
+    cleaned = strip_evidence_citation_markers(cleaned)
+    return strip_internal_handoff_tags(cleaned)
 
 
 def plain_text_for_export(markdown: str) -> str:

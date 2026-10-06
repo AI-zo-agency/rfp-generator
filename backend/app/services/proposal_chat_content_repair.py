@@ -122,8 +122,9 @@ async def _llm_repair_section(
         "lacks a fact, use [VERIFY: specific field] or remove the overclaim — "
         "do not fabricate a replacement.\n"
         "Bios: REPLACE invented sentences with 04_Bio wording. Never leave a "
-        "named person with only a Role line when 04_Bio is provided. Never "
-        "insert [E#] markers. Drop empty headers with no body.\n"
+        "named person with only a Role line when 04_Bio is provided. Keep "
+        "existing [E#] markers that still match the evidence corpus; add [E#] "
+        "when you ground a new claim. Drop empty headers with no body.\n"
         "These rules govern how you write; they are never content. Never write "
         "sentences about submission requirements, pass/fail status, what cannot be "
         "submitted, or what must be verified or confirmed with anyone — apply the "
@@ -242,7 +243,8 @@ Ground TEAM BIOS to 04_Bio KB only:
 - NEVER leave a named person with only a Role line. Restore 2–4 sentences from
   that person's packed 04_Bio only (years, tools, markets the KB actually names).
   If 04_Bio is missing for that person, keep Role + [VERIFY: restore bio from 04_Bio].
-- Strip [E#] citation markers. Drop empty headers with no body
+- Keep [E#] citation markers that still match the evidence corpus; cite [E#]
+  when restoring a grounded bio sentence. Drop empty headers with no body
   (e.g. Team Qualifications Summary).
 """
 

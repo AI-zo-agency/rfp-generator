@@ -58,6 +58,16 @@ class EvidenceItem(BaseModel):
     chunk_key: str = Field(default="", alias="chunkKey")
 
 
+class CitationGrounding(BaseModel):
+    """Post-hoc claim → evidenceCorpus ids (review UI badges; not exported)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    text: str
+    evidence_ids: list[str] = Field(default_factory=list, alias="evidenceIds")
+    method: Literal["verbatim", "overlap"] = "overlap"
+
+
 class ResearchQuestion(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -882,6 +892,11 @@ class ProposalSection(BaseModel):
     designer_note: str | None = Field(default=None, alias="designerNote")
     status: ProposalSectionStatus = "outline"
     kb_refs: list[str] = Field(default_factory=list, alias="kbRefs")
+    citation_map: list[CitationGrounding] = Field(
+        default_factory=list,
+        alias="citationMap",
+        description="Post-hoc claim→evidence ids for review citation badges.",
+    )
 
 
 class VoiceFinding(BaseModel):

@@ -351,6 +351,16 @@ def apply_zero_fabrication_guards(
                 draft = draft.model_copy(update={"sections": sections})
                 report.logs.append(f"{label}: Cost section re-rendered from pricing plan")
 
+    try:
+        from app.services.proposal_citation_grounding import attach_citation_maps_to_draft
+
+        draft, cite_logs = attach_citation_maps_to_draft(
+            draft, research, label=f"{label}:citations"
+        )
+        report.logs.extend(cite_logs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s citation map skipped: %s", label, exc)
+
     return draft, report
 
 
@@ -454,6 +464,17 @@ async def apply_zero_fabrication_guards_before_persist(
             report.logs.append(f"{label}: unverified personnel — {line}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s unverified personnel scrub skipped: %s", label, exc)
+
+    # Re-stamp after bio/roster rewrites so maps match final persisted prose.
+    try:
+        from app.services.proposal_citation_grounding import attach_citation_maps_to_draft
+
+        draft, cite_logs = attach_citation_maps_to_draft(
+            draft, research, label=f"{label}:citations"
+        )
+        report.logs.extend(cite_logs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s citation map (persist) skipped: %s", label, exc)
 
     return draft, report
 

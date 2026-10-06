@@ -8,6 +8,12 @@ export type OutlineSectionStatus =
   | "generated"
   | "reviewed";
 
+export interface CitationGrounding {
+  text: string;
+  evidenceIds: string[];
+  method?: "verbatim" | "overlap";
+}
+
 export interface OutlineSection {
   id: string;
   title: string;
@@ -21,6 +27,8 @@ export interface OutlineSection {
   mode?: "pull" | "select" | "write";
   designerNote?: string;
   kbRefs?: string[];
+  /** Post-hoc claim→evidence ids for review citation badges. */
+  citationMap?: CitationGrounding[];
 }
 
 export interface ProposalDraftSnapshot {

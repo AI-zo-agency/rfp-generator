@@ -1,4 +1,80 @@
+"use client";
+
+import { createContext, useContext, useMemo, type ReactNode } from "react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { humanizeGapTag, isInternalScanTag, isManualFillTag } from "@/lib/gap-tag-humanize";
+import type { EvidenceItem } from "@/types/proposal";
+
+/** Map of E1 → EvidenceItem for inline citation badges. */
+const EvidenceByIdContext = createContext<Record<string, EvidenceItem>>({});
+
+function useEvidenceById(): Record<string, EvidenceItem> {
+  return useContext(EvidenceByIdContext);
+}
+
+const EVIDENCE_CITE_TOKEN =
+  /^\*{0,2}\[\s*E\d+(?:\s*[,;]\s*E\d+)*\s*\]\*{0,2}$/i;
+
+function parseEvidenceIds(token: string): string[] {
+  return [...token.matchAll(/E\d+/gi)].map((m) => m[0].toUpperCase());
+}
+
+function EvidenceCiteBadge({ evidenceId }: { evidenceId: string }) {
+  const byId = useEvidenceById();
+  const item = byId[evidenceId];
+  const num = evidenceId.replace(/^E/i, "");
+  const source = item?.source?.trim() || "Evidence not in loaded corpus";
+  const excerpt = item?.excerpt?.trim() || "No excerpt available for this citation.";
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="evidence-cite-badge ml-0.5 inline-flex h-[1.125rem] w-[1.125rem] shrink-0 translate-y-[-1px] items-center justify-center rounded-full border border-sky-300/80 bg-sky-100 align-middle text-[9px] font-bold leading-none text-sky-800 hover:border-sky-400 hover:bg-sky-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-500"
+            aria-label={`Evidence ${evidenceId}: ${source}`}
+          >
+            <span className="sr-only">[{evidenceId}]</span>
+            {num}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={8}
+          className="z-[220] max-w-[22rem] border border-[rgba(17,24,39,0.12)] bg-white px-3 py-2.5 text-left text-[var(--zo-text)] shadow-[0_8px_24px_rgba(15,23,42,0.14)]"
+        >
+          <p className="m-0 flex items-start gap-1.5 text-[12px] font-semibold leading-snug">
+            <span className="mt-px inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-sky-100 text-[9px] font-bold text-sky-800">
+              {num}
+            </span>
+            <span className="min-w-0 break-words">{source}</span>
+          </p>
+          <p className="m-0 mt-1.5 text-[11.5px] leading-snug text-[var(--zo-text-secondary)]">
+            {excerpt.length > 280 ? `${excerpt.slice(0, 280)}…` : excerpt}
+          </p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+function EvidenceCiteGroup({ token }: { token: string }) {
+  const ids = parseEvidenceIds(token);
+  if (ids.length === 0) return null;
+  return (
+    <span className="evidence-cite-group inline-flex items-center gap-0.5 whitespace-nowrap align-middle">
+      {ids.map((id) => (
+        <EvidenceCiteBadge key={id} evidenceId={id} />
+      ))}
+    </span>
+  );
+}
 
 type Block =
   | { type: "heading"; level: number; text: string }
@@ -198,6 +274,48 @@ export function stripManuscriptDisplayArtifacts(text: string): string {
     })
     .join("\n");
   return t.trim();
+}
+
+/**
+ * Display-only: append [E#] after grounded claim spans from post-hoc citationMap
+ * when those ids are not already cited next to the span. Does not mutate saved draft.
+ */
+export function injectCitationMarkers(
+  body: string,
+  citationMap: Array<{ text: string; evidenceIds: string[] }> | undefined | null,
+): string {
+  if (!body || !citationMap?.length) return body;
+  let out = body;
+  // Longer claims first so nested/shorter duplicates don't steal the match site.
+  const rows = [...citationMap]
+    .filter((r) => r.text?.trim() && r.evidenceIds?.length)
+    .sort((a, b) => b.text.length - a.text.length);
+
+  for (const row of rows) {
+    const ids = [
+      ...new Set(
+        row.evidenceIds
+          .map((id) => id.trim().toUpperCase())
+          .filter((id) => /^E\d+$/i.test(id)),
+      ),
+    ];
+    if (!ids.length) continue;
+    const needle = row.text.trim();
+    const idx = out.indexOf(needle);
+    if (idx < 0) continue;
+    const afterStart = idx + needle.length;
+    const window = out.slice(afterStart, afterStart + 48);
+    const citeMatch = window.match(/\[\s*E\d+(?:\s*[,;]\s*E\d+)*\s*\]/i);
+    if (citeMatch) {
+      const present = new Set(
+        [...citeMatch[0].matchAll(/E\d+/gi)].map((m) => m[0].toUpperCase()),
+      );
+      if (ids.every((id) => present.has(id))) continue;
+    }
+    const marker = ids.length === 1 ? `[${ids[0]}]` : `[${ids.join(", ")}]`;
+    out = `${out.slice(0, afterStart)} ${marker}${out.slice(afterStart)}`;
+  }
+  return out;
 }
 
 /** Strip internal KB evidence markers ([E1], [E12, E13], …) from client-facing copy. */
@@ -858,7 +976,8 @@ function escapeRegex(value: string): string {
 }
 
 function buildInlinePattern(highlightTexts: string[]): RegExp {
-  const tagPattern = String.raw`\*\*[^*]+\*\*|\[(?:VERIFY|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER|MANUAL FILL)[^\]]*\]`;
+  const tagPattern =
+    String.raw`\*\*[^*]+\*\*|\[(?:VERIFY|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER|MANUAL FILL)[^\]]*\]|\*{0,2}\[\s*E\d+(?:\s*[,;]\s*E\d+)*\s*\]\*{0,2}`;
   const unique = [...new Set(highlightTexts.map((h) => h.trim()).filter(Boolean))].sort(
     (a, b) => b.length - a.length
   );
@@ -886,6 +1005,10 @@ function renderInline(
 
   return parts.map((part, index) => {
     if (!part) return null;
+
+    if (EVIDENCE_CITE_TOKEN.test(part)) {
+      return <EvidenceCiteGroup key={index} token={part} />;
+    }
 
     if (/^\[MANUAL\s+FILL/i.test(part)) {
       if (isInternalScanTag(part)) return null;
@@ -976,18 +1099,44 @@ export function MarkdownReportBody({
   body,
   variant = "report",
   highlightTexts = [],
+  evidenceCorpus,
+  citationMap,
 }: {
   body: string;
   variant?: "report" | "document" | "chat";
   highlightTexts?: string[];
+  /** When provided, [E#] markers render as source badges (export still strips). */
+  evidenceCorpus?: EvidenceItem[];
+  /** Post-hoc claim→evidence map; badges injected for review even without LLM [E#]. */
+  citationMap?: Array<{ text: string; evidenceIds: string[]; method?: string }>;
 }) {
-  const blocks = parseBlocks(
-    variant === "document" ? stripEvidenceCitations(body) : body
-  );
+  const evidenceById = useMemo(() => {
+    const map: Record<string, EvidenceItem> = {};
+    for (const item of evidenceCorpus ?? []) {
+      const id = (item?.id || "").trim().toUpperCase();
+      if (id) map[id] = item;
+    }
+    return map;
+  }, [evidenceCorpus]);
+
+  // Strip only when document view has no corpus (e.g. fee justification).
+  // Review surfaces pass evidenceCorpus so [E#] become citation badges.
+  const prepared = useMemo(() => {
+    const withMap = injectCitationMarkers(body, citationMap);
+    if (variant === "document" && evidenceCorpus === undefined) {
+      return stripEvidenceCitations(withMap);
+    }
+    return withMap;
+  }, [body, citationMap, variant, evidenceCorpus]);
+  const blocks = parseBlocks(prepared);
   const highlights = highlightTexts.filter((h) => h?.trim());
 
+  const wrap = (node: ReactNode) => (
+    <EvidenceByIdContext.Provider value={evidenceById}>{node}</EvidenceByIdContext.Provider>
+  );
+
   if (variant === "document") {
-    return (
+    return wrap(
       <div className="proposal-prose proposal-prose--manuscript selection:bg-blue-500/20 selection:text-inherit">
         {blocks.map((block, index) => {
           if (block.type === "hr") {
@@ -1074,7 +1223,7 @@ export function MarkdownReportBody({
     ? "proposal-section-chat-md space-y-2 text-[14px] leading-relaxed text-inherit"
     : "space-y-4 text-sm leading-relaxed text-zo-text-secondary";
 
-  return (
+  return wrap(
     <div className={stackClass}>
       {blocks.map((block, index) => {
         if (block.type === "heading") {

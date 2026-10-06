@@ -559,19 +559,21 @@ def _salvage_content_string(text: str) -> str:
 
 
 def content_from_agent_payload(parsed: dict[str, Any], raw_text: str = "") -> str:
-    """Normalize agent JSON to section prose."""
-    from app.services.proposal_manuscript import strip_evidence_citation_markers
+    """Normalize agent JSON to section prose.
 
+    Keeps [E#] markers so the review UI can render citation badges; export
+    strips them via scrub_text_for_client_export.
+    """
     for key in ("content", "sectionContent", "section_content", "text", "prose"):
         val = parsed.get(key)
         if isinstance(val, str) and val.strip():
-            return strip_evidence_citation_markers(val.strip())
+            return val.strip()
     salvaged = _salvage_content_string(raw_text)
     if salvaged:
-        return strip_evidence_citation_markers(salvaged)
+        return salvaged
     stripped = raw_text.strip()
     if stripped and not stripped.startswith("{"):
-        return strip_evidence_citation_markers(stripped)
+        return stripped
     return ""
 
 
