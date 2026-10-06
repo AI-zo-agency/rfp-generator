@@ -165,6 +165,9 @@ worthScore ("Worth It Score") — financial return vs pursuit effort:
   opportunity class is professional_services and pursuit effort is normal → usually Worth 3 (mixed).
   EXCEPTION: when HARD FACTS say opportunity class is open_competition (or compensation is
   unpaid/prize_only) without confirmed_fee → Worth ≤ 1 and prefer no_go. Do not invent a fee.
+  EXCEPTION: funding_program with undisclosed award → Worth ≤ 3 and Financial ≤ 2 is fine;
+  do NOT force Worth ≤ 1 or Financial 0. Prefer review until applicant eligibility and
+  award economics are confirmed.
 
 decisionMatrix — exactly 5 rows; each score is independent (they will often differ):
   1. Technical Capability Match — scope execution per KB excerpts actually retrieved
@@ -173,6 +176,8 @@ decisionMatrix — exactly 5 rows; each score is independent (they will often di
   2. Resource Availability — team bandwidth, geography, live-demo/on-site needs
   3. Financial Viability — agency revenue vs cost (use commission math when budget is mostly media spend).
      open_competition / unpaid / prize_only without confirmed fee → 0 (do not invent payout)
+     funding_program with undisclosed award → typically 2 (uncertain economics), NEVER 0 solely
+     because award size is applicant-defined or not stated
   4. Strategic Value — reference value, sector/geography expansion.
      open_competition without confirmed fee → ≤ 2 (not a paid municipal brand-system showcase)
   5. Win Probability — competition, proximity, scoring criteria alignment, disqualification risk.
@@ -181,8 +186,10 @@ decisionMatrix — exactly 5 rows; each score is independent (they will often di
 Overall Go Score = arithmetic average of the 5 decisionMatrix scores (not fitScore/worthScore).
 Use the full 0–5 range. Strong RFPs with local presence and high contract value should score 4–5 on several dimensions.
 Weak or distant low-value RFPs should score 1–2 on Financial Viability and Win Probability.
-Classify the deal BEFORE scoring: community design contests / "submit your seal" open calls are NOT
-paid professional-services procurements even if the header says "Sealed Bid" or "RFP".
+Classify the deal BEFORE scoring by opportunity shape:
+- Contests for creative concepts (prize/recognition) → open_competition — not paid vendor RFPs.
+- Applications for project funding from an award pool → funding_program — not open_competition
+  and not unpaid/prize work. Surface applicant-eligibility clarifying questions.
 
 EVIDENCE CALIBRATION (accurate — neither reject-everything NOR invent pessimism):
 - Score each matrix row against THIS RFP's stated requirements and the KB excerpts returned for the searches run.
@@ -2770,6 +2777,9 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 - Spell Ella Lindau correctly (not Lindeau).
 - Undisclosed budget alone ≠ Worth 2 when opportunity class is professional_services — usually Worth ~3.
 - open_competition / unpaid / prize_only without confirmed fee → Financial 0, Worth ≤1, prefer no_go.
+- funding_program with undisclosed award → Financial ~2, Worth ≤3, prefer review —
+  NEVER treat as open_competition or Financial 0 / automatic no_go. Ask who may be
+  applicant of record (including for-profit eligibility).
 - Never cite small-business gross-receipts thresholds (e.g. $30M) as contract value.
 
 ## RFP

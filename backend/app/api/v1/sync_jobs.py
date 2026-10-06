@@ -145,7 +145,7 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
     if sb.use_supabase_db():
         # Clear zombie "running" rows left behind by uvicorn --reload / crashes
         # before we refuse a new sync with 409.
-        expired = sb.expire_stale_running_sync_jobs(max_age_minutes=8)
+        expired = sb.expire_stale_running_sync_jobs()
         if expired:
             logger.warning(
                 "Expired %d stale JustWin sync job(s) before trigger: %s",

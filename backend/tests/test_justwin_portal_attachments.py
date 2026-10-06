@@ -124,6 +124,9 @@ class PortalAttachmentHelpersTests(unittest.TestCase):
         self.assertTrue(
             should_skip_portal_scrape("https://agency.bonfirehub.com/opportunities/1")
         )
+        self.assertTrue(
+            should_skip_portal_scrape("https://www.nyscr.ny.gov/Ads/Search")
+        )
         self.assertFalse(
             should_skip_portal_scrape(
                 "https://col.ionwave.net/PublicBid.aspx?bidid=123"

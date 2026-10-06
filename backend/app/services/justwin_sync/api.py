@@ -282,12 +282,13 @@ def _lead_payload(client: JustWinApiClient, external_id: str) -> dict[str, Any] 
     return payload if isinstance(payload, dict) else None
 
 
-# S3 returns headers quickly but large RFP PDFs often exceed Playwright's
-# default 30s while the body is still streaming (logs show 200 OK + timeout).
-_S3_PDF_TIMEOUT_MS = 180_000
+# Pre-signed S3 URLs do not need browser cookies. Playwright often returns
+# HTTP 200 for headers then times out while the PDF body streams (we have
+# burned 180s per lead on that path). Prefer httpx; keep Playwright as fallback.
+_S3_PDF_TIMEOUT_MS = 45_000
 
 
-def _download_bytes_httpx(url: str, *, timeout_s: float = 180.0) -> bytes:
+def _download_bytes_httpx(url: str, *, timeout_s: float = 120.0) -> bytes:
     """Direct GET for pre-signed S3 URLs — no browser cookies required."""
     import httpx
 
@@ -313,21 +314,25 @@ def _download_target_pdf(
 
     body: bytes | None = None
     try:
-        pdf_response = client.page.request.get(s3_url, timeout=_S3_PDF_TIMEOUT_MS)
-        if not pdf_response.ok:
-            raise RuntimeError(f"Failed to download PDF from S3 ({pdf_response.status})")
-        body = pdf_response.body()
-    except Exception as exc:  # noqa: BLE001
+        body = _download_bytes_httpx(str(s3_url))
+    except Exception as http_exc:  # noqa: BLE001
         logger.warning(
-            "[justwin-sync] Playwright S3 download failed (%s) — retrying with httpx",
-            exc,
+            "[justwin-sync] httpx S3 download failed (%s) — retrying with Playwright",
+            http_exc,
         )
         try:
-            body = _download_bytes_httpx(str(s3_url))
-        except Exception as http_exc:  # noqa: BLE001
+            pdf_response = client.page.request.get(
+                s3_url, timeout=_S3_PDF_TIMEOUT_MS
+            )
+            if not pdf_response.ok:
+                raise RuntimeError(
+                    f"Failed to download PDF from S3 ({pdf_response.status})"
+                )
+            body = pdf_response.body()
+        except Exception as pw_exc:  # noqa: BLE001
             raise RuntimeError(
-                f"Failed to download PDF from S3 after Playwright + httpx: {http_exc}"
-            ) from http_exc
+                f"Failed to download PDF from S3 after httpx + Playwright: {pw_exc}"
+            ) from pw_exc
 
     if body is None or len(body) < 500 or not body.startswith(b"%PDF"):
         raise RuntimeError("Downloaded file was not a valid PDF")
@@ -375,7 +380,7 @@ def download_solicitation_pdf_bytes(
     readonly = payload.get("readonly_values") or {}
     originating = str(readonly.get("originating_url") or "").strip()
     portal_pdfs = []
-    if originating:
+    if originating and package_looks_thin(primary):
         try:
             portal_pdfs = fetch_portal_attachment_pdfs(client.page, originating)
         except Exception as exc:  # noqa: BLE001
@@ -385,6 +390,13 @@ def download_solicitation_pdf_bytes(
                 exc,
             )
             portal_pdfs = []
+    elif originating:
+        logger.info(
+            "[justwin-sync] %s: skip portal scrape — JustWin PDF already looks "
+            "complete (%d bytes)",
+            external_id,
+            len(primary),
+        )
 
     if portal_pdfs:
         ordered = sort_portal_pdfs(portal_pdfs)

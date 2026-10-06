@@ -12,7 +12,12 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-OpportunityClass = Literal["professional_services", "open_competition", "ambiguous"]
+OpportunityClass = Literal[
+    "professional_services",
+    "open_competition",
+    "funding_program",
+    "ambiguous",
+]
 CompensationSignal = Literal[
     "confirmed_fee",
     "prize_only",
@@ -24,24 +29,30 @@ _DIM_FINANCIAL = "financial viability"
 _DIM_STRATEGIC = "strategic value"
 _DIM_WIN = "win probability"
 
+_VALID_OPPORTUNITY_CLASSES = frozenset(
+    {"professional_services", "open_competition", "funding_program", "ambiguous"}
+)
+
 _OPPORTUNITY_CLASSIFIER_PROMPT = """You classify an RFP's opportunity shape and compensation model for a marketing agency Go/No-Go decision.
 
 Read the RFP excerpt and return JSON only:
 {
-  "opportunityClass": "professional_services" | "open_competition" | "ambiguous",
+  "opportunityClass": "professional_services" | "open_competition" | "funding_program" | "ambiguous",
   "compensationSignal": "confirmed_fee" | "undisclosed" | "explicitly_unpaid" | "prize_only",
   "evidenceQuote": "verbatim phrase from the RFP that supports compensationSignal (required)",
   "rationale": "one sentence"
 }
 
 Principles (judge by meaning — no keyword shortcuts):
-- professional_services: agency delivers scoped marketing/branding/communications work under contract.
-- open_competition: public design contest / open call where participants submit concepts for recognition or prize, not a professional fee engagement.
-- confirmed_fee: RFP states paid contract mechanics — fixed ceiling/NTE, price agreement, IDIQ/task-order vehicle, hourly rate schedule, invoicing/NET terms, sample services agreement for paid work.
-- undisclosed: paid professional-services shape but no reliable contract ceiling or rate table in the excerpt (common for IDIQ without a dollar cap stated upfront).
-- explicitly_unpaid: deliverable work itself is unpaid, volunteer-only, or prize/recognition-only — NOT standard bid-prep boilerplate.
-- CRITICAL: "No payment for proposal preparation" / "costs incurred prior to award" / "no fee for submitting a proposal" describe BID PREP only. That is NOT explicitly_unpaid when the RFP also requests hourly rates, price agreements, invoicing, or paid services scope.
-- prize_only: compensation is honorarium/stipend/public recognition without a professional services contract.
+- professional_services: buyer hires the firm under a paid vendor/services contract for scoped work.
+- funding_program: applicant seeks an award from a funding pool to deliver a proposed project (grant or similar funded application). Award size is often applicant-defined or undisclosed. Seeking funding ≠ being hired on a vendor SOW. This is NOT open_competition.
+- open_competition: ONLY contests / open calls where participants submit creative concepts for prize, honorarium, or recognition — not hired as a contractor and not applying for project funding.
+- CRITICAL separation: if applicants compete for project funding (even when they invent the project/budget and present to a panel), classify funding_program — never open_competition or prize_only.
+- confirmed_fee: paid contract mechanics — fixed ceiling/NTE, price agreement, IDIQ/task-order vehicle, hourly rates, invoicing/NET terms, sample services agreement. An applicant-requested funding ask is NOT confirmed_fee unless the notice awards a hired vendor under contract pay terms.
+- undisclosed: no reliable contract ceiling or rate table (IDIQ without a stated cap; funding_program when award size is applicant-defined or unstated). Prefer undisclosed for funding_program unless the notice states a fixed prize/honorarium (then prize_only / open_competition may apply).
+- explicitly_unpaid: the deliverable work itself is unpaid/volunteer — NOT bid-prep boilerplate, and NOT a funding award that pays for project delivery.
+- CRITICAL: "No payment for proposal preparation" / "costs incurred prior to award" describe BID PREP only — NOT explicitly_unpaid when the solicitation also has paid contract mechanics.
+- prize_only: honorarium/stipend/recognition without a professional-services contract and without project-funding award mechanics.
 
 evidenceQuote MUST appear verbatim (or near-verbatim) in the RFP text provided."""
 
@@ -83,7 +94,7 @@ def parse_opportunity_classification(
     rationale = str(raw.get("rationale") or "").strip()
 
     opp_class: OpportunityClass
-    if opp_raw in {"professional_services", "open_competition", "ambiguous"}:
+    if opp_raw in _VALID_OPPORTUNITY_CLASSES:
         opp_class = opp_raw  # type: ignore[assignment]
     else:
         opp_class = "ambiguous"
@@ -111,6 +122,16 @@ def parse_opportunity_classification(
                 ),
                 quote[:80],
             )
+
+    # Safety: prize_only / explicitly_unpaid on a funding_program shape is almost
+    # always a mislabel (grant award ≠ contest prize). Keep class; soften signal.
+    if opp_class == "funding_program" and comp in {"explicitly_unpaid", "prize_only"}:
+        logger.info(
+            "opportunity classifier: funding_program + %s → undisclosed "
+            "(grant award is not unpaid/prize contest pay)",
+            comp,
+        )
+        comp = "undisclosed"
 
     return OpportunityClassification(
         opportunity_class=opp_class,
@@ -213,6 +234,27 @@ def apply_opportunity_score_caps(
             "Opportunity is an open design/community competition without a confirmed "
             "professional fee — speculative unpaid/prize work is not a paid services RFP.",
         )
+    elif opportunity_class == "funding_program" and not confirmed:
+        # Funding-award applications: unknown award size ≠ unpaid contest.
+        # Soft caps only — never Financial 0 / forced no_go from shape alone.
+        _cap_worth(raw, 3)
+        _cap_dimension(raw, _DIM_FINANCIAL, 2)
+        if raw.get("recommendation") == "go":
+            raw["recommendation"] = "review"
+        _append_gap(
+            raw,
+            "Funding-award program (not a paid vendor contract): confirm applicant "
+            "eligibility (including whether a for-profit firm may be applicant of "
+            "record or only a named partner/contractor) and realistic award economics "
+            "before treating as Go. Undisclosed award size is not Financial Viability "
+            "0 / automatic Pass.",
+        )
+        _append_clarifying_question(
+            raw,
+            "Who may be the applicant of record under this funding program, and can a "
+            "for-profit firm apply directly or only as a named partner/contractor to an "
+            "eligible applicant?",
+        )
     elif opportunity_class == "ambiguous" and not confirmed:
         _cap_worth(raw, 2)
         _cap_dimension(raw, _DIM_FINANCIAL, 1)
@@ -258,6 +300,10 @@ def format_opportunity_facts_lines(
             "- If opportunity class is open_competition and compensation is not confirmed_fee: "
             "Financial Viability must be 0, Worth ≤ 1, Strategic ≤ 2, Win ≤ 2, prefer no_go. "
             "Do NOT treat this as a normal paid professional-services RFP.",
+            "- If opportunity class is funding_program: Financial Viability ≤ 2 and Worth ≤ 3 "
+            "when award size is undisclosed — NOT Financial 0 / automatic no_go. Prefer "
+            "recommendation=review until applicant eligibility and award economics are "
+            "confirmed. Never label funding_program as open_competition or unpaid/prize work.",
             "- If professional_services with undisclosed budget: Worth ~3 (mixed) is allowed; "
             "do NOT invent a fee, and do NOT force Financial to 0 solely for undisclosed budget.",
             '- "No payment for proposal preparation" is bid-prep boilerplate — NOT explicitly_unpaid '
@@ -317,3 +363,13 @@ def _append_gap(raw: dict[str, Any], message: str) -> None:
     if any(isinstance(g, str) and message[:48] in g for g in gaps):
         return
     gaps.append(message)
+
+
+def _append_clarifying_question(raw: dict[str, Any], question: str) -> None:
+    qs = raw.setdefault("clarifyingQuestions", [])
+    if not isinstance(qs, list):
+        return
+    needle = question[:48]
+    if any(isinstance(q, str) and needle in q for q in qs):
+        return
+    qs.append(question)

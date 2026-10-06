@@ -32,6 +32,14 @@ This is a community design competition. Submit your design by August 30, 2026.
 Budget and any professional-services fee are not mentioned in this excerpt.
 """
 
+FUNDING_PROGRAM_LIKE = """
+Municipal Funding Opportunity — Community Project Awards
+Eligible organizations may apply for project funding from the City's award pool.
+Applicants must propose a project and budget ask, submit via the online application portal,
+and present to the review committee. Award amounts are not fixed in the notice;
+applicants define their funding request. This is not a vendor services contract.
+"""
+
 NORMAL_PAID_RFP = """
 Request for Proposals — Brand Strategy and Creative Services
 Scope of Services: discovery, brand platform, visual identity system.
@@ -102,6 +110,19 @@ class ParseOpportunityClassificationTests(unittest.TestCase):
         )
         self.assertEqual(parsed.compensation_signal, "confirmed_fee")
 
+    def test_funding_program_prize_signal_softens_to_undisclosed(self) -> None:
+        parsed = parse_opportunity_classification(
+            {
+                "opportunityClass": "funding_program",
+                "compensationSignal": "prize_only",
+                "evidenceQuote": "apply for project funding from the City's award pool",
+                "rationale": "Mislabelled funding award as prize.",
+            },
+            rfp_text=FUNDING_PROGRAM_LIKE,
+        )
+        self.assertEqual(parsed.opportunity_class, "funding_program")
+        self.assertEqual(parsed.compensation_signal, "undisclosed")
+
 
 class OpportunityScoreCapTests(unittest.TestCase):
     def test_open_competition_no_fee_caps_like_claude(self) -> None:
@@ -142,6 +163,42 @@ class OpportunityScoreCapTests(unittest.TestCase):
         by_dim = {r["dimension"]: r["score"] for r in raw["decisionMatrix"]}
         self.assertEqual(by_dim["Financial Viability"], 3)
         self.assertNotEqual(raw["recommendation"], "no_go")
+
+    def test_funding_program_soft_caps_not_open_competition_hard_zero(self) -> None:
+        """Any funding-award shape: soft caps — not Financial 0 / forced no_go."""
+        raw = _optimistic_matrix_raw()
+        raw["recommendation"] = "go"
+        apply_opportunity_score_caps(
+            raw,
+            opportunity_class="funding_program",
+            compensation_signal="undisclosed",
+        )
+        by_dim = {r["dimension"]: r["score"] for r in raw["decisionMatrix"]}
+        self.assertEqual(by_dim["Financial Viability"], 2)
+        self.assertLessEqual(raw["worthScore"], 3)
+        self.assertGreaterEqual(raw["worthScore"], 2)
+        self.assertEqual(raw["recommendation"], "review")
+        self.assertNotEqual(raw["recommendation"], "no_go")
+        gaps = " ".join(str(g) for g in raw["criticalGaps"])
+        self.assertIn("Funding-award program", gaps)
+        self.assertNotIn("open design/community competition", gaps)
+        questions = raw.get("clarifyingQuestions") or []
+        self.assertTrue(
+            any("applicant of record" in str(q).casefold() for q in questions),
+            questions,
+        )
+
+    def test_mislabelled_grant_as_open_competition_still_hard_caps(self) -> None:
+        """Until the classifier returns funding_program, open_competition stays strict."""
+        raw = _optimistic_matrix_raw()
+        apply_opportunity_score_caps(
+            raw,
+            opportunity_class="open_competition",
+            compensation_signal="undisclosed",
+        )
+        by_dim = {r["dimension"]: r["score"] for r in raw["decisionMatrix"]}
+        self.assertEqual(by_dim["Financial Viability"], 0)
+        self.assertEqual(raw["recommendation"], "no_go")
 
     def test_cnm_confirmed_fee_does_not_cap_financial_to_zero(self) -> None:
         raw = _optimistic_matrix_raw()

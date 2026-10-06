@@ -15,9 +15,26 @@ class ScheduledJob:
     method: str = "POST"
     body: dict[str, Any] | None = None
     timeout_seconds: float = 600
+    # None → follow SCHEDULER_RUN_ON_START; False → cron only (no deploy fire).
+    run_on_start: bool | None = None
 
 
 JOBS: tuple[ScheduledJob, ...] = (
+    # JustWin leads posted on the IST calendar day — 10:00 Asia/Kolkata.
+    # syncDate __TODAY__ is expanded in trigger.py to YYYY-MM-DD in this TZ.
+    ScheduledJob(
+        id="justwin_morning",
+        path="/api/v1/sync-jobs/trigger",
+        cron="0 10 * * *",
+        timezone="Asia/Kolkata",
+        body={
+            "syncMode": "today",
+            "syncDate": "__TODAY__",
+            "tab": "all",
+        },
+        timeout_seconds=120,
+        run_on_start=False,
+    ),
     ScheduledJob(
         id="iworker_nightly",
         path="/api/v1/financials/iworker/sync",

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -12,6 +14,23 @@ from app.core.config import Settings
 from app.scheduler.jobs import ScheduledJob
 
 logger = logging.getLogger(__name__)
+
+_TODAY_SENTINEL = "__TODAY__"
+
+
+def resolve_job_body(job: ScheduledJob, *, now: datetime | None = None) -> dict[str, Any]:
+    """Copy job.body; expand syncDate=__TODAY__ to YYYY-MM-DD in the job timezone."""
+    body = dict(job.body or {})
+    if body.get("syncDate") != _TODAY_SENTINEL:
+        return body
+    tz = ZoneInfo(job.timezone)
+    stamp = now if now is not None else datetime.now(tz)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=tz)
+    else:
+        stamp = stamp.astimezone(tz)
+    body["syncDate"] = stamp.strftime("%Y-%m-%d")
+    return body
 
 
 def trigger_job(job: ScheduledJob, *, settings: Settings) -> dict[str, Any]:
@@ -26,7 +45,8 @@ def trigger_job(job: ScheduledJob, *, settings: Settings) -> dict[str, Any]:
         return {"status": "skipped", "job_id": job.id}
 
     url = f"{base}{job.path}"
-    mode = (job.body or {}).get("mode", "")
+    payload = resolve_job_body(job)
+    mode = payload.get("mode") or payload.get("syncMode") or ""
     logger.info(
         "operation=scheduler_job job_id=%s step=http_request method=%s url=%s "
         "mode=%s timeout_s=%s note=waiting_on_api",
@@ -45,7 +65,7 @@ def trigger_job(job: ScheduledJob, *, settings: Settings) -> dict[str, Any]:
                 "X-Cron-Secret": secret,
                 "Content-Type": "application/json",
             },
-            json=job.body or {},
+            json=payload,
             timeout=job.timeout_seconds,
         )
     except httpx.TimeoutException:

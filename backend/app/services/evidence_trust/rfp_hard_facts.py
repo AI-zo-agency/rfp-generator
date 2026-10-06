@@ -458,6 +458,11 @@ def format_hard_facts_block(facts: dict[str, Any]) -> str:
             "Strategic ≤2, Win ≤2, prefer no_go (not a paid services engagement)."
         )
         lines.append(
+            "- funding_program without confirmed_fee → Financial ≤2, Worth ≤3, prefer review "
+            "— not Financial 0 / automatic no_go. Confirm applicant eligibility. Never treat "
+            "funding_program as open_competition."
+        )
+        lines.append(
             "- professional_services + undisclosed budget → Worth ~3 allowed; "
             "do not invent a fee and do not force Financial to 0 solely for undisclosed budget."
         )

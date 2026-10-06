@@ -864,7 +864,9 @@ def finish_sync_job(
 
 # uvicorn --reload kills in-flight Playwright tasks but leaves sync_jobs.status=
 # "running", so the modal spins forever. Expire zombies on read/trigger.
-_STALE_SYNC_JOB_MINUTES = 8
+# All-tab syncs with portal scrapes routinely exceed 8m; only treat as zombie
+# after a longer window (Playwright/httpx work can still be healthy).
+_STALE_SYNC_JOB_MINUTES = 20
 _JUSTWIN_CELERY_TASK_KEY = "zo:justwin_sync_task:{job_id}"
 # After enqueue, Celery may sit in PENDING briefly before a worker reserves it.
 _CELERY_ORPHAN_GRACE_SECONDS = 45

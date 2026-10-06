@@ -92,26 +92,16 @@ def _is_ionwave_url(url: str) -> bool:
     return "ionwave.net" in host
 
 
-# Headless scrape hangs or hits a bot wall on these hosts. Ionwave public
-# Bid Attachments still work; everything else must fail fast.
-_SKIP_PORTAL_HOST_MARKERS = (
-    "bonfirehub.com",
-    "bonfire",
-    "opengov.com",
-    "bidnetdirect.com",
-    "bidnet",
-    "planetbids.com",
-    "procure.org",  # hudsoncountynjprocure.org and similar BidNet skins
-)
-
+# Only Ionwave public Bid Attachments are reliable in headless Chromium.
+# Everything else (Bonfire, OpenGov, BidNet skins, state search portals, …)
+# either challenges bots or hangs past Playwright's goto timeout — fail fast.
 # Playwright's 90s goto did not abort Chrome TCP hangs (~4 min on dead portals).
 PORTAL_GOTO_TIMEOUT_MS = 12_000
 PORTAL_PDF_TIMEOUT_MS = 20_000
 
 
 def should_skip_portal_scrape(url: str) -> bool:
-    host = urlparse(url or "").netloc.casefold()
-    return any(marker in host for marker in _SKIP_PORTAL_HOST_MARKERS)
+    return not _is_ionwave_url(url or "")
 
 
 def package_looks_thin(pdf_bytes: bytes | None = None, *, text: str = "") -> bool:

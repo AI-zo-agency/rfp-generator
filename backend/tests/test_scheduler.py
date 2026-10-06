@@ -70,6 +70,98 @@ def _settings(**overrides) -> Settings:
     return loaded
 
 
+def test_justwin_morning_is_10am_ist():
+    job = scheduler_jobs.job_by_id("justwin_morning")
+    assert job is not None
+    assert job.cron == "0 10 * * *"
+    assert job.timezone == "Asia/Kolkata"
+    assert job.method == "POST"
+    assert job.path == "/api/v1/sync-jobs/trigger"
+    assert job.body == {
+        "syncMode": "today",
+        "syncDate": "__TODAY__",
+        "tab": "all",
+    }
+    assert job.run_on_start is False
+    assert job.timeout_seconds == 120
+
+
+def test_build_scheduler_registers_justwin_without_startup_fire():
+    from app.scheduler.service import _job_next_run_time
+
+    settings = _settings(
+        scheduler_backend_url="http://127.0.0.1:8001",
+        scheduler_timezone="America/Los_Angeles",
+        scheduler_run_on_start=True,
+        quickbooks_cron_secret="s3cret",
+    )
+    scheduler = build_scheduler(settings)
+    assert scheduler.get_job("justwin_morning") is not None
+    job = scheduler_jobs.job_by_id("justwin_morning")
+    assert job is not None
+    startup = first_run_time(settings)
+    # JustWin opts out of deploy-time fire; cron alone schedules the next 10:00 IST.
+    assert _job_next_run_time(job, settings, startup=startup) is None
+    qb = scheduler_jobs.job_by_id("quickbooks_nightly")
+    assert qb is not None
+    assert _job_next_run_time(qb, settings, startup=startup) is not None
+
+
+def test_resolve_job_body_expands_today_in_job_timezone():
+    from app.scheduler.trigger import resolve_job_body
+
+    job = scheduler_jobs.job_by_id("justwin_morning")
+    assert job is not None
+    ist = ZoneInfo("Asia/Kolkata")
+    # 2026-10-06 00:30 IST is still Oct 5 in UTC — body must use IST date.
+    body = resolve_job_body(
+        job,
+        now=datetime(2026, 10, 5, 19, 0, tzinfo=ZoneInfo("UTC")),
+    )
+    assert body["syncDate"] == "2026-10-06"
+    assert body["syncMode"] == "today"
+    assert body["tab"] == "all"
+    # Explicit check against IST wall clock too.
+    body2 = resolve_job_body(job, now=datetime(2026, 10, 6, 10, 0, tzinfo=ist))
+    assert body2["syncDate"] == "2026-10-06"
+
+
+def test_trigger_justwin_posts_resolved_ist_date(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["headers"] = kwargs["headers"]
+        captured["json"] = kwargs["json"]
+        captured["timeout"] = kwargs["timeout"]
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(scheduler_trigger.httpx, "request", fake_request)
+    monkeypatch.setattr(
+        scheduler_trigger,
+        "resolve_job_body",
+        lambda job, now=None: {
+            "syncMode": "today",
+            "syncDate": "2026-10-06",
+            "tab": "all",
+        },
+    )
+    result = trigger_job(
+        scheduler_jobs.job_by_id("justwin_morning"),
+        settings=_settings(
+            scheduler_backend_url="http://backend.internal:8000",
+            quickbooks_cron_secret="s3cret",
+        ),
+    )
+    assert result["status"] == "success"
+    assert captured["url"] == (
+        "http://backend.internal:8000/api/v1/sync-jobs/trigger"
+    )
+    assert captured["json"]["syncDate"] == "2026-10-06"
+    assert captured["timeout"] == 120
+
+
 def test_quickbooks_job_is_11pm_pacific():
     job = scheduler_jobs.job_by_id("quickbooks_nightly")
     assert job is not None
