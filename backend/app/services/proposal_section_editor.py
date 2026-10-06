@@ -238,8 +238,9 @@ Rules:
       government/municipal/enterprise specialization not in the bio PDF → applyInstruction:
       REPLACE the invented sentences with 2–4 sentences copied from that person's 04_Bio
       (years, tools, markets the KB actually states). NEVER delete the paragraph and leave
-      only a Role line. NEVER invent a replacement specialization. Also strip [E#] citation
-      markers and drop empty headers with no body (e.g. Team Qualifications Summary).
+      only a Role line. NEVER invent a replacement specialization. Keep [E#]
+      citation markers that still match the evidence corpus. Drop empty headers
+      with no body (e.g. Team Qualifications Summary).
     When the user pastes a multi-item audit covering capability + bio fabrications across
     tabs, tell them to say **remove fabricated content** or **fix these content issues**
     so the proposal-wide purge runs — still set hasFix for the open tab's safe scrub.
@@ -4138,7 +4139,8 @@ Every sentence you add must be supportable from the KB excerpts — if a fact is
 omit it or use [VERIFY: specific field], never guess.
 
 When fixing an invented bio specialization: REPLACE with 2–4 sentences from that person's
-04_Bio. Never leave only a Role line. Never insert [E#] markers. Drop empty headers.
+04_Bio. Never leave only a Role line. Keep [E#] markers that match the evidence
+corpus; cite [E#] when grounding a claim. Drop empty headers.
 
 DESIGNER NOTES: Insert ONLY standalone `[DESIGNER NOTE: …]` paragraphs (blank line before/after) —
 never **Designer Note:** or HTML. Content = layout/production handoff (callout, columns, attach PDF),
@@ -6077,9 +6079,9 @@ async def _improve_section_selection(
             allow_remove=False,
             allow_verify_fill=True,
         ):
-            from app.services.proposal_manuscript import strip_evidence_citation_markers
+            from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 
-            filled_excerpt = strip_evidence_citation_markers(filled_excerpt)
+            filled_excerpt = scrub_client_facing_section_artifacts(filled_excerpt)
             new_content = _splice_selection(
                 content,
                 start=selection_start,
@@ -6364,9 +6366,9 @@ async def _improve_section_selection(
             title=section.title,
             zo_mode=section.mode,
         )
-    from app.services.proposal_manuscript import strip_evidence_citation_markers
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 
-    replacement = strip_evidence_citation_markers(replacement)
+    replacement = scrub_client_facing_section_artifacts(replacement)
     if "«MFILL_" in replacement and "«MFILL_" not in (excerpt or ""):
         from app.services.proposal_manual_flags import scrub_orphan_mfill_placeholders
 
@@ -11213,7 +11215,8 @@ async def improve_proposal_section(
                     "Ground named team members to 04_Bio only. REPLACE invented "
                     "specialization / year claims with 2–4 sentences from that person's "
                     "packed 04_Bio. Keep Role lines. Never invent specialization. "
-                    "Strip [E#] markers. Drop empty headers with no body."
+                    "Keep [E#] markers that match the evidence corpus. Drop empty "
+                    "headers with no body."
                 )
                 try:
                     bio_pack = await pack_04_bio_kb_for_section(

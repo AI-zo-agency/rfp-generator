@@ -11,7 +11,7 @@ import {
   pinnedSectionConflictsWithMessage,
   resolveChatTarget,
 } from "@/lib/proposal-section-resolve";
-import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
+import type { EvidenceItem, OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 import { composeApplyFixInstruction, resolveApplyFixTarget } from "./compose-apply-fix-instruction";
@@ -74,6 +74,7 @@ interface ProposalSectionChatPanelProps {
   onStatusLineChange: (statusLine: string | null) => void;
   showClose?: boolean;
   onClose?: () => void;
+  evidenceCorpus?: EvidenceItem[];
 }
 
 function normalizeChatPlain(text: string): string {
@@ -199,6 +200,7 @@ export function ProposalSectionChatPanel({
   onStatusLineChange,
   showClose = false,
   onClose,
+  evidenceCorpus,
 }: ProposalSectionChatPanelProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -805,7 +807,11 @@ export function ProposalSectionChatPanel({
                     <AgentActivityCard activity={msg.agentActivity} />
                   ) : null}
                   {assistantBodyAddsUniqueDetail(msg.content, msg.agentActivity) ? (
-                    <MarkdownReportBody body={msg.content} variant="chat" />
+                    <MarkdownReportBody
+                      body={msg.content}
+                      variant="chat"
+                      evidenceCorpus={evidenceCorpus}
+                    />
                   ) : null}
                   {msg.suggestedFix && !msg.suggestedFixApplied ? (
                     <div className="proposal-section-chat-apply">

@@ -1,4 +1,4 @@
-"""Client-facing scrub: evidence lists + pricing flags must not ship."""
+"""Evidence markers: kept in saved drafts for review UI; stripped on export."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_playbook import user_asks_insert_budget_table
 from app.services.proposal_manuscript import (
     scrub_client_facing_section_artifacts,
+    scrub_text_for_client_export,
     strip_evidence_citation_markers,
 )
 
@@ -53,6 +54,22 @@ class StripEvidenceMarkersTests(unittest.TestCase):
         out = scrub_client_facing_section_artifacts(raw)
         self.assertNotIn("PRICING FLAG", out)
         self.assertIn("County budget", out)
+
+    def test_authoring_scrub_keeps_evidence_markers(self) -> None:
+        raw = "Curt brings 25+ years of creative direction. [E3]\n"
+        out = scrub_client_facing_section_artifacts(raw)
+        self.assertIn("[E3]", out)
+        self.assertIn("creative direction", out)
+
+    def test_export_scrub_strips_evidence_markers(self) -> None:
+        raw = (
+            "Curt brings 25+ years of creative direction. [E3]\n\n"
+            "Ron leads account management. [E3, E4]\n"
+        )
+        out = scrub_text_for_client_export(raw)
+        self.assertNotIn("[E3]", out)
+        self.assertNotIn("E4", out)
+        self.assertIn("creative direction", out)
 
 
 class EmbeddedBudgetTableTests(unittest.TestCase):

@@ -5,8 +5,13 @@ import { createPortal } from "react-dom";
 import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
 import { getTextareaCaretViewportRect } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
-import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
-import { MarkdownReportBody, stripEvidenceCitations } from "./MarkdownReportBody";
+import type {
+  EvidenceItem,
+  OutlineSection,
+  ProposalOutline,
+  ProposalResearch,
+} from "@/types/proposal";
+import { MarkdownReportBody } from "./MarkdownReportBody";
 import type { SectionChatReference } from "./ProposalSectionChatPanel";
 import { buildSectionPinReference } from "./ProposalSectionChatPanel";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
@@ -52,6 +57,8 @@ interface DraftSectionEditorProps {
   hideToolbar?: boolean;
   previewMode?: boolean;
   onPreviewModeChange?: (preview: boolean) => void;
+  evidenceCorpus?: EvidenceItem[];
+  citationMap?: OutlineSection["citationMap"];
 }
 
 export function DraftSectionEditor({
@@ -71,6 +78,8 @@ export function DraftSectionEditor({
   hideToolbar = false,
   previewMode: previewModeProp,
   onPreviewModeChange,
+  evidenceCorpus,
+  citationMap,
 }: DraftSectionEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -360,8 +369,10 @@ export function DraftSectionEditor({
                 onKeyUp={capturePreviewSelection}
               >
                 <MarkdownReportBody
-                  body={stripEvidenceCitations(value)}
+                  body={value}
                   variant="report"
+                  evidenceCorpus={evidenceCorpus}
+                  citationMap={citationMap}
                   highlightTexts={highlightRange ? [highlightRange.text] : []}
                 />
               </div>

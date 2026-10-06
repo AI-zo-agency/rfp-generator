@@ -5011,6 +5011,8 @@ function ProposalDraftWorkspaceInner({
                       disabled={anyPipelineRunning}
                       chatBusy={sectionChatBusy}
                       value={selectedSection.content}
+                      evidenceCorpus={research?.evidenceCorpus}
+                      citationMap={selectedSection.citationMap}
                       highlightRange={
                         activeSubmissionFlag?.sectionId === selectedSectionId
                           ? activeFlagHighlight
@@ -5108,6 +5110,7 @@ function ProposalDraftWorkspaceInner({
               messages={sectionChatMessages}
               onMessagesChange={setSectionChatMessages}
               onSectionUpdated={applySectionImproveFromServer}
+              evidenceCorpus={research?.evidenceCorpus}
               onRevisionRecorded={(sectionId, revision) =>
                 recordSectionRevision(sectionId, revision)
               }
@@ -5525,6 +5528,8 @@ function ProposalDraftWorkspaceInner({
                         <MarkdownReportBody
                           body={stripLeadingTitleEcho(section.content, section.title)}
                           variant="document"
+                          evidenceCorpus={research?.evidenceCorpus}
+                          citationMap={section.citationMap}
                           highlightTexts={
                             activeSubmissionFlag?.sectionId === section.id &&
                             activeFlagHighlight
@@ -5563,6 +5568,8 @@ function ProposalDraftWorkspaceInner({
                       <MarkdownReportBody
                         body={stripLeadingTitleEcho(section.content, section.title)}
                         variant="document"
+                        evidenceCorpus={research?.evidenceCorpus}
+                        citationMap={section.citationMap}
                         highlightTexts={
                           activeSubmissionFlag?.sectionId === section.id && activeFlagHighlight
                             ? [activeFlagHighlight.text]
@@ -5795,6 +5802,8 @@ function ProposalDraftWorkspaceInner({
                             <MarkdownReportBody
                               body={stripLeadingTitleEcho(section.content, section.title)}
                               variant="document"
+                              evidenceCorpus={research?.evidenceCorpus}
+                              citationMap={section.citationMap}
                             />
                           </div>
                         </article>

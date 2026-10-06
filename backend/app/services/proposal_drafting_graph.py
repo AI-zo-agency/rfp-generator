@@ -187,7 +187,7 @@ ALLOWED WITHOUT inventing company facts (plan-driven structure):
 
 Rules (strict):
 1. Never invent unverified company facts (metrics, clients, certifications, team members, contract awards). Those require evidence [E#] or [VERIFY].
-2. Use ONLY facts from the evidence corpus. Do NOT insert markers like [E1] or [E2] in the written proposal — keep the prose client-ready.
+2. Use ONLY facts from the evidence corpus. After every grounded claim, cite the supporting evidence with an inline [E#] marker (e.g. [E3] or [E3, E4]). The review UI turns these into source badges; export strips them — never invent a marker that is not in the corpus.
 3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed] ONLY for the missing fact — prefer citing [E#] when any excerpt partially answers. Do not blank the whole section.
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the BRAND VOICE and REGISTER blocks for each section.
