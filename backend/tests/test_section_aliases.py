@@ -207,10 +207,19 @@ class AliasChannelMeasurementTests(unittest.TestCase):
 
 _ENUMERATED_SAME_GROUP_CROSS_PAIRS: dict[tuple[str, str], str] = {
     # -- Cover letter group -------------------------------------------------
+    ("cover letter", "letter of interest"): (
+        "Same submission letter under a municipal synonym; RFPs that ask for a "
+        "'Letter of Interest' want the signed offer/interest letter, not a "
+        "second scored narrative tab alongside a cover letter."
+    ),
     ("cover letter", "letter of transmittal"): (
         "One artifact under two names; 'Letter of Transmittal' is the formal "
         "procurement term. A submission never contains both, and no RFP scores "
         "them as separate criteria."
+    ),
+    ("letter of interest", "letter of transmittal"): (
+        "Same single letter artifact: interest / cover / transmittal naming "
+        "varies by buyer; a packet never scores two of these separately."
     ),
     # -- Key personnel group ------------------------------------------------
     ("key personnel", "key staff"): (

@@ -610,9 +610,7 @@ def format_rfp_calendar_constraint(
     return "\n".join(lines)
 
 
-_COVER_LETTER_TITLE_RE = re.compile(
-    r"(?i)\b(?:cover\s+letter|letter\s+of\s+transmittal|transmittal\s+letter)\b"
-)
+# Title matching lives in proposal_draft_structure_stubs (includes letter of interest).
 _SIGNATURE_PAGE_TITLE_RE = re.compile(
     r"(?i)\b(?:signature|signatory|authorization|authorized\s+sign)\b"
 )
@@ -725,15 +723,20 @@ def ensure_signed_cover_designer_note(
     if not sections:
         return draft, logs
 
+    from app.services.proposal_draft_structure_stubs import (
+        is_cover_letter_section_title,
+        text_mentions_cover_letter,
+    )
+
     if _signed_cover_required(attachment_labels, rfp_text):
         target_idx: int | None = None
         for idx, section in enumerate(sections):
-            if _COVER_LETTER_TITLE_RE.search(section.title or ""):
+            if is_cover_letter_section_title(section.title or ""):
                 target_idx = idx
                 break
         if target_idx is None:
             for idx, section in enumerate(sections):
-                if _COVER_LETTER_TITLE_RE.search(
+                if text_mentions_cover_letter(
                     f"{section.title or ''}\n{section.content or ''}"
                 ):
                     target_idx = idx
@@ -762,7 +765,7 @@ def ensure_signed_cover_designer_note(
     if _signature_page_required(attachment_labels, rfp_text):
         target_idx = None
         for idx, section in enumerate(sections):
-            if _SIGNATURE_PAGE_TITLE_RE.search(section.title or "") and not _COVER_LETTER_TITLE_RE.search(
+            if _SIGNATURE_PAGE_TITLE_RE.search(section.title or "") and not is_cover_letter_section_title(
                 section.title or ""
             ):
                 target_idx = idx
@@ -774,7 +777,7 @@ def ensure_signed_cover_designer_note(
                     break
         if target_idx is None:
             for idx, section in enumerate(sections):
-                if _COVER_LETTER_TITLE_RE.search(section.title or ""):
+                if is_cover_letter_section_title(section.title or ""):
                     target_idx = idx
                     break
         if target_idx is None:
@@ -792,7 +795,7 @@ def ensure_signed_cover_designer_note(
         if "authorized signature page" not in body.casefold():
             # Cover may already have the signed-cover attach note; still allow the
             # distinct wet-ink signature-page note (never put it on Budget/Cost).
-            allow_stack = bool(_COVER_LETTER_TITLE_RE.search(sections[target_idx].title or ""))
+            allow_stack = is_cover_letter_section_title(sections[target_idx].title or "")
             sections, changed = _inject_designer_note_on_section(
                 sections,
                 target_idx=target_idx,

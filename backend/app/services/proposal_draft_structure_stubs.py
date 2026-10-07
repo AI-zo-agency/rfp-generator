@@ -35,12 +35,18 @@ _SKIP_FILL_ID_PREFIXES = (
 
 _DRAFT_STUB_MARKER = "draft this rfp-required section"
 
-_COVER_LETTER_TITLE_TOKENS = (
+# Single source of truth for "this tab is the signed offer / interest letter".
+# All drafting, evidence-gate, and consistency paths import via
+# is_cover_letter_section_title() — do not copy this tuple elsewhere.
+COVER_LETTER_TITLE_TOKENS = (
     "cover letter",
     "letter of transmittal",
     "transmittal letter",
     "letter of offer",
+    "letter of interest",
 )
+# Back-compat for any private imports.
+_COVER_LETTER_TITLE_TOKENS = COVER_LETTER_TITLE_TOKENS
 
 _COVER_LETTER_BODY_SIGNALS = (
     "dear ",
@@ -67,8 +73,96 @@ _COVER_LETTER_MIN_PROSE_WORDS = 180
 
 
 def is_cover_letter_section_title(title: str) -> bool:
+    """Title-token fallback only. Prefer is_cover_letter_section() with Phase 2 stamps."""
     t = (title or "").casefold()
-    return any(tok in t for tok in _COVER_LETTER_TITLE_TOKENS)
+    return any(tok in t for tok in COVER_LETTER_TITLE_TOKENS)
+
+
+def is_cover_letter_section(
+    *,
+    title: str = "",
+    section_id: str = "",
+    submission_instrument: str | None = None,
+    voice_register: str | None = None,
+) -> bool:
+    """True when this tab is the signed offer letter — instrument/register first.
+
+    Phase 2 stamps submissionInstrument \"letter\" (and/or register cover_letter) by
+    MEANING. Title tokens are a last-resort fallback for odd/legacy titles.
+    """
+    inst = (submission_instrument or "").strip().casefold()
+    if inst in {"letter", "cover_letter"}:
+        return True
+    if (voice_register or "").strip().casefold() == "cover_letter":
+        return True
+    if is_cover_letter_section_title(title):
+        return True
+    sid = (section_id or "").casefold()
+    return any(
+        tok in sid for tok in ("cover-letter", "transmittal", "letter-of-interest")
+    )
+
+
+def text_mentions_cover_letter(text: str) -> bool:
+    """Title or body mentions a cover/transmittal/interest letter (designer-note routing)."""
+    t = (text or "").casefold()
+    return any(tok in t for tok in COVER_LETTER_TITLE_TOKENS)
+
+
+def letter_stamps_from_research(
+    research: object | None,
+    section_id: str,
+) -> tuple[str | None, str | None]:
+    """(submissionInstrument, plan register) for section_id from Phase 2 plan."""
+    if research is None or not section_id:
+        return None, None
+    plan = getattr(research, "proposal_execution_plan", None)
+    if plan is None:
+        return None, None
+    if isinstance(plan, dict):
+        writing = plan.get("writing") or {}
+        outline = writing.get("proposalOutline") or writing.get("proposal_outline") or {}
+        sections = outline.get("sections") if isinstance(outline, dict) else []
+        plans = (writing.get("sectionPlans") or writing.get("section_plans") or {}).get(
+            "plans"
+        ) or []
+    else:
+        writing = getattr(plan, "writing", None)
+        outline = getattr(writing, "proposal_outline", None) if writing else None
+        sections = getattr(outline, "sections", None) or []
+        sp = getattr(writing, "section_plans", None) if writing else None
+        plans = getattr(sp, "plans", None) or []
+
+    inst: str | None = None
+    for sec in sections or []:
+        sid = sec.get("id") if isinstance(sec, dict) else getattr(sec, "id", None)
+        if str(sid or "") != section_id:
+            continue
+        raw = (
+            sec.get("submissionInstrument") or sec.get("submission_instrument")
+            if isinstance(sec, dict)
+            else getattr(sec, "submission_instrument", None)
+        )
+        inst = str(raw).strip() if raw else None
+        break
+
+    reg: str | None = None
+    for item in plans or []:
+        sid = (
+            item.get("sectionId") or item.get("section_id")
+            if isinstance(item, dict)
+            else getattr(item, "section_id", None)
+        )
+        if str(sid or "") != section_id:
+            continue
+        raw = (
+            item.get("register") or item.get("voice_register")
+            if isinstance(item, dict)
+            else getattr(item, "voice_register", None)
+        )
+        reg = str(raw).strip() if raw else None
+        break
+    return inst, reg
 
 
 def _cover_letter_prose_word_count(content: str) -> int:

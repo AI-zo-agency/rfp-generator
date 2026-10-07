@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 AGENT = "submission_authority"
 
 CHECKLIST_INSTRUMENTS = frozenset({"form", "references", "disclosure"})
-VALID_INSTRUMENTS = CHECKLIST_INSTRUMENTS | frozenset({"narrative", "cost", "clarify"})
+VALID_INSTRUMENTS = CHECKLIST_INSTRUMENTS | frozenset(
+    {"narrative", "cost", "clarify", "letter"}
+)
 
 _AUTHORITY_SYSTEM = """You are zö agency's submission-authority agent for proposal outlines.
 
@@ -51,6 +53,9 @@ Rules (judge by meaning, not keyword lists):
   costRequirementStatus "confirmed" and stamp the matching tab submissionInstrument "cost".
 - When no operative pricing submittal exists, costRequirementStatus "absent".
 - Scored evaluation narrative tabs: submissionInstrument "narrative" (with evaluationWeight).
+- Signed offer / interest / cover / transmittal letter the buyer wants with the packet:
+  submissionInstrument "letter" — judge by MEANING (whatever the buyer named it), not
+  title synonyms. One letter tab per package.
 - Required forms, references, certifications, attachments: form | references | disclosure.
 - Do NOT invent tabs. Only update/remove existing outline ids.
 
@@ -60,7 +65,7 @@ Return JSON only:
   "sectionUpdates": [
     {
       "id": "rfp-sec-1",
-      "submissionInstrument": "narrative|form|references|disclosure|cost|clarify",
+      "submissionInstrument": "narrative|form|references|disclosure|cost|clarify|letter",
       "required": true,
       "conditionalReason": ""
     }

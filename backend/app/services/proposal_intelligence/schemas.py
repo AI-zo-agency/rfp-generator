@@ -471,7 +471,8 @@ class OutlineSection(BaseModel):
     # Agent-stamped: never drop for hard-cap / lean filler hygiene.
     protect_from_cap: bool = Field(default=False, alias="protectFromCap")
     # Agent-stamped instrument kind for near-dup + protect (not title synonym regex).
-    # cost | form | disclosure | references | narrative | clarify | null
+    # cost | form | disclosure | references | letter | narrative | clarify | null
+    # "letter" = signed cover / interest / transmittal / offer letter (by meaning).
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )

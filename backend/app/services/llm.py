@@ -281,9 +281,27 @@ class LlmError(Exception):
 # token on reasoning_tokens and returned empty content.
 _LENGTH_RETRY_TOKEN_CAP = 8192
 _LEAN_SCAN_LENGTH_RETRY_CAP = 8192
+# Pricing ASKS / plan JSON is large; Sonnet 5 also spends completion budget on
+# adaptive thinking. Cap must sit ABOVE the caller's requested max_tokens or
+# reinforce "bumps" shrink the budget (10000 → 8192) and re-truncate.
+_HIGH_OUTPUT_LENGTH_RETRY_CAP = 32768
+_HIGH_OUTPUT_NODES = frozenset(
+    {
+        "pricing-plan-v2",
+    }
+)
 _OUTPUT_LENGTH_FINISH = frozenset({"length", "max_tokens", "MAX_TOKENS"})
 # Keep a truncated-but-parsed first reply instead of paying for a doubled shot.
 _MIN_CHARS_TO_KEEP_LENGTH_HIT = 400
+
+
+def _length_retry_token_cap(node_name: str | None) -> int:
+    n = (node_name or "").strip().casefold()
+    if n in _HIGH_OUTPUT_NODES or n.startswith("pricing-plan"):
+        return _HIGH_OUTPUT_LENGTH_RETRY_CAP
+    if _is_lean_scan_node(node_name):
+        return _LEAN_SCAN_LENGTH_RETRY_CAP
+    return _LENGTH_RETRY_TOKEN_CAP
 
 
 def _is_lean_scan_node(node_name: str | None) -> bool:
@@ -357,20 +375,16 @@ def bump_max_tokens_after_length_hit(
     *,
     node_name: str | None = None,
 ) -> int:
-    """Double the output budget after a length truncation (hard cap 8192).
+    """Grow the output budget after length / truncated-JSON failure.
 
-    Never climbs to 16k/32k — reasoning models (claude-sonnet-5) used the extra
-    budget on thinking and returned empty content, doubling spend for nothing.
+    Default cap stays 8192 (scan/review). Pricing-plan nodes may climb to 32k —
+    never shrink below the caller's requested budget when the cap allows it.
     """
     base = int(requested) if requested and requested > 0 else 4096
-    cap = (
-        _LEAN_SCAN_LENGTH_RETRY_CAP
-        if _is_lean_scan_node(node_name)
-        else _LENGTH_RETRY_TOKEN_CAP
-    )
-    if _is_lean_scan_node(node_name):
-        return min(max(base * 2, base + 1024), cap)
-    return min(max(base * 2, 4096), cap)
+    cap = _length_retry_token_cap(node_name)
+    if base >= cap:
+        return cap
+    return min(max(base * 2, base + 1024), cap)
 
 
 def _usage_reasoning_exhausted_output(usage: dict[str, Any] | None) -> bool:
@@ -444,9 +458,8 @@ def _should_retry_after_length_truncation(
     if _usage_reasoning_exhausted_output(usage):
         return False
     current = int(requested) if requested and requested > 0 else 4096
-    if current >= _LENGTH_RETRY_TOKEN_CAP:
-        return False
-    if _is_lean_scan_node(node_name) and current >= _LEAN_SCAN_LENGTH_RETRY_CAP:
+    cap = _length_retry_token_cap(node_name)
+    if current >= cap:
         return False
     return bump_max_tokens_after_length_hit(current, node_name=node_name) > current
 
@@ -742,6 +755,7 @@ async def _post_chat(
     cache_prefix: str | Sequence[str] | None = None,
     ttl_1h: bool | None = None,
     reasoning_effort: str | None = None,
+    plugins: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -786,6 +800,8 @@ async def _post_chat(
         body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
+    if plugins:
+        body["plugins"] = plugins
 
     logger.info(
         "LLM request: provider=%s model=%s messages=%d reasoning=%s",
@@ -1873,10 +1889,11 @@ async def chat_text_vision(
     node_name: str | None = "rfp_pdf_ocr",
     rfp_id: str | None = None,
     run_id: str | None = None,
+    plugins: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
-    """OpenRouter-only plain-text chat for multimodal (image) messages.
+    """OpenRouter-only plain-text chat for multimodal (image/PDF file) messages.
 
-    Skips Gemini/Fireworks — those paths expect string content, not image parts.
+    Skips Gemini/Fireworks SDK paths — those expect string content, not file parts.
     """
     _enforce_llm_preflight()
     _enforce_run_cost_cap(node_name, run_id)
@@ -1902,6 +1919,7 @@ async def chat_text_vision(
         json_mode=False,
         cache_prefix=None,
         ttl_1h=False,
+        plugins=plugins,
     )
     _record_successful_call(
         model=model,

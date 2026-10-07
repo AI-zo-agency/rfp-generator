@@ -85,9 +85,9 @@ class Settings(BaseSettings):
     # settings and not one.
     openrouter_model_forecast: str = "google/gemini-3.6-flash"
     # Image-only RFP PDF OCR (vision). Used only when pypdf extracts almost no text.
+    # Sends the full PDF to OpenRouter (native file engine) — no page cap.
     openrouter_model_ocr: str = "~google/gemini-flash-latest"
     rfp_ocr_enabled: bool = True
-    rfp_ocr_max_pages: int = 20
 
     # Monid — server-side company enrichment only. Never expose this to the frontend.
     monid_api_key: str = ""

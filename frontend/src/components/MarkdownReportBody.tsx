@@ -47,7 +47,7 @@ function EvidenceCiteBadge({ evidenceId }: { evidenceId: string }) {
         <TooltipContent
           side="top"
           sideOffset={8}
-          className="z-[220] max-w-[22rem] border border-[rgba(17,24,39,0.12)] bg-white px-3 py-2.5 text-left text-[var(--zo-text)] shadow-[0_8px_24px_rgba(15,23,42,0.14)]"
+          className="z-[220] max-w-[28rem] border border-[rgba(17,24,39,0.12)] bg-white px-3 py-2.5 text-left text-[var(--zo-text)] shadow-[0_8px_24px_rgba(15,23,42,0.14)]"
         >
           <p className="m-0 flex items-start gap-1.5 text-[12px] font-semibold leading-snug">
             <span className="mt-px inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-sky-100 text-[9px] font-bold text-sky-800">
@@ -55,8 +55,9 @@ function EvidenceCiteBadge({ evidenceId }: { evidenceId: string }) {
             </span>
             <span className="min-w-0 break-words">{source}</span>
           </p>
-          <p className="m-0 mt-1.5 text-[11.5px] leading-snug text-[var(--zo-text-secondary)]">
-            {excerpt.length > 280 ? `${excerpt.slice(0, 280)}…` : excerpt}
+          {/* Full excerpt — was hard-truncated at 280 chars, which cut Pricing Book basis mid-sentence. */}
+          <p className="m-0 mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap break-words text-[11.5px] leading-snug text-[var(--zo-text-secondary)]">
+            {excerpt}
           </p>
         </TooltipContent>
       </Tooltip>

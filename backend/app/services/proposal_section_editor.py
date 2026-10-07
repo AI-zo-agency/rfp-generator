@@ -6544,10 +6544,18 @@ async def _redraft_rfp_section(
         uncovered=uncovered,
         section_title=section.title or "",
     )
+    from app.services.proposal_draft_structure_stubs import (
+        is_cover_letter_section,
+        letter_stamps_from_research,
+    )
+
+    outline_inst, plan_register = letter_stamps_from_research(research, section.id)
     register = classify_section_register(
         section_id=section.id,
         title=section.title,
         zo_mode=section.mode,
+        submission_instrument=outline_inst,
+        plan_register=plan_register,
     )
     voice_block = format_brand_voice_block(
         brand_voice,
@@ -6636,7 +6644,12 @@ async def _redraft_rfp_section(
         )
 
     for attempt in (1, 2):
-        is_cover_letter = is_cover_letter_section_title(section.title or "")
+        is_cover_letter = is_cover_letter_section(
+            title=section.title or "",
+            section_id=section.id or "",
+            submission_instrument=outline_inst,
+            voice_register=register,
+        )
         word_target_line = (
             f"Word target: {section.word_target} MAX — aim for "
             f"{int(section.word_target * 0.6)}-{int(section.word_target * 0.75)} words. "

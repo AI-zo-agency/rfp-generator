@@ -54,6 +54,11 @@ HARD RULES:
   Zero or more of "substance" | "calendar" | "price". Same definitions as the outline planner.
   Copy from outline when already correct; fix when the outline missed a combined calendar+substance
   tab or mis-tagged a form as price. Leave [] for bios/case studies/cover/references/attachments.
+- register: exactly one of "narrative" | "cover_letter" | "procurement".
+  Use "cover_letter" when the tab IS the signed offer/interest/cover/transmittal letter
+  (judge by MEANING / outline submissionInstrument "letter" — not title keywords).
+  Use "procurement" for forms, attachments, certifications, fee tables.
+  Use "narrative" for approach / experience / scored essays.
 
 Return JSON only:
 {
@@ -70,7 +75,7 @@ Return JSON only:
       "successDefinition": "string",
       "wordBudget": 500,
       "tone": "executive",
-      "register": "narrative",
+      "register": "narrative|cover_letter|procurement",
       "audience": "string",
       "deliveryRoles": []
     }
@@ -241,6 +246,9 @@ def apply_section_strategy_from_raw(
         # Prefer brief roles; if empty, inherit outline LLM stamp (still meaning-based).
         if not section_plan.delivery_roles and outline_sec is not None:
             section_plan.delivery_roles = list(outline_sec.delivery_roles or [])
+        # Outline stamped "letter" by meaning → cover_letter register (title may be anything).
+        if (outline_inst or "").casefold() == "letter":
+            section_plan.voice_register = "cover_letter"
         if outline_inst == "clarify":
             section_plan.word_budget = 80
             section_plan.writer_instructions = (

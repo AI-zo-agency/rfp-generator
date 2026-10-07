@@ -46,6 +46,9 @@ class StructureStubDraftTests(unittest.TestCase):
         )
 
         self.assertTrue(is_cover_letter_section_title("Section 1 - Cover Letter"))
+        self.assertTrue(is_cover_letter_section_title("Letter of Interest"))
+        self.assertTrue(is_cover_letter_section_title("1. Letter of Interest"))
+        self.assertFalse(is_cover_letter_section_title("Approach & Methodology"))
         checklist = (
             "[DESIGNER NOTE: Attach the physically signed cover letter PDF.]\n\n"
             "## COVER LETTER REQUIREMENTS\n\n"

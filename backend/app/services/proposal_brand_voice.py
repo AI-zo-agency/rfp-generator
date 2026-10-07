@@ -187,21 +187,26 @@ def classify_section_register(
     section_id: str = "",
     title: str = "",
     zo_mode: str = "write",
+    submission_instrument: str | None = None,
+    plan_register: str | None = None,
 ) -> Register:
-    """Narrative / cover-letter correspondence / procurement register for a section."""
+    """Narrative / cover-letter correspondence / procurement register for a section.
+
+    Prefer Phase 2 meaning stamps (submissionInstrument=letter, plan register=
+    cover_letter). Title tokens are fallback only.
+    """
+    from app.services.proposal_draft_structure_stubs import is_cover_letter_section
+
     sid = section_id.lower()
     t = title.lower()
 
-    # Signed passages (Rev 6) — before generic narrative / Zo 1–3 defaults.
-    if any(
-        k in t
-        for k in (
-            "cover letter",
-            "letter of transmittal",
-            "transmittal letter",
-            "letter of offer",
-        )
-    ) or "cover-letter" in sid or "transmittal" in sid:
+    # Signed passages (Rev 6) — instrument/register beat title synonyms.
+    if is_cover_letter_section(
+        title=title,
+        section_id=section_id,
+        submission_instrument=submission_instrument,
+        voice_register=plan_register,
+    ):
         return "cover_letter"
 
     if sid.startswith(

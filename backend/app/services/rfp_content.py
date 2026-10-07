@@ -29,7 +29,7 @@ def resolve_rfp_pdf_path(rfp_id: str, pdf_path: str | None = None) -> Path | Non
 def load_local_rfp_text(
     rfp: RfpRecord,
     *,
-    max_chars: int = 120_000,
+    max_chars: int = 400_000,
 ) -> tuple[str, str, bool, bool, int, bool]:
     """Return description, pdf_text, pdf_exists, pdf_file_missing, page_count, image_only."""
     description = (rfp.description or "").strip()

@@ -3077,6 +3077,16 @@ async def _finish_phase3_5_pricing_plan(
     for line in zf_report.logs[:12]:
         logger.info("Phase 3.5 zero-fabrication: %s — %s", rfp_id, line)
     await asave_proposal_draft(draft)
+    # Citation grounding may have appended Pricing Book evidence onto research.
+    if research is not None:
+        research = research.model_copy(
+            update={
+                "budget": budget,
+                "evidence_corpus": list(research.evidence_corpus or []),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await asave_research_cache(research)
     logger.info("Phase 3.5 pricing plan v2 complete for %s: tier=%s", rfp_id, budget.pricing_tier)
     step_trace(
         "phase3_5_budget_complete",

@@ -6,6 +6,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -99,7 +100,6 @@ import { PacketPlacePreviewModal } from "./PacketPlacePreviewModal";
 import { AlignOutlinePreviewModal } from "./AlignOutlinePreviewModal";
 import type { PacketPlacePreview } from "@/lib/proposal-api";
 import type { AlignOutlinePreview } from "@/lib/proposal-api";
-import { VoiceRevChip } from "@/components/VoiceRevChip";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody, stripManuscriptDisplayArtifacts } from "./MarkdownReportBody";
 import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
@@ -512,9 +512,9 @@ function ProposalDraftWorkspaceInner({
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
   const advancedMenuRef = useRef<HTMLDivElement | null>(null);
-  /** Outline-mode picker under Build my proposal (not the toolbar). */
+  /** Outline-mode modal when starting Build my proposal. */
   const [buildModePickerOpen, setBuildModePickerOpen] = useState(false);
-  const buildModePickerRef = useRef<HTMLDivElement | null>(null);
+  const buildModeTitleId = useId();
   /** ON = Zo Sections 1–3 template; OFF = strict RFP outline. */
   const [useZoTemplate, setUseZoTemplate] = useState(true);
   const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
@@ -624,20 +624,11 @@ function ProposalDraftWorkspaceInner({
 
   useEffect(() => {
     if (!buildModePickerOpen) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!buildModePickerRef.current?.contains(event.target as Node)) {
-        setBuildModePickerOpen(false);
-      }
-    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setBuildModePickerOpen(false);
     };
-    document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [buildModePickerOpen]);
 
   useEffect(() => {
@@ -4092,8 +4083,7 @@ function ProposalDraftWorkspaceInner({
                       ? ` Bidding: ${rfp.selectedTracks!.join(", ")}.`
                       : ""}
                   </p>
-                  <div ref={buildModePickerRef}>
-                    <button
+                  <button
                       type="button"
                       onClick={() => {
                         // Resume / recover already know the outline mode.
@@ -4101,7 +4091,7 @@ function ProposalDraftWorkspaceInner({
                           requireKeyPersonas(() => void handlePrimaryPipeline());
                           return;
                         }
-                        setBuildModePickerOpen((open) => !open);
+                        setBuildModePickerOpen(true);
                       }}
                       disabled={
                         anyPipelineRunning ||
@@ -4121,59 +4111,11 @@ function ProposalDraftWorkspaceInner({
                           : "Lock bid scope on the RFP detail page first"
                       }
                       className="proposal-status-build"
-                      aria-haspopup="menu"
+                      aria-haspopup="dialog"
                       aria-expanded={buildModePickerOpen}
                     >
                       {primaryPipelineLabel}
                     </button>
-                    {buildModePickerOpen ? (
-                      <div
-                        className="mt-2 w-full max-w-[16.5rem] rounded-lg border border-zo-border/80 bg-[#fafbfc] p-1.5"
-                        role="menu"
-                        aria-label="Proposal outline mode"
-                      >
-                        <p className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-zo-text-muted">
-                          Choose outline mode
-                        </p>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="block w-full rounded-md px-2.5 py-2 text-left hover:bg-[#fff1e8]"
-                          onClick={() => {
-                            setBuildModePickerOpen(false);
-                            requireKeyPersonas(() =>
-                              void handlePrimaryPipeline("zo_template"),
-                            );
-                          }}
-                        >
-                          <span className="block text-xs font-semibold text-foreground">
-                            Zo template
-                          </span>
-                          <span className="mt-0.5 block text-[10px] leading-snug text-zo-text-muted">
-                            Sections 1–3 first, then RFP tabs
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="block w-full rounded-md px-2.5 py-2 text-left hover:bg-[#fff1e8]"
-                          onClick={() => {
-                            setBuildModePickerOpen(false);
-                            requireKeyPersonas(() =>
-                              void handlePrimaryPipeline("strict_rfp"),
-                            );
-                          }}
-                        >
-                          <span className="block text-xs font-semibold text-foreground">
-                            Strict RFP
-                          </span>
-                          <span className="mt-0.5 block text-[10px] leading-snug text-zo-text-muted">
-                            Exact TOC + evaluation asks only
-                          </span>
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
                 </>
               )}
             </div>
@@ -4423,7 +4365,6 @@ function ProposalDraftWorkspaceInner({
               </button>
             ) : null}
             <div className="proposal-tab-actions-toolbar">
-            <VoiceRevChip key={rfp.id} rfpId={rfp.id} />
             {/* Compact LLM spend chip — opens Advanced options where the full
                 Cost summary lives (kept out of Ask Ralph so chat stays clean). */}
             {rfpCost ? (
@@ -6065,6 +6006,80 @@ function ProposalDraftWorkspaceInner({
               </div>
             </div>,
             document.body
+          )
+        : null}
+      {buildModePickerOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[200] flex items-center justify-center p-4 sm:p-6"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={buildModeTitleId}
+            >
+              <button
+                type="button"
+                className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px]"
+                aria-label="Dismiss outline mode"
+                onClick={() => setBuildModePickerOpen(false)}
+              />
+              <div className="relative z-10 w-full max-w-md rounded-2xl border border-zo-border bg-white p-6 shadow-[0_24px_64px_rgba(15,23,42,0.12)]">
+                <h2
+                  id={buildModeTitleId}
+                  className="font-heading text-lg font-bold text-foreground"
+                >
+                  Choose outline mode
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-zo-text-secondary">
+                  How should Ralph structure this draft?
+                </p>
+                <div className="mt-5 space-y-2">
+                  <button
+                    type="button"
+                    className="block w-full rounded-xl border border-zo-border/80 bg-[#fafbfc] px-4 py-3.5 text-left transition-colors hover:border-[#ef5018]/40 hover:bg-[#fff1e8]"
+                    onClick={() => {
+                      setBuildModePickerOpen(false);
+                      requireKeyPersonas(() =>
+                        void handlePrimaryPipeline("zo_template"),
+                      );
+                    }}
+                  >
+                    <span className="block text-sm font-semibold text-foreground">
+                      Zo template
+                    </span>
+                    <span className="mt-1 block text-xs leading-snug text-zo-text-muted">
+                      Sections 1–3 first, then RFP tabs
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="block w-full rounded-xl border border-zo-border/80 bg-[#fafbfc] px-4 py-3.5 text-left transition-colors hover:border-[#ef5018]/40 hover:bg-[#fff1e8]"
+                    onClick={() => {
+                      setBuildModePickerOpen(false);
+                      requireKeyPersonas(() =>
+                        void handlePrimaryPipeline("strict_rfp"),
+                      );
+                    }}
+                  >
+                    <span className="block text-sm font-semibold text-foreground">
+                      Strict RFP
+                    </span>
+                    <span className="mt-1 block text-xs leading-snug text-zo-text-muted">
+                      Exact TOC + evaluation asks only
+                    </span>
+                  </button>
+                </div>
+                <div className="mt-5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setBuildModePickerOpen(false)}
+                    className="zo-btn secondary !py-2.5"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
           )
         : null}
       <CaseStudyMatchModal

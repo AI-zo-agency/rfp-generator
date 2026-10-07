@@ -160,14 +160,17 @@ Rules:
 - When an evaluation criterion clearly matches a section, set evaluationWeight to that criterion's points.
 - Set protectFromCap=true for mandatory submission instruments the buyer must receive
   (scored Cost / pricing form, official quotation form, required certifications, AI disclosure,
-  references package, addenda acknowledgement, portal/vendor questionnaire, attachment checklists).
+  references package, signed cover/interest/transmittal letter, addenda acknowledgement,
+  portal/vendor questionnaire, attachment checklists).
   Do NOT set protectFromCap for optional narrative padding.
 - Set submissionInstrument to exactly one of:
-  cost | form | disclosure | references | narrative | null
+  cost | form | disclosure | references | letter | narrative | null
   Use "cost" for the scored pricing INSTRUMENT (hourly labor-category table, blended rate form,
   official quotation/pricing proposal form) — NOT for optional fee narrative that is not the
   scored Cost deliverable. Use "disclosure" for AI / generative-AI disclosures.
   Use "references" for reference forms. Use "form" for other signed compliance forms.
+  Use "letter" for the signed offer / interest / cover / transmittal letter that accompanies
+  the packet — judge by MEANING (whatever the buyer titled it), never by a keyword list.
   Use "narrative" for approach / experience essays. Leave null only when unsure.
 - Set deliveryRoles by MEANING for THIS RFP tab (judge the buyer's ask — never by title
   keyword lists). Zero or more of: "substance" | "calendar" | "price".

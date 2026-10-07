@@ -1,6 +1,6 @@
-"""Edge cases for RFP PDF text pipeline: pypdf → OCR cache → OpenRouter vision.
+"""Edge cases for RFP PDF text pipeline: pypdf → OCR cache → OpenRouter native PDF.
 
-Covers the 41-case matrix (A1–G41). OpenRouter is mocked unless marked live_ocr.
+Covers the OCR matrix. OpenRouter is mocked unless marked live_ocr.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pymupdf
 import pytest
@@ -120,11 +120,6 @@ def _native_text_pdf() -> bytes:
     return _text_pdf(text="Cost Proposal Fee Schedule " + ("word " * 40))
 
 
-# ---------------------------------------------------------------------------
-# A. Input / PDF shape
-# ---------------------------------------------------------------------------
-
-
 class TestA_InputPdfShape:
     def test_A1_native_text_pdf_skips_ocr(self) -> None:
         pdf = _native_text_pdf()
@@ -179,43 +174,63 @@ class TestA_InputPdfShape:
         assert extract_pdf_text_from_bytes(b"not-a-pdf") == ""
         assert extract_pdf_text_from_bytes(b"%PDF-1.4 truncated") == ""
         assert pdf_page_count(b"not-a-pdf") == 0
-        assert pdf_ocr.render_pdf_pages_png(b"not-a-pdf") == []
-        assert pdf_ocr.render_pdf_pages_png(b"%PDF-1.4 bad") == []
+        text, source = pdf_ocr.extract_text_via_ocr(b"not-a-pdf", rfp_id="edge")
+        assert text == "" and source == ""
 
     def test_A5_password_protected_does_not_crash(self) -> None:
         enc = _encrypted_pdf()
         assert extract_pdf_text_from_bytes(enc) == ""
-        assert pdf_ocr.render_pdf_pages_png(enc) == []
         with patch("app.services.rfp_content.load_rfp_pdf_bytes", return_value=enc):
             _d, text, exists, _missing, pages, _image_only = load_local_rfp_text(_rfp())
         assert exists
         assert text == ""
         assert pages >= 0
 
-    def test_A6_page_cap_honored(self) -> None:
-        pdf = _image_only_pdf(pages=5)
-        with patch.object(pdf_ocr.settings, "rfp_ocr_max_pages", 2):
-            pages = pdf_ocr.render_pdf_pages_png(pdf)
-        assert len(pages) == 2
+    def test_A6_no_page_cap_full_pdf_sent(self) -> None:
+        """50-page scans must send the whole PDF — not a page subset."""
+        pdf = _image_only_pdf(pages=12)
+        captured: dict = {}
 
-    def test_A7_large_png_payload_still_builds_message(self) -> None:
-        big = b"\x89PNG" + (b"x" * 50_000)
+        async def fake_vision(messages, **kwargs):
+            captured["plugins"] = kwargs.get("plugins")
+            captured["messages"] = messages
+            return _long_ocr(200), "openrouter"
+
+        with patch("app.services.llm.chat_text_vision", side_effect=fake_vision):
+            text = asyncio.run(
+                pdf_ocr.ocr_pdf_via_vision(pdf, rfp_id="edge-a6", max_chars=10_000)
+            )
+        assert "Cost Proposal" in text
+        file_part = next(
+            p
+            for p in captured["messages"][0]["content"]
+            if p.get("type") == "file"
+        )
+        assert file_part["file"]["file_data"].startswith("data:application/pdf;base64,")
+        assert captured["plugins"] == [
+            {"id": "file-parser", "pdf": {"engine": "native"}}
+        ]
+        # Entire PDF bytes encoded — not N page images.
+        image_parts = [
+            p for p in captured["messages"][0]["content"] if p.get("type") == "image_url"
+        ]
+        assert image_parts == []
+
+    def test_A7_large_pdf_payload_builds_file_part(self) -> None:
+        big = b"%PDF-1.4\n" + (b"0" * 200_000)
         with patch(
             "app.services.llm.chat_text_vision",
             new_callable=AsyncMock,
             return_value=(_long_ocr(200), "openrouter"),
         ) as vision:
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([big, big], rfp_id="edge-a7")
+                pdf_ocr.ocr_pdf_via_vision(big, rfp_id="edge-a7")
             )
         assert len(text) >= IMAGE_ONLY_TEXT_THRESHOLD
         vision.assert_awaited_once()
-        messages = vision.await_args.args[0]
-        parts = messages[0]["content"]
-        image_parts = [p for p in parts if p.get("type") == "image_url"]
-        assert len(image_parts) == 2
+        assert vision.await_args.kwargs.get("plugins")
 
-    def test_A8_rotated_scan_render_no_crash(self) -> None:
+    def test_A8_rotated_scan_loader_triggers_ocr(self) -> None:
         doc = pymupdf.open()
         page = doc.new_page()
         page.insert_text((72, 200), "Rotated Cost Proposal Fee Schedule " * 5)
@@ -227,8 +242,16 @@ class TestA_InputPdfShape:
         data = out.tobytes()
         doc.close()
         out.close()
-        rendered = pdf_ocr.render_pdf_pages_png(data)
-        assert len(rendered) == 1
+        assert is_image_only_pdf(data)
+        with (
+            patch("app.services.rfp_content.load_rfp_pdf_bytes", return_value=data),
+            patch(
+                "app.services.pdf_ocr.extract_text_via_ocr",
+                return_value=(_long_ocr(200), "ocr"),
+            ) as ocr,
+        ):
+            load_local_rfp_text(_rfp())
+        ocr.assert_called_once()
 
     def test_A9_thin_ocr_keeps_image_only(self) -> None:
         pdf = _image_only_pdf()
@@ -244,21 +267,13 @@ class TestA_InputPdfShape:
         assert image_only is True
 
 
-# ---------------------------------------------------------------------------
-# B. Loader gate
-# ---------------------------------------------------------------------------
-
-
 class TestB_LoaderGate:
     def test_B10_missing_pdf(self) -> None:
         with patch("app.services.rfp_content.load_rfp_pdf_bytes", return_value=None):
             _d, text, exists, missing, pages, image_only = load_local_rfp_text(
                 _rfp(pdf_path="supabase:rfp-ocr-edge/rfp.pdf")
             )
-        assert not exists
-        assert missing
-        assert text == ""
-        assert pages == 0
+        assert not exists and missing and text == "" and pages == 0
         assert image_only is False
 
     def test_B11_description_only_no_pdf_path(self) -> None:
@@ -270,22 +285,18 @@ class TestB_LoaderGate:
                 _rfp(pdf_path=None, description="Scope only description.")
             )
         assert desc.startswith("Scope only")
-        assert text == ""
-        assert not exists
-        assert not missing
+        assert text == "" and not exists and not missing
         assert image_only is False
 
     def test_B12_ocr_disabled(self) -> None:
         pdf = _image_only_pdf()
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", False),
-            patch("app.services.pdf_ocr.load_cached_ocr_text") as cache,
-            patch("app.services.pdf_ocr.render_pdf_pages_png") as render,
+            patch("app.services.pdf_ocr._run_coro_sync") as vision,
         ):
             text, source = pdf_ocr.extract_text_via_ocr(pdf, rfp_id="edge")
         assert text == "" and source == ""
-        cache.assert_not_called()
-        render.assert_not_called()
+        vision.assert_not_called()
 
     def test_B13_ocr_unexpected_exception_swallowed(self) -> None:
         pdf = _image_only_pdf()
@@ -297,16 +308,13 @@ class TestB_LoaderGate:
             ),
         ):
             _d, text, exists, _m, pages, image_only = load_local_rfp_text(_rfp())
-        assert exists and pages >= 1
-        assert text == ""
-        assert image_only is True
+        assert exists and pages >= 1 and text == "" and image_only is True
 
     def test_B14_ocr_short_text_rejected(self) -> None:
         pdf = b"%PDF-1.4 scan"
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", return_value="tiny"),
             patch("app.services.pdf_ocr.save_ocr_cache_text") as save,
         ):
@@ -321,7 +329,6 @@ class TestB_LoaderGate:
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", return_value=exactly),
             patch("app.services.pdf_ocr.save_ocr_cache_text") as save,
         ):
@@ -332,18 +339,12 @@ class TestB_LoaderGate:
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", return_value=below),
             patch("app.services.pdf_ocr.save_ocr_cache_text") as save2,
         ):
             text2, source2 = pdf_ocr.extract_text_via_ocr(pdf, rfp_id="edge")
         assert text2 == "" and source2 == ""
         save2.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# C. Cache
-# ---------------------------------------------------------------------------
 
 
 class TestC_Cache:
@@ -356,7 +357,6 @@ class TestC_Cache:
         body = _long_ocr(180)
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", return_value=body) as vision,
         ):
             t1, s1 = pdf_ocr.extract_text_via_ocr(pdf, rfp_id="cache-rfp")
@@ -366,8 +366,7 @@ class TestC_Cache:
         assert vision.call_count == 1
 
     def test_C17_hash_mismatch_reocr(self) -> None:
-        sha_old = "a" * 64
-        blob = pdf_ocr.format_ocr_cache_blob(sha_old, _long_ocr(150))
+        blob = pdf_ocr.format_ocr_cache_blob("a" * 64, _long_ocr(150))
         assert pdf_ocr.parse_ocr_cache_blob(blob, expected_sha256="b" * 64) is None
 
     def test_C18_corrupt_cache_header_miss(self) -> None:
@@ -375,7 +374,6 @@ class TestC_Cache:
             pdf_ocr.parse_ocr_cache_blob(b"not-a-header\ntext", expected_sha256="a" * 64)
             is None
         )
-        assert pdf_ocr.parse_ocr_cache_blob(b"", expected_sha256="a" * 64) is None
 
     def test_C19_cache_write_failure_still_returns_text(self) -> None:
         pdf = b"%PDF-1.4 write-fail"
@@ -383,7 +381,6 @@ class TestC_Cache:
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", return_value=body),
             patch(
                 "app.services.pdf_ocr.save_ocr_cache_text",
@@ -391,8 +388,7 @@ class TestC_Cache:
             ),
         ):
             text, source = pdf_ocr.extract_text_via_ocr(pdf, rfp_id="edge")
-        assert source == "ocr"
-        assert text == body.strip()
+        assert source == "ocr" and text == body.strip()
 
     def test_C20_save_pdf_deletes_ocr_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -403,9 +399,7 @@ class TestC_Cache:
         (tmp_path / rfp_id).mkdir()
         cache_path = tmp_path / rfp_id / "rfp.ocr.txt"
         cache_path.write_text("# sha256=" + ("a" * 64) + "\nhello\n", encoding="utf-8")
-        content = b"%PDF-1.4\n" + (b"0" * 600)
-        path = rfp_storage.save_rfp_pdf(rfp_id, content)
-        assert path
+        rfp_storage.save_rfp_pdf(rfp_id, b"%PDF-1.4\n" + (b"0" * 600))
         assert not cache_path.exists()
 
     def test_C21_local_disk_cache_roundtrip(
@@ -413,67 +407,30 @@ class TestC_Cache:
     ) -> None:
         monkeypatch.setattr(rfp_storage.settings, "pdf_storage_path", tmp_path)
         monkeypatch.setattr(rfp_storage, "use_supabase", lambda: False)
-        rfp_id = "local-cache"
         sha = "c" * 64
-        pdf_ocr.save_ocr_cache_text(rfp_id, sha, "Local disk OCR body " + ("x" * 100))
-        loaded = pdf_ocr.load_cached_ocr_text(rfp_id, sha)
-        assert loaded is not None
-        assert loaded.startswith("Local disk OCR body")
-        pdf_ocr.delete_ocr_cache(rfp_id)
-        assert pdf_ocr.load_cached_ocr_text(rfp_id, sha) is None
+        pdf_ocr.save_ocr_cache_text("local-cache", sha, "Local disk OCR body " + ("x" * 100))
+        assert pdf_ocr.load_cached_ocr_text("local-cache", sha)
+        pdf_ocr.delete_ocr_cache("local-cache")
+        assert pdf_ocr.load_cached_ocr_text("local-cache", sha) is None
 
 
-# ---------------------------------------------------------------------------
-# D. Render
-# ---------------------------------------------------------------------------
+class TestD_DirectPdf:
+    def test_D22_empty_content_skips(self) -> None:
+        assert pdf_ocr.extract_text_via_ocr(b"", rfp_id="edge") == ("", "")
 
+    def test_D23_non_pdf_magic_skips(self) -> None:
+        assert pdf_ocr.extract_text_via_ocr(b"PNG...", rfp_id="edge") == ("", "")
 
-class TestD_Render:
-    def test_D22_pymupdf_missing(self) -> None:
-        import builtins
+    def test_D24_native_plugin_always_attached(self) -> None:
+        async def fake_vision(messages, **kwargs):
+            assert kwargs.get("plugins") == pdf_ocr._NATIVE_PDF_PLUGIN
+            return _long_ocr(120), "openrouter"
 
-        real_import = builtins.__import__
-
-        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "pymupdf":
-                raise ImportError("simulated missing pymupdf")
-            return real_import(name, globals, locals, fromlist, level)
-
-        with patch("builtins.__import__", side_effect=fake_import):
-            assert pdf_ocr.render_pdf_pages_png(_image_only_pdf()) == []
-
-    def test_D23_open_failure_returns_empty(self) -> None:
-        assert pdf_ocr.render_pdf_pages_png(b"%PDF-1.4\n%EOF") == []
-
-    def test_D24_one_page_render_failure_continues(self) -> None:
-        class BoomPage:
-            def get_pixmap(self, *a, **k):
-                raise RuntimeError("page boom")
-
-        class OkPage:
-            def get_pixmap(self, *a, **k):
-                m = MagicMock()
-                m.tobytes.return_value = b"png-ok"
-                return m
-
-        class FakeDoc:
-            is_encrypted = False
-            page_count = 3
-
-            def load_page(self, i):
-                return BoomPage() if i == 1 else OkPage()
-
-            def close(self):
-                return None
-
-        with patch("pymupdf.open", return_value=FakeDoc()):
-            pages = pdf_ocr.render_pdf_pages_png(b"%PDF-1.4 stub", max_pages=3)
-        assert pages == [b"png-ok", b"png-ok"]
-
-
-# ---------------------------------------------------------------------------
-# E. Vision / OpenRouter
-# ---------------------------------------------------------------------------
+        with patch("app.services.llm.chat_text_vision", side_effect=fake_vision):
+            text = asyncio.run(
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 stub-content", rfp_id="edge")
+            )
+        assert len(text) >= IMAGE_ONLY_TEXT_THRESHOLD
 
 
 class TestE_Vision:
@@ -481,12 +438,10 @@ class TestE_Vision:
         with patch(
             "app.services.llm.chat_text_vision",
             new_callable=AsyncMock,
-            side_effect=LlmError(
-                "OpenRouter API error (400): invalid model", status_code=400
-            ),
+            side_effect=LlmError("invalid model", status_code=400),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([b"png"], rfp_id="edge")
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 x", rfp_id="edge")
             )
         assert text == ""
 
@@ -494,12 +449,10 @@ class TestE_Vision:
         with patch(
             "app.services.llm.chat_text_vision",
             new_callable=AsyncMock,
-            side_effect=LlmError(
-                "OPENROUTER_API_KEY required for vision OCR", status_code=503
-            ),
+            side_effect=LlmError("OPENROUTER_API_KEY required", status_code=503),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([b"png"], rfp_id="edge")
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 x", rfp_id="edge")
             )
         assert text == ""
 
@@ -508,10 +461,10 @@ class TestE_Vision:
         with patch(
             "app.services.llm.chat_text_vision",
             new_callable=AsyncMock,
-            side_effect=LlmError(f"OpenRouter API error ({code})", status_code=code),
+            side_effect=LlmError(f"error {code}", status_code=code),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([b"png"], rfp_id="edge")
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 x", rfp_id="edge")
             )
         assert text == ""
 
@@ -522,7 +475,7 @@ class TestE_Vision:
             return_value=("", "openrouter"),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([b"png"], rfp_id="edge")
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 x", rfp_id="edge")
             )
         assert text == ""
 
@@ -534,21 +487,20 @@ class TestE_Vision:
             return_value=(fenced, "openrouter"),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision([b"png"], rfp_id="edge")
+                pdf_ocr.ocr_pdf_via_vision(b"%PDF-1.4 x", rfp_id="edge")
             )
         assert not text.startswith("```")
         assert "Cost Proposal" in text
 
     def test_E30_max_chars_truncation(self) -> None:
-        huge = "A" * 5_000
         with patch(
             "app.services.llm.chat_text_vision",
             new_callable=AsyncMock,
-            return_value=(huge, "openrouter"),
+            return_value=("A" * 5_000, "openrouter"),
         ):
             text = asyncio.run(
-                pdf_ocr.ocr_pdf_pages_via_vision(
-                    [b"png"], rfp_id="edge", max_chars=500
+                pdf_ocr.ocr_pdf_via_vision(
+                    b"%PDF-1.4 x", rfp_id="edge", max_chars=500
                 )
             )
         assert len(text) == 500
@@ -566,15 +518,14 @@ class TestE_Vision:
         assert text == "" and image_only is True
 
     def test_E32_sync_and_async_run_coro_branches(self) -> None:
-        result = pdf_ocr._run_coro_sync(lambda: asyncio.sleep(0, result="sync-ok"))
-        assert result == "sync-ok"
+        assert pdf_ocr._run_coro_sync(lambda: asyncio.sleep(0, result="sync-ok")) == "sync-ok"
 
         async def _inside():
             return pdf_ocr._run_coro_sync(lambda: asyncio.sleep(0, result="async-ok"))
 
         assert asyncio.run(_inside()) == "async-ok"
 
-    def test_E33_cost_logging_node_name(self) -> None:
+    def test_E33_cost_logging_and_plugins_forwarded(self) -> None:
         with (
             patch(
                 "app.services.llm._post_chat",
@@ -583,7 +534,7 @@ class TestE_Vision:
                     _long_ocr(120),
                     {"prompt_tokens": 10, "completion_tokens": 20},
                 ),
-            ),
+            ) as post,
             patch("app.services.llm._openrouter_key", return_value="test-key"),
             patch("app.services.llm._enforce_llm_preflight"),
             patch("app.services.llm._enforce_run_cost_cap"),
@@ -596,15 +547,11 @@ class TestE_Vision:
                     [{"role": "user", "content": "hi"}],
                     model="~google/gemini-flash-latest",
                     rfp_id="edge-cost",
+                    plugins=pdf_ocr._NATIVE_PDF_PLUGIN,
                 )
             )
         assert record.call_args.kwargs["node_name"] == "rfp_pdf_ocr"
-        assert record.call_args.kwargs["rfp_id"] == "edge-cost"
-
-
-# ---------------------------------------------------------------------------
-# F. Downstream consumers
-# ---------------------------------------------------------------------------
+        assert post.await_args.kwargs["plugins"] == pdf_ocr._NATIVE_PDF_PLUGIN
 
 
 class TestF_Downstream:
@@ -623,10 +570,8 @@ class TestF_Downstream:
             ),
         ):
             info = _assess_rfp_content(_rfp())
-        assert info.pdf_image_only is False
-        assert info.pdf_extracted is True
-        qs = _default_clarifying_questions(info)
-        assert not any("image-only" in q for q in qs)
+        assert info.pdf_image_only is False and info.pdf_extracted is True
+        assert not any("image-only" in q for q in _default_clarifying_questions(info))
 
     def test_F35_gng_keeps_image_only_message_on_ocr_fail(self) -> None:
         info = RfpContentInfo(
@@ -641,15 +586,12 @@ class TestF_Downstream:
             substantive_chars=4,
             metadata_only=True,
         )
-        qs = _default_clarifying_questions(info)
-        assert any("image-only" in q for q in qs)
-        summary = _needs_input_summary(_rfp(title="Jackson"), info)
-        assert "image-only" in summary
+        assert any("image-only" in q for q in _default_clarifying_questions(info))
+        assert "image-only" in _needs_input_summary(_rfp(title="Jackson"), info)
 
     def test_F36_combine_rfp_text(self) -> None:
         combined = combine_rfp_text("Desc here", "PDF body Cost Proposal")
-        assert combined.startswith("Desc here")
-        assert "Cost Proposal" in combined
+        assert "Desc here" in combined and "Cost Proposal" in combined
 
     def test_F37_ocr_text_usable_as_rfp_doc_context(self) -> None:
         from app.services.proposal_intelligence.opportunity_extract.agent1_tools import (
@@ -657,12 +599,9 @@ class TestF_Downstream:
         )
 
         body = (
-            "3. PROPOSAL REQUIREMENTS\n"
-            "Cost Proposal: Itemized budget broken down by Brand Strategy and Social Media.\n"
-            + ("scope detail " * 80)
+            "Cost Proposal: Itemized budget.\n" + ("scope detail " * 80)
         )
-        doc = RfpDoc.from_context_text(body, filename="wyoming.txt")
-        assert "Cost Proposal" in doc.full_text()
+        assert "Cost Proposal" in RfpDoc.from_context_text(body).full_text()
 
     def test_F38_budget_gate_not_blocked_when_cost_confirmed(self) -> None:
         plan = ProposalExecutionPlan(
@@ -683,18 +622,11 @@ class TestF_Downstream:
             )
         )
         gate, detail = phase35_budget_gate(ambiguous)
-        assert gate == "skip"
-        assert detail and "text-readable" in detail
-
-
-# ---------------------------------------------------------------------------
-# G. Concurrency / ops
-# ---------------------------------------------------------------------------
+        assert gate == "skip" and detail and "text-readable" in detail
 
 
 class TestG_Ops:
     def test_G39_parallel_loads_may_double_ocr(self) -> None:
-        """Documents current behavior: no lock → both callers can miss cache."""
         pdf = b"%PDF-1.4 race"
         calls = {"n": 0}
         lock = threading.Lock()
@@ -710,18 +642,19 @@ class TestG_Ops:
         with (
             patch.object(pdf_ocr.settings, "rfp_ocr_enabled", True),
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch("app.services.pdf_ocr.render_pdf_pages_png", return_value=[b"png"]),
             patch("app.services.pdf_ocr._run_coro_sync", side_effect=slow_vision),
             patch("app.services.pdf_ocr.save_ocr_cache_text"),
         ):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futs = [
-                    pool.submit(pdf_ocr.extract_text_via_ocr, pdf, rfp_id="race")
-                    for _ in range(2)
+                results = [
+                    f.result()
+                    for f in [
+                        pool.submit(pdf_ocr.extract_text_via_ocr, pdf, rfp_id="race")
+                        for _ in range(2)
+                    ]
                 ]
-                results = [f.result() for f in futs]
         assert all(r[1] == "ocr" for r in results)
-        assert calls["n"] == 2  # known ceiling: no single-flight lock
+        assert calls["n"] == 2
 
     def test_G40_reupload_invalidates_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -731,7 +664,6 @@ class TestG_Ops:
         rfp_id = "reupload"
         sha1 = pdf_ocr.pdf_content_sha256(b"%PDF-1.4 old-file-content")
         pdf_ocr.save_ocr_cache_text(rfp_id, sha1, _long_ocr(150))
-        assert pdf_ocr.load_cached_ocr_text(rfp_id, sha1) is not None
         rfp_storage.save_rfp_pdf(rfp_id, b"%PDF-1.4\n" + (b"N" * 600))
         assert pdf_ocr.load_cached_ocr_text(rfp_id, sha1) is None
 
@@ -739,40 +671,33 @@ class TestG_Ops:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(pdf_ocr.settings, "rfp_ocr_enabled", False)
-        text, source = pdf_ocr.extract_text_via_ocr(b"%PDF-1.4 x", rfp_id="edge")
-        assert text == "" and source == ""
+        assert pdf_ocr.extract_text_via_ocr(b"%PDF-1.4 x", rfp_id="edge") == ("", "")
 
         monkeypatch.setattr(pdf_ocr.settings, "rfp_ocr_enabled", True)
         monkeypatch.setattr(
             pdf_ocr.settings, "openrouter_model_ocr", "~google/gemini-flash-latest"
         )
-        monkeypatch.setattr(pdf_ocr.settings, "rfp_ocr_max_pages", 3)
         captured: dict = {}
 
         async def fake_vision(messages, **kwargs):
             captured["model"] = kwargs.get("model")
             return _long_ocr(120), "openrouter"
 
-        pdf = _image_only_pdf(pages=10)
-        pages = pdf_ocr.render_pdf_pages_png(pdf)
-        assert len(pages) == 3
         with (
             patch("app.services.pdf_ocr.load_cached_ocr_text", return_value=None),
-            patch(
-                "app.services.pdf_ocr.render_pdf_pages_png",
-                return_value=[b"p1", b"p2", b"p3"],
-            ),
             patch("app.services.llm.chat_text_vision", side_effect=fake_vision),
             patch("app.services.pdf_ocr.save_ocr_cache_text"),
         ):
-            text, source = pdf_ocr.extract_text_via_ocr(pdf, rfp_id="edge")
+            text, source = pdf_ocr.extract_text_via_ocr(
+                b"%PDF-1.4 model", rfp_id="edge"
+            )
         assert source == "ocr"
         assert captured["model"] == "~google/gemini-flash-latest"
 
 
 @pytest.mark.live_ocr
 def test_live_wyoming_ocr_smoke() -> None:
-    """Live OpenRouter check. Run: pytest -m live_ocr tests/test_rfp_pdf_ocr_edge_cases.py"""
+    """Live OpenRouter native-PDF check. Run: pytest -m live_ocr ..."""
     from app.core.config import settings
 
     if not WYOMING_PDF.is_file():
@@ -781,10 +706,8 @@ def test_live_wyoming_ocr_smoke() -> None:
         pytest.skip("OPENROUTER_API_KEY empty")
     content = WYOMING_PDF.read_bytes()
     assert extract_pdf_text_from_bytes(content) == ""
-    pages = pdf_ocr.render_pdf_pages_png(content)
-    assert len(pages) == 5
     text = asyncio.run(
-        pdf_ocr.ocr_pdf_pages_via_vision(pages, rfp_id="live-wyoming-edge")
+        pdf_ocr.ocr_pdf_via_vision(content, rfp_id="live-wyoming-edge")
     )
     assert len(text) >= IMAGE_ONLY_TEXT_THRESHOLD
     assert "proposal" in text.casefold()

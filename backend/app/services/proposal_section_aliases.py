@@ -78,6 +78,7 @@ PROPOSAL_SECTION_ALIAS_GROUPS: tuple[frozenset[str], ...] = (
     frozenset({
         "cover letter",
         "letter of transmittal",
+        "letter of interest",
     }),
     # Key personnel -- WHO is on the team: the named individuals, their
     # resumes/bios, their roles. "Key Staff" is the identical ask in a

@@ -81,6 +81,26 @@ class BumpMaxTokensTests(unittest.TestCase):
             )
         )
 
+    def test_pricing_plan_asks_can_climb_past_8k(self) -> None:
+        """ASKS used 10k; old 8k reinforce cap shrank the retry and re-truncated JSON."""
+        from app.services.llm import _should_retry_after_length_truncation
+
+        self.assertEqual(
+            bump_max_tokens_after_length_hit(10000, node_name="pricing-plan-v2"),
+            20000,
+        )
+        self.assertEqual(
+            bump_max_tokens_after_length_hit(24000, node_name="pricing-plan-v2"),
+            32768,
+        )
+        self.assertTrue(
+            _should_retry_after_length_truncation(
+                finish_reason="length",
+                requested=10000,
+                node_name="pricing-plan-v2",
+            )
+        )
+
 
 class OpenRouterLengthRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_retries_once_with_bumped_max_tokens_after_length(self) -> None:

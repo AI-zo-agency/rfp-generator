@@ -747,6 +747,26 @@ def _plan_section_brief(state: DraftingGraphState, section_id: str) -> dict[str,
     return None
 
 
+def _outline_submission_instrument(
+    state: DraftingGraphState, section_id: str
+) -> str | None:
+    """Phase 2 meaning stamp for this tab (e.g. letter / cost / narrative)."""
+    plan = state.get("execution_plan") or {}
+    writing = plan.get("writing") or {}
+    outline = writing.get("proposalOutline") or writing.get("proposal_outline") or {}
+    sections = outline.get("sections") if isinstance(outline, dict) else None
+    if not isinstance(sections, list):
+        return None
+    for item in sections:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "") != section_id:
+            continue
+        raw = item.get("submissionInstrument") or item.get("submission_instrument")
+        return str(raw).strip() if raw else None
+    return None
+
+
 def _plan_retrieval_entry(state: DraftingGraphState, section_id: str) -> dict[str, Any] | None:
     plan = state.get("execution_plan") or {}
     writing = plan.get("writing") or {}
@@ -1722,14 +1742,16 @@ def _build_draft_prompt_zones(
                     "Reuse DELIVERY PACKAGE workstream names when present. "
                     "If this tab also owns calendar, include Timing with the same names.\n\n"
                 )
-            if any(
-                k in title_lower
-                for k in (
-                    "cover letter",
-                    "letter of transmittal",
-                    "transmittal letter",
-                )
-            ):
+            from app.services.proposal_draft_structure_stubs import (
+                is_cover_letter_section,
+            )
+
+            if is_cover_letter_section(
+                title=str(payload.get("title") or ""),
+                section_id=str(payload.get("sectionId") or ""),
+                submission_instrument=payload.get("submissionInstrument"),
+                voice_register=str(payload.get("register") or ""),
+            ) or payload.get("register") == "cover_letter":
                 zone_c += (
                     f"COVER LETTER SECTION {payload.get('sectionId')}:\n"
                     "1) FORMAT / CONTENT — follow THIS RFP's cover-letter or letter-of-"
@@ -1795,12 +1817,18 @@ async def _draft_batch_once(
         )
         evidence = await _ensure_jit_evidence(state, sid)
         zo_mode = str(section.get("zoMode") or section.get("zo_mode") or "write")
+        brief = _plan_section_brief(state, sid)
+        outline_inst = _outline_submission_instrument(state, sid)
+        plan_register = (
+            str(brief.get("register") or "").strip() if brief else ""
+        ) or None
         register = classify_section_register(
             section_id=sid,
             title=title,
             zo_mode=zo_mode,
+            submission_instrument=outline_inst,
+            plan_register=plan_register,
         )
-        brief = _plan_section_brief(state, sid)
         word_target = (
             int(brief.get("wordBudget") or 0)
             if brief and brief.get("wordBudget")
@@ -1808,12 +1836,18 @@ async def _draft_batch_once(
         )
         from app.services.proposal_evidence_gate import decide_evidence_action
 
-        gate = decide_evidence_action(section_id=sid, section_title=title)
+        gate = decide_evidence_action(
+            section_id=sid,
+            section_title=title,
+            submission_instrument=outline_inst,
+            voice_register=register,
+        )
         batch_payload.append(
             {
                 "sectionId": sid,
                 "title": title,
                 "register": register,
+                "submissionInstrument": outline_inst,
                 "requirements": section.get("requirements") or [],
                 "zoMode": zo_mode,
                 "wordTarget": word_target or _word_target(section),
@@ -1886,15 +1920,26 @@ async def _draft_batch_once(
         content = str(item.get("content", "")).strip()
         zo_mode = str(section.get("zoMode") or section.get("zo_mode") or "write")
         title = str(section.get("title") or sid)
-        register = classify_section_register(
+        cached = payload_by_id.get(sid) or {}
+        outline_inst = cached.get("submissionInstrument") or _outline_submission_instrument(
+            state, sid
+        )
+        brief = _plan_section_brief(state, sid)
+        plan_register = (
+            str(brief.get("register") or "").strip() if brief else ""
+        ) or None
+        register = str(cached.get("register") or "") or classify_section_register(
             section_id=sid,
             title=title,
             zo_mode=zo_mode,
+            submission_instrument=outline_inst,
+            plan_register=plan_register,
         )
-        section_payload = payload_by_id.get(sid) or {
+        section_payload = cached or {
             "sectionId": sid,
             "title": title,
             "register": register,
+            "submissionInstrument": outline_inst,
             "requirements": section.get("requirements") or [],
             "wordTarget": _word_target(section),
             "evidence": "(retry — use plan context)",

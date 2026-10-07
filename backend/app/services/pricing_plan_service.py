@@ -37,8 +37,12 @@ MAX_REPAIRS = 2
 _UNIT = {"one_time": "project", "monthly": "month", "per_event": "event"}
 _NOT_NOTES = ("implied limit", "RFP compensation outline")  # warnings the plan itself must raise or ignore
 
+# Sonnet 5 adaptive thinking shares the completion budget; ASKS JSON for Form A-3
+# RFPs is large — keep headroom well above the old 10k that truncated mid-string.
+ASKS_MAX_TOKENS = 24000
+
 ASKS_PROMPT = """You read an RFP and list how the buyer wants the COST / PRICE / BUDGET submitted.
-Return JSON only:
+Return ONE JSON object only — no markdown fences, no commentary, no trailing text:
 {
  "compensation_outline": {"ref": "RFP section number + title of the cost/compensation section, or null",
                           "items": ["the RFP's own numbered items in that section, short, with their numbers"]},
@@ -181,15 +185,44 @@ async def _call(system: str, user: str, max_tokens: int = 24000) -> dict:
     return raw
 
 
+def _asks_rfp_context(rfp_text: str) -> str:
+    """Cost/pricing windows only — full 70-page RFPs blow the ASKS JSON budget."""
+    from app.services.proposal_rfp_excerpt import budget_and_cost_excerpt
+
+    body = (rfp_text or "").strip()
+    if not body:
+        return ""
+    excerpt = budget_and_cost_excerpt(body, max_chars=48_000)
+    # Thin excerpt → fall back to full text (small RFPs / odd wording).
+    min_keep = min(8_000, max(1, len(body) // 4))
+    if excerpt and len(excerpt) >= min_keep:
+        logger.info(
+            "pricing_asks_rfp_context excerpt_chars=%d full_chars=%d",
+            len(excerpt),
+            len(body),
+        )
+        return excerpt
+    logger.info(
+        "pricing_asks_rfp_context using_full_rfp excerpt_chars=%d full_chars=%d",
+        len(excerpt or ""),
+        len(body),
+    )
+    return body
+
+
 async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
-    asks = await _call(ASKS_PROMPT, f"=== RFP ===\n{rfp_text}", 10000)
+    ctx = _asks_rfp_context(rfp_text)
+    asks = await _call(
+        ASKS_PROMPT, f"=== RFP (cost / pricing excerpts) ===\n{ctx}", ASKS_MAX_TOKENS
+    )
     errs = verify_asks(asks, rfp_text)
     if errs:
         asks = await _call(
             ASKS_PROMPT,
-            f"=== RFP ===\n{rfp_text}\n\n=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
+            f"=== RFP (cost / pricing excerpts) ===\n{ctx}\n\n"
+            f"=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
             "=== FIX THESE (quote exactly or drop the item) ===\n" + "\n".join(errs),
-            10000,
+            ASKS_MAX_TOKENS,
         )
         errs = verify_asks(asks, rfp_text)
     return asks, errs

@@ -50,14 +50,8 @@ _METHODOLOGY_TITLE_TOKENS = (
     "quality assurance",
 )
 
-# Cover / transmittal letters must retrieve 06_WON form exemplars — never treat
-# as plan-only methodology (the old "transmittal" token starved that path).
-_COVER_LETTER_TITLE_TOKENS = (
-    "cover letter",
-    "letter of transmittal",
-    "transmittal letter",
-    "letter of offer",
-)
+# Cover / interest letters must retrieve 06_WON form exemplars — never treat
+# as plan-only methodology. Tokens live in proposal_draft_structure_stubs.
 
 _MONEY_MARKERS = (
     "budget",
@@ -127,10 +121,13 @@ def decide_evidence_action(
     section_title: str | None = None,
     finding: Any | None = None,
     user_ask: str | None = None,
+    submission_instrument: str | None = None,
+    voice_register: str | None = None,
 ) -> EvidenceGateResult:
     """Classify how content should be produced for a section or finding.
 
     Prefer finding signals when present; fall back to section title for drafting.
+    Phase 2 submissionInstrument \"letter\" / register cover_letter beats title synonyms.
     """
     code = str(getattr(finding, "code", "") or "") if finding is not None else ""
     category = str(getattr(finding, "category", "") or "") if finding is not None else ""
@@ -172,9 +169,13 @@ def decide_evidence_action(
         _log(section_id, result)
         return result
 
-    title_cf = (title or "").casefold()
-    if any(tok in title_cf for tok in _COVER_LETTER_TITLE_TOKENS) or any(
-        tok in (section_id or "").casefold() for tok in ("cover-letter", "transmittal")
+    from app.services.proposal_draft_structure_stubs import is_cover_letter_section
+
+    if is_cover_letter_section(
+        title=title or "",
+        section_id=section_id or "",
+        submission_instrument=submission_instrument,
+        voice_register=voice_register,
     ):
         result = EvidenceGateResult(
             action=EvidenceDecision.RETRIEVE_THEN_WRITE,

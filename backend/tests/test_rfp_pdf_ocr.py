@@ -1,4 +1,4 @@
-"""Image-only RFP PDFs: pypdf → OCR cache / vision fallback."""
+"""Image-only RFP PDFs: pypdf → OCR cache / native PDF vision fallback."""
 
 from __future__ import annotations
 
@@ -87,9 +87,6 @@ class LoadLocalRfpTextOcrTests(unittest.TestCase):
                 return_value=cached,
             ) as cache_load,
             patch(
-                "app.services.pdf_ocr.render_pdf_pages_png",
-            ) as render,
-            patch(
                 "app.services.pdf_ocr._run_coro_sync",
             ) as vision,
             patch(
@@ -103,7 +100,6 @@ class LoadLocalRfpTextOcrTests(unittest.TestCase):
         self.assertEqual(text, cached)
         self.assertEqual(source, "cache")
         cache_load.assert_called_once_with("rfp-ocr-test", sha)
-        render.assert_not_called()
         vision.assert_not_called()
         cache_save.assert_not_called()
 
@@ -116,10 +112,6 @@ class LoadLocalRfpTextOcrTests(unittest.TestCase):
             patch(
                 "app.services.pdf_ocr.load_cached_ocr_text",
                 return_value=None,
-            ),
-            patch(
-                "app.services.pdf_ocr.render_pdf_pages_png",
-                return_value=[b"png1", b"png2"],
             ),
             patch(
                 "app.services.pdf_ocr._run_coro_sync",

@@ -1,7 +1,8 @@
 """Vision OCR fallback for image-only RFP PDFs.
 
 Flow: pypdf text layer first (caller), then cache lookup, then OpenRouter
-vision over PyMuPDF page renders. Results are cached next to the PDF.
+Gemini with the full PDF as a native file input (no page-to-image split,
+no page cap). Results are cached next to the PDF.
 """
 
 from __future__ import annotations
@@ -28,72 +29,21 @@ _OCR_PROMPT = (
     "plain text (use | between columns when obvious). Do not summarize, translate, "
     "or invent missing text. Output plain text only — no markdown fences."
 )
+_NATIVE_PDF_PLUGIN: list[dict[str, Any]] = [
+    {"id": "file-parser", "pdf": {"engine": "native"}},
+]
+# Large municipal RFPs (50+ pages) need headroom; OpenRouter Gemini allows high caps.
+_OCR_MAX_TOKENS = 65_536
+_OCR_SYNC_TIMEOUT_S = 900.0
 
 
 def pdf_content_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def render_pdf_pages_png(
-    content: bytes,
-    *,
-    max_pages: int | None = None,
-    scale: float = 2.0,
-) -> list[bytes]:
-    """Render PDF pages to PNG bytes via PyMuPDF. Empty list on failure."""
-    if not content or not content.startswith(b"%PDF"):
-        return []
-    try:
-        import pymupdf
-    except ImportError:
-        logger.warning("pymupdf not installed — cannot render pages for OCR")
-        return []
-
-    limit = max_pages if max_pages is not None else int(settings.rfp_ocr_max_pages or 20)
-    limit = max(1, min(limit, 40))
-    images: list[bytes] = []
-    try:
-        doc = pymupdf.open(stream=content, filetype="pdf")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("pdf_ocr open failed: %s", str(exc)[:200])
-        return []
-    try:
-        if getattr(doc, "is_encrypted", False):
-            try:
-                # Empty password unlocks some restriction-only files; never prompt.
-                if doc.authenticate("") == 0:
-                    logger.info("pdf_ocr skipped encrypted PDF")
-                    return []
-            except Exception as exc:  # noqa: BLE001
-                logger.info("pdf_ocr encrypted auth failed: %s", str(exc)[:160])
-                return []
-        matrix = pymupdf.Matrix(scale, scale)
-        page_count = doc.page_count
-        for i in range(min(page_count, limit)):
-            try:
-                page = doc.load_page(i)
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                images.append(pix.tobytes("png"))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "pdf_ocr page render failed page=%s err=%s",
-                    i + 1,
-                    str(exc)[:160],
-                )
-    except Exception as exc:  # noqa: BLE001 — encrypted / corrupt mid-render
-        logger.warning("pdf_ocr render failed: %s", str(exc)[:200])
-        return []
-    finally:
-        try:
-            doc.close()
-        except Exception:  # noqa: BLE001
-            pass
-    return images
-
-
-def _encode_data_url(png: bytes) -> str:
-    b64 = base64.standard_b64encode(png).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+def _encode_pdf_data_url(content: bytes) -> str:
+    b64 = base64.standard_b64encode(content).decode("ascii")
+    return f"data:application/pdf;base64,{b64}"
 
 
 def format_ocr_cache_blob(sha256: str, text: str) -> bytes:
@@ -146,48 +96,52 @@ def delete_ocr_cache(rfp_id: str) -> None:
     rfp_storage.delete_rfp_ocr_cache(rfp_id)
 
 
-async def ocr_pdf_pages_via_vision(
-    page_pngs: list[bytes],
+async def ocr_pdf_via_vision(
+    content: bytes,
     *,
     rfp_id: str | None = None,
     max_chars: int = 120_000,
+    filename: str = "rfp.pdf",
 ) -> str:
-    """Transcribe page images with OpenRouter vision. Returns plain text."""
-    if not page_pngs:
+    """Transcribe a full PDF with OpenRouter Gemini native file input."""
+    if not content or not content.startswith(b"%PDF"):
         return ""
     from app.services.llm import LlmError, chat_text_vision
 
     model = (settings.openrouter_model_ocr or "~google/gemini-flash-latest").strip()
-    content_parts: list[dict[str, Any]] = [{"type": "text", "text": _OCR_PROMPT}]
-    for i, png in enumerate(page_pngs):
-        content_parts.append(
-            {"type": "text", "text": f"\n--- Page {i + 1} of {len(page_pngs)} ---\n"}
-        )
-        content_parts.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": _encode_data_url(png)},
-            }
-        )
-    messages = [{"role": "user", "content": content_parts}]
-    # ~800 tokens per page of dense scan text; floor for short RFPs.
-    max_tokens = min(16_000, max(2_048, 900 * len(page_pngs)))
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _OCR_PROMPT},
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": filename or "rfp.pdf",
+                        "file_data": _encode_pdf_data_url(content),
+                    },
+                },
+            ],
+        }
+    ]
     started = time.perf_counter()
     try:
         raw, provider = await chat_text_vision(
             messages,
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=_OCR_MAX_TOKENS,
             temperature=0.1,
             node_name="rfp_pdf_ocr",
             rfp_id=rfp_id,
+            plugins=_NATIVE_PDF_PLUGIN,
         )
     except LlmError as exc:
         logger.warning(
-            "pdf_ocr vision failed rfp_id=%s model=%s err=%s",
+            "pdf_ocr vision failed rfp_id=%s model=%s err=%s pdf_bytes=%s",
             rfp_id,
             model,
             str(exc)[:240],
+            len(content),
         )
         return ""
     text = (raw or "").strip()
@@ -197,18 +151,35 @@ async def ocr_pdf_pages_via_vision(
     if len(text) > max_chars:
         text = text[:max_chars]
     logger.info(
-        "pdf_ocr vision done rfp_id=%s provider=%s model=%s pages=%s chars=%s duration_ms=%s",
+        "pdf_ocr vision done rfp_id=%s provider=%s model=%s pdf_bytes=%s chars=%s "
+        "duration_ms=%s",
         rfp_id,
         provider,
         model,
-        len(page_pngs),
+        len(content),
         len(text),
         int((time.perf_counter() - started) * 1000),
     )
     return text
 
 
-def _run_coro_sync(factory: Any, *, timeout_s: float = 300.0) -> Any:
+# Back-compat alias for older imports/tests.
+async def ocr_pdf_pages_via_vision(
+    _page_pngs: list[bytes] | None = None,
+    *,
+    rfp_id: str | None = None,
+    max_chars: int = 120_000,
+    pdf_bytes: bytes | None = None,
+) -> str:
+    """Deprecated: use ocr_pdf_via_vision(pdf_bytes)."""
+    if pdf_bytes:
+        return await ocr_pdf_via_vision(
+            pdf_bytes, rfp_id=rfp_id, max_chars=max_chars
+        )
+    return ""
+
+
+def _run_coro_sync(factory: Any, *, timeout_s: float = _OCR_SYNC_TIMEOUT_S) -> Any:
     """Run an async zero-arg factory from sync code (celery / FastAPI threads)."""
 
     async def _inner() -> Any:
@@ -232,7 +203,9 @@ def extract_text_via_ocr(
 
     source "" means OCR disabled, failed, or yielded too little text.
     """
-    if not content or not getattr(settings, "rfp_ocr_enabled", True):
+    if not content or not content.startswith(b"%PDF"):
+        return "", ""
+    if not getattr(settings, "rfp_ocr_enabled", True):
         return "", ""
 
     sha = pdf_content_sha256(content)
@@ -247,27 +220,18 @@ def extract_text_via_ocr(
         return cached[:max_chars], "cache"
 
     started = time.perf_counter()
-    pages = render_pdf_pages_png(content, max_pages=int(settings.rfp_ocr_max_pages or 20))
-    if not pages:
-        logger.warning(
-            "pdf_ocr no pages rendered rfp_id=%s duration_ms=%s",
-            rfp_id,
-            int((time.perf_counter() - started) * 1000),
-        )
-        return "", ""
-
     text = _run_coro_sync(
-        lambda: ocr_pdf_pages_via_vision(
-            pages, rfp_id=rfp_id, max_chars=max_chars
+        lambda: ocr_pdf_via_vision(
+            content, rfp_id=rfp_id, max_chars=max_chars, filename=f"{rfp_id}.pdf"
         )
     )
     text = (text or "").strip()
     if len(text) < IMAGE_ONLY_TEXT_THRESHOLD:
         logger.warning(
-            "pdf_ocr insufficient text rfp_id=%s chars=%s pages=%s duration_ms=%s",
+            "pdf_ocr insufficient text rfp_id=%s chars=%s pdf_bytes=%s duration_ms=%s",
             rfp_id,
             len(text),
-            len(pages),
+            len(content),
             int((time.perf_counter() - started) * 1000),
         )
         return "", ""
@@ -282,9 +246,9 @@ def extract_text_via_ocr(
         )
 
     logger.info(
-        "pdf_ocr complete rfp_id=%s source=ocr pages=%s chars=%s duration_ms=%s",
+        "pdf_ocr complete rfp_id=%s source=ocr pdf_bytes=%s chars=%s duration_ms=%s",
         rfp_id,
-        len(pages),
+        len(content),
         len(text),
         int((time.perf_counter() - started) * 1000),
     )
