@@ -179,19 +179,55 @@ def phase35_budget_gate(
     return "skip", None
 
 
-def attachment_checklist_stub(title: str, instrument: str) -> str:
-    label = title or "Required attachment"
-    kind = "form"
-    if instrument == "references":
+def attachment_checklist_stub(
+    title: str,
+    instrument: str,
+    *,
+    requirement: str = "",
+) -> str:
+    """Handoff for a buyer form/references/disclosure tab.
+
+    The note names THIS section. A shared sentence made Vendor Questionnaire
+    and Insurance Requirements look like the same task.
+    """
+    label = (title or "Required attachment").strip()
+    inst = (instrument or "form").strip().casefold()
+    if inst == "references":
         kind = "reference forms"
-    elif instrument == "disclosure":
+    elif inst == "disclosure":
         kind = "disclosure / exemption affidavit"
-    return (
-        f"## {label}\n\n"
-        f"Required {kind} per the RFP submission package.\n\n"
-        "[DESIGNER NOTE: Attach the buyer's required PDF/form here.]\n\n"
-        "[MANUAL FILL: Sonja — attach signed/completed file before submit.]"
+    else:
+        kind = "form"
+    ask = " ".join((requirement or "").split())
+    if len(ask) > 280:
+        ask = ask[:277].rstrip() + "…"
+    if ask.casefold() == label.casefold():
+        ask = ""
+    lines = [
+        f"## {label}",
+        "",
+        (
+            f"This section is the buyer's {label} ({kind}). "
+            "Attach that file with the submission — do not rewrite it as narrative."
+        ),
+        "",
+    ]
+    if ask:
+        lines.extend([f"What the RFP asks here: {ask}", ""])
+    lines.extend(
+        [
+            (
+                f"[DESIGNER NOTE: Place the completed {label} ({kind}) "
+                "in this section for export.]"
+            ),
+            "",
+            (
+                f"[MANUAL FILL: Sonja — complete and attach the signed {label} "
+                "before submit.]"
+            ),
+        ]
     )
+    return "\n".join(lines)
 
 
 def clarify_blocker_stub(title: str, reason: str) -> str:

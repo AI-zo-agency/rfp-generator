@@ -197,7 +197,10 @@ class Phase3PartitionRoutingTests(unittest.TestCase):
         self.assertEqual(len(to_draft), 1)
         self.assertEqual(to_draft[0].id, "n1")
         self.assertEqual(len(already), 1)
-        self.assertIn("MANUAL FILL", already[0].content or "")
+        content = already[0].content or ""
+        self.assertIn("MANUAL FILL", content)
+        self.assertIn("Attachment C — Certification", content)
+        self.assertNotIn("required PDF/form here", content)
         self.assertIn("f1", already[0].id)
 
     def test_clarify_tab_routes_to_manual_fill_stub(self) -> None:
@@ -213,6 +216,20 @@ class Phase3PartitionRoutingTests(unittest.TestCase):
         self.assertEqual(to_draft, [])
         self.assertEqual(len(already), 1)
         self.assertIn("ambiguity", (already[0].content or "").casefold())
+
+    def test_form_stubs_name_the_section(self) -> None:
+        from app.services.proposal_submission_authority import attachment_checklist_stub
+
+        vendor = attachment_checklist_stub("Vendor Questionnaire", "form")
+        insurance = attachment_checklist_stub(
+            "Insurance Requirements",
+            "form",
+            requirement="Certificate of insurance meeting the stated limits.",
+        )
+        self.assertIn("Vendor Questionnaire", vendor)
+        self.assertIn("Insurance Requirements", insurance)
+        self.assertIn("Certificate of insurance meeting the stated limits.", insurance)
+        self.assertNotEqual(vendor, insurance)
 
 
 if __name__ == "__main__":

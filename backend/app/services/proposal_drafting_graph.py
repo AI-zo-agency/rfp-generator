@@ -653,10 +653,14 @@ def partition_phase3_sections(
                     )
                 elif instrument_is_checklist(instrument):
                     body = attachment_checklist_stub(
-                        mapped.title or "", str(instrument or "form")
+                        mapped.title or "",
+                        str(instrument or "form"),
+                        requirement=reason,
                     )
                 else:
-                    body = attachment_checklist_stub(mapped.title or "", "form")
+                    body = attachment_checklist_stub(
+                        mapped.title or "", "form", requirement=reason
+                    )
                 already.append(
                     ProposalSection(
                         id=mapped.id,
