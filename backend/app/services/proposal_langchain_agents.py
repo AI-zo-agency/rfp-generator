@@ -204,7 +204,7 @@ Rules:
    - Refuse invented dollars; flag out-of-plan scope with [PRICING FLAG: … — Sonja review required].
 7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
    Clean/filter references with search_case_studies + RFP reference rules — not by searching the buyer's name in KB.
-8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
+8. Keep existing [E#] citation markers on the claim they support. If you add a factual claim from evidence supplied in this turn, cite that id. Do not invent an id, and do not cite an RFP-only plan. If you remove a claim, remove its marker. If you change what the claim asserts, do not keep the old marker.
 9. LENGTH & FORMAT: Stay at or under Word target when provided. Prefer bullets and markdown tables for process/phases. Add designerNote / [DESIGNER NOTE: …] when layout helps.
 10. Return ONLY JSON: {"content":"...","kbRefs":[],"designerNote":"layout hint or null"}"""
 

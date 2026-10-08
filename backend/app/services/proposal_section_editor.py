@@ -3960,9 +3960,8 @@ Rules:
 1. Directly address the user's edit request.
 2. Use ONLY facts from the evidence corpus. If PACKED KB / 04_Bio is provided, every
    sentence you add must be supportable from that text — never invent years, sector
-   specialization, clients, or metrics. Do NOT put citation markers like [E1], [E12, E13],
-   or **References:** [E…] lists in the prose — write clean client-facing sentences with
-   proper **bold** markdown for labels and amounts.
+   specialization, clients, or metrics. Keep [E#] markers on the claims they support.
+   Do not invent an id. Use **bold** markdown for labels and amounts.
 2a. Team bios / Experience of Personnel: never delete a person's supporting paragraph
     to "fix" fabrication. Rewrite it from 04_Bio only. Never leave a named person with
     only a Role line when KB facts exist. Drop empty headers with no body.
@@ -4053,7 +4052,7 @@ Rules:
 5b. RFP: When RFP CONTEXT is present, keep this span compliant with demanded asks for the
    section — proposal answer, not RFP echo.
 6. Keep markdown structure inside the excerpt (lists, table rows) if the selection had them.
-7. NEVER insert citation markers like [E1], [E14], or **[E3]** into the excerpt.
+7. Keep [E#] markers already on the excerpt, attached to the same claim. Do not add an id that was not supplied.
 8. Return ONLY JSON: {"replacement": "revised excerpt text only"}
    - Escape line breaks inside the string as \\n (required for markdown tables).
    - If the user asked to REMOVE THIS HIGHLIGHT (this excerpt / this part / cut this out):
@@ -4119,7 +4118,7 @@ Rules:
   claims the KB does not state. Years must match the KB number exactly. If 04_Bio
   is missing for that person, keep Role + [VERIFY: restore bio from 04_Bio] —
   do not invent years or specializations.
-- Never insert citation markers like [E3] or [E3, E4]. Strip any that are present.
+- Keep [E#] markers on the claim they support. Do not invent an id or move a marker onto a different claim.
 - Drop empty headers with no body (e.g. **Team Qualifications Summary** with nothing under it).
 
 These rules govern how you write; they are never content. Never write sentences about

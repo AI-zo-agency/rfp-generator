@@ -65,7 +65,7 @@ class CitationGrounding(BaseModel):
 
     text: str
     evidence_ids: list[str] = Field(default_factory=list, alias="evidenceIds")
-    method: Literal["verbatim", "overlap"] = "overlap"
+    method: Literal["verbatim", "overlap", "inline_provenance"] = "overlap"
 
 
 class ResearchQuestion(BaseModel):

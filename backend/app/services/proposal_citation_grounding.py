@@ -152,6 +152,10 @@ def _iter_claim_spans(content: str) -> list[str]:
         line = re.sub(r"^#{1,6}\s+", "", line)
         line = re.sub(r"^\*\*(.+?)\*\*:?\s*$", r"\1", line)
         for sent in _split_sentences(line):
+            # A marker after the period ("… package. [E3]") is its own fragment.
+            if _INLINE_CITE.fullmatch(sent.strip()) and claims:
+                claims[-1] = f"{claims[-1]} {sent.strip()}"
+                continue
             cleaned = _INLINE_CITE.sub("", sent).strip()
             cleaned = re.sub(r"\s{2,}", " ", cleaned)
             if len(cleaned) < _MIN_CLAIM_CHARS:
@@ -160,7 +164,8 @@ def _iter_claim_spans(content: str) -> list[str]:
                 continue
             if cleaned.startswith("[") and cleaned.endswith("]"):
                 continue
-            claims.append(cleaned)
+            # Keep [E#] on the span so provenance can be read after a voice rewrite.
+            claims.append(re.sub(r"\s{2,}", " ", sent).strip())
             if len(claims) >= _MAX_CLAIMS_PER_SECTION:
                 return claims
     return claims
@@ -197,13 +202,53 @@ def score_claim_against_excerpt(claim: str, excerpt: str) -> float:
     return min(score, 1.0)
 
 
+def is_citable_evidence(item: EvidenceItem) -> bool:
+    """True for a real E# excerpt. Flags and proof-point labels are not sources."""
+    eid = (item.id or "").strip()
+    if not re.fullmatch(r"E\d+", eid, flags=re.I):
+        return False
+    if (item.source or "") == "evidence_trust_gate":
+        return False
+    if (item.chunk_key or "").startswith("evidence-trust-gap"):
+        return False
+    return bool((item.excerpt or "").strip())
+
+
+def _inline_evidence_ids(text: str) -> list[str]:
+    found: list[str] = []
+    for match in _INLINE_CITE.finditer(text or ""):
+        for eid in re.findall(r"E\d+", match.group(0), flags=re.I):
+            upper = eid.upper()
+            if upper not in found:
+                found.append(upper)
+    return found
+
+
+def strip_uncitable_markers(text: str, allowed_ids: set[str]) -> str:
+    """Drop [E#] markers whose ids were not in this section's evidence packet."""
+
+    def _repl(match: re.Match[str]) -> str:
+        ids = _inline_evidence_ids(match.group(0))
+        keep = [eid for eid in ids if eid in allowed_ids]
+        if not keep:
+            return ""
+        if keep == ids:
+            return match.group(0)
+        return f"[{keep[0]}]" if len(keep) == 1 else f"[{', '.join(keep)}]"
+
+    return _INLINE_CITE.sub(_repl, text or "")
+
+
 def _corpus_for_section(
     corpus: list[EvidenceItem], section_id: str
 ) -> list[EvidenceItem]:
     tagged = [e for e in corpus if section_id and section_id in (e.section_ids or [])]
     pool = tagged if tagged else list(corpus)
-    # Prefer real E# evidence items; skip empty excerpts.
-    return [e for e in pool if (e.id or "").strip() and (e.excerpt or "").strip()]
+    # Section-tagged rows win even when none of them are citable, so a flag
+    # packet cannot fall through to another section's excerpt.
+    if tagged:
+        return [e for e in tagged if is_citable_evidence(e)]
+    return [e for e in pool if is_citable_evidence(e)]
 
 
 def ground_section_citations(
@@ -212,27 +257,46 @@ def ground_section_citations(
     *,
     section_id: str = "",
 ) -> list[CitationGrounding]:
-    """Build citation map for one section body against the evidence corpus."""
+    """Build citation map for one section body against the evidence corpus.
+
+    Inline [E#] left by the drafter (and kept by voice rewrite) is the citation.
+    Lexical overlap is only a backup for a sentence that still matches an
+    excerpt and has no marker.
+    """
     if not content.strip() or not corpus:
         return []
 
     pool = _corpus_for_section(corpus, section_id)
     if not pool:
         return []
+    allowed = {(e.id or "").strip().upper() for e in pool}
 
     # Precompute nothing expensive — corpus is tens/hundreds.
     out: list[CitationGrounding] = []
     seen_claim_keys: set[str] = set()
 
     for claim in _iter_claim_spans(content):
-        key = _normalize(claim)[:160]
+        plain = _INLINE_CITE.sub("", claim).strip()
+        plain = re.sub(r"\s{2,}", " ", plain)
+        key = _normalize(plain)[:160]
         if key in seen_claim_keys:
             continue
         seen_claim_keys.add(key)
 
+        inline = [eid for eid in _inline_evidence_ids(claim) if eid in allowed]
+        if inline:
+            out.append(
+                CitationGrounding(
+                    text=plain,
+                    evidence_ids=inline,
+                    method="inline_provenance",
+                )
+            )
+            continue
+
         ranked: list[tuple[float, EvidenceItem]] = []
         for item in pool:
-            s = score_claim_against_excerpt(claim, item.excerpt or "")
+            s = score_claim_against_excerpt(plain, item.excerpt or "")
             if s >= _SCORE_FLOOR:
                 ranked.append((s, item))
         if not ranked:
@@ -250,7 +314,7 @@ def ground_section_citations(
         if ids:
             out.append(
                 CitationGrounding(
-                    text=claim,
+                    text=plain,
                     evidence_ids=ids,
                     method=method,  # type: ignore[arg-type]
                 )

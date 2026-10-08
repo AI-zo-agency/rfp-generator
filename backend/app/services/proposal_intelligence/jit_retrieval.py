@@ -195,19 +195,13 @@ async def retrieve_for_section(
         counter += 1
 
     if not items and gap_tag:
-        items.append(
-            EvidenceItem(
-                id=f"E{counter}",
-                source="evidence_trust_gate",
-                excerpt=(
-                    f"{gap_tag}\n\n"
-                    "NO VERIFIED KB MATCH after ClientList + provenance filtering. "
-                    "Do NOT invent clients, references, emails, or certifications. "
-                    "Insert the VERIFY/FLAG tag above and continue other RFP requirements only."
-                ),
-                sectionIds=[entry.section_id],
-                chunkKey="evidence-trust-gap",
-            )
+        # A rejection notice is not an evidence excerpt. Keeping it out of the
+        # corpus stops one section's FLAG (shared chunk key evidence-trust-gap)
+        # from being merged onto every other section that also came back empty.
+        logger.info(
+            "JIT trust gap not added to corpus section=%s gap=%s",
+            entry.section_id,
+            (gap_tag or "")[:160],
         )
 
     return items

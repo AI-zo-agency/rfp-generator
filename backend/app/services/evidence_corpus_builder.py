@@ -48,6 +48,15 @@ async def build_shared_evidence_corpus(
             )
             continue
         for item in items:
+            if (item.source or "") == "evidence_trust_gate" or (
+                item.chunk_key or ""
+            ).startswith("evidence-trust-gap"):
+                logger.info(
+                    "phase2_corpus_skip_trust_gap section=%s chunk=%s",
+                    entry.section_id,
+                    item.chunk_key or "",
+                )
+                continue
             key = (item.chunk_key or item.id or "").strip() or f"{item.source}:{item.excerpt[:80]}"
             existing = by_key.get(key)
             if existing is not None:

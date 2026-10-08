@@ -11,7 +11,7 @@ export type OutlineSectionStatus =
 export interface CitationGrounding {
   text: string;
   evidenceIds: string[];
-  method?: "verbatim" | "overlap";
+  method?: "verbatim" | "overlap" | "inline_provenance";
 }
 
 export interface OutlineSection {

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Literal
@@ -65,6 +66,7 @@ What never to change:
 - The strength of a claim. "Gave us practice unifying" cannot become "we unified". A hedge that reflects a real limit ("closest match", "have not yet") stays as strong as it was. Never turn experience into an accomplishment, and never drop a commitment.
 - Facts: names, numbers, dates, dollar amounts, phone numbers, emails, addresses, solicitation numbers, titles, client names, counts. Do not add any fact, claim, credential, or number that is not already in the section. A stated gap (for example no HIPAA-covered engagement) stays stated, once, in plain words.
 - [VERIFY: ...] and [MANUAL FILL: ...] tags, markdown headings, table separator rows, and any tagline the standards' exceptions register names.
+- [E#] citation markers. They are provenance, not wording. When you rewrite a sentence, keep every [E#] on that same claim. Do not add, remove, replace, or move an evidence id.
 - Words of belief or expectation ("we don't expect", "we believe", "we plan to", "we see", "should") are part of the claim. Never replace them with a flat statement of fact ("there will be no delay"). A sentence like "we see three programs that are ready" must not become "Three programs are ready". Keep the expectation or the view, or leave the sentence alone.
 - Counts and named quantities ("five checkpoints, five approvals", "three rounds") are facts and commitments. Keep every one when you rewrite a sentence, even when you shorten it.
 - A list stays a list. When you repair its punctuation, change only the punctuation. Do not add words such as "including" or "such as" that change what the list means.
@@ -168,6 +170,10 @@ def _protected(span: str) -> bool:
     return "[VERIFY" in span or "[MANUAL FILL" in span or "[DESIGNER NOTE" in span
 
 
+def _citation_ids(span: str) -> list[str]:
+    return [m.upper() for m in re.findall(r"E\d+", span or "")]
+
+
 def _check_edit(edit: VoiceEdit, text: str, block: str) -> str:
     """Return "" when the edit is safe to apply, else the reason it isn't."""
     if not edit.find.strip():
@@ -180,6 +186,8 @@ def _check_edit(edit: VoiceEdit, text: str, block: str) -> str:
         return f"find matched {text.count(edit.find)} times"
     if _protected(edit.find) or _protected(edit.replace):
         return "touches a tag"
+    if _citation_ids(edit.find) != _citation_ids(edit.replace):
+        return "citation markers must stay on the rewritten claim"
     if "\n" in edit.find and "|" in edit.find:
         return "spans table rows"
     new = _new_fact_tokens(edit.replace, text)

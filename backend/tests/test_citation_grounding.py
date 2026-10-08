@@ -16,7 +16,9 @@ from app.services.proposal_citation_grounding import (
     ground_budget_pricing_citations,
     ground_section_citations,
     score_claim_against_excerpt,
+    strip_uncitable_markers,
 )
+from app.services.proposal_voice_llm import VoiceEdit, _check_edit
 
 
 class ScoreClaimTests(unittest.TestCase):
@@ -173,6 +175,76 @@ class BudgetPricingCitationTests(unittest.TestCase):
             evidence=[e for e in research.evidence_corpus if e.id in pricing_ids],
         )
         self.assertTrue(any("$" in row.text for row in cmap))
+
+
+class ProvenanceCitationTests(unittest.TestCase):
+    def test_plan_sentence_is_not_cited_from_a_gap_flag_or_other_section(self) -> None:
+        claim = (
+            "We'll build HomeFront's site so staff can run it, residents can find "
+            "documents quickly, and every file, database, and page can leave with "
+            "HomeFront at any time."
+        )
+        corpus = [
+            EvidenceItem(
+                id="E1",
+                source="evidence_trust_gate",
+                excerpt=(
+                    "[FLAG: blocked source 07_FIN_CityofNorthGlenn_Proposal_2026_compressed.pdf "
+                    "— 07_FIN finalist/loss — not usable as won experience]\n\n"
+                    "NO VERIFIED KB MATCH"
+                ),
+                sectionIds=["rfp-sec-5"],
+                chunkKey="evidence-trust-gap",
+            ),
+            EvidenceItem(
+                id="pp-5",
+                source="proof_point",
+                excerpt="Phase plan | Phase plan",
+                sectionIds=["rfp-sec-5"],
+                chunkKey="pp-5",
+            ),
+            EvidenceItem(
+                id="E6",
+                source="OWNERSHIP STRUCTURE",
+                excerpt="Sonja Anderson is the sole owner and director of zö, a full-service marketing agency.",
+                sectionIds=["rfp-sec-6"],
+            ),
+        ]
+        cmap = ground_section_citations(claim, corpus, section_id="rfp-sec-5")
+        self.assertEqual(cmap, [])
+        self.assertLess(score_claim_against_excerpt(claim, corpus[2].excerpt), 0.42)
+
+    def test_voice_rewrite_keeps_the_evidence_id(self) -> None:
+        corpus = [
+            EvidenceItem(
+                id="E3",
+                source="06_WON_handoff.pdf",
+                excerpt="The engagement includes a documented handoff package for client staff.",
+                sectionIds=["approach"],
+            )
+        ]
+        content = "We'll give your team a documented handoff package. [E3]"
+        cmap = ground_section_citations(content, corpus, section_id="approach")
+        self.assertEqual(len(cmap), 1)
+        self.assertEqual(cmap[0].evidence_ids, ["E3"])
+        self.assertEqual(cmap[0].method, "inline_provenance")
+        self.assertNotIn("[E3]", cmap[0].text)
+
+        kept = "We'll give your team a documented handoff package. [E3]"
+        dropped = "We'll give your team a documented handoff package."
+        original = "Our team provides a documented handoff package for client staff. [E3]"
+        self.assertEqual(
+            _check_edit(VoiceEdit(original, kept, "contraction", "hard"), original, original),
+            "",
+        )
+        self.assertIn(
+            "citation",
+            _check_edit(VoiceEdit(original, dropped, "contraction", "hard"), original, original),
+        )
+
+    def test_marker_from_another_section_is_removed(self) -> None:
+        text = "We'll build the site so residents can find documents. [E6]"
+        self.assertNotIn("[E6]", strip_uncitable_markers(text, set()))
 
 
 if __name__ == "__main__":

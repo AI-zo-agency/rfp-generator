@@ -187,7 +187,7 @@ ALLOWED WITHOUT inventing company facts (plan-driven structure):
 
 Rules (strict):
 1. Never invent unverified company facts (metrics, clients, certifications, team members, contract awards). Those require evidence [E#] or [VERIFY].
-2. Use ONLY facts from the evidence corpus. After every grounded claim, cite the supporting evidence with an inline [E#] marker (e.g. [E3] or [E3, E4]). The review UI turns these into source badges; export strips them — never invent a marker that is not in the corpus.
+2. Use ONLY facts from the evidence corpus. After every grounded claim, cite the supporting evidence with an inline [E#] marker (e.g. [E3] or [E3, E4]). The review UI turns these into source badges; export strips them — never invent a marker that is not in the corpus. Cite only an id in THIS section's evidence packet that you actually used. Do not cite trust-gate flags, missing-evidence notices, proof-point labels, or evidence from another section. Do not cite an RFP-only plan or a generic commitment. Brand voice will rewrite the sentence and must keep the same [E#] on that claim.
 3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed] ONLY for the missing fact — prefer citing [E#] when any excerpt partially answers. Do not blank the whole section.
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the BRAND VOICE and REGISTER blocks for each section.
@@ -729,12 +729,6 @@ def _brand_voice_block(
 
 def _chunk_sections(sections: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [sections[i : i + size] for i in range(0, len(sections), size)]
-
-
-def _extract_kb_refs(content: str, declared: list[str] | None) -> list[str]:
-    """Extract evidence citations from content. KB references removed - returns empty list."""
-    # KB references are no longer included in proposals
-    return []
 
 
 def _plan_section_brief(state: DraftingGraphState, section_id: str) -> dict[str, Any] | None:
@@ -2035,7 +2029,40 @@ async def _draft_batch_once(
             extra_directives=opportunity_understanding_directives(understanding),
         )
 
-        kb_refs = _extract_kb_refs(content, item.get("kbRefs") or item.get("kb_refs"))
+        from app.models.proposal import EvidenceItem
+        from app.services.proposal_citation_grounding import (
+            _corpus_for_section,
+            ground_section_citations,
+            strip_uncitable_markers,
+        )
+
+        corpus_items: list[EvidenceItem] = []
+        for raw in state.get("evidence_corpus") or []:
+            if isinstance(raw, EvidenceItem):
+                corpus_items.append(raw)
+            elif isinstance(raw, dict):
+                try:
+                    corpus_items.append(EvidenceItem.model_validate(raw))
+                except Exception:  # noqa: BLE001
+                    continue
+        allowed = {
+            (item.id or "").strip().upper()
+            for item in _corpus_for_section(corpus_items, sid)
+        }
+        stripped = strip_uncitable_markers(content, allowed)
+        if stripped != content:
+            logger.info(
+                "phase3_dropped_uncitable_markers section=%s",
+                sid,
+            )
+            content = stripped
+        citation_map = [
+            row.model_dump(by_alias=True)
+            for row in ground_section_citations(
+                content, corpus_items, section_id=sid
+            )
+        ]
+        kb_refs = sorted({eid for row in citation_map for eid in row.get("evidenceIds") or []})
         results.append(
             {
                 "id": sid,
@@ -2050,6 +2077,7 @@ async def _draft_batch_once(
                 "designerNote": item.get("designerNote") or item.get("designer_note"),
                 "status": "generated" if content else "outline",
                 "kbRefs": kb_refs,
+                "citationMap": citation_map,
             }
         )
 
