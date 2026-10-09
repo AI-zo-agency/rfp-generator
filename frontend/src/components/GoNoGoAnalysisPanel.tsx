@@ -1,4 +1,4 @@
-import type { GoNoGoAnalysis } from "@/types/rfp";
+import type { GoNoGoAnalysis, RfpBuyerDemand, RfpPacketRead } from "@/types/rfp";
 import {
   alignGoNoGoRecommendation,
   alignGoNoGoSummary,
@@ -263,8 +263,142 @@ function LeanNoGoReasons({ reasons }: { reasons: string[] }) {
   );
 }
 
+const PACKET_KIND_LABEL: Record<RfpPacketRead["documentKind"], string> = {
+  complete_rfp: "Complete RFP",
+  solicitation_notice: "Solicitation notice",
+  incomplete_packet: "Incomplete RFP packet",
+  other: "Not an RFP",
+};
+
+function BuyerDemandList({ demands }: { demands: RfpBuyerDemand[] }) {
+  if (!demands.length) return null;
+  return (
+    <ul className="mt-3 space-y-2">
+      {demands.map((demand) => (
+        <li
+          key={`${demand.action}-${demand.quote ?? ""}`}
+          className="rounded-lg border border-zo-orange/30 bg-white/70 px-3 py-2 text-sm text-zo-text-secondary"
+        >
+          <p className="font-medium text-foreground">{demand.action}</p>
+          {demand.contact ? (
+            <p className="mt-1 text-xs text-zo-text-muted">
+              Contact: {demand.contact}
+            </p>
+          ) : null}
+          {demand.whyEssential ? (
+            <p className="mt-1">{demand.whyEssential}</p>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function BuyerDemandBanner({ demands }: { demands: RfpBuyerDemand[] }) {
+  if (!demands.length) return null;
+  return (
+    <div className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 p-5">
+      <h3 className="font-heading text-sm font-bold uppercase tracking-wide text-zo-orange">
+        Required from the buyer before you can win this
+      </h3>
+      <p className="mt-2 text-sm text-zo-text-secondary">
+        This RFP tells you to obtain the following. Go/No-Go scored the packet
+        that was uploaded. These items are still outstanding.
+      </p>
+      <BuyerDemandList demands={demands} />
+    </div>
+  );
+}
+
+function PacketDeadline({
+  packet,
+  deadline,
+}: {
+  packet: RfpPacketRead;
+  deadline: GoNoGoAnalysis["deadline"];
+}) {
+  if (packet.deadlineNote) {
+    return (
+      <p className="mt-4 text-sm text-zo-text-secondary">
+        <span className="font-semibold text-foreground">
+          Deadline in this upload:{" "}
+        </span>
+        {packet.deadlineNote}
+      </p>
+    );
+  }
+  if (!deadline?.dueDate) return null;
+  return (
+    <p className="mt-4 text-sm text-zo-text-secondary">
+      <span className="font-semibold text-foreground">Due date on file: </span>
+      {deadline.dueDate}
+      {deadline.note ? ` — ${deadline.note}` : ""}
+    </p>
+  );
+}
+
+function IncompletePacketPanel({ analysis }: { analysis: GoNoGoAnalysis }) {
+  const packet = analysis.packetRead;
+  if (!packet) return null;
+  const missing = packet.missing ?? [];
+  const demands = packet.buyerDemands ?? [];
+  const kindLabel = PACKET_KIND_LABEL[packet.documentKind] ?? "Not a complete RFP";
+
+  return (
+    <section className="zo-card space-y-6 p-8">
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.34em] text-zo-orange">
+          Stage 1 — Fit Analysis
+        </p>
+        <h2 className="font-heading mt-2 text-2xl text-foreground">
+          {packet.headline || "This upload is not a complete RFP"}
+        </h2>
+        <p className="mt-1 text-xs text-zo-text-muted">
+          {kindLabel} — Go/No-Go was not run
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 p-5">
+        <p className="text-sm leading-relaxed text-zo-text-secondary">
+          {packet.whatItIs || analysis.summary}
+        </p>
+        {missing.length > 0 && (
+          <div className="mt-4">
+            <h3 className="text-sm font-bold text-foreground">
+              Not in this upload
+            </h3>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-zo-text-secondary">
+              {missing.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {packet.nextStep ? (
+          <div className="mt-4 rounded-lg border border-zo-orange/30 bg-white/70 px-3 py-2">
+            <h3 className="text-sm font-bold text-zo-orange">Next step</h3>
+            <p className="mt-1 text-sm text-zo-text-secondary">{packet.nextStep}</p>
+          </div>
+        ) : null}
+        <PacketDeadline packet={packet} deadline={analysis.deadline} />
+        {demands.length > 0 && (
+          <div className="mt-4">
+            <h3 className="text-sm font-bold text-foreground">
+              What the document tells you to request
+            </h3>
+            <BuyerDemandList demands={demands} />
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function providerLabel(provider: string | undefined): string | null {
   if (!provider) return null;
+  if (provider === "packet-gate") {
+    return "Scoring skipped — this upload is not a complete RFP";
+  }
   if (provider === "content-gate") {
     return "Blocked — PDF text could not be extracted for scoring";
   }
@@ -306,14 +440,20 @@ export function GoNoGoAnalysisPanel({
   const scoresPending = needsInput || overallGoScore === null;
   const hasMatrix = (analysis.decisionMatrix?.length ?? 0) > 0;
   const actionFlags = analysis.actionFlags ?? [];
+  const buyerDemands = analysis.packetRead?.buyerDemands ?? [];
   const leanNoGoReasons = buildLeanNoGoReasons(analysis, overallGoScore);
   const conditionsTitle =
     displayRecommendation === "no_go"
       ? "No-Go Notes & Override Conditions"
       : "Go With Conditions";
 
+  if (analysis.packetRead?.blocksScoring) {
+    return <IncompletePacketPanel analysis={analysis} />;
+  }
+
   return (
     <section className="zo-card space-y-6 p-8">
+      {buyerDemands.length > 0 && <BuyerDemandBanner demands={buyerDemands} />}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-zo-orange">

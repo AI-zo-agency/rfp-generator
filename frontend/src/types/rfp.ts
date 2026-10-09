@@ -50,6 +50,28 @@ export interface GoNoGoDecisionMatrixRow {
   notes: string;
 }
 
+export interface RfpBuyerDemand {
+  action: string;
+  contact?: string;
+  whyEssential?: string;
+  quote?: string;
+}
+
+export interface RfpPacketRead {
+  documentKind:
+    | "complete_rfp"
+    | "solicitation_notice"
+    | "incomplete_packet"
+    | "other";
+  blocksScoring: boolean;
+  headline: string;
+  whatItIs: string;
+  missing?: string[];
+  nextStep?: string;
+  deadlineNote?: string;
+  buyerDemands?: RfpBuyerDemand[];
+}
+
 export interface GoNoGoDeadlineInfo {
   today: string;
   dueDate: string | null;
@@ -78,6 +100,7 @@ export interface GoNoGoAnalysis {
   decisionMatrix?: GoNoGoDecisionMatrixRow[];
   deadline?: GoNoGoDeadlineInfo | null;
   actionFlags?: string[];
+  packetRead?: RfpPacketRead | null;
   provider?: string;
   availableTracks?: string[];
   capabilityMatrix?: Array<{

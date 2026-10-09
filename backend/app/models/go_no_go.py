@@ -106,6 +106,47 @@ class GoNoGoDeadlineInfo(BaseModel):
     note: str = ""
 
 
+PacketDocumentKind = Literal[
+    "complete_rfp",
+    "solicitation_notice",
+    "incomplete_packet",
+    "other",
+]
+
+
+class RfpBuyerDemand(BaseModel):
+    """Something the buyer requires the offeror to obtain before a responsive bid.
+
+    Contacts and quotes are kept only when they appear in the uploaded text.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    action: str
+    contact: str = ""
+    why_essential: str = Field(default="", alias="whyEssential")
+    quote: str = ""
+
+
+class RfpPacketRead(BaseModel):
+    """What the upload actually is, judged before Go/No-Go spends tokens scoring."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_kind: PacketDocumentKind = Field(
+        default="complete_rfp", alias="documentKind"
+    )
+    blocks_scoring: bool = Field(default=False, alias="blocksScoring")
+    headline: str = ""
+    what_it_is: str = Field(default="", alias="whatItIs")
+    missing: list[str] = Field(default_factory=list)
+    next_step: str = Field(default="", alias="nextStep")
+    deadline_note: str = Field(default="", alias="deadlineNote")
+    buyer_demands: list[RfpBuyerDemand] = Field(
+        default_factory=list, alias="buyerDemands"
+    )
+
+
 class GoNoGoAnalysis(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -136,3 +177,5 @@ class GoNoGoAnalysis(BaseModel):
     provider: str | None = None
     # Distinct non-empty track labels from capability_matrix (multi-lot RFPs).
     available_tracks: list[str] = Field(default_factory=list, alias="availableTracks")
+    # Set before scoring. When blocksScoring, Go/No-Go did not run.
+    packet_read: RfpPacketRead | None = Field(default=None, alias="packetRead")

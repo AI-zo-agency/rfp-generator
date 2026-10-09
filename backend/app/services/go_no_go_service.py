@@ -69,6 +69,10 @@ from app.services.go_no_go_opportunity import (
     classify_opportunity_llm,
     format_opportunity_facts_lines,
 )
+from app.services.go_no_go_packet_gate import (
+    build_blocked_packet_analysis,
+    classify_rfp_packet,
+)
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
@@ -2652,6 +2656,22 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         return _build_needs_input_analysis(rfp, content)
 
     full_rfp_text = combine_rfp_text(content.description, content.pdf_text)
+    packet = await classify_rfp_packet(
+        full_rfp_text,
+        rfp_id=rfp.id,
+        title=rfp.title or "",
+    )
+    if packet.blocks_scoring:
+        logger.info(
+            "Go/No-Go skipped for %s — upload is %s, not a scoreable RFP",
+            rfp.id,
+            packet.document_kind,
+        )
+        return build_blocked_packet_analysis(
+            packet,
+            deadline=_assess_deadline(rfp, content),
+        )
+
     kb_task = asyncio.create_task(_gather_knowledge_context(rfp, content))
     opp_task = asyncio.create_task(
         classify_opportunity_llm(
@@ -2956,11 +2976,16 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
             str(exc)[:200],
         )
 
+    if packet.buyer_demands:
+        analysis = analysis.model_copy(update={"packet_read": packet})
+
     return analysis
 
 
 def analysis_activity_note(analysis: GoNoGoAnalysis) -> str:
     """Short pipeline note for dashboards — never dump the full summary."""
+    if analysis.packet_read and analysis.packet_read.blocks_scoring:
+        return "Go/No-Go skipped — upload is not a complete RFP"
     if analysis.insufficient_data:
         return "Go/No-Go paused — add RFP scope and re-run"
 
