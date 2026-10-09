@@ -267,6 +267,8 @@ const PACKET_KIND_LABEL: Record<RfpPacketRead["documentKind"], string> = {
   complete_rfp: "Complete RFP",
   solicitation_notice: "Solicitation notice",
   incomplete_packet: "Incomplete RFP packet",
+  rfi: "Request for Information (RFI)",
+  rfq: "Request for Quotation (RFQ)",
   other: "Not an RFP",
 };
 

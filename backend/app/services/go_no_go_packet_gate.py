@@ -1,7 +1,8 @@
 """Decide whether an upload is a scoreable RFP before Go/No-Go spends tokens.
 
-A solicitation notice or an incomplete packet (email us for the full RFP)
-must not enter requirement planning, KB retrieval, or scoring. A complete
+A solicitation notice, an RFI, an RFQ, or an incomplete packet (email us
+for the full RFP) must not enter requirement planning, KB retrieval, or
+scoring. A complete
 RFP that still requires the offeror to obtain something essential from the
 buyer is scored, and those demands are returned for a banner above the result.
 
@@ -30,7 +31,7 @@ _PACKET_CLASSIFIER_PROMPT = """You read an uploaded procurement document before 
 
 Return JSON only:
 {
-  "documentKind": "complete_rfp" | "solicitation_notice" | "incomplete_packet" | "other",
+  "documentKind": "complete_rfp" | "solicitation_notice" | "incomplete_packet" | "rfi" | "rfq" | "other",
   "blocksScoring": true | false,
   "headline": "one line a proposal manager sees first",
   "whatItIs": "thorough plain-language explanation of what this upload actually is",
@@ -53,11 +54,15 @@ Judge by meaning. Do not use keyword checklists.
 A complete RFP is scoreable: it contains enough for a proposer to understand the work, what the proposal must include, and how the buyer will choose. A price form that says "propose your price" without a ceiling is still complete.
 
 blocksScoring=true when the upload is not that packet:
+- rfi: a Request for Information. The buyer is collecting information, capabilities, qualifications, or market input. It is not asking for a competitive proposal that will be evaluated for contract award. Say so in the headline ("This is an RFI, not an RFP") and in whatItIs: what the buyer is asking for, that this is not a proposal competition, and the response the document actually requests. If the text says an RFP will follow, include that as nextStep. Do not invent a later RFP.
+- rfq: a Request for Quotation or Request for Quote. The buyer wants a price quotation. It is not an RFP, even when a short description of the work is included. Headline must say this is an RFQ, not an RFP. whatItIs must explain that the response is a quote, not a scored proposal, and restate any submission instructions that appear in the text.
 - A solicitation notice, advertisement, or cover page that announces an opportunity and tells vendors how to obtain the real packet, but does not itself include the scope, proposal contents, and selection method.
 - An upload that calls itself an RFP yet explicitly requires the reader to email, call, or download the complete RFP, scope, specifications, or proposal requirements, and those materials are not in this upload.
 - Any other document that is not the RFP body (questions-only, a single form, an agenda, an addendum with no scope).
 
-When blocksScoring is true, whatItIs must say what the document is, what it does not contain, and what that means for scoring. Name the issuing body when the text does. missing lists the absent materials (scope, proposal structure, evaluation method, pricing instructions) only when they are actually absent. nextStep is how to obtain the real packet, copied from the document. If the document does not say how, say that the upload does not explain how to obtain the rest.
+Do not label a true proposal competition as rfi or rfq just because it asks questions or asks for a price. Use rfi or rfq when the document's purpose is information-gathering or a quotation.
+
+When blocksScoring is true, whatItIs must say what the document is, what it does not contain, and what that means for scoring. Name the issuing body when the text does. missing lists the absent materials (scope, proposal structure, evaluation method, pricing instructions) only when they are actually absent. For an RFI or RFQ, missing may be empty when the document is complete for what it is — the reason to stop is that it is not an RFP. nextStep is how to respond or how to obtain the real packet, copied from the document. If the document does not say how, say that the upload does not explain the next action.
 
 blocksScoring=false when the upload already contains the scope, proposal contents, and selection method. Still fill buyerDemands when that complete RFP explicitly requires the offeror to obtain something from the buyer that is essential to submit a responsive or winning proposal: the remainder of the packet, a missing exhibit, a mandatory registration, a required pre-proposal conference, a pricing workbook, or an addendum that must be in hand. Optional question windows ("questions may be sent to") are not demands unless the document says skipping them withholds materials or makes the proposal non-responsive.
 
@@ -69,8 +74,31 @@ Every email, phone, URL, and deadline you output must appear in the document. ev
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
 _KINDS = frozenset(
-    {"complete_rfp", "solicitation_notice", "incomplete_packet", "other"}
+    {
+        "complete_rfp",
+        "solicitation_notice",
+        "incomplete_packet",
+        "rfi",
+        "rfq",
+        "other",
+    }
 )
+# These instruments are never scored as an RFP, even if the model forgets blocksScoring.
+_NON_RFP_INSTRUMENTS = frozenset({"rfi", "rfq"})
+_INSTRUMENT_HEADLINE = {
+    "rfi": "This upload is an RFI, not an RFP",
+    "rfq": "This upload is an RFQ, not an RFP",
+}
+_INSTRUMENT_WHAT = {
+    "rfi": (
+        "This upload is a Request for Information. The buyer is asking for "
+        "information, not a competitive proposal. Go/No-Go scoring does not apply."
+    ),
+    "rfq": (
+        "This upload is a Request for Quotation. The buyer is asking for a quote, "
+        "not a proposal scored as an RFP. Go/No-Go scoring does not apply."
+    ),
+}
 
 
 def default_packet_read() -> RfpPacketRead:
@@ -145,7 +173,12 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
     evidence_ok = _grounded(evidence, rfp_text)
 
     wants_block = bool(raw.get("blocksScoring") if "blocksScoring" in raw else raw.get("blocks_scoring"))
-    blocks = wants_block and kind != "complete_rfp" and evidence_ok
+    # An RFI or RFQ is not scored as an RFP once a verbatim quote grounds the label.
+    blocks = (
+        (wants_block or kind in _NON_RFP_INSTRUMENTS)
+        and kind != "complete_rfp"
+        and evidence_ok
+    )
     if not evidence_ok and kind != "complete_rfp":
         logger.info(
             "packet gate quote not in upload — not blocking scoring (kind=%s)",
@@ -159,7 +192,12 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
     next_step = _strip_invented_contacts(
         str(raw.get("nextStep") or raw.get("next_step") or ""), rfp_text
     )
-    if blocks and not what:
+    if blocks and kind in _NON_RFP_INSTRUMENTS:
+        if not headline:
+            headline = _INSTRUMENT_HEADLINE[kind]
+        if not what:
+            what = _INSTRUMENT_WHAT[kind]
+    elif blocks and not what:
         blocks = False
         kind = "complete_rfp"
 

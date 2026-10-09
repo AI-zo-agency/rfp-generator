@@ -110,6 +110,8 @@ PacketDocumentKind = Literal[
     "complete_rfp",
     "solicitation_notice",
     "incomplete_packet",
+    "rfi",
+    "rfq",
     "other",
 ]
 

@@ -2985,6 +2985,11 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 def analysis_activity_note(analysis: GoNoGoAnalysis) -> str:
     """Short pipeline note for dashboards — never dump the full summary."""
     if analysis.packet_read and analysis.packet_read.blocks_scoring:
+        kind = analysis.packet_read.document_kind
+        if kind == "rfi":
+            return "Go/No-Go skipped — upload is an RFI, not an RFP"
+        if kind == "rfq":
+            return "Go/No-Go skipped — upload is an RFQ, not an RFP"
         return "Go/No-Go skipped — upload is not a complete RFP"
     if analysis.insufficient_data:
         return "Go/No-Go paused — add RFP scope and re-run"

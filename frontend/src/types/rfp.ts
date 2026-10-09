@@ -62,6 +62,8 @@ export interface RfpPacketRead {
     | "complete_rfp"
     | "solicitation_notice"
     | "incomplete_packet"
+    | "rfi"
+    | "rfq"
     | "other";
   blocksScoring: boolean;
   headline: string;

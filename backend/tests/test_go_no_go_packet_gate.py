@@ -210,6 +210,88 @@ class PacketGateParseTests(unittest.TestCase):
         )
 
 
+RFI = """
+City of Rivergate
+Request for Information — Marketing Capabilities
+The City is not requesting proposals and will not award a contract from this RFI.
+Respondents should describe their communications capabilities by November 2, 2026.
+A competitive RFP may be issued later to firms that respond.
+"""
+
+RFQ = """
+County of Pine
+Request for Quotation — Social Media Advertising Placement
+Vendors shall submit a firm price quotation for the placement described below.
+This RFQ is not a request for proposals. Award will be to the lowest responsive quote.
+Quotes are due October 30, 2026 at 2:00 PM.
+"""
+
+
+class PacketInstrumentTests(unittest.TestCase):
+    def test_rfi_blocks_even_when_model_forgets_the_flag(self) -> None:
+        parsed = parse_packet_read(
+            {
+                "documentKind": "rfi",
+                "blocksScoring": False,
+                "headline": "This is an RFI, not an RFP",
+                "whatItIs": (
+                    "The City of Rivergate is collecting marketing capabilities. "
+                    "It will not award a contract from this RFI."
+                ),
+                "nextStep": "Describe communications capabilities by November 2, 2026.",
+                "evidenceQuote": (
+                    "The City is not requesting proposals and will not award a contract from this RFI."
+                ),
+                "deadlineQuote": "Respondents should describe their communications capabilities by November 2, 2026.",
+            },
+            rfp_text=RFI,
+        )
+        self.assertTrue(parsed.blocks_scoring)
+        self.assertEqual(parsed.document_kind, "rfi")
+        self.assertIn("RFI", parsed.headline)
+        analysis = build_blocked_packet_analysis(parsed)
+        self.assertEqual(
+            analysis_activity_note(analysis),
+            "Go/No-Go skipped — upload is an RFI, not an RFP",
+        )
+        self.assertIsNone(analysis.recommendation)
+
+    def test_rfq_is_named_and_not_scored(self) -> None:
+        parsed = parse_packet_read(
+            {
+                "documentKind": "rfq",
+                "blocksScoring": True,
+                "whatItIs": "",
+                "evidenceQuote": "This RFQ is not a request for proposals.",
+                "deadlineQuote": "Quotes are due October 30, 2026 at 2:00 PM.",
+            },
+            rfp_text=RFQ,
+        )
+        self.assertTrue(parsed.blocks_scoring)
+        self.assertEqual(parsed.document_kind, "rfq")
+        self.assertIn("RFQ", parsed.headline)
+        self.assertIn("quote", parsed.what_it_is.casefold())
+        self.assertIn("October 30, 2026", parsed.deadline_note)
+        analysis = build_blocked_packet_analysis(parsed)
+        self.assertEqual(
+            analysis_activity_note(analysis),
+            "Go/No-Go skipped — upload is an RFQ, not an RFP",
+        )
+
+    def test_ungrounded_rfi_label_does_not_block_a_real_rfp(self) -> None:
+        parsed = parse_packet_read(
+            {
+                "documentKind": "rfi",
+                "blocksScoring": True,
+                "whatItIs": "This is an RFI.",
+                "evidenceQuote": "This sentence was not in the uploaded RFP.",
+            },
+            rfp_text=COMPLETE,
+        )
+        self.assertFalse(parsed.blocks_scoring)
+        self.assertEqual(parsed.document_kind, "complete_rfp")
+
+
 class PacketGateSkipTests(unittest.IsolatedAsyncioTestCase):
     async def test_analyze_rfp_does_not_score_a_solicitation_notice(self) -> None:
         with (
