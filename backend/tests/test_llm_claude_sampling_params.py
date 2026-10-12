@@ -84,7 +84,7 @@ class ClaudeRejectsSamplingParamsTests(unittest.TestCase):
 
 
 class PostChatOmitsTemperatureTests(unittest.IsolatedAsyncioTestCase):
-    async def _post_chat(self, model: str):
+    async def _post_chat(self, model: str, *, reasoning_effort: str | None = None):
         captured: dict = {}
 
         async def fake_post(_self, url, *, headers, json):  # noqa: A002 - matches httpx signature
@@ -107,6 +107,7 @@ class PostChatOmitsTemperatureTests(unittest.IsolatedAsyncioTestCase):
                 provider="TestProvider",
                 max_tokens=128,
                 temperature=0.35,
+                reasoning_effort=reasoning_effort,
             )
         return captured["body"]
 
@@ -124,9 +125,73 @@ class PostChatOmitsTemperatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body.get("temperature"), 0.35)
         self.assertNotIn("reasoning", body)
 
-    async def test_temperature_included_for_non_claude_model(self) -> None:
-        body = await self._post_chat("google/gemini-2.5-flash")
+    async def test_gemini_ids_keep_temperature_and_disable_thinking(self) -> None:
+        """Every Gemini id thinks by default unless the request says none.
+        The cap is then the answer, including fields written late in the JSON."""
+        for model in [
+            "google/gemini-2.5-flash",
+            "google/gemini-3.6-flash",
+            "google/gemini-3.7-flash",
+            "gemini-flash-latest",
+            "~google/gemini-flash-latest",
+            "GOOGLE/GEMINI-FLASH-LATEST",
+        ]:
+            with self.subTest(model=model):
+                body = await self._post_chat(model)
+                self.assertEqual(body.get("temperature"), 0.35)
+                self.assertEqual(
+                    body.get("reasoning"),
+                    {"effort": "none", "exclude": True},
+                )
+                self.assertEqual(body.get("max_tokens"), 128)
+
+    async def test_explicit_effort_on_gemini_is_not_forced_to_none(self) -> None:
+        body = await self._post_chat(
+            "~google/gemini-flash-latest",
+            reasoning_effort="low",
+        )
         self.assertEqual(body.get("temperature"), 0.35)
+        self.assertEqual(body.get("reasoning"), {"effort": "low", "exclude": True})
+
+    async def test_unknown_effort_on_gemini_falls_back_to_medium(self) -> None:
+        body = await self._post_chat(
+            "gemini-flash-latest",
+            reasoning_effort="thinking-hard",
+        )
+        self.assertEqual(body.get("reasoning"), {"effort": "medium", "exclude": True})
+
+    async def test_non_gemini_models_do_not_get_a_reasoning_block(self) -> None:
+        for model in [
+            "openai/gpt-5-mini",
+            "accounts/fireworks/models/llama-v3p3-70b-instruct",
+            "",
+        ]:
+            with self.subTest(model=model):
+                body = await self._post_chat(model)
+                self.assertEqual(body.get("temperature"), 0.35)
+                self.assertNotIn("reasoning", body)
+
+    async def test_latest_claude_aliases_omit_temperature(self) -> None:
+        for model in [
+            "~anthropic/claude-sonnet-latest",
+            "~anthropic/claude-haiku-latest",
+            "~anthropic/claude-opus-latest",
+        ]:
+            with self.subTest(model=model):
+                body = await self._post_chat(model)
+                self.assertNotIn("temperature", body)
+                self.assertEqual(
+                    body.get("reasoning"),
+                    {"effort": "medium", "exclude": True},
+                )
+
+    async def test_caller_effort_overrides_claude_default(self) -> None:
+        body = await self._post_chat(
+            "~anthropic/claude-sonnet-latest",
+            reasoning_effort="low",
+        )
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body.get("reasoning"), {"effort": "low", "exclude": True})
 
 
 if __name__ == "__main__":

@@ -802,6 +802,11 @@ async def _post_chat(
         body["temperature"] = temperature
         if reasoning_effort:
             body["reasoning"] = _claude_adaptive_reasoning_body(reasoning_effort)
+        elif "gemini" in model_l:
+            # Flash thinks by default and bills that against max_tokens, so a
+            # JSON field written after the cutoff is dropped. none keeps the
+            # cap for the answer. Callers that want thinking pass reasoning_effort.
+            body["reasoning"] = _claude_adaptive_reasoning_body("none")
     if effective_json_mode:
         body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
