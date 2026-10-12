@@ -15,7 +15,7 @@ from app.core.config import settings
 
 logger = logging.getLogger("proposal.opportunity_extract.langextract")
 
-DEFAULT_LANGEXTRACT_MODEL = "google/gemini-2.5-flash"
+DEFAULT_LANGEXTRACT_MODEL = "~google/gemini-flash-latest"
 
 
 def langextract_model_id() -> str:

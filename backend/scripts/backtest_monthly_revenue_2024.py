@@ -9,7 +9,7 @@ Usage:
     cd backend && python scripts/backtest_monthly_revenue_2024.py
     cd backend && YEAR=2025 python scripts/backtest_monthly_revenue_2024.py
 
-Optional: MODEL=google/gemini-2.5-flash YEAR=2025 python scripts/…
+Optional: MODEL=~google/gemini-flash-latest YEAR=2025 python scripts/…
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from app.core.config import settings  # noqa: E402
 from app.financial import quickbooks as qbo  # noqa: E402
 from app.services.llm import _financial_openrouter_key, _openrouter_key  # noqa: E402
 
-_DEFAULT_MODEL = "google/gemini-3.6-flash"
+_DEFAULT_MODEL = "~google/gemini-flash-latest"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LOOKBACK = 10
 _MONTH_RE = re.compile(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})$")

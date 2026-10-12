@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     app_url: str = "http://localhost:3001"
 
     openrouter_api_key: str = ""
-    openrouter_model: str = "anthropic/claude-sonnet-4"
+    openrouter_model: str = "~google/gemini-flash-latest"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # Financial workspace (QuickBooks + Teamwork insights/chat). Empty key
     # falls back to openrouter_api_key; empty model falls back to openrouter_model.
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     # other models — 13-week cash 2.96%, full year 0.31%. It is the better
     # forecaster and the worse writer, which is exactly why these are two
     # settings and not one.
-    openrouter_model_forecast: str = "google/gemini-3.6-flash"
+    openrouter_model_forecast: str = "~google/gemini-flash-latest"
     # Image-only RFP PDF OCR (vision). Used only when pypdf extracts almost no text.
     # Sends the full PDF to OpenRouter (native file engine) — no page cap.
     openrouter_model_ocr: str = "~google/gemini-flash-latest"
@@ -99,8 +99,8 @@ class Settings(BaseSettings):
     hubspot_api_key: str = ""
     # Role-tier router: heavy = Sonnet-class (writing/judgment); light = Haiku-class (plan/gate).
     # Empty heavy → fall back to openrouter_model. Empty light → fall back to heavy.
-    llm_heavy_model: str = ""
-    llm_light_model: str = "anthropic/claude-haiku-4.5"
+    llm_heavy_model: str = "~anthropic/claude-sonnet-latest"
+    llm_light_model: str = "~google/gemini-flash-latest"
     # Anthropic prompt caching (Claude models via OpenRouter only). Cuts the cost
     # of re-sent prompt prefixes to ~0.1x without changing what the model sees.
     # Kill switch first — if caching ever misbehaves, this restores prior behaviour.
@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     llm_cache_ttl_1h: bool = True
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.7-flash"
+    gemini_model: str = "gemini-flash-latest"
     
     fireworks_api_key: str = ""
     fireworks_model: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"

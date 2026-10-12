@@ -20,11 +20,18 @@ from app.services.llm import _claude_rejects_sampling_params
 class ClaudeRejectsSamplingParamsTests(unittest.TestCase):
     def test_current_env_heavy_model_rejects(self) -> None:
         """LLM_HEAVY_MODEL in this repo's .env — must be detected."""
-        self.assertTrue(_claude_rejects_sampling_params("anthropic/claude-sonnet-5"))
+        self.assertTrue(
+            _claude_rejects_sampling_params("~anthropic/claude-sonnet-latest")
+        )
 
     def test_current_env_light_model_still_allows(self) -> None:
         """LLM_LIGHT_MODEL in this repo's .env — must NOT be affected."""
-        self.assertFalse(_claude_rejects_sampling_params("anthropic/claude-haiku-4.5"))
+        self.assertFalse(
+            _claude_rejects_sampling_params("~google/gemini-flash-latest")
+        )
+        self.assertTrue(
+            _claude_rejects_sampling_params("~anthropic/claude-haiku-latest")
+        )
 
     def test_rejects_five_generation_models(self) -> None:
         for model in [

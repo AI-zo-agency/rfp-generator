@@ -733,6 +733,12 @@ def _claude_rejects_sampling_params(model_l: str) -> bool:
         return True
     if "opus" in normalized and ("4-7" in normalized or "4-8" in normalized):
         return True
+    # OpenRouter "-latest" aliases currently resolve to the generation that
+    # rejects temperature. Matching the numbered id alone misses the alias.
+    if normalized.endswith("-latest") and any(
+        family in normalized for family in ("sonnet", "opus", "haiku")
+    ):
+        return True
     return False
 
 

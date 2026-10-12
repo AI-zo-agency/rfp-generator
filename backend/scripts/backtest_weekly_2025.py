@@ -31,7 +31,7 @@ from app.core.config import settings  # noqa: E402
 from app.financial import qb_repository as repo  # noqa: E402
 from app.services.llm import _financial_openrouter_key, _openrouter_key  # noqa: E402
 
-_DEFAULT_MODEL = "google/gemini-3.6-flash"
+_DEFAULT_MODEL = "~google/gemini-flash-latest"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _CASH_LOOKBACK = 13
 _REVENUE_LOOKBACK = 10

@@ -34,6 +34,12 @@ Return JSON only:
 {
   "documentKind": "complete_rfp" | "solicitation_notice" | "incomplete_packet" | "rfi" | "rfq" | "other",
   "blocksScoring": true | false,
+  "unresolvedReferences": [
+    {
+      "target": "the name of the cited part, copied from the quote",
+      "quote": "verbatim sentence in this upload that points at that part"
+    }
+  ],
   "headline": "one line a proposal manager sees first",
   "whatItIs": "thorough plain-language explanation of what this upload actually is",
   "missing": ["materials absent from this upload that a proposer needs"],
@@ -46,12 +52,6 @@ Return JSON only:
       "contact": "email, phone, or URL copied from the document, or empty",
       "whyEssential": "why a responsive proposal cannot be prepared without this",
       "quote": "verbatim sentence that states the demand"
-    }
-  ],
-  "unresolvedReferences": [
-    {
-      "target": "the name of the cited part, copied from the quote",
-      "quote": "verbatim sentence in this upload that points at that part"
     }
   ]
 }
@@ -345,7 +345,7 @@ async def classify_rfp_packet(
                     ),
                 },
             ],
-            max_tokens=1600,
+            max_tokens=8192,
             temperature=0.0,
             tier="light",
             node_name="go_no_go_packet_gate",
