@@ -2036,6 +2036,7 @@ async def _draft_batch_once(
         from app.models.proposal import EvidenceItem
         from app.services.proposal_citation_grounding import (
             _corpus_for_section,
+            drop_unsupported_inline_markers,
             ground_section_citations,
             strip_uncitable_markers,
         )
@@ -2053,7 +2054,11 @@ async def _draft_batch_once(
             (item.id or "").strip().upper()
             for item in _corpus_for_section(corpus_items, sid)
         }
-        stripped = strip_uncitable_markers(content, allowed)
+        stripped = drop_unsupported_inline_markers(
+            strip_uncitable_markers(content, allowed),
+            corpus_items,
+            section_id=sid,
+        )
         if stripped != content:
             logger.info(
                 "phase3_dropped_uncitable_markers section=%s",

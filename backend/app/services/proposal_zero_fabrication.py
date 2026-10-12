@@ -355,7 +355,7 @@ def apply_zero_fabrication_guards(
         from app.services.proposal_citation_grounding import attach_citation_maps_to_draft
 
         draft, cite_logs = attach_citation_maps_to_draft(
-            draft, research, label=f"{label}:citations"
+            draft, research, label=f"{label}:citations", rfp_text=rfp_text
         )
         report.logs.extend(cite_logs)
     except Exception as exc:  # noqa: BLE001
@@ -470,7 +470,7 @@ async def apply_zero_fabrication_guards_before_persist(
         from app.services.proposal_citation_grounding import attach_citation_maps_to_draft
 
         draft, cite_logs = attach_citation_maps_to_draft(
-            draft, research, label=f"{label}:citations"
+            draft, research, label=f"{label}:citations", rfp_text=rfp_text
         )
         report.logs.extend(cite_logs)
     except Exception as exc:  # noqa: BLE001

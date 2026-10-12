@@ -219,7 +219,7 @@ class ProvenanceCitationTests(unittest.TestCase):
             EvidenceItem(
                 id="E3",
                 source="06_WON_handoff.pdf",
-                excerpt="The engagement includes a documented handoff package for client staff.",
+                excerpt="We'll give your team a documented handoff package for client staff.",
                 sectionIds=["approach"],
             )
         ]
@@ -232,7 +232,7 @@ class ProvenanceCitationTests(unittest.TestCase):
 
         kept = "We'll give your team a documented handoff package. [E3]"
         dropped = "We'll give your team a documented handoff package."
-        original = "Our team provides a documented handoff package for client staff. [E3]"
+        original = "We'll give your team a documented handoff package for client staff. [E3]"
         self.assertEqual(
             _check_edit(VoiceEdit(original, kept, "contraction", "hard"), original, original),
             "",
@@ -325,7 +325,14 @@ class ProvenanceCitationTests(unittest.TestCase):
                 )
             ],
         )
-        out, logs = attach_citation_maps_to_draft(draft, research)
+        out, logs = attach_citation_maps_to_draft(
+            draft,
+            research,
+            rfp_text=(
+                "Deliver the Village website redesign for the main Village site. "
+                "Publish a Cultural Center calendar and event listings."
+            ),
+        )
         self.assertTrue(any("RFP requirement" in line for line in logs))
         approach = out.sections[0]
         by_text = {row.text: row.evidence_ids for row in approach.citation_map}
@@ -349,6 +356,93 @@ class ProvenanceCitationTests(unittest.TestCase):
             eid for row in out.sections[1].citation_map for eid in row.evidence_ids
         }
         self.assertFalse(other_ids & rfp_ids)
+
+    def test_short_role_title_does_not_cite_someone_elses_resume(self) -> None:
+        corpus = [
+            EvidenceItem(
+                id="E14",
+                source="Work History",
+                excerpt="**zö agency** Creative Director 2024 - Present **MusicCred** UX/UI Designer 2023 - 2024",
+                sectionIds=["team"],
+            )
+        ]
+        content = "| Role | Name |\n| --- | --- |\n| Creative Director | [VERIFY: confirm named Creative Director] |\n"
+        cmap = ground_section_citations(content, corpus, section_id="team")
+        self.assertEqual(cmap, [])
+
+    def test_inline_marker_is_dropped_when_excerpt_does_not_support_the_claim(self) -> None:
+        from app.services.proposal_citation_grounding import drop_unsupported_inline_markers
+
+        corpus = [
+            EvidenceItem(
+                id="E6",
+                source="Living Wage Ordinance Compliance:",
+                excerpt=(
+                    "Upon contract award, zö agency will complete and submit the "
+                    "Living Wage Self-Verification Form and comply with all "
+                    "requirements of San Leandro Municipal Code Title 1, Chapter 6."
+                ),
+                sectionIds=["corporate"],
+            )
+        ]
+        content = (
+            "We are certified as a Women's Business Enterprise (WBENC) and a "
+            "Women-Owned Small Business (WOSB) [E6]."
+        )
+        cleaned = drop_unsupported_inline_markers(content, corpus, section_id="corporate")
+        self.assertNotIn("[E6]", cleaned)
+        self.assertEqual(
+            ground_section_citations(cleaned, corpus, section_id="corporate"),
+            [],
+        )
+
+    def test_memory_summary_is_not_citable(self) -> None:
+        from app.services.proposal_citation_grounding import is_citable_evidence
+
+        item = EvidenceItem(
+            id="E6",
+            source="06_WON_Umatilla.pdf ⚠️ MEMORY SUMMARY — do NOT cite exact numbers from this; use [VERIFY] instead",
+            excerpt="zö agency is certified as WBENC.",
+            sectionIds=["corporate"],
+        )
+        self.assertFalse(is_citable_evidence(item))
+
+    def test_planner_label_is_not_an_rfp_excerpt(self) -> None:
+        from app.models.proposal import RfpSectionMap
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="refs",
+                    title="References",
+                    content="RFP requirement: Verified public-sector clients",
+                    status="generated",
+                )
+            ],
+        )
+        research = ProposalResearchCache(
+            rfpId="r1",
+            updatedAt="t",
+            rfpSections=[
+                RfpSectionMap(
+                    id="refs",
+                    title="References",
+                    requirements=["Verified public-sector clients"],
+                )
+            ],
+            evidenceCorpus=[],
+        )
+        out, _logs = attach_citation_maps_to_draft(
+            draft,
+            research,
+            rfp_text="Project Team 10. References 10. Pricing 10.",
+        )
+        self.assertEqual(out.sections[0].citation_map, [])
+        self.assertFalse(
+            any((e.chunk_key or "").startswith("rfp-req:") for e in research.evidence_corpus)
+        )
 
     def test_marker_from_another_section_is_removed(self) -> None:
         text = "We'll build the site so residents can find documents. [E6]"

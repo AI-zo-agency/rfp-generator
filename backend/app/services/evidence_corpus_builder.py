@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.models.proposal import EvidenceItem, ProofPoint
+from app.services.proposal_evidence_corpus import ensure_unique_evidence_ids
 from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
@@ -47,7 +49,14 @@ async def build_shared_evidence_corpus(
                 str(exc)[:200],
             )
             continue
+        # The retriever stamps E# from start_index for every hit it returns,
+        # including hits this loop then drops. Advance past the highest number
+        # it issued, or the next section reuses an id that is already stored.
+        issued = start_index
         for item in items:
+            match = re.match(r"E(\d+)$", (item.id or "").strip(), flags=re.I)
+            if match:
+                issued = max(issued, int(match.group(1)) + 1)
             if (item.source or "") == "evidence_trust_gate" or (
                 item.chunk_key or ""
             ).startswith("evidence-trust-gap"):
@@ -66,10 +75,10 @@ async def build_shared_evidence_corpus(
                 by_key[key] = existing.model_copy(update={"section_ids": merged_ids})
                 continue
             by_key[key] = item
-            start_index += 1
+        start_index = issued
 
-    corpus = list(by_key.values())
-    seen = set(by_key.keys())
+    corpus = ensure_unique_evidence_ids(list(by_key.values()))
+    seen = {(item.chunk_key or item.id or "").strip() for item in corpus}
 
     # Proof-point stubs as lightweight evidence when retrieval returned nothing useful.
     for index, pp in enumerate(proof_points or [], start=1):
@@ -127,4 +136,4 @@ def merge_corpus(
             continue
         seen.add(key)
         out.append(item)
-    return out
+    return ensure_unique_evidence_ids(out)

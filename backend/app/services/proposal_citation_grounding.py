@@ -221,17 +221,22 @@ def score_claim_against_excerpt(
     en = _normalize(excerpt)
     if len(cn) < min_chars or len(en) < 20:
         return 0.0
-    if cn in en:
-        return 0.98
-    if len(en) >= 40 and en in cn:
+    ct = _content_tokens(claim)
+    anchors = _distinctive_anchors(claim) & _distinctive_anchors(excerpt)
+    # A short label that merely occurs inside an excerpt is not support.
+    # "Creative Director" sits in someone else's resume. A real claim carries
+    # enough of its own words, or a year or amount that is actually there.
+    if cn in en or (len(en) >= 40 and en in cn):
+        if len(ct) < 4 and not anchors:
+            return 0.0
+        if cn in en:
+            return 0.98
         return 0.9
 
-    ct = _content_tokens(claim)
     et = _content_tokens(excerpt)
     if len(ct) < 4:
         return 0.0
     shared = ct & et
-    anchors = _distinctive_anchors(claim) & _distinctive_anchors(excerpt)
     if len(shared) < 3 and not anchors:
         return 0.0
 
@@ -247,13 +252,16 @@ def score_claim_against_excerpt(
 
 
 def is_citable_evidence(item: EvidenceItem) -> bool:
-    """True for a real E# excerpt. Flags and proof-point labels are not sources."""
+    """True for a real E# excerpt. Flags, proof-point labels, and memory summaries are not sources."""
     eid = (item.id or "").strip()
     if not re.fullmatch(r"E\d+", eid, flags=re.I):
         return False
     if (item.source or "") == "evidence_trust_gate":
         return False
     if (item.chunk_key or "").startswith("evidence-trust-gap"):
+        return False
+    blob = f"{item.source or ''}\n{item.excerpt or ''}".casefold()
+    if "do not cite" in blob or "memory summary" in blob:
         return False
     return bool((item.excerpt or "").strip())
 
@@ -295,6 +303,68 @@ def _corpus_for_section(
     return [e for e in pool if is_citable_evidence(e)]
 
 
+def _min_chars_for(plain: str) -> int:
+    return _MIN_TABLE_CELL_CHARS if len(plain) < _MIN_CLAIM_CHARS else _MIN_CLAIM_CHARS
+
+
+def _item_by_id(pool: list[EvidenceItem], eid: str) -> EvidenceItem | None:
+    want = (eid or "").strip().upper()
+    for item in pool:
+        if (item.id or "").strip().upper() == want:
+            return item
+    return None
+
+
+def _excerpt_supports_claim(
+    plain: str,
+    item: EvidenceItem | None,
+    *,
+    min_chars: int,
+) -> bool:
+    if item is None or not is_citable_evidence(item):
+        return False
+    return score_claim_against_excerpt(plain, item.excerpt or "", min_chars=min_chars) >= _SCORE_FLOOR
+
+
+def drop_unsupported_inline_markers(
+    content: str,
+    corpus: list[EvidenceItem],
+    *,
+    section_id: str = "",
+) -> str:
+    """Remove [E#] markers whose excerpt does not support that claim."""
+    if not content.strip():
+        return content
+    pool = _corpus_for_section(corpus, section_id)
+    updated = content
+    for claim in _iter_claim_spans(content):
+        inline = _inline_evidence_ids(claim)
+        if not inline:
+            continue
+        plain = re.sub(r"\s{2,}", " ", _INLINE_CITE.sub("", claim).strip())
+        min_chars = _min_chars_for(plain)
+        keep = [
+            eid
+            for eid in inline
+            if _excerpt_supports_claim(plain, _item_by_id(pool, eid), min_chars=min_chars)
+        ]
+        if keep == inline:
+            continue
+        if keep:
+            replacement = f"[{', '.join(keep)}]" if len(keep) > 1 else f"[{keep[0]}]"
+            new_claim = _INLINE_CITE.sub(replacement, claim, count=1)
+        else:
+            new_claim = re.sub(r"\s{2,}", " ", _INLINE_CITE.sub("", claim)).strip()
+        if claim in updated and new_claim != claim:
+            updated = updated.replace(claim, new_claim, 1)
+            logger.info(
+                "citation dropped unsupported marker section=%s ids=%s",
+                section_id,
+                ",".join(eid for eid in inline if eid not in keep),
+            )
+    return updated
+
+
 def ground_section_citations(
     content: str,
     corpus: list[EvidenceItem],
@@ -303,9 +373,8 @@ def ground_section_citations(
 ) -> list[CitationGrounding]:
     """Build citation map for one section body against the evidence corpus.
 
-    Inline [E#] left by the drafter (and kept by voice rewrite) is the citation.
-    Lexical overlap is only a backup for a sentence that still matches an
-    excerpt and has no marker.
+    An inline [E#] is a candidate. It is kept only when that exact excerpt
+    supports the claim. Overlap is the path for a sentence with no marker.
     """
     if not content.strip() or not corpus:
         return []
@@ -329,23 +398,25 @@ def ground_section_citations(
 
         inline = [eid for eid in _inline_evidence_ids(claim) if eid in allowed]
         if inline:
-            out.append(
-                CitationGrounding(
-                    text=plain,
-                    evidence_ids=inline,
-                    method="inline_provenance",
+            # The drafter named a row. If that row does not support the claim,
+            # do not shop the rest of the packet for a different document.
+            supported = [
+                eid
+                for eid in inline
+                if _excerpt_supports_claim(plain, _item_by_id(pool, eid), min_chars=_min_chars_for(plain))
+            ]
+            if supported:
+                out.append(
+                    CitationGrounding(
+                        text=plain,
+                        evidence_ids=supported,
+                        method="inline_provenance",
+                    )
                 )
-            )
             continue
 
         ranked: list[tuple[float, EvidenceItem]] = []
-        # Table cells are shorter than prose sentences; prose spans are already
-        # filtered at _MIN_CLAIM_CHARS before they reach here.
-        min_chars = (
-            _MIN_TABLE_CELL_CHARS
-            if len(plain) < _MIN_CLAIM_CHARS
-            else _MIN_CLAIM_CHARS
-        )
+        min_chars = _min_chars_for(plain)
         for item in pool:
             s = score_claim_against_excerpt(plain, item.excerpt or "", min_chars=min_chars)
             if s >= _SCORE_FLOOR:
@@ -661,19 +732,43 @@ def _requirement_texts_for_section(
     return clean
 
 
+def _verbatim_rfp_span(requirement: str, rfp_text: str) -> str:
+    """Return the requirement only when it is a span of the solicitation.
+
+    Planner labels ("Verified public-sector clients") are not excerpts.
+    """
+    text = re.sub(r"\s+", " ", (requirement or "").strip())
+    body = re.sub(r"\s+", " ", (rfp_text or "").strip())
+    if len(text) < 20 or not body:
+        return ""
+    if text.casefold() not in body.casefold():
+        return ""
+    return text[:2000]
+
+
 def build_rfp_requirement_evidence(
     sections: list[ProposalSection],
     research: ProposalResearchCache | None,
     *,
     start_index: int = 1,
+    rfp_text: str = "",
 ) -> list[EvidenceItem]:
-    """One evidence row per section requirement so plan prose can cite the RFP."""
+    """One evidence row per requirement that is quoted from the solicitation."""
     items: list[EvidenceItem] = []
     n = start_index
     for section in sections:
         sid = (section.id or "").strip()
         title = (section.title or sid or "section").strip()
-        for index, text in enumerate(_requirement_texts_for_section(research, section)):
+        index = 0
+        for raw in _requirement_texts_for_section(research, section):
+            text = _verbatim_rfp_span(raw, rfp_text)
+            if not text:
+                logger.info(
+                    "rfp citation skipped not-verbatim section=%s text=%s",
+                    sid,
+                    raw[:80],
+                )
+                continue
             eid = f"E{n}"
             n += 1
             items.append(
@@ -685,6 +780,7 @@ def build_rfp_requirement_evidence(
                     chunkKey=f"{_RFP_CHUNK_PREFIX}{sid}:{index}",
                 )
             )
+            index += 1
     return items
 
 
@@ -729,6 +825,7 @@ def attach_citation_maps_to_draft(
     research: ProposalResearchCache | None,
     *,
     label: str = "citation-map",
+    rfp_text: str = "",
 ) -> tuple[ProposalDraft, list[str]]:
     """Stamp citationMap (+ kbRefs union) on every section. Does not rewrite prose.
 
@@ -740,7 +837,14 @@ def attach_citation_maps_to_draft(
     grounding still uses the corpus without those rows, so a section that has
     no tagged packet keeps searching the shared KB instead of only its RFP lines.
     """
-    corpus = list((research.evidence_corpus if research else None) or [])
+    from app.services.proposal_evidence_corpus import ensure_unique_evidence_ids
+
+    corpus = ensure_unique_evidence_ids(
+        list((research.evidence_corpus if research else None) or [])
+    )
+    if research is not None and corpus != list(research.evidence_corpus or []):
+        research.evidence_corpus = corpus
+        logger.info("%s evidence ids made unique count=%s", label, len(corpus))
     if not draft.sections:
         return draft, []
 
@@ -778,6 +882,7 @@ def attach_citation_maps_to_draft(
         draft.sections,
         research,
         start_index=_next_evidence_num(corpus),
+        rfp_text=rfp_text,
     )
     if rfp_evidence:
         corpus = merge_prefixed_evidence_into_corpus(
@@ -809,7 +914,11 @@ def attach_citation_maps_to_draft(
     new_sections: list[ProposalSection] = []
     total = 0
     for section in draft.sections:
-        content = section.content or ""
+        content = drop_unsupported_inline_markers(
+            section.content or "",
+            kb_corpus,
+            section_id=section.id or "",
+        )
         sid = section.id or ""
         if not content.strip():
             new_sections.append(
@@ -863,7 +972,9 @@ def attach_citation_maps_to_draft(
         refs = sorted(set(refs), key=lambda x: int(re.sub(r"\D", "", x) or 0))
         total += len(cmap)
         new_sections.append(
-            section.model_copy(update={"citation_map": cmap, "kb_refs": refs})
+            section.model_copy(
+                update={"content": content, "citation_map": cmap, "kb_refs": refs}
+            )
         )
     logs.append(
         f"{label}: grounded {total} claim citation(s) across {len(new_sections)} section(s)"

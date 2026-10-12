@@ -230,7 +230,7 @@ class SharedCorpusBuilderTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        async def fake_retrieve(entry, *, rfp_client="", start_index=1):
+        async def fake_retrieve(entry, *, rfp_client="", start_index=1, section_title=""):
             return [
                 EvidenceItem(
                     id=f"E{start_index}",
@@ -281,6 +281,33 @@ class SharedCorpusBuilderTests(unittest.IsolatedAsyncioTestCase):
         merged = merge_corpus(base, jut)
         self.assertEqual(len(merged), 2)
         self.assertEqual(merged[0].id, "E1")
+
+    def test_reused_evidence_id_is_renumbered(self) -> None:
+        from app.services.proposal_evidence_corpus import ensure_unique_evidence_ids
+
+        corpus = ensure_unique_evidence_ids(
+            [
+                EvidenceItem(
+                    id="E6",
+                    source="umatilla.pdf",
+                    excerpt="zö agency is certified as WBENC.",
+                    sectionIds=["corporate"],
+                    chunkKey="umatilla",
+                ),
+                EvidenceItem(
+                    id="E6",
+                    source="Living Wage Ordinance Compliance:",
+                    excerpt="San Leandro Municipal Code Title 1, Chapter 6.",
+                    sectionIds=["wage"],
+                    chunkKey="living-wage",
+                ),
+            ]
+        )
+        ids = [item.id for item in corpus]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(corpus[0].id, "E6")
+        self.assertNotEqual(corpus[1].id, "E6")
+        self.assertEqual(corpus[1].chunk_key, "living-wage")
 
 
 class JitFallbackFlagTests(unittest.IsolatedAsyncioTestCase):

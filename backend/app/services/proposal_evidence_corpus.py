@@ -14,10 +14,64 @@ logger = logging.getLogger(__name__)
 def next_evidence_id(corpus: list[EvidenceItem]) -> int:
     max_id = 0
     for item in corpus:
-        match = re.match(r"E(\d+)$", item.id)
+        match = re.match(r"E(\d+)$", item.id or "", flags=re.I)
         if match:
             max_id = max(max_id, int(match.group(1)))
     return max_id + 1
+
+
+def ensure_unique_evidence_ids(corpus: list[EvidenceItem]) -> list[EvidenceItem]:
+    """One E# means one excerpt.
+
+    The first row keeps its number. A later row that reused it is renumbered.
+    The same chunk_key collapses into the first row; section ids are merged.
+    Callers may stamp provisional numbers. This function is the only assignment
+    that is allowed to persist.
+    """
+    used: set[str] = set()
+    next_n = 1
+    by_chunk: dict[str, EvidenceItem] = {}
+    order: list[str] = []
+
+    def _mint(preferred: str) -> str:
+        nonlocal next_n
+        pref = (preferred or "").strip().upper()
+        if re.fullmatch(r"E\d+", pref) and pref not in used:
+            used.add(pref)
+            next_n = max(next_n, int(pref[1:]) + 1)
+            return pref
+        while f"E{next_n}" in used:
+            next_n += 1
+        eid = f"E{next_n}"
+        used.add(eid)
+        next_n += 1
+        if pref and pref != eid:
+            logger.warning(
+                "evidence id renumbered from=%s to=%s",
+                pref,
+                eid,
+            )
+        return eid
+
+    for index, item in enumerate(corpus):
+        key = (item.chunk_key or "").strip()
+        if key and key in by_chunk:
+            existing = by_chunk[key]
+            merged_ids = list(dict.fromkeys([*existing.section_ids, *item.section_ids]))
+            by_chunk[key] = existing.model_copy(update={"section_ids": merged_ids})
+            logger.info(
+                "evidence chunk collapsed key=%s kept=%s dropped=%s",
+                key[:80],
+                existing.id,
+                item.id,
+            )
+            continue
+        eid = _mint(item.id)
+        updated = item.model_copy(update={"id": eid})
+        ident = key or f"row:{index}:{eid}"
+        by_chunk[ident] = updated
+        order.append(ident)
+    return [by_chunk[key] for key in order]
 
 
 def merge_hits_into_corpus(
@@ -66,4 +120,4 @@ def merge_hits_into_corpus(
         by_key[key] = item
         updated.append(item)
 
-    return updated
+    return ensure_unique_evidence_ids(updated)
