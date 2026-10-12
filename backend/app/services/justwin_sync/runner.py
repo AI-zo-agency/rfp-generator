@@ -7,6 +7,7 @@ from typing import Any
 
 from app.services import supabase_db as sb
 from app.services.justwin_sync.api import (
+    JustWinAuthError,
     collect_leads,
     create_api_client,
     download_solicitation_pdf_bytes,
@@ -86,7 +87,29 @@ def run_justwin_sync(
         # automatically instead of telling the user to delete the session file.
         auth, page = ensure_authenticated_page(auth, page)
 
-        client = create_api_client(page)
+        try:
+            client = create_api_client(page)
+        except JustWinAuthError as exc:
+            # Cookies can keep the SPA off /login after the bearer token is
+            # missing or rejected. One fresh login, then fail for real.
+            logger.warning(
+                "[justwin-sync] %s — logging in again with credentials", exc
+            )
+            try:
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            close_auth(auth)
+            auth = get_authenticated_context(force_fresh=True)
+            page = auth.context.new_page()
+            page.goto(
+                f"{get_justwin_base_url()}/leads",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            page.wait_for_timeout(3000)
+            auth, page = ensure_authenticated_page(auth, page)
+            client = create_api_client(page)
         leads = collect_leads(client, target_date or None, tab)
         logger.info("[justwin-sync] found %s matching lead(s)", len(leads))
         rfps_found = len(leads)

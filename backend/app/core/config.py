@@ -282,7 +282,7 @@ class Settings(BaseSettings):
     justwin_email: str = ""
     justwin_password: str = ""
     justwin_base_url: str = "https://app.justwin.ai"
-    justwin_api_root: str = "https://api.justwin.ai"
+    justwin_api_root: str = "https://prod2.api.justwin.ai"
     justwin_session_path: str = ""
     justwin_headless: bool = True
     justwin_rfp_title_filter: str = "*"

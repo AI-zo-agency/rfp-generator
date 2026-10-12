@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,7 +75,45 @@ def _perform_login(page: Page) -> None:
 
     page.wait_for_url(lambda url: "/login" not in str(url), timeout=60_000)
     page.wait_for_load_state("domcontentloaded")
-    page.wait_for_timeout(2000)
+    # The access token lives in memory. The session we can replay is the
+    # jw_refresh cookie (older logins also left localStorage.token).
+    if not wait_for_session_credential(page):
+        raise RuntimeError(
+            "JustWin login finished but no session cookie was stored. "
+            "Check JUSTWIN_EMAIL / JUSTWIN_PASSWORD."
+        )
+
+
+_LOGIN_SESSION_WAIT_MS = 20_000
+
+
+def wait_for_session_credential(
+    page: Page, *, timeout_ms: int = _LOGIN_SESSION_WAIT_MS
+) -> bool:
+    """True once jw_refresh or a legacy localStorage token is available."""
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while True:
+        if _has_session_credential(page):
+            logger.info("[justwin-sync] session credential stored")
+            return True
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "[justwin-sync] no session cookie or auth token after %sms",
+                timeout_ms,
+            )
+            return False
+        page.wait_for_timeout(250)
+
+
+def _has_session_credential(page: Page) -> bool:
+    try:
+        cookies = page.context.cookies()
+    except Exception:  # noqa: BLE001
+        cookies = []
+    if any(cookie.get("name") == "jw_refresh" for cookie in cookies):
+        return True
+    raw = page.evaluate("() => localStorage.getItem('token')")
+    return bool(str(raw or "").strip())
 
 
 def _save_session(context: BrowserContext) -> None:
@@ -130,7 +169,14 @@ def get_authenticated_context(*, force_fresh: bool = False) -> AuthContext:
             invalidate_session()
             context = browser.new_context()
             page = _open_leads(context)
-        _perform_login(page)
+        try:
+            _perform_login(page)
+        except Exception:
+            logger.exception("[justwin-sync] credential login failed")
+            page.close()
+            browser.close()
+            pw.stop()
+            raise
         _save_session(context)
 
     if _is_login_page(page) or "/login" in page.url:
@@ -171,10 +217,13 @@ def ensure_authenticated_page(auth: AuthContext, page: Page) -> tuple[AuthContex
 
 
 def close_auth(auth: AuthContext) -> None:
-    try:
-        auth.context.close()
-    finally:
+    """Close the browser. Safe to call after a failed login already stopped Playwright."""
+    for label, closer in (
+        ("context", lambda: auth.context.close()),
+        ("browser", lambda: auth.browser.close()),
+        ("playwright", lambda: auth._playwright.stop()),  # type: ignore[attr-defined]
+    ):
         try:
-            auth.browser.close()
-        finally:
-            auth._playwright.stop()  # type: ignore[attr-defined]
+            closer()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[justwin-sync] close %s skipped: %s", label, exc)

@@ -1,13 +1,20 @@
 """Post-hoc claim → evidenceCorpus citation map (no LLM [E#] required).
 
-After manuscript prose is stable, map sentences to existing EvidenceItem ids by
-lexical overlap / containment. UI renders badges from citationMap; export
+After manuscript prose is stable, map sentences and table cells to EvidenceItem
+ids by lexical overlap / containment. UI renders badges from citationMap; export
 never sees the map (and still strips any inline [E#]).
+
+Two source pools, kept separate so one cannot hide the other:
+- Knowledge-base excerpts already on the section (or the shared corpus when the
+  section has no tagged packet).
+- RFP requirements stored on the research cache for that section. A plan
+  sentence can carry both a KB id and an RFP id.
 
 Budget / Cost sections are special: dollar figures come from the Pricing Book
 plan (catalog SKU or custom build), not from RFP/KB narrative retrieval. Those
 amounts are grounded mechanically to Pricing Book evidence items so review
-badges show where each number came from.
+badges show where each number came from. Table cells in that section still
+match the Pricing Book excerpts, not won-proposal rate cards.
 """
 
 from __future__ import annotations
@@ -37,6 +44,10 @@ _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _MONEY_RE = re.compile(r"\$[\d,]+(?:\.\d+)?|\b\d{1,3}(?:\.\d+)?\s*%")
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 _PRICING_CHUNK_PREFIX = "pricing:"
+_RFP_CHUNK_PREFIX = "rfp-req:"
+_MIN_TABLE_CELL_CHARS = 16
+_MAX_MERGED_IDS = 4
+_TABLE_SEP_CELL = re.compile(r"^:?-{3,}:?$")
 _STOP = frozenset(
     {
         "the",
@@ -139,12 +150,53 @@ def _split_sentences(text: str) -> list[str]:
     return out
 
 
+def _is_table_separator(line: str) -> bool:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return bool(cells) and all(not c or _TABLE_SEP_CELL.match(c) for c in cells)
+
+
+def _table_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|") if c.strip()]
+
+
+def _accept_claim(claims: list[str], sent: str, *, min_chars: int) -> None:
+    """Keep a verbatim span long enough to cite. ``sent`` must occur in the body."""
+    if _INLINE_CITE.fullmatch(sent.strip()) and claims:
+        claims[-1] = f"{claims[-1]} {sent.strip()}"
+        return
+    cleaned = _INLINE_CITE.sub("", sent).strip()
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    if len(cleaned) < min_chars:
+        return
+    if _GENERIC_LEAD.match(cleaned):
+        return
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        return
+    # Keep [E#] on the span so provenance can be read after a voice rewrite.
+    claims.append(re.sub(r"\s{2,}", " ", sent).strip())
+
+
 def _iter_claim_spans(content: str) -> list[str]:
-    """Claims from prose lines; skip headings, tags, empty table chrome."""
+    """Claims from prose sentences and markdown table cells.
+
+    Separator rows are chrome. A cell is cited from its own text so the review
+    badge lands inside the cell instead of after the pipe row.
+    """
     claims: list[str] = []
     for raw_line in (content or "").splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("|") or set(line) <= set("-|: "):
+        if not line or set(line) <= set("-|: "):
+            continue
+        if line.startswith("|"):
+            if _is_table_separator(line):
+                continue
+            for cell in _table_cells(line):
+                if _SKIP_LINE.match(cell):
+                    continue
+                for sent in _split_sentences(cell):
+                    _accept_claim(claims, sent, min_chars=_MIN_TABLE_CELL_CHARS)
+                    if len(claims) >= _MAX_CLAIMS_PER_SECTION:
+                        return claims
             continue
         if _SKIP_LINE.match(line):
             continue
@@ -152,30 +204,22 @@ def _iter_claim_spans(content: str) -> list[str]:
         line = re.sub(r"^#{1,6}\s+", "", line)
         line = re.sub(r"^\*\*(.+?)\*\*:?\s*$", r"\1", line)
         for sent in _split_sentences(line):
-            # A marker after the period ("… package. [E3]") is its own fragment.
-            if _INLINE_CITE.fullmatch(sent.strip()) and claims:
-                claims[-1] = f"{claims[-1]} {sent.strip()}"
-                continue
-            cleaned = _INLINE_CITE.sub("", sent).strip()
-            cleaned = re.sub(r"\s{2,}", " ", cleaned)
-            if len(cleaned) < _MIN_CLAIM_CHARS:
-                continue
-            if _GENERIC_LEAD.match(cleaned):
-                continue
-            if cleaned.startswith("[") and cleaned.endswith("]"):
-                continue
-            # Keep [E#] on the span so provenance can be read after a voice rewrite.
-            claims.append(re.sub(r"\s{2,}", " ", sent).strip())
+            _accept_claim(claims, sent, min_chars=_MIN_CLAIM_CHARS)
             if len(claims) >= _MAX_CLAIMS_PER_SECTION:
                 return claims
     return claims
 
 
-def score_claim_against_excerpt(claim: str, excerpt: str) -> float:
+def score_claim_against_excerpt(
+    claim: str,
+    excerpt: str,
+    *,
+    min_chars: int = _MIN_CLAIM_CHARS,
+) -> float:
     """0–1 support score. High = excerpt grounds the claim."""
     cn = _normalize(claim)
     en = _normalize(excerpt)
-    if len(cn) < _MIN_CLAIM_CHARS or len(en) < 20:
+    if len(cn) < min_chars or len(en) < 20:
         return 0.0
     if cn in en:
         return 0.98
@@ -295,8 +339,15 @@ def ground_section_citations(
             continue
 
         ranked: list[tuple[float, EvidenceItem]] = []
+        # Table cells are shorter than prose sentences; prose spans are already
+        # filtered at _MIN_CLAIM_CHARS before they reach here.
+        min_chars = (
+            _MIN_TABLE_CELL_CHARS
+            if len(plain) < _MIN_CLAIM_CHARS
+            else _MIN_CLAIM_CHARS
+        )
         for item in pool:
-            s = score_claim_against_excerpt(plain, item.excerpt or "")
+            s = score_claim_against_excerpt(plain, item.excerpt or "", min_chars=min_chars)
             if s >= _SCORE_FLOOR:
                 ranked.append((s, item))
         if not ranked:
@@ -546,23 +597,131 @@ def ground_budget_pricing_citations(
     return out
 
 
+def merge_prefixed_evidence_into_corpus(
+    corpus: list[EvidenceItem],
+    items: list[EvidenceItem],
+    prefix: str,
+) -> list[EvidenceItem]:
+    """Replace prior ``prefix`` stubs, append fresh ones with new E# ids."""
+    kept = [e for e in corpus if not (e.chunk_key or "").startswith(prefix)]
+    n = _next_evidence_num(kept)
+    out = list(kept)
+    for item in items:
+        eid = f"E{n}"
+        n += 1
+        out.append(item.model_copy(update={"id": eid}))
+    return out
+
+
 def merge_pricing_evidence_into_corpus(
     corpus: list[EvidenceItem],
     pricing_items: list[EvidenceItem],
 ) -> list[EvidenceItem]:
     """Replace prior pricing:* stubs, append fresh ones with new E# ids."""
-    kept = [
-        e
-        for e in corpus
-        if not (e.chunk_key or "").startswith(_PRICING_CHUNK_PREFIX)
-    ]
-    n = _next_evidence_num(kept)
-    out = list(kept)
-    for item in pricing_items:
-        eid = f"E{n}"
-        n += 1
-        out.append(item.model_copy(update={"id": eid}))
-    return out
+    return merge_prefixed_evidence_into_corpus(
+        corpus, pricing_items, _PRICING_CHUNK_PREFIX
+    )
+
+
+def _requirement_texts_for_section(
+    research: ProposalResearchCache | None,
+    section: ProposalSection,
+) -> list[str]:
+    """RFP requirement strings this section was written to answer."""
+    if research is None:
+        return []
+    sid = (section.id or "").strip()
+    title_key = (section.title or "").strip().casefold()
+    texts: list[str] = []
+    title_fallback: list[str] = []
+    for mapped in research.rfp_sections or []:
+        reqs = [str(r) for r in (mapped.requirements or []) if str(r).strip()]
+        if sid and (mapped.id or "").strip() == sid:
+            texts.extend(reqs)
+        elif title_key and (mapped.title or "").strip().casefold() == title_key:
+            title_fallback.extend(reqs)
+    if not texts:
+        texts.extend(title_fallback)
+    ledger = research.requirement_ledger
+    if ledger is not None and sid:
+        for req in ledger.requirements or []:
+            if sid in (req.satisfied_by or []):
+                texts.append(req.text or "")
+    seen: set[str] = set()
+    clean: list[str] = []
+    for raw in texts:
+        text = re.sub(r"\s+", " ", (raw or "").strip())
+        if len(text) < 20:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(text[:2000])
+    return clean
+
+
+def build_rfp_requirement_evidence(
+    sections: list[ProposalSection],
+    research: ProposalResearchCache | None,
+    *,
+    start_index: int = 1,
+) -> list[EvidenceItem]:
+    """One evidence row per section requirement so plan prose can cite the RFP."""
+    items: list[EvidenceItem] = []
+    n = start_index
+    for section in sections:
+        sid = (section.id or "").strip()
+        title = (section.title or sid or "section").strip()
+        for index, text in enumerate(_requirement_texts_for_section(research, section)):
+            eid = f"E{n}"
+            n += 1
+            items.append(
+                EvidenceItem(
+                    id=eid,
+                    source=f"RFP · {title}",
+                    excerpt=text,
+                    sectionIds=[sid] if sid else [],
+                    chunkKey=f"{_RFP_CHUNK_PREFIX}{sid}:{index}",
+                )
+            )
+    return items
+
+
+def merge_citation_maps(
+    *maps: list[CitationGrounding],
+) -> list[CitationGrounding]:
+    """Union evidence ids that landed on the same claim text.
+
+    A plan sentence can carry one knowledge-base id and one RFP id. Inline
+    provenance wins over overlap when both passes marked the same span.
+    """
+    order: list[str] = []
+    by_key: dict[str, CitationGrounding] = {}
+    for cmap in maps:
+        for row in cmap:
+            key = _normalize(row.text)[:160]
+            if not key:
+                continue
+            prev = by_key.get(key)
+            if prev is None:
+                ids = list(dict.fromkeys(row.evidence_ids))[:_MAX_MERGED_IDS]
+                by_key[key] = row.model_copy(update={"evidence_ids": ids})
+                order.append(key)
+                continue
+            ids = list(prev.evidence_ids)
+            for eid in row.evidence_ids:
+                if eid not in ids:
+                    ids.append(eid)
+            method = prev.method
+            if "inline_provenance" in (prev.method, row.method):
+                method = "inline_provenance"
+            elif "verbatim" in (prev.method, row.method):
+                method = "verbatim"
+            by_key[key] = prev.model_copy(
+                update={"evidence_ids": ids[:_MAX_MERGED_IDS], "method": method}
+            )
+    return [by_key[key] for key in order]
 
 
 def attach_citation_maps_to_draft(
@@ -576,6 +735,10 @@ def attach_citation_maps_to_draft(
     When research.budget is a pricing_plan, Cost sections get mechanical citations
     to Pricing Book catalog/build sources (and those evidence rows are merged into
     research.evidence_corpus in place for badge tooltips).
+
+    RFP requirements for each section are merged the same way. Knowledge-base
+    grounding still uses the corpus without those rows, so a section that has
+    no tagged packet keeps searching the shared KB instead of only its RFP lines.
     """
     corpus = list((research.evidence_corpus if research else None) or [])
     if not draft.sections:
@@ -611,13 +774,43 @@ def attach_citation_maps_to_draft(
                 f"{label}: added {len(pricing_evidence)} Pricing Book source citation(s)"
             )
 
+    rfp_evidence = build_rfp_requirement_evidence(
+        draft.sections,
+        research,
+        start_index=_next_evidence_num(corpus),
+    )
+    if rfp_evidence:
+        corpus = merge_prefixed_evidence_into_corpus(
+            corpus, rfp_evidence, _RFP_CHUNK_PREFIX
+        )
+        rfp_evidence = [
+            e for e in corpus if (e.chunk_key or "").startswith(_RFP_CHUNK_PREFIX)
+        ]
+        if research is not None:
+            research.evidence_corpus = corpus
+        logs.append(
+            f"{label}: added {len(rfp_evidence)} RFP requirement source citation(s)"
+        )
+        logger.info(
+            "%s rfp_requirement_sources=%s",
+            label,
+            len(rfp_evidence),
+        )
+
     if not corpus:
         return draft, logs
+
+    kb_corpus = [
+        e
+        for e in corpus
+        if not (e.chunk_key or "").startswith(_RFP_CHUNK_PREFIX)
+    ]
 
     new_sections: list[ProposalSection] = []
     total = 0
     for section in draft.sections:
         content = section.content or ""
+        sid = section.id or ""
         if not content.strip():
             new_sections.append(
                 section.model_copy(update={"citation_map": [], "kb_refs": []})
@@ -631,12 +824,33 @@ def attach_citation_maps_to_draft(
             and _is_budget_section(section)
         ):
             # Do not lexical-match won-proposal rate cards onto Cost dollars.
+            # Pricing rows are tagged to the cost section. Do not let an untagged
+            # fall-through pull another section's pricing excerpts onto this body.
+            pricing_for_section = [
+                e
+                for e in pricing_evidence
+                if sid and sid in (e.section_ids or [])
+            ]
             cmap = ground_budget_pricing_citations(
                 content, budget, evidence=pricing_evidence
             )
+            if pricing_for_section:
+                cmap = merge_citation_maps(
+                    cmap,
+                    ground_section_citations(
+                        content, pricing_for_section, section_id=sid
+                    ),
+                )
         else:
-            cmap = ground_section_citations(
-                content, corpus, section_id=section.id or ""
+            cmap = ground_section_citations(content, kb_corpus, section_id=sid)
+
+        section_rfp = [
+            e for e in rfp_evidence if sid and sid in (e.section_ids or [])
+        ]
+        if section_rfp:
+            cmap = merge_citation_maps(
+                cmap,
+                ground_section_citations(content, section_rfp, section_id=sid),
             )
 
         refs = sorted({eid for row in cmap for eid in row.evidence_ids})

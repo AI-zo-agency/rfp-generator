@@ -242,6 +242,114 @@ class ProvenanceCitationTests(unittest.TestCase):
             _check_edit(VoiceEdit(original, dropped, "contraction", "hard"), original, original),
         )
 
+    def test_table_cell_is_cited_and_separator_is_not(self) -> None:
+        corpus = [
+            EvidenceItem(
+                id="E3",
+                source="06_WON_handoff.pdf",
+                excerpt="The engagement includes a documented handoff package for client staff.",
+                sectionIds=["approach"],
+            )
+        ]
+        content = (
+            "| Task | Window |\n"
+            "| --- | --- |\n"
+            "| Documented handoff package for client staff | Weeks 1-2 |\n"
+        )
+        cmap = ground_section_citations(content, corpus, section_id="approach")
+        self.assertTrue(cmap)
+        self.assertTrue(
+            any("documented handoff package" in row.text.casefold() for row in cmap)
+        )
+        self.assertTrue(all("---" not in row.text for row in cmap))
+        self.assertEqual(cmap[0].evidence_ids, ["E3"])
+
+    def test_plan_cites_kb_and_rfp_without_crossing_sections(self) -> None:
+        from app.models.proposal import RfpSectionMap
+        from app.models.requirement_ledger import LedgerRequirement, RequirementLedger
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="approach",
+                    title="Proposed Approach",
+                    content=(
+                        "zö agency was founded in 2013 in Bend, Oregon and will "
+                        "deliver the Village website redesign for the main Village site.\n\n"
+                        "| Work | Detail |\n"
+                        "| --- | --- |\n"
+                        "| Cultural Center calendar and event listings | Staff-managed |\n"
+                    ),
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="other",
+                    title="Other",
+                    content=(
+                        "We will deliver the Village website redesign for the main "
+                        "Village site."
+                    ),
+                    status="generated",
+                ),
+            ],
+        )
+        research = ProposalResearchCache(
+            rfpId="r1",
+            updatedAt="t",
+            rfpSections=[
+                RfpSectionMap(
+                    id="approach",
+                    title="Proposed Approach",
+                    requirements=[
+                        "Deliver the Village website redesign for the main Village site.",
+                        "Publish a Cultural Center calendar and event listings.",
+                    ],
+                )
+            ],
+            requirementLedger=RequirementLedger(
+                requirements=[
+                    LedgerRequirement(
+                        id="L1",
+                        text="Deliver the Village website redesign for the main Village site.",
+                        satisfiedBy=["approach"],
+                    )
+                ]
+            ),
+            evidenceCorpus=[
+                EvidenceItem(
+                    id="E12",
+                    source="01_companyfacts",
+                    excerpt="zö agency was founded in 2013 in Bend, Oregon.",
+                )
+            ],
+        )
+        out, logs = attach_citation_maps_to_draft(draft, research)
+        self.assertTrue(any("RFP requirement" in line for line in logs))
+        approach = out.sections[0]
+        by_text = {row.text: row.evidence_ids for row in approach.citation_map}
+        plan = next(ids for text, ids in by_text.items() if "founded in 2013" in text)
+        calendar = next(
+            ids for text, ids in by_text.items() if "Cultural Center calendar" in text
+        )
+        rfp_ids = {
+            e.id
+            for e in research.evidence_corpus
+            if (e.chunk_key or "").startswith("rfp-req:")
+        }
+        self.assertIn("E12", plan)
+        self.assertTrue(set(plan) & rfp_ids)
+        self.assertTrue(set(calendar) & rfp_ids)
+        self.assertTrue(
+            any(e.source.startswith("RFP ·") for e in research.evidence_corpus)
+        )
+        # The other section repeats the sentence but does not own the requirement.
+        other_ids = {
+            eid for row in out.sections[1].citation_map for eid in row.evidence_ids
+        }
+        self.assertFalse(other_ids & rfp_ids)
+
     def test_marker_from_another_section_is_removed(self) -> None:
         text = "We'll build the site so residents can find documents. [E6]"
         self.assertNotIn("[E6]", strip_uncitable_markers(text, set()))

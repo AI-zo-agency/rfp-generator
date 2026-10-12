@@ -16,7 +16,7 @@ PAGE_SIZE = 100
 
 
 def _api_root() -> str:
-    return (settings.justwin_api_root or "https://api.justwin.ai").rstrip("/")
+    return (settings.justwin_api_root or "https://prod2.api.justwin.ai").rstrip("/")
 
 
 LifecycleState = Literal["hot", "warm", "review"]
@@ -34,6 +34,10 @@ class JustWinLead:
     description: str
     detail_url: str
     tab: LifecycleState
+
+
+class JustWinAuthError(RuntimeError):
+    """Bearer token missing or rejected. Caller should log in once and retry."""
 
 
 @dataclass
@@ -115,15 +119,46 @@ def _lead_is_older_than_target(lead: dict[str, Any], target_date: str) -> bool:
     return bool(dates) and max(dates) < target_date
 
 
-def create_api_client(page: Page) -> JustWinApiClient:
-    token = page.evaluate("() => localStorage.getItem('token')")
-    if not token:
-        raise RuntimeError(
-            "JustWin auth token not found — delete session file and rerun sync"
-        )
-    headers = {"Authorization": f"Bearer {token}"}
+def _stored_access_token(page: Page) -> str:
+    """Legacy sessions kept the bearer token in localStorage. New ones do not."""
+    raw = page.evaluate("() => localStorage.getItem('token')")
+    return str(raw or "").strip()
 
-    companies_res = page.request.get(f"{_api_root()}/companies", headers=headers)
+
+def _refreshed_access_token(page: Page) -> str:
+    """Mint an access token from the jw_refresh cookie. Do not log the token."""
+    res = page.request.post(f"{_api_root()}/auth/token/refresh")
+    if res.status == 401:
+        raise JustWinAuthError("JustWin refresh token rejected (401)")
+    if not res.ok:
+        raise RuntimeError(f"JustWin token refresh failed ({res.status})")
+    body = res.json()
+    token = str((body or {}).get("access") or "").strip() if isinstance(body, dict) else ""
+    if not token:
+        raise JustWinAuthError("JustWin token refresh returned no access token")
+    logger.info("[justwin-sync] refreshed JustWin access token")
+    return token
+
+
+def _companies_response(page: Page, headers: dict[str, str]):
+    return page.request.get(f"{_api_root()}/companies", headers=headers)
+
+
+def create_api_client(page: Page) -> JustWinApiClient:
+    token = _stored_access_token(page) or _refreshed_access_token(page)
+    headers = {"Authorization": f"Bearer {token}"}
+    companies_res = _companies_response(page, headers)
+    if companies_res.status == 401 and _stored_access_token(page):
+        logger.warning(
+            "[justwin-sync] stored token rejected — refreshing session cookie"
+        )
+        token = _refreshed_access_token(page)
+        headers = {"Authorization": f"Bearer {token}"}
+        companies_res = _companies_response(page, headers)
+    if companies_res.status == 401:
+        raise JustWinAuthError(
+            "JustWin companies API rejected the session token (401)"
+        )
     if not companies_res.ok:
         raise RuntimeError(f"JustWin companies API failed ({companies_res.status})")
     companies = companies_res.json()
