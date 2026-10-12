@@ -2,19 +2,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.team_personas_service import get_all_key_personas, VERIFIED_TEAM_PERSONAS
+from app.services.team_personas_service import get_all_key_personas
 from app.models.proposal import KeyPersona, ProposalDraft
 
 
+def test_roster_is_not_a_hardcoded_name_tuple():
+    import app.services.team_personas_service as personas
+
+    assert not hasattr(personas, "VERIFIED_TEAM_PERSONAS")
+
+
 @pytest.mark.asyncio
-async def test_get_all_key_personas_returns_verified_members():
+async def test_get_all_key_personas_returns_kb_rows():
     personas = await get_all_key_personas()
-    assert len(personas) >= len(VERIFIED_TEAM_PERSONAS)
-    persona_names = [p["name"] for p in personas]
-    assert "Sonja Anderson" in persona_names
-    assert "Rachael Rice" in persona_names
-    assert "Ella Lindau" in persona_names
-    assert "Sarah Eichhorn" in persona_names
+    assert isinstance(personas, list)
+    for person in personas:
+        assert person.get("name")
+        assert "id" in person
 
 
 def test_key_persona_model_validation():

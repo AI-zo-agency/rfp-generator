@@ -9,6 +9,7 @@ from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.go_no_go_packet_gate import (
     build_blocked_packet_analysis,
+    classify_rfp_packet,
     parse_packet_read,
 )
 from app.services.go_no_go_service import (
@@ -209,6 +210,73 @@ class PacketGateParseTests(unittest.TestCase):
             "Go/No-Go skipped — upload is not a complete RFP",
         )
 
+    def test_cited_section_with_no_body_is_kept(self) -> None:
+        upload = (
+            "The City seeks campaign services. Proposals will be evaluated on "
+            "approach, experience, and price. Refer to the Proposal Response Packet: "
+            "Section 7: Submission Instructions for details. Pricing is worth 10 points."
+        )
+        parsed = parse_packet_read(
+            {
+                "documentKind": "complete_rfp",
+                "blocksScoring": False,
+                "unresolvedReferences": [
+                    {
+                        "target": "Section 7: Submission Instructions",
+                        "quote": (
+                            "Refer to the Proposal Response Packet: "
+                            "Section 7: Submission Instructions for details."
+                        ),
+                    }
+                ],
+            },
+            rfp_text=upload,
+        )
+        self.assertFalse(parsed.blocks_scoring)
+        self.assertEqual(len(parsed.unresolved_references), 1)
+        self.assertEqual(
+            parsed.unresolved_references[0].target,
+            "Section 7: Submission Instructions",
+        )
+
+    def test_cited_section_is_dropped_when_its_body_is_in_the_upload(self) -> None:
+        upload = (
+            "Refer to Section 7: Submission Instructions for details. "
+            "Section 7: Submission Instructions. Offerors shall submit a fee "
+            "schedule with hourly rates for each labor category and a signature "
+            "from the authorized representative. The schedule is a required form."
+        )
+        parsed = parse_packet_read(
+            {
+                "documentKind": "complete_rfp",
+                "blocksScoring": False,
+                "unresolvedReferences": [
+                    {
+                        "target": "Section 7: Submission Instructions",
+                        "quote": "Refer to Section 7: Submission Instructions for details.",
+                    }
+                ],
+            },
+            rfp_text=upload,
+        )
+        self.assertEqual(parsed.unresolved_references, [])
+
+    def test_ungrounded_reference_is_dropped(self) -> None:
+        parsed = parse_packet_read(
+            {
+                "documentKind": "complete_rfp",
+                "blocksScoring": False,
+                "unresolvedReferences": [
+                    {
+                        "target": "Section 9: Missing Form",
+                        "quote": "See Section 9 for the form that was never uploaded.",
+                    }
+                ],
+            },
+            rfp_text=COMPLETE,
+        )
+        self.assertEqual(parsed.unresolved_references, [])
+
 
 RFI = """
 City of Rivergate
@@ -349,3 +417,21 @@ class PacketGateSkipTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(analysis.packet_read and analysis.packet_read.blocks_scoring)
         self.assertIn("solicitations@tpchd.org", analysis.summary)
         self.assertIn("October 21, 2026", analysis.packet_read.deadline_note)
+
+    async def test_long_upload_sends_the_final_section(self) -> None:
+        tail = "Refer to the closing exhibit for the signature block that is not written above."
+        body = ("scope " * 6000) + tail
+        seen: dict[str, str] = {}
+
+        async def _capture(messages, **kwargs):
+            seen["user"] = messages[-1]["content"]
+            return {"documentKind": "complete_rfp", "blocksScoring": False}, "test"
+
+        with (
+            patch("app.services.llm.is_configured", return_value=True),
+            patch("app.services.llm.chat_json", new=AsyncMock(side_effect=_capture)),
+        ):
+            await classify_rfp_packet(body, rfp_id="rfp-long", title="Long RFP")
+
+        self.assertIn(tail, seen["user"])
+        self.assertGreater(len(seen["user"]), 24_000)

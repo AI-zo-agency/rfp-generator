@@ -2976,7 +2976,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
             str(exc)[:200],
         )
 
-    if packet.buyer_demands:
+    if packet.buyer_demands or packet.unresolved_references:
         analysis = analysis.model_copy(update={"packet_read": packet})
 
     return analysis

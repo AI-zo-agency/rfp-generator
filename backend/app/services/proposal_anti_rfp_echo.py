@@ -36,6 +36,10 @@ NEVER restate, paraphrase, quote, summarize, or "acknowledge" the RFP as content
 
 If evidence is thin: write the strongest grounded answer you can + narrow
 [VERIFY] / [MANUAL FILL] tags. Do NOT fill the gap by echoing the RFP.
+
+Exception: a packet row whose id is an RFP sentence may be quoted, and that
+sentence must carry its [E#]. Do not quote a solicitation line that is not
+in this section's packet.
 """
 
 # Token overlap: a sentence that is mostly made of requirement words is echo.
@@ -80,6 +84,7 @@ _ECHO_OPENER_MARKERS = (
 )
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_EVIDENCE_MARKER_RE = re.compile(r"\[E(\d+)", re.I)
 
 
 def _tokens(text: str) -> set[str]:
@@ -151,11 +156,21 @@ def _is_rfp_requirement_echo(sentence: str, requirement_token_sets: list[set[str
     return False
 
 
+def _cites_kept_evidence(sentence: str, keep_evidence_ids: set[str]) -> bool:
+    if not keep_evidence_ids:
+        return False
+    return any(
+        f"E{match.group(1)}".upper() in keep_evidence_ids
+        for match in _EVIDENCE_MARKER_RE.finditer(sentence or "")
+    )
+
+
 def strip_rfp_requirement_echo_sentences(
     text: str,
     requirements: Iterable[Any],
     *,
     extra_directives: Iterable[str] | None = None,
+    keep_evidence_ids: Iterable[str] | None = None,
 ) -> str:
     """Drop sentences that paraphrase RFP requirements / opportunity understanding.
 
@@ -169,6 +184,7 @@ def strip_rfp_requirement_echo_sentences(
     requirement_token_sets = [_tokens(d) for d in directives]
     if not body.strip() or not requirement_token_sets:
         return body
+    kept_ids = {str(eid or "").strip().upper() for eid in (keep_evidence_ids or []) if str(eid or "").strip()}
 
     out_lines: list[str] = []
     for line in body.split("\n"):
@@ -193,7 +209,10 @@ def strip_rfp_requirement_echo_sentences(
 
         sentences = _SENTENCE_SPLIT_RE.split(content)
         kept = [
-            s for s in sentences if not _is_rfp_requirement_echo(s, requirement_token_sets)
+            s
+            for s in sentences
+            if _cites_kept_evidence(s, kept_ids)
+            or not _is_rfp_requirement_echo(s, requirement_token_sets)
         ]
         if len(kept) == len(sentences):
             out_lines.append(line)

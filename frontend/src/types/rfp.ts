@@ -57,6 +57,11 @@ export interface RfpBuyerDemand {
   quote?: string;
 }
 
+export interface UnresolvedReference {
+  target: string;
+  quote: string;
+}
+
 export interface RfpPacketRead {
   documentKind:
     | "complete_rfp"
@@ -72,6 +77,7 @@ export interface RfpPacketRead {
   nextStep?: string;
   deadlineNote?: string;
   buyerDemands?: RfpBuyerDemand[];
+  unresolvedReferences?: UnresolvedReference[];
 }
 
 export interface GoNoGoDeadlineInfo {

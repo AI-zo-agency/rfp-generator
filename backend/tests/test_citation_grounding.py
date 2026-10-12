@@ -449,5 +449,98 @@ class ProvenanceCitationTests(unittest.TestCase):
         self.assertNotIn("[E6]", strip_uncitable_markers(text, set()))
 
 
+class WriterPacketSeedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_kb_bio_and_verbatim_rfp_are_seeded(self) -> None:
+        from unittest import mock
+
+        from app.models.proposal import RfpSectionMap
+        from app.services.proposal_citation_grounding import seed_writer_citation_packet
+
+        solicitation = (
+            "The City seeks a campaign that locates specific production resources for each event."
+        )
+        bio = (
+            "Ella Lindau is the creative director and leads campaign production for public clients. "
+            * 3
+        )
+        sections = [
+            RfpSectionMap(
+                id="scope",
+                title="Scope of Work",
+                requirements=[
+                    solicitation,
+                    "Verified public-sector clients",
+                ],
+            ),
+            RfpSectionMap(id="team", title="Project Team", requirements=[]),
+        ]
+        with mock.patch(
+            "app.services.team_personas_service.get_all_key_personas",
+            new_callable=mock.AsyncMock,
+            return_value=[
+                {
+                    "id": "ella-lindau",
+                    "name": "Ella Lindau",
+                    "retired": False,
+                    "hasResume": True,
+                    "sourceFile": "04_Bio_Ella_Lindau.pdf",
+                }
+            ],
+        ), mock.patch(
+            "app.services.proposal_sections_graph._fetch_member_bio_kb",
+            new_callable=mock.AsyncMock,
+            return_value=(bio, ["04_Bio_Ella_Lindau.pdf"]),
+        ):
+            corpus = await seed_writer_citation_packet(
+                [],
+                rfp_id="rfp-1",
+                rfp_sections=sections,
+                rfp_text=solicitation,
+                requirement_ledger=None,
+            )
+        self.assertTrue(any(item.chunk_key.startswith("rfp-req:scope:") for item in corpus))
+        self.assertFalse(any("Verified public-sector" in item.excerpt for item in corpus))
+        bios = [item for item in corpus if item.chunk_key.startswith("bio:")]
+        self.assertEqual(len(bios), 1)
+        self.assertEqual(bios[0].section_ids, ["team"])
+        self.assertIn("Ella Lindau", bios[0].excerpt)
+
+    async def test_plan_section_keeps_seeded_rfp_row(self) -> None:
+        from app.services.proposal_drafting_graph import _ensure_jit_evidence
+
+        state = {
+            "evidence_corpus": [
+                {
+                    "id": "E4",
+                    "source": "RFP · Scope",
+                    "excerpt": "The City seeks a campaign that locates specific production resources.",
+                    "sectionIds": ["scope"],
+                    "chunkKey": "rfp-req:scope:0",
+                }
+            ],
+            "rfp_sections": [{"id": "scope", "title": "Technical Approach"}],
+            "rfp_client": "PBOT",
+        }
+        rows = await _ensure_jit_evidence(state, "scope")  # type: ignore[arg-type]
+        self.assertEqual([row["id"] for row in rows], ["E4"])
+
+    def test_cited_rfp_sentence_survives_echo_strip(self) -> None:
+        from app.services.proposal_anti_rfp_echo import strip_rfp_requirement_echo_sentences
+
+        requirement = (
+            "The City seeks a campaign that locates specific production resources for each event."
+        )
+        quoted = requirement[:-1] + " [E4]."
+        body = f"We will staff a producer for every shoot. {quoted}"
+        kept = strip_rfp_requirement_echo_sentences(
+            body,
+            [requirement],
+            keep_evidence_ids={"E4"},
+        )
+        self.assertIn("locates specific production resources", kept)
+        dropped = strip_rfp_requirement_echo_sentences(body, [requirement])
+        self.assertNotIn("locates specific production resources", dropped)
+
+
 if __name__ == "__main__":
     unittest.main()

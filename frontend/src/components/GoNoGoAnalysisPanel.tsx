@@ -1,4 +1,9 @@
-import type { GoNoGoAnalysis, RfpBuyerDemand, RfpPacketRead } from "@/types/rfp";
+import type {
+  GoNoGoAnalysis,
+  RfpBuyerDemand,
+  RfpPacketRead,
+  UnresolvedReference,
+} from "@/types/rfp";
 import {
   alignGoNoGoRecommendation,
   alignGoNoGoSummary,
@@ -296,6 +301,36 @@ function BuyerDemandList({ demands }: { demands: RfpBuyerDemand[] }) {
   );
 }
 
+function UnresolvedReferenceBanner({
+  references,
+}: {
+  references: UnresolvedReference[];
+}) {
+  if (!references.length) return null;
+  return (
+    <div className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 p-5">
+      <h3 className="font-heading text-sm font-bold uppercase tracking-wide text-zo-orange">
+        Cited in this RFP, not included in the file
+      </h3>
+      <p className="mt-2 text-sm text-zo-text-secondary">
+        The upload points at these parts of itself. Their text is not in the
+        file, so a tab that depends on one is left for a person to fill.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {references.map((item) => (
+          <li
+            key={`${item.target}-${item.quote}`}
+            className="rounded-lg border border-zo-orange/30 bg-white/70 px-3 py-2 text-sm text-zo-text-secondary"
+          >
+            <p className="font-medium text-foreground">{item.target}</p>
+            <p className="mt-1">{item.quote}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function BuyerDemandBanner({ demands }: { demands: RfpBuyerDemand[] }) {
   if (!demands.length) return null;
   return (
@@ -443,6 +478,7 @@ export function GoNoGoAnalysisPanel({
   const hasMatrix = (analysis.decisionMatrix?.length ?? 0) > 0;
   const actionFlags = analysis.actionFlags ?? [];
   const buyerDemands = analysis.packetRead?.buyerDemands ?? [];
+  const unresolvedReferences = analysis.packetRead?.unresolvedReferences ?? [];
   const leanNoGoReasons = buildLeanNoGoReasons(analysis, overallGoScore);
   const conditionsTitle =
     displayRecommendation === "no_go"
@@ -456,6 +492,9 @@ export function GoNoGoAnalysisPanel({
   return (
     <section className="zo-card space-y-6 p-8">
       {buyerDemands.length > 0 && <BuyerDemandBanner demands={buyerDemands} />}
+      {unresolvedReferences.length > 0 && (
+        <UnresolvedReferenceBanner references={unresolvedReferences} />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-zo-orange">

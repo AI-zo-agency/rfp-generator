@@ -17,8 +17,26 @@ from app.services.proposal_submission_authority import (
     apply_authority_from_raw,
     instrument_supports_budget_build,
     phase35_budget_gate,
+    unresolved_reference_block,
 )
 from app.models.pricing_instrument import PricingInstrument, PricingTrack
+
+
+class UnresolvedReferencePromptTests(unittest.TestCase):
+    def test_block_quotes_the_stored_reference(self) -> None:
+        block = unresolved_reference_block(
+            [
+                {
+                    "target": "Section 7: Submission Instructions",
+                    "quote": "Refer to Section 7: Submission Instructions for details.",
+                }
+            ]
+        )
+        self.assertIn("Section 7: Submission Instructions", block)
+        self.assertIn("Refer to Section 7: Submission Instructions for details.", block)
+
+    def test_empty_references_add_nothing(self) -> None:
+        self.assertEqual(unresolved_reference_block([]), "")
 
 
 class SubmissionAuthorityApplyTests(unittest.TestCase):

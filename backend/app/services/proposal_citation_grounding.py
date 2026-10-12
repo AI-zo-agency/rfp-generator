@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 from difflib import SequenceMatcher
+from typing import Any
 
 from app.models.proposal import (
     CitationGrounding,
@@ -981,3 +982,120 @@ def attach_citation_maps_to_draft(
     )
     logger.info("%s", logs[-1])
     return draft.model_copy(update={"sections": new_sections}), logs
+
+
+_STAFF_SECTION_TOKENS = ("team", "personnel", "staff", "bio", "qualif")
+
+
+def section_may_name_staff(section_id: str, title: str) -> bool:
+    """Staffing tabs are the ones allowed to name people from the KB roster."""
+    blob = f"{title} {section_id}".casefold()
+    return any(token in blob for token in _STAFF_SECTION_TOKENS)
+
+
+async def seed_writer_citation_packet(
+    corpus: list[EvidenceItem],
+    *,
+    rfp_id: str,
+    rfp_sections: list,
+    rfp_text: str,
+    requirement_ledger: Any = None,
+) -> list[EvidenceItem]:
+    """Add citable rows before the writer runs.
+
+    Verbatim solicitation spans go on every section that owns them.
+    Bio excerpts go on staffing sections only, and only for people the
+    knowledge base currently has a resume for. Names are not taken from a
+    hardcoded roster.
+    """
+    from app.models.proposal import RfpSectionMap
+
+    sections = [
+        ProposalSection(
+            id=getattr(section, "id", "") or "",
+            title=getattr(section, "title", "") or "",
+            content="seed",
+            status="outline",
+        )
+        for section in rfp_sections
+        if getattr(section, "id", None)
+    ]
+    research = ProposalResearchCache(
+        rfpId=rfp_id or "rfp",
+        updatedAt="seed",
+        rfpSections=[
+            section if isinstance(section, RfpSectionMap) else RfpSectionMap.model_validate(section)
+            for section in rfp_sections
+        ],
+        requirementLedger=requirement_ledger,
+        evidenceCorpus=list(corpus),
+    )
+    rfp_rows = build_rfp_requirement_evidence(
+        sections,
+        research,
+        start_index=_next_evidence_num(corpus),
+        rfp_text=rfp_text,
+    )
+    merged = merge_prefixed_evidence_into_corpus(list(corpus), rfp_rows, _RFP_CHUNK_PREFIX)
+    logger.info(
+        "writer citation seed rfp_rows=%s rfp_id=%s",
+        len(rfp_rows),
+        rfp_id,
+    )
+
+    staff_ids = [
+        section.id
+        for section in sections
+        if section_may_name_staff(section.id, section.title)
+    ]
+    if not staff_ids:
+        from app.services.proposal_evidence_corpus import ensure_unique_evidence_ids
+
+        return ensure_unique_evidence_ids(merged)
+
+    from app.services.proposal_sections_graph import _fetch_member_bio_kb
+    from app.services.team_personas_service import get_all_key_personas
+
+    import asyncio
+
+    personas = [
+        person
+        for person in await get_all_key_personas()
+        if not person.get("retired")
+        and person.get("hasResume")
+        and str(person.get("name") or "").strip()
+    ]
+
+    async def _one(person: dict[str, Any]) -> EvidenceItem | None:
+        name = str(person.get("name") or "").strip()
+        try:
+            excerpt, sources = await _fetch_member_bio_kb(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("writer bio seed failed name=%s err=%s", name, exc)
+            return None
+        text = (excerpt or "").strip()
+        if len(text) < 80:
+            logger.info("writer bio seed skipped name=%s reason=thin_excerpt", name)
+            return None
+        source = (sources[0] if sources else "") or str(person.get("sourceFile") or "04_Bio")
+        return EvidenceItem(
+            id="E0",
+            source=source[:240],
+            excerpt=text[:2000],
+            sectionIds=list(staff_ids),
+            chunkKey=f"bio:{person.get('id') or name.casefold()}",
+        )
+
+    loaded = await asyncio.gather(*(_one(person) for person in personas))
+    bio_rows = [row for row in loaded if row is not None]
+    logger.info(
+        "writer citation seed bio_rows=%s staff_sections=%s rfp_id=%s",
+        len(bio_rows),
+        len(staff_ids),
+        rfp_id,
+    )
+    from app.services.proposal_evidence_corpus import ensure_unique_evidence_ids
+
+    return ensure_unique_evidence_ids(
+        merge_prefixed_evidence_into_corpus(merged, bio_rows, "bio:")
+    )

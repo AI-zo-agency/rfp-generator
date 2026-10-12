@@ -116,6 +116,19 @@ PacketDocumentKind = Literal[
 ]
 
 
+class UnresolvedReference(BaseModel):
+    """A part of this upload that the text cites, whose body is not in the file.
+
+    Distinct from a buyer demand: the sentence does not tell the offeror to
+    email, download, or register. It points at a section that should be here.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    target: str
+    quote: str
+
+
 class RfpBuyerDemand(BaseModel):
     """Something the buyer requires the offeror to obtain before a responsive bid.
 
@@ -146,6 +159,9 @@ class RfpPacketRead(BaseModel):
     deadline_note: str = Field(default="", alias="deadlineNote")
     buyer_demands: list[RfpBuyerDemand] = Field(
         default_factory=list, alias="buyerDemands"
+    )
+    unresolved_references: list[UnresolvedReference] = Field(
+        default_factory=list, alias="unresolvedReferences"
     )
 
 

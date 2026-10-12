@@ -213,7 +213,7 @@ Rules (strict):
 26. Project management fees must stay within 5–8% of agency fees — do not leave unresolved PM ratio flags in budget prose.
 27. Address every Phase 2 uncovered requirement explicitly — compliance tables, forms, or narrative; do not assume a titled section alone satisfies the RFP.
 28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose as if it were THIS proposal. Exception for COVER LETTER / TRANSMITTAL: when 06_WON cover/transmittal exemplars are in evidence, mirror their letter FORM and correspondence voice only — rewrite every fact for THIS RFP.
-29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview / Executive Summary) MUST be drafted even when evidence is thin or empty. Read RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory as private direction — then write ONLY the proposal answer (our diagnosis, plan, proof, commitments). Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body. NEVER fill thin evidence by echoing the RFP.
+29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview / Executive Summary) MUST be drafted even when evidence is thin or empty. Read RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory as private direction — then write ONLY the proposal answer (our diagnosis, plan, proof, commitments). Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body. Do not paste the solicitation as the section. When a packet row is a bio or an RFP sentence, put that [E#] on the sentence that uses it.
 30. Understanding / Executive Summary sections must open with zö's proposal stance: what we will do, why it fits, and proof. Do NOT open by paraphrasing the client's ask, what they already built, or what they need. The evaluator already has the RFP.
 31. When the section title is Budget / Pricing / Fees / Cost: write narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in the pricing docs when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If THIS outline ALSO has a separate Price Sheet / Pricing Schedule / Proposal Price Sheet / official pricing form tab, then a "Cost Analysis" / cost-rationale tab is rationale + cross-reference ONLY — do NOT paste fee tables, line-item dollars, or investment schedules here; point to that pricing tab. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
 32. Do NOT invent dashboards, reporting diagrams, org charts, timeline graphics, or "see attached" visuals. Describe reporting cadence in prose unless KB evidence / RFP-required template exists.
@@ -685,6 +685,26 @@ def partition_phase3_sections(
     return to_draft, already
 
 
+def _chunk_key(item: dict[str, Any]) -> str:
+    return str(item.get("chunkKey") or item.get("chunk_key") or "")
+
+
+def _seeded_citation_rows(
+    section_id: str,
+    corpus: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bio and verbatim-RFP rows placed on this section before drafting."""
+    rows: list[dict[str, Any]] = []
+    for item in corpus:
+        sids = item.get("sectionIds") or item.get("section_ids") or []
+        if section_id not in sids:
+            continue
+        key = _chunk_key(item)
+        if key.startswith("bio:") or key.startswith("rfp-req:"):
+            rows.append(item)
+    return rows
+
+
 def _evidence_for_section(
     section_id: str,
     corpus: list[dict[str, Any]],
@@ -694,9 +714,17 @@ def _evidence_for_section(
         for item in corpus
         if section_id in (item.get("sectionIds") or item.get("section_ids") or [])
     ]
-    if tagged:
-        return tagged[:12]
-    return corpus[:10]
+    pool = tagged if tagged else list(corpus)[:10]
+
+    def _rank(item: dict[str, Any]) -> int:
+        key = _chunk_key(item)
+        if key.startswith("bio:"):
+            return 0
+        if key.startswith("rfp-req:"):
+            return 1
+        return 2
+
+    return sorted(pool, key=_rank)[:12]
 
 
 def _format_evidence_block(items: list[dict[str, Any]]) -> str:
@@ -1157,18 +1185,22 @@ async def _ensure_jit_evidence(
     )
 
     # Plan-driven / manual / cleanup: do not pull random KB facts into the writer.
+    # Rows seeded before drafting (bio: and rfp-req:) stay. Those are the
+    # sources this section is allowed to cite while it writes.
     if gate.action in {
         EvidenceDecision.WRITE_FROM_PLAN,
         EvidenceDecision.MANUAL_FILL,
         EvidenceDecision.DETERMINISTIC_CLEANUP,
         EvidenceDecision.VERIFY_FIELD,
     }:
+        seeded = _seeded_citation_rows(section_id, corpus)
         logger.info(
-            "phase3_jit_skipped_by_gate section=%s decision=%s",
+            "phase3_jit_skipped_by_gate section=%s decision=%s seeded=%s",
             section_id,
             gate.action.value,
+            len(seeded),
         )
-        return []
+        return seeded
 
     is_budget_section = (
         gate.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET
@@ -2027,10 +2059,18 @@ async def _draft_batch_once(
             )
             or {}
         )
+        rfp_cite_ids = {
+            str(raw.get("id") or "").strip().upper()
+            for raw in (state.get("evidence_corpus") or [])
+            if isinstance(raw, dict)
+            and str(raw.get("chunkKey") or raw.get("chunk_key") or "").startswith("rfp-req:")
+            and sid in (raw.get("sectionIds") or raw.get("section_ids") or [])
+        }
         content = strip_rfp_requirement_echo_sentences(
             content,
             section.get("requirements") or [],
             extra_directives=opportunity_understanding_directives(understanding),
+            keep_evidence_ids=rfp_cite_ids,
         )
 
         from app.models.proposal import EvidenceItem
@@ -2346,6 +2386,37 @@ def resolve_display_client_name(
     return display
 
 
+async def _seed_citation_packet(
+    corpus: list[EvidenceItem],
+    *,
+    rfp_id: str,
+    rfp_sections: list[RfpSectionMap],
+    rfp_text: str,
+    requirement_ledger: Any,
+) -> list[EvidenceItem]:
+    """Load KB bios and verbatim RFP spans before the writer sees the packet."""
+    from app.services.proposal_citation_grounding import seed_writer_citation_packet
+
+    try:
+        seeded = await seed_writer_citation_packet(
+            corpus,
+            rfp_id=rfp_id,
+            rfp_sections=rfp_sections,
+            rfp_text=rfp_text,
+            requirement_ledger=requirement_ledger,
+        )
+    except Exception as exc:  # noqa: BLE001 — drafting still runs if the KB is down
+        logger.warning("writer citation seed skipped rfp_id=%s err=%s", rfp_id, exc)
+        return corpus
+    logger.info(
+        "writer citation packet rfp_id=%s before=%s after=%s",
+        rfp_id,
+        len(corpus),
+        len(seeded),
+    )
+    return seeded
+
+
 async def run_drafting_graph(
     *,
     rfp_id: str,
@@ -2445,6 +2516,14 @@ async def run_drafting_graph(
     # Typed pricing/delivery pack from research (Phase 2 extract) for SOW/Timeline.
     pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
         rfp_id
+    )
+
+    evidence_corpus = await _seed_citation_packet(
+        evidence_corpus,
+        rfp_id=rfp_id,
+        rfp_sections=rfp_sections,
+        rfp_text=rfp_context or "",
+        requirement_ledger=requirement_ledger_model,
     )
 
     # Prefer Opportunity Memory legal client name over short intake aliases.
@@ -2601,6 +2680,13 @@ async def draft_single_rfp_section_phase3(
 
     pricing_instrument_dict, delivery_constraints_dict = _load_pricing_delivery_dicts(
         rfp_id
+    )
+    evidence_corpus = await _seed_citation_packet(
+        evidence_corpus,
+        rfp_id=rfp_id,
+        rfp_sections=[section],
+        rfp_text=rfp_context or "",
+        requirement_ledger=None,
     )
 
     state: DraftingGraphState = {

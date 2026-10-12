@@ -23,6 +23,7 @@ from app.models.go_no_go import (
     GoNoGoFlag,
     RfpBuyerDemand,
     RfpPacketRead,
+    UnresolvedReference,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,12 @@ Return JSON only:
       "whyEssential": "why a responsive proposal cannot be prepared without this",
       "quote": "verbatim sentence that states the demand"
     }
+  ],
+  "unresolvedReferences": [
+    {
+      "target": "the name of the cited part, copied from the quote",
+      "quote": "verbatim sentence in this upload that points at that part"
+    }
   ]
 }
 
@@ -67,6 +74,8 @@ When blocksScoring is true, whatItIs must say what the document is, what it does
 blocksScoring=false when the upload already contains the scope, proposal contents, and selection method. Still fill buyerDemands when that complete RFP explicitly requires the offeror to obtain something from the buyer that is essential to submit a responsive or winning proposal: the remainder of the packet, a missing exhibit, a mandatory registration, a required pre-proposal conference, a pricing workbook, or an addendum that must be in hand. Optional question windows ("questions may be sent to") are not demands unless the document says skipping them withholds materials or makes the proposal non-responsive.
 
 When the demand is "email us to receive the complete RFP" and the complete RFP is not in this upload, that is incomplete_packet with blocksScoring=true, and the email request is also a buyerDemand.
+
+An unresolved reference is different from a buyer demand. It is a sentence in this upload that points at another part of the same document — a section, exhibit, attachment, appendix, or packet section — and the body of that part is not in the upload. The text does not tell the offeror to email, call, download, or register. Cite the sentence verbatim as quote, and copy the name of the missing part into target from that sentence. One entry per missing body. Omit a reference whose body appears anywhere in the upload. A complete RFP can still have unresolved references; do not set blocksScoring just because one cited part is missing.
 
 Every email, phone, URL, and deadline you output must appear in the document. evidenceQuote and each demand quote must be copied from the document, not paraphrased. Do not invent a contact. Leave deadlineQuote empty when no deadline is stated.
 """
@@ -146,6 +155,61 @@ def _clip(text: str, limit: int) -> str:
     return cleaned[: limit - 1].rstrip() + "…"
 
 
+def _body_follows_target(target: str, quote: str, source: str) -> bool:
+    """True when the cited part has its own text outside the citing sentence.
+
+    The quote is removed first, so a table-of-contents mention of the same
+    name does not count as the body. A short leftover title does not either.
+    """
+    folded_source = _normalize(source)
+    folded_quote = _normalize(quote)
+    folded_target = _normalize(target)
+    if len(folded_target) < 8 or folded_target not in folded_quote:
+        return False
+    remaining = folded_source.replace(folded_quote, " ")
+    idx = remaining.find(folded_target)
+    if idx < 0:
+        return False
+    window = remaining[idx + len(folded_target) : idx + len(folded_target) + 500]
+    alnum = sum(ch.isalnum() for ch in window)
+    return alnum >= 120
+
+
+def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[UnresolvedReference]:
+    rows = raw.get("unresolvedReferences") or raw.get("unresolved_references") or []
+    if not isinstance(rows, list):
+        return []
+    kept: list[UnresolvedReference] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        quote = str(item.get("quote") or "").strip()
+        target = _clip(str(item.get("target") or ""), 200)
+        if not _grounded(quote, source) or len(_normalize(target)) < 8:
+            logger.info(
+                "unresolved reference dropped ungrounded target=%s",
+                target[:80],
+            )
+            continue
+        if _normalize(target) not in _normalize(quote):
+            logger.info(
+                "unresolved reference dropped target not in quote target=%s",
+                target[:80],
+            )
+            continue
+        if _body_follows_target(target, quote, source):
+            logger.info(
+                "unresolved reference dropped body present target=%s",
+                target[:80],
+            )
+            continue
+        kept.append(UnresolvedReference(target=target, quote=_clip(quote, 500)))
+        if len(kept) >= 8:
+            break
+    logger.info("unresolved references kept=%s", len(kept))
+    return kept
+
+
 def _parse_demand(raw: Any, source: str) -> RfpBuyerDemand | None:
     if not isinstance(raw, dict):
         return None
@@ -216,6 +280,8 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
             if len(missing) >= 8:
                 break
 
+    references = _parse_unresolved_references(raw, rfp_text)
+
     demands: list[RfpBuyerDemand] = []
     raw_demands = raw.get("buyerDemands") or raw.get("buyer_demands") or []
     if isinstance(raw_demands, list):
@@ -242,6 +308,7 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
         next_step=_clip(next_step, 800) if blocks or demands else "",
         deadline_note=_clip(deadline_note, 400),
         buyer_demands=demands,
+        unresolved_references=references,
     )
 
 
@@ -261,7 +328,11 @@ async def classify_rfp_packet(
     if not llm.is_configured():
         return default_packet_read()
 
-    excerpt = body[:24_000]
+    logger.info(
+        "packet gate input rfp_id=%s chars=%s",
+        rfp_id or "unknown",
+        len(body),
+    )
     try:
         raw, provider = await llm.chat_json(
             [
@@ -270,24 +341,25 @@ async def classify_rfp_packet(
                     "role": "user",
                     "content": (
                         f"Document title: {title or '(not provided)'}\n\n"
-                        f"Uploaded text:\n{excerpt}"
+                        f"Uploaded text:\n{body}"
                     ),
                 },
             ],
-            max_tokens=900,
+            max_tokens=1600,
             temperature=0.0,
             tier="light",
             node_name="go_no_go_packet_gate",
             rfp_id=rfp_id,
         )
-        parsed = parse_packet_read(raw if isinstance(raw, dict) else {}, rfp_text=excerpt)
+        parsed = parse_packet_read(raw if isinstance(raw, dict) else {}, rfp_text=body)
         logger.info(
-            "packet gate for %s via %s: kind=%s blocks=%s demands=%d",
+            "packet gate for %s via %s: kind=%s blocks=%s demands=%d unresolved=%d",
             rfp_id or "unknown",
             provider,
             parsed.document_kind,
             parsed.blocks_scoring,
             len(parsed.buyer_demands),
+            len(parsed.unresolved_references),
         )
         return parsed
     except Exception as exc:  # noqa: BLE001

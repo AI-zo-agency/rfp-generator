@@ -52,6 +52,11 @@ Rules (judge by meaning, not keyword lists):
 - When operative text clearly requires a pricing/cost form or fee schedule, set
   costRequirementStatus "confirmed" and stamp the matching tab submissionInstrument "cost".
 - When no operative pricing submittal exists, costRequirementStatus "absent".
+- The user message may include unresolved references. Those are facts: the upload
+  cites that part, and its body is not in the file. Do not rediscover them and
+  do not drop them. Any tab that cannot be answered without one of those bodies
+  gets submissionInstrument "clarify" and conditionalReason set to that entry's
+  quote. Do not treat that tab as a confirmed deliverable.
 - Scored evaluation narrative tabs: submissionInstrument "narrative" (with evaluationWeight).
 - Signed offer / interest / cover / transmittal letter the buyer wants with the packet:
   submissionInstrument "letter" — judge by MEANING (whatever the buyer named it), not
@@ -406,9 +411,58 @@ def page_limit_from_constraints(plan: ProposalExecutionPlan | None) -> int | Non
     return None
 
 
+def unresolved_reference_block(references: list[Any]) -> str:
+    """Facts for the authority pass. Empty when Go/No-Go stored none."""
+    lines: list[str] = []
+    for item in references:
+        if isinstance(item, dict):
+            target = str(item.get("target") or "").strip()
+            quote = str(item.get("quote") or "").strip()
+        else:
+            target = str(getattr(item, "target", "") or "").strip()
+            quote = str(getattr(item, "quote", "") or "").strip()
+        if not target or not quote:
+            continue
+        lines.append(f"- target: {target}\n  quote: {quote}")
+    if not lines:
+        return ""
+    return "Unresolved references (cited in the upload, body absent):\n" + "\n".join(lines)
+
+
+def _load_unresolved_references(rfp_id: str) -> list[dict[str, str]]:
+    rid = (rfp_id or "").strip()
+    if not rid:
+        return []
+    try:
+        from app.services.rfp_repository import get_rfp
+
+        record = get_rfp(rid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "unresolved references load failed rfp_id=%s err=%s", rid, exc
+        )
+        return []
+    raw = getattr(record, "go_no_go_analysis", None) if record is not None else None
+    if not isinstance(raw, dict):
+        return []
+    packet = raw.get("packetRead") or raw.get("packet_read") or {}
+    if not isinstance(packet, dict):
+        return []
+    rows = packet.get("unresolvedReferences") or packet.get("unresolved_references") or []
+    if not isinstance(rows, list):
+        return []
+    logger.info(
+        "unresolved references loaded rfp_id=%s count=%s",
+        rid,
+        len(rows),
+    )
+    return [row for row in rows if isinstance(row, dict)]
+
+
 async def apply_submission_authority_pass(
     plan: ProposalExecutionPlan,
     rfp_context: str,
+    unresolved_references: list[Any] | None = None,
 ) -> ProposalExecutionPlan:
     """Run authority LLM and normalize outline routing metadata."""
     sections = plan.writing.proposal_outline.sections
@@ -422,8 +476,12 @@ async def apply_submission_authority_pass(
         f"weight={s.evaluation_weight} required={s.required}"
         for s in sections
     )
+    if unresolved_references is None:
+        unresolved_references = _load_unresolved_references(plan.metadata.rfp_id)
+    reference_block = unresolved_reference_block(unresolved_references)
     stable = (
         f"Current outline ({len(sections)} tabs):\n{titles_block}\n\n"
+        f"{reference_block}\n\n"
         f"Submission-documents excerpt:\n"
         f"{submission_documents_excerpt(rfp_context)[:24000]}\n\n"
         f"Closing/forms excerpt:\n{closing_package_excerpt(rfp_context)[:16000]}"

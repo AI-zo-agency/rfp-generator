@@ -864,6 +864,10 @@ def derive_legacy_fields(
             section_queries[section.id] = list(entry.queries)[:5]
 
         instrument = getattr(section, "submission_instrument", None)
+        if str(instrument or "").casefold() == "clarify":
+            reason = str(getattr(section, "conditional_reason", "") or "").strip()
+            if reason:
+                requirements = [reason, *[item for item in requirements if item != reason]]
         # Cost / form tabs carry more independent sub-asks (rate schedule,
         # assumptions, fee method) — keep enough so chat Improve can fill them.
         req_cap = 24 if str(instrument or "").casefold() in {"cost", "form"} else 16
