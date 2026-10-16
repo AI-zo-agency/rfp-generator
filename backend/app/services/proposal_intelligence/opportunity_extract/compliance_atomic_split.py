@@ -256,8 +256,10 @@ def atomize_compliance_items(
             row["requirement"] = chunk[:900]
             if i == 0:
                 row["id"] = base_id
+                row["atomOf"] = ""
             else:
                 row["id"] = f"{base_id}-{chr(97 + i)}" if i < 26 else f"{base_id}-s{i}"
+                row["atomOf"] = base_id
             out.append(row)
         next_n += len(splits)
 

@@ -1302,9 +1302,10 @@ async def run_self_edit_loop(
 ) -> tuple[ProposalDraft, ProposalResearchCache | None, SelfEditReport]:
     """Focused senior editor: keep every TOC tab; mechanically trim copied prose.
 
-    ``lean=True`` (full generate) is deterministic: no ticket-emit LLM, no per-tab
-    rewrites, no VERIFY scrub LLM, no designer-compact LLM. Duplicate paragraphs
-    become a one-line cross-ref. Delete tickets never drop headings.
+    ``lean=True`` (full generate) skips the ticket-emit LLM, VERIFY scrub, and
+    designer-compact LLM. It still rewrites a section when the requirement
+    ledger marks coverage on a tab the draft does not contain. Duplicate
+    paragraphs become a one-line cross-ref. Delete tickets never drop headings.
     """
     del max_iterations, time_budget_sec, parallel
 
@@ -1566,6 +1567,29 @@ async def run_self_edit_loop(
             use_llm_toc=not lean,
         )
     )
+    if research and research.requirement_ledger:
+        from app.services.proposal_coverage_binding import (
+            rebind_ledger_to_draft,
+            unbound_requirement_tickets,
+        )
+
+        unbound = unbound_requirement_tickets(research.requirement_ledger, draft.sections)
+        if unbound:
+            seen_unbound = {
+                str(t.get("sectionId") or "")
+                for t in mechanical_coverage
+                if isinstance(t, dict) and t.get("source") == "unbound-requirement"
+            }
+            mechanical_coverage = [
+                t for t in unbound if str(t.get("sectionId") or "") not in seen_unbound
+            ] + list(mechanical_coverage)
+            coverage_audit_logs.append(
+                f"unbound requirements grouped into {len(unbound)} section ticket(s)"
+            )
+        rebound = rebind_ledger_to_draft(research.requirement_ledger, draft.sections)
+        if rebound.model_dump() != research.requirement_ledger.model_dump():
+            research = research.model_copy(update={"requirement_ledger": rebound})
+            await asave_research_cache(research)
     if coverage_audit_logs:
         await asave_proposal_draft(draft)
         for line in coverage_audit_logs[:16]:
@@ -1579,8 +1603,15 @@ async def run_self_edit_loop(
             samples=coverage_audit_logs[:10],
         )
 
-    skip_llm_rewrites = lean
-    skip_llm_emit = skip_llm_rewrites or (
+    force_unbound_coverage = any(
+        isinstance(t, dict) and t.get("source") == "unbound-requirement"
+        for t in mechanical_coverage
+    )
+    # Lean generate stays free of the ticket-emit LLM. Requirements whose
+    # ledger says "covered" by a section the draft does not contain still
+    # get one surgical rewrite, on the section the ledger already links.
+    skip_llm_rewrites = lean and not force_unbound_coverage
+    skip_llm_emit = lean or (
         lean
         and bool(app_settings.senior_editor_skip_llm_emit_in_generate)
         and not _manuscript_needs_senior_llm_emit(
@@ -1595,7 +1626,11 @@ async def run_self_edit_loop(
         if mechanical_coverage:
             tickets["coverageTickets"] = list(mechanical_coverage)
         tickets["notes"] = [
-            "lean: mechanical trim only — skipped LLM emit, VERIFY scrub, and per-tab rewrites"
+            (
+                "lean: applying unbound-requirement coverage rewrites"
+                if force_unbound_coverage
+                else "lean: mechanical trim only — skipped LLM emit, VERIFY scrub, and per-tab rewrites"
+            )
         ]
         scrubbed_sections, scrub_logs = list(draft.sections), []
         logger.info(

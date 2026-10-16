@@ -266,7 +266,20 @@ _VERB_TO_PLURAL = {
     "offers": "offer",
     "includes": "include",
     "submits": "submit",
+    "proposes": "propose",
+    "bills": "bill",
+    "gives": "give",
+    "carries": "carry",
+    "prices": "price",
+    "will": "will",
 }
+
+# Price and offer prose that names the agency as the actor. Certifications
+# (certifies / acknowledges / represents / agrees) and form labels stay.
+_ZO_AGENCY_PROSE = re.compile(
+    r"\bzö agency (proposes|bills|gives|carries|prices|will)\b",
+    re.IGNORECASE,
+)
 
 
 def _fix_we_verb_agreement(text: str) -> str:
@@ -318,6 +331,13 @@ _HARD_BAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     ("em-dash", re.compile(r"—")),
+    (
+        "agency-subject",
+        re.compile(
+            r"\bzö agency (?:proposes|bills|gives|carries|prices|will)\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 # Commercial / procurement phrasing that looks like negation but is allowed.
@@ -359,8 +379,35 @@ def hard_voice_ban_hits(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _swap_agency_prose(text: str) -> str:
+    """First person when the agency is the actor in price or offer prose.
+
+    "Submitted by zö agency" has no verb and stays. "zö agency certifies" stays.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        verb = _VERB_TO_PLURAL.get(match.group(1).lower(), match.group(1).lower())
+        raw_before = text[: match.start()]
+        stripped = raw_before.rstrip()
+        at_start = (
+            not stripped
+            or raw_before.endswith(("\n", "\n ", "\n\t"))
+            or stripped[-1] in ".!?"
+            or stripped.endswith(">")
+        )
+        who = "We" if at_start else "we"
+        return f"{who} {verb}"
+
+    swapped = _ZO_AGENCY_PROSE.sub(repl, text)
+    return re.sub(
+        r"\b((?:We|we) (?:propose|bill|give|carry|price|will)) its own\b",
+        r"\1 our own",
+        swapped,
+    )
+
+
 def apply_writing_standards_mechanics(content: str) -> str:
-    """Deterministic Rev 6 mechanics: company name + no em dashes."""
+    """Deterministic Rev 6 mechanics: company name, no em dashes, agency-as-subject."""
     if not content.strip():
         return content
 
@@ -374,6 +421,7 @@ def apply_writing_standards_mechanics(content: str) -> str:
     text = re.sub(r"\bZö\s+Agency\b", "zö agency", text)
     text = re.sub(r"\bZo\s+Agency\b", "zö agency", text)
     text = re.sub(r"\bzo\s+agency\b", "zö agency", text)
+    text = _swap_agency_prose(text)
     # Cleanup double commas / spaces from dash swaps
     text = re.sub(r",\s*,", ",", text)
     text = re.sub(r"[ \t]+,", ",", text)

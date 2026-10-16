@@ -51,6 +51,9 @@ class LedgerRequirement(BaseModel):
     points: float | None = None
     satisfied_by: list[str] = Field(default_factory=list, alias="satisfiedBy")
     kb_queries: list[str] = Field(default_factory=list, alias="kbQueries")
+    # Set when compliance atomization split this row off a parent requirement.
+    # Atoms are sub-asks of the parent section. They must not mint their own tab.
+    atom_of: str = Field(default="", alias="atomOf")
 
 
 class RequirementLedger(BaseModel):

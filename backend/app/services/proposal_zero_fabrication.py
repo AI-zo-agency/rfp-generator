@@ -114,6 +114,23 @@ def apply_zero_fabrication_guards(
     for line in phone_logs:
         report.logs.append(f"{label}: reference phone — {line}")
 
+    from app.services.proposal_client_table_guard import collapse_incomplete_client_tables
+
+    collapsed_sections = []
+    collapsed_n = 0
+    for section in draft.sections:
+        body, did = collapse_incomplete_client_tables(section.content or "")
+        if did:
+            collapsed_n += 1
+            collapsed_sections.append(section.model_copy(update={"content": body}))
+        else:
+            collapsed_sections.append(section)
+    if collapsed_n:
+        draft = draft.model_copy(update={"sections": collapsed_sections})
+        report.logs.append(
+            f"{label}: collapsed {collapsed_n} unfinished client-reference table(s)"
+        )
+
     resolved_budget = budget or (research.budget if research else None)
     # Budget-shape steps only for pricing-plan budgets; pre-v2 budgets are
     # frozen and their Cost section is treated as ordinary manuscript text.

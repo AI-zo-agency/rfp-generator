@@ -546,6 +546,7 @@ def build_requirement_ledger(
                     points=None,
                     satisfiedBy=satisfied_by,
                     kbQueries=[evidence_needed] if evidence_needed else [],
+                    atomOf=str(getattr(item, "atom_of", "") or ""),
                 )
             )
         except Exception:  # noqa: BLE001 — one bad item must never block Phase 2
@@ -694,6 +695,18 @@ def resolve_duplicate_owners(
     return ledger, resolutions
 
 
+def _requirement_is_atom(requirement: LedgerRequirement, requirement_ids: set[str]) -> bool:
+    """True for a split child (``C-24-b`` of ``C-24``), including ledgers saved
+    before ``atomOf`` existed. Those rows are sub-asks, not tabs."""
+    parent = (requirement.atom_of or "").strip()
+    if parent:
+        return True
+    rid = requirement.id or ""
+    if len(rid) >= 3 and rid[-2] == "-" and rid[-1].isalpha() and rid[:-2] in requirement_ids:
+        return True
+    return False
+
+
 def amend_outline_for_missing_requirements(
     ledger: RequirementLedger,
     outline_sections: list[RfpSectionMap],
@@ -742,8 +755,14 @@ def amend_outline_for_missing_requirements(
     existing_ids = {s.id for s in outline_sections}
     existing_titles = [s.title for s in outline_sections]
     amended = list(outline_sections)
+    requirement_ids = {r.id for r in ledger.requirements}
     for requirement in ledger.missing():
         if requirement.source not in _ADD_ELIGIBLE_SOURCES:
+            continue
+        # Atomized sub-asks (FIPS, HIPAA, resume fields, …) stay on the parent
+        # requirement. Minting one tab per atom is what marked Wyoming's
+        # hosting scope "covered" by section ids the draft never contained.
+        if _requirement_is_atom(requirement, requirement_ids):
             continue
         section_id = f"ledger-{requirement.id}"
         if section_id in existing_ids:
@@ -1045,6 +1064,14 @@ def derive_legacy_fields(
             len(cap_dropped),
             cap_dropped[:12],
         )
+
+    from app.services.proposal_coverage_binding import rebind_ledger_to_section_ids
+
+    # Lean-filter and the section cap drop tabs after satisfied_by was stamped.
+    # A requirement must not stay "covered" by a section id that is gone.
+    requirement_ledger = rebind_ledger_to_section_ids(
+        requirement_ledger, {s.id for s in rfp_sections}
+    )
 
     return {
         "rfpSections": rfp_sections,

@@ -48,6 +48,12 @@ Look for:
 - Text that is an instruction or to-do addressed to the writer instead of the evaluator ("Bid that record accurately.", "we will update this table before submitting"). Delete it or rewrite it as a statement to the reader.
 - Broken sentences: dangling words, a fragment left where a clause was cut ("prepared to demonstrate, overstating."), unbalanced parentheses, a missing object ("include ."), a duplicated word or title. Repair only what the surrounding text makes certain. When words are missing and the section doesn't say what they were, delete the broken clause. Never guess.
 - Uncontracted first-person forms ("We will commit to" becomes "We'll commit to"). Contract the words only. Changing present tense to future tense is never a contraction fix; report it as soft.
+- Narrative opening sentence only (the first sentence of the block, when this block is the start of the section): three or more outcomes stacked in one "so" clause, or a third-person opener about the agency (Our philosophy, Our agency, The agency). Rewrite as one first-person promise. Put each other outcome in its own following sentence, using only facts already in the block. This split may add sentences. It may not add facts. Severity hard.
+- Agency as the subject of a prose sentence anywhere in the block: "zö agency proposes", "zö agency bills", "zö agency gives", "zö agency carries", "zö agency prices", "zö agency will". Rewrite to we/we'll. Severity hard. Leave a form label ("Submitted by zö agency"), a signature line, and a certification sentence ("zö agency certifies", "acknowledges", "represents", "agrees") unchanged.
+- A narrative block that opens by restating the buyer's problem, or by listing the solicitation's deliverables back to the buyer. That is a clear violation, not a preference. Delete the editorial heading and the restatement when the block already contains our promise. Keep every deliverable that is our answer. Severity hard. It may not add facts.
+- Editorial headings, including a short line that comments on the section instead of labeling the contents. Rewrite it as a plain label, or delete the line when the next sentence already says the thing. Severity hard.
+- The same list of measures, deliverables, or proof points repeated later in this same section. Keep the first full statement. Cut the later copy, or point at that earlier statement. Severity hard. A fact that appears only once stays. A scored section may still answer its own question; only cut a repeat inside this section.
+- A sentence that defines a price or a method by denying another method. State the method and delete the denial. Severity hard. A commercial exclusion stays ("no work bills before the contract is executed", "this sits outside the quote").
 
 Precision over recall. This may be copy that is already approved. Flag only clear violations. If you are unsure, leave it alone. Never flag a rewrite you would merely prefer.
 
@@ -85,7 +91,7 @@ This section is a signed cover letter. It follows the correspondence standard in
 """
 
 _PROCUREMENT_EXTRA = """
-This section is a formal procurement response. Keep it human without going casual. Answer in the order asked. Leave form labels, exhibit titles, and RFP-mandated wording alone.
+This section is a formal procurement response. Keep it human without going casual. Answer in the order asked. Prose is first person. Leave form labels, exhibit titles, signature lines, and certification sentences the firm signs alone. "zö agency proposes/bills/gives/carries" in the price narrative is a hard fix to we/we'll.
 """
 
 _VERIFY_INSTRUCTIONS = """You audit proposed voice edits for zö agency proposals. The standards file above governs.
@@ -94,7 +100,7 @@ Each edit below has an ORIGINAL span, a REPLACEMENT, and the rule the editor cit
 
 "faithful" is true when the REPLACEMENT keeps every fact and every promise of future work, service, or deliverable from the ORIGINAL, adds nothing new, and leaves every claim about past experience exactly as strong as it was.
 
-Faithful: removing a disclaimer about our own wording ("and we won't claim one"); removing a trailing "which is why..." or "the same discipline X" clause; deleting a cut-off fragment with no readable meaning; deleting a to-do about editing this document before it is submitted while keeping the client-facing commitment; contracting words outside a certification or legal clause the firm signs; swapping a process verb for a plain verb of the same meaning.
+Faithful: removing a disclaimer about our own wording ("and we won't claim one"); removing a trailing "which is why..." or "the same discipline X" clause; deleting a cut-off fragment with no readable meaning; deleting a to-do about editing this document before it is submitted while keeping the client-facing commitment; contracting words outside a certification or legal clause the firm signs; swapping a process verb for a plain verb of the same meaning; deleting an opening that only restates the buyer's problem when our promise stays; changing "zö agency proposes/bills" to we/we'll without changing the price or the promise.
 
 Not faithful: "gave us practice" becoming "we did"; dropping a promise ("we'll pair a media buyer with a specialist"); guessing a missing object or adding a commitment that was not there; adding a number, name, or claim; turning an expectation or hedge into a flat statement of fact ("we don't expect any delay" becoming "there will be no delay"); turning a statement of our own view or assessment into a flat statement of fact ("we see two options that fit" becoming "two options fit"); dropping a count or a number of commitments ("five checkpoints, five approvals" becoming "five-checkpoint"); changing the wording of a certification or legal clause the firm signs; adding a word that changes the meaning of a list.
 
@@ -142,10 +148,19 @@ def _tokens(text: str) -> list[str]:
     return cleaned.split()
 
 
+# Bump when the editor's hard rules change, so a paragraph marked reviewed under
+# the old rules is reviewed again. The brand-revision id alone does not change
+# when the editor starts treating RFP echo and agency-as-subject as hard.
+_EDITOR_RULESET = "agency-subject-and-rfp-echo"
+
+
 def block_hash(block: str, rev_id: str = "") -> str:
-    """Stable id for a reviewed paragraph. The revision is part of the hash, so a
-    paragraph reviewed under one revision is unreviewed under another."""
-    return hashlib.sha256(f"{rev_id}\n{block}".encode("utf-8")).hexdigest()[:16]
+    """Stable id for a reviewed paragraph. The revision and the editor ruleset
+    are part of the hash, so a paragraph reviewed under one of them is
+    unreviewed under the other."""
+    return hashlib.sha256(
+        f"{_EDITOR_RULESET}\n{rev_id}\n{block}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _new_fact_tokens(replacement: str, section_text: str) -> list[str]:
@@ -254,7 +269,6 @@ async def _review_block(
                 max_tokens=4000,
                 temperature=0.0,
                 tier="light",
-                reasoning_effort="low",
                 node_name=NODE_NAME,
                 rfp_id=rfp_id,
                 cache_prefix=prefix,
@@ -285,7 +299,6 @@ async def _verify(
             max_tokens=4000,
             temperature=0.0,
             tier="light",
-            reasoning_effort="low",
             node_name=NODE_NAME + "_verify",
             rfp_id=rfp_id,
             cache_prefix=prefix,

@@ -170,6 +170,7 @@ class ComplianceItem(BaseModel):
     source_ref: str = Field(default="", alias="sourceRef")
     target_section: str = Field(default="", alias="targetSection")
     evidence_needed: str = Field(default="", alias="evidenceNeeded")
+    atom_of: str = Field(default="", alias="atomOf")
     status: str = "open"
     owner: str = ""
 

@@ -653,6 +653,20 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
                     )
                 )
             # One critical issue per rule still present — excerpt is the first hit.
+            from app.services.proposal_brand_voice import narrative_opening_problem
+
+            opening = narrative_opening_problem(body)
+            if opening:
+                issues.append(
+                    PreSubmitIssue(
+                        severity="warning",
+                        category="voice",
+                        message=f"zö voice (compulsory) not followed: {opening}",
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                        excerpt=body.strip().split("\n", 1)[0][:240],
+                    )
+                )
             seen_rules: set[str] = set()
             for rule, excerpt in hard_voice_ban_hits(body):
                 if rule in seen_rules:

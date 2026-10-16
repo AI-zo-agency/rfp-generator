@@ -65,8 +65,8 @@ class RequirementsMethodology(BaseModel):
 REQUIREMENT_COVERAGE_RULE_TEXT = (
     "We take the important words from each checklist line (skipping filler like "
     '"the" or "provide"). If at least half of those words—or at least two words, '
-    "whichever is higher—appear anywhere in your full draft, we count that line as "
-    "covered."
+    "whichever is higher—appear together in a substantive section, we count that "
+    "line as covered. A short attach-the-form note does not count."
 )
 
 
@@ -207,9 +207,9 @@ def build_proposal_ending_report(
     static_count = sum(1 for s in drafted if s.id in static_ids or s.id.startswith("section-1-") or s.id.startswith("section-2-") or s.id.startswith("section-3-"))
 
     rfp_mapped = research.rfp_sections if research else []
-    manuscript = "\n\n".join(
-        f"## {s.title}\n{s.content}" for s in drafted
-    )
+    from app.services.proposal_coverage_binding import coverage_haystack
+
+    manuscript = coverage_haystack(drafted)
 
     statuses: list[EndingRequirementStatus] = []
     covered = 0

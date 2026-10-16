@@ -192,7 +192,7 @@ Rules (strict):
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the BRAND VOICE and REGISTER blocks for each section.
 6. NARRATIVE sections (register=narrative): first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance. RFP form language does not apply to narrative prose.
-7. PROCUREMENT sections (register=procurement): formal third-person Vendor/Offeror language is OK for attachments, forms, and compliance tables.
+7. PROCUREMENT sections (register=procurement): prose is first person we/we'll. Third person only for a buyer form label, a signature line, or a certification the firm signs (certifies, acknowledges, represents, agrees). Never narrate a price as "zö agency proposes/bills/gives/carries".
 8. DESIGNER-READY: every tab uses short lead + tables/bullets/rows + [DESIGNER NOTE] for layout-heavy content — never multi-page essay prose.
 9. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
 10. Lead narrative sections with PROOF POINTS — specific case studies tied to requirements ("why we win").
@@ -1502,7 +1502,7 @@ def _build_draft_prompt_zones(
         )
     if procurement_sections:
         zone_c += (
-            "PROCUREMENT sections in this batch (formal third-person OK):\n"
+            "PROCUREMENT sections in this batch (prose is first person; form labels and signed certifications stay as the form requires):\n"
             f"{format_register_block('procurement')}\n\n"
         )
     zo_ctx = (state.get("zo_sections_context") or "").strip()

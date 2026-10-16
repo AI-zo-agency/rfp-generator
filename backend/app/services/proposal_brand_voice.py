@@ -9,6 +9,7 @@ Older revs are dead on arrival.
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -31,8 +32,9 @@ REQUIRED for scored narrative tabs (Executive Summary, Understanding, Approach, 
 2. Teach by showing: put the idea inside one verified case study, named method, or festival-ready example from KB.
 3. Prefer a fresh, specific idea over a generic capability list ("we do websites / social / content").
 4. Admit a true cost or tradeoff when it matters (scope edge, timeline pressure, handoff risk).
-5. State our commitment in contractions and future tense ("we'll…") — flat — and stop.
-6. ANTI-RFP-ECHO still holds: requirements are a private checklist; the body is only our answer.
+5. First sentence: one promise, in contractions and future tense ("we'll"). Say it the way you would across a desk. If the work has several outcomes, the first sentence carries one of them. Each other outcome gets its own next sentence.
+6. Never pack three outcomes into one "so" clause. Never open in third person about the agency. The first sentence is first person and carries one promise.
+7. ANTI-RFP-ECHO still holds: requirements are a private checklist; the body is only our answer.
 """
 
 # Compact hard rules for section-chat / selection / apply-fix rewrites.
@@ -177,9 +179,14 @@ the signed file. Never invent signature dates or claim the PDF is already attach
 
 PROCUREMENT_REGISTER_BLOCK = """## PROCUREMENT REGISTER (this section)
 
-Use formal third-person language appropriate for attachments, legal forms, certifications, pricing tables, or compliance schedules.
-"The Vendor" / "Offeror" language is acceptable when matching RFP form or attachment language.
-Still follow Writing Standards rev 6 for company name (zö agency) and writing rules. No em dashes, no empty hype words, no process-verb jargon. American English."""
+This is a form, price sheet, certification, or compliance schedule. The prose around it is still zö speaking: first person, contractions, future tense (we'll).
+
+Third person stays only where the buyer's form requires the legal name:
+- a form label or signature line ("Submitted by zö agency")
+- a certification the firm signs ("zö agency certifies", "acknowledges", "represents", "agrees")
+
+Price and offer sentences name us as we/we'll. "zö agency proposes", "zö agency bills", "zö agency gives", and "zö agency carries" are third person and get rewritten.
+Still follow the writing standards: company name zö agency, no em dashes, no empty hype words, no negation-contrast, no process-verb jargon. American English."""
 
 
 def classify_section_register(
@@ -380,14 +387,16 @@ def format_brand_voice_block(
                 "- If you wrote 'The Vendor' or third-person agency references, rewrite in first person before returning.",
                 "- If a sentence sounds crafted for effect, flatten it.",
                 "- Shape: concrete open, teach by showing, admit a true cost, state the point flat and stop.",
+                "- First sentence is one promise, in first person. Do not stack outcomes after \"so\".",
+                "- Do not open in third person about the agency.",
                 "- Never open by paraphrasing the RFP. Prefer specific ideas over generic capability lists.",
             ]
         )
     else:
         lines.append(
-            "Use procurement/form register for this attachment. "
-            "Third-person Vendor language is OK here. "
-            "Still: rev 6 company name and writing rules."
+            "Prose in this section is first person (we/we'll). "
+            "Third person only for a form label, a signature line, or a certification the firm signs. "
+            "Still: company name zö agency and the writing rules."
         )
 
     return "\n".join(lines)
@@ -469,3 +478,102 @@ async def resolve_voice_context(
     bv["voiceGuidelines"] = merged_guidelines
 
     return bv, kb_zo_voice
+
+
+_VERB = re.compile(r"\b(can|will|is|are|has|have|does|do)\b", re.I)
+
+
+def first_narrative_sentence(text: str) -> str:
+    """First prose sentence, skipping headings and table rows."""
+    for para in (text or "").split("\n\n"):
+        line = para.strip()
+        if not line or line.startswith("#") or line.startswith("|"):
+            continue
+        flat = " ".join(line.split())
+        match = re.match(r".+?[.!?](?:\s|$)", flat)
+        return (match.group(0) if match else flat).strip()
+    return ""
+
+
+def narrative_opening_problem(text: str) -> str | None:
+    """Flag a first sentence that stacks three verb-clauses after ``so``.
+
+    Shape only: ``We'll … so [clause], [clause], and [clause]``, each clause
+    with its own verb. A noun list (``forms, minutes, and notices``) has no
+    verbs and is left alone. One outcome after ``so`` is left alone.
+    """
+    sentence = first_narrative_sentence(text)
+    if not sentence or not re.match(r"^(We['’]ll|We will)\b", sentence, re.I):
+        return None
+    match = re.search(r"\bso\b\s+(.+)$", sentence, re.I)
+    if not match:
+        return None
+    parts = [
+        part.strip(" .")
+        for part in re.split(r",\s+(?:and\s+)?", match.group(1))
+        if part.strip(" .")
+    ]
+    if sum(1 for part in parts if _VERB.search(part)) >= 3:
+        return "piled-so-opening"
+    return None
+
+
+def brand_voice_is_usable(brand_voice: Any) -> bool:
+    """True when Phase 3 has a real per-RFP voice profile, not the empty default.
+
+    Strict-RFP generation skips Sections 1–3, which is the only step that used
+    to synthesize this profile. An empty ``ProposalBrandVoice`` has formality
+    set and nothing else. Drafting then falls back to one generic sentence.
+    """
+    if brand_voice is None:
+        return False
+    if isinstance(brand_voice, dict):
+        tone = str(brand_voice.get("tone") or "")
+        core = str(brand_voice.get("zoCoreVoice") or brand_voice.get("zo_core_voice") or "")
+        kb = str(brand_voice.get("kbZoVoice") or brand_voice.get("kb_zo_voice") or "")
+    else:
+        tone = str(getattr(brand_voice, "tone", "") or "")
+        core = str(getattr(brand_voice, "zo_core_voice", "") or "")
+        kb = str(getattr(brand_voice, "kb_zo_voice", "") or "")
+    return bool(tone.strip() and (core.strip() or kb.strip()))
+
+
+async def ensure_drafting_brand_voice(
+    brand_voice: Any,
+    *,
+    rfp_title: str,
+    rfp_client: str,
+    rfp_sector: str,
+    rfp_location: str | None,
+    rfp_context: str,
+) -> Any:
+    """Synthesize zö core voice + this RFP's adaptation when the cache has none."""
+    from app.models.proposal import ProposalBrandVoice
+
+    if brand_voice_is_usable(brand_voice):
+        if isinstance(brand_voice, ProposalBrandVoice):
+            return brand_voice
+        return ProposalBrandVoice.model_validate(brand_voice)
+
+    zo = await fetch_zo_voice_excerpt(
+        rfp_title=rfp_title,
+        rfp_client=rfp_client,
+        rfp_sector=rfp_sector,
+        rfp_location=rfp_location,
+        rfp_context=rfp_context,
+    )
+    from app.services.proposal_sections_graph import _synthesize_proposal_voice
+
+    raw = await _synthesize_proposal_voice(
+        {
+            "rfp_client": rfp_client,
+            "rfp_sector": rfp_sector,
+            "rfp_title": rfp_title,
+            "rfp_context": rfp_context,
+            "kb_zo_voice": zo,
+        }
+    )
+    voice = ProposalBrandVoice.model_validate((raw or {}).get("brand_voice") or {})
+    if not (voice.kb_zo_voice or "").strip() and zo.strip():
+        voice = voice.model_copy(update={"kb_zo_voice": zo})
+    return voice

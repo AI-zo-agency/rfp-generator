@@ -2523,6 +2523,26 @@ async def _run_phase3_drafting_inner(
         rfp_text=rfp_source_text,
     )
 
+    from app.services.proposal_brand_voice import (
+        brand_voice_is_usable,
+        ensure_drafting_brand_voice,
+    )
+
+    if not brand_voice_is_usable(research.brand_voice):
+        research = research.model_copy(
+            update={
+                "brand_voice": await ensure_drafting_brand_voice(
+                    research.brand_voice,
+                    rfp_title=rfp.title,
+                    rfp_client=rfp.client,
+                    rfp_sector=rfp.sector,
+                    rfp_location=rfp.location or None,
+                    rfp_context=rfp_context,
+                )
+            }
+        )
+        await asave_research_cache(research)
+
     with pipeline_step("drafting_graph", section_count=len(sections_to_draft)):
         drafted_rfp_sections, provider, jit_corpus = await run_drafting_graph(
             rfp_id=rfp.id,
