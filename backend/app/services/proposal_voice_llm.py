@@ -50,12 +50,12 @@ Look for:
 - Uncontracted first-person forms ("We will commit to" becomes "We'll commit to"). Contract the words only. Changing present tense to future tense is never a contraction fix; report it as soft.
 - Narrative opening sentence only (the first sentence of the block, when this block is the start of the section): three or more outcomes stacked in one "so" clause, or a third-person opener about the agency (Our philosophy, Our agency, The agency). Rewrite as one first-person promise. Put each other outcome in its own following sentence, using only facts already in the block. This split may add sentences. It may not add facts. Severity hard.
 - Agency as the subject of a prose sentence anywhere in the block: "zö agency proposes", "zö agency bills", "zö agency gives", "zö agency carries", "zö agency prices", "zö agency will". Rewrite to we/we'll. Severity hard. Leave a form label ("Submitted by zö agency"), a signature line, and a certification sentence ("zö agency certifies", "acknowledges", "represents", "agrees") unchanged.
-- A narrative block that opens by restating the buyer's problem, or by listing the solicitation's deliverables back to the buyer. That is a clear violation, not a preference. Delete the editorial heading and the restatement when the block already contains our promise. Keep every deliverable that is our answer. Severity hard. It may not add facts.
-- Editorial headings, including a short line that comments on the section instead of labeling the contents. Rewrite it as a plain label, or delete the line when the next sentence already says the thing. Severity hard.
+- The opening of a narrative section follows Section 3, and that shape is hard, not a preference. One promise, in first person, in the first sentence. If the block opens by restating the buyer's problem, or by listing the solicitation's deliverables back to the buyer, delete that heading and that restatement when our promise is already in the block. Keep every deliverable that is our answer. It may not add facts.
+- Editorial headings, including a markdown heading and a bold run-in that comments on the section instead of labeling the contents. Rewrite it as a plain label, or delete the line when the next sentence already says the thing. Severity hard. A wayfinding label stays ("Payment gates", "Cover page").
 - The same list of measures, deliverables, or proof points repeated later in this same section. Keep the first full statement. Cut the later copy, or point at that earlier statement. Severity hard. A fact that appears only once stays. A scored section may still answer its own question; only cut a repeat inside this section.
 - A sentence that defines a price or a method by denying another method. State the method and delete the denial. Severity hard. A commercial exclusion stays ("no work bills before the contract is executed", "this sits outside the quote").
 
-Precision over recall. This may be copy that is already approved. Flag only clear violations. If you are unsure, leave it alone. Never flag a rewrite you would merely prefer.
+Precision over recall. This may be copy that is already approved. Flag only clear violations. If you are unsure, leave it alone. Never flag a rewrite you would merely prefer. That caution does not cover a rule in the list above. Those are hard.
 
 Severity, on every edit:
 - "hard": a clear break of a rule listed above.
@@ -65,13 +65,13 @@ What stays, even though it looks like a violation:
 - Commercial qualification and contract terms: conditions, exclusions, "only upon the County's written approval", "not subject to adjustment", "there is no separate reimbursable-expense category", "no unresolved violations". These mark the edge of a promise. They are not negation-contrast.
 - Cross-references to a named exhibit, section, or page ("Section 3", "Exhibit C carries the reference fields"). Only pointing at the document's own act of speaking is self-reference.
 - Present or perfect tense for completed facts and standing capability ("has reviewed", "operates as", "has not posted any addenda").
-- Labels, form fields, and run-in headings. Fix wording in a label only if it breaks a hard rule. Never add tense or contractions to a label.
+- Form-field labels and wayfinding headings. Never add tense or contractions to a label. A bold run-in that comments on the section is an editorial heading, not a label.
 - A denial that is a fact: rewrite it as an affirmative statement of the same fact ("we won't ask the County to carry that liability" becomes "the County carries none of that liability"). Delete only meta-commentary and leaked instructions.
 
 What never to change:
-- The strength of a claim. "Gave us practice unifying" cannot become "we unified". A hedge that reflects a real limit ("closest match", "have not yet") stays as strong as it was. Never turn experience into an accomplishment, and never drop a commitment.
+- The strength of a claim. "Gave us practice unifying" cannot become "we unified". A hedge that reflects a real limit ("closest match", "have not yet", "our record does not include") stays, in those words or equally plain words. Never delete it. Never turn experience into an accomplishment, and never drop a commitment. An empty replacement is forbidden on a sentence that states a limit.
 - Facts: names, numbers, dates, dollar amounts, phone numbers, emails, addresses, solicitation numbers, titles, client names, counts. Do not add any fact, claim, credential, or number that is not already in the section. A stated gap (for example no HIPAA-covered engagement) stays stated, once, in plain words.
-- [VERIFY: ...] and [MANUAL FILL: ...] tags, markdown headings, table separator rows, and any tagline the standards' exceptions register names.
+- [VERIFY: ...] and [MANUAL FILL: ...] tags, table separator rows, the hash marks on a wayfinding label, and any tagline the standards' exceptions register names. An editorial heading may be rewritten or removed.
 - [E#] citation markers. They are provenance, not wording. When you rewrite a sentence, keep every [E#] on that same claim. Do not add, remove, replace, or move an evidence id.
 - Words of belief or expectation ("we don't expect", "we believe", "we plan to", "we see", "should") are part of the claim. Never replace them with a flat statement of fact ("there will be no delay"). A sentence like "we see three programs that are ready" must not become "Three programs are ready". Keep the expectation or the view, or leave the sentence alone.
 - Counts and named quantities ("five checkpoints, five approvals", "three rounds") are facts and commitments. Keep every one when you rewrite a sentence, even when you shorten it.
@@ -102,7 +102,7 @@ Each edit below has an ORIGINAL span, a REPLACEMENT, and the rule the editor cit
 
 Faithful: removing a disclaimer about our own wording ("and we won't claim one"); removing a trailing "which is why..." or "the same discipline X" clause; deleting a cut-off fragment with no readable meaning; deleting a to-do about editing this document before it is submitted while keeping the client-facing commitment; contracting words outside a certification or legal clause the firm signs; swapping a process verb for a plain verb of the same meaning; deleting an opening that only restates the buyer's problem when our promise stays; changing "zö agency proposes/bills" to we/we'll without changing the price or the promise.
 
-Not faithful: "gave us practice" becoming "we did"; dropping a promise ("we'll pair a media buyer with a specialist"); guessing a missing object or adding a commitment that was not there; adding a number, name, or claim; turning an expectation or hedge into a flat statement of fact ("we don't expect any delay" becoming "there will be no delay"); turning a statement of our own view or assessment into a flat statement of fact ("we see two options that fit" becoming "two options fit"); dropping a count or a number of commitments ("five checkpoints, five approvals" becoming "five-checkpoint"); changing the wording of a certification or legal clause the firm signs; adding a word that changes the meaning of a list.
+Not faithful: "gave us practice" becoming "we did"; dropping a promise ("we'll pair a media buyer with a specialist"); deleting a stated limit ("have not yet", "haven't confirmed", "our record does not include", "no verified"); guessing a missing object or adding a commitment that was not there; adding a number, name, or claim; turning an expectation or hedge into a flat statement of fact ("we don't expect any delay" becoming "there will be no delay"); turning a statement of our own view or assessment into a flat statement of fact ("we see two options that fit" becoming "two options fit"); dropping a count or a number of commitments ("five checkpoints, five approvals" becoming "five-checkpoint"); changing the wording of a certification or legal clause the firm signs; adding a word that changes the meaning of a list. Do not reject a replacement because you disagree that the original broke the rule. You only judge whether the replacement keeps the facts, the limits, and the promises.
 
 Return JSON: {"verdicts": [{"i": 0, "faithful": true, "reason": "short"}]} with one verdict per edit, using the edit numbers given."""
 
@@ -151,7 +151,7 @@ def _tokens(text: str) -> list[str]:
 # Bump when the editor's hard rules change, so a paragraph marked reviewed under
 # the old rules is reviewed again. The brand-revision id alone does not change
 # when the editor starts treating RFP echo and agency-as-subject as hard.
-_EDITOR_RULESET = "agency-subject-and-rfp-echo"
+_EDITOR_RULESET = "opening-shape-and-stated-limit"
 
 
 def block_hash(block: str, rev_id: str = "") -> str:
@@ -189,12 +189,33 @@ def _citation_ids(span: str) -> list[str]:
     return [m.upper() for m in re.findall(r"E\d+", span or "")]
 
 
+_STATED_LIMITS = (
+    "have not",
+    "haven't",
+    "has not",
+    "hasn't",
+    "not yet",
+    "no verified",
+    "does not include",
+    "do not include",
+)
+
+
+def _drops_stated_limit(find: str, replace: str) -> bool:
+    """A limit admission has to survive the edit. The words can move. They cannot vanish."""
+    folded_find = find.casefold()
+    folded_replace = replace.casefold()
+    return any(marker in folded_find and marker not in folded_replace for marker in _STATED_LIMITS)
+
+
 def _check_edit(edit: VoiceEdit, text: str, block: str) -> str:
     """Return "" when the edit is safe to apply, else the reason it isn't."""
     if not edit.find.strip():
         return "empty find"
     if edit.find == edit.replace:
         return "no change"
+    if _drops_stated_limit(edit.find, edit.replace):
+        return "drops a stated limit"
     if edit.find not in block:
         return "find not in the reviewed block"
     if text.count(edit.find) != 1:
@@ -238,16 +259,48 @@ def _apply(text: str, edit: VoiceEdit) -> str:
     return text
 
 
+def _heading_text(block: str) -> str:
+    return block.lstrip("#").strip()
+
+
+def _carry_heading(block: str) -> bool:
+    """A heading the editor must see. A short wayfinding label stays out of the call."""
+    if not block.startswith("#"):
+        return False
+    text = _heading_text(block)
+    if not text or text.startswith("["):
+        return False
+    if text.endswith((".", "?", "!")):
+        return True
+    first = text.split(None, 1)[0].casefold().strip(":")
+    return first in {"where", "why"}
+
+
 def _blocks(text: str) -> list[str]:
-    """Paragraphs worth a model call. A table is one block."""
+    """Paragraphs worth a model call. A table is one block.
+
+    A sentence heading, or a heading that opens with Where or Why, is handed to
+    the editor with the next paragraph. A short label such as "Payment gates" is not.
+    """
     out: list[str] = []
+    pending = ""
     for block in text.split("\n\n"):
         b = block.strip()
-        if not b or b.startswith("#") or _protected(b) and len(b) < 200:
+        if not b:
             continue
+        if _carry_heading(b):
+            pending = f"{pending}\n{b}".strip() if pending else b
+            continue
+        if b.startswith("#") or (_protected(b) and len(b) < 200):
+            continue
+        if pending:
+            b = f"{pending}\n{b}"
+            pending = ""
         if len(b.split()) < _MIN_WORDS:
             continue
         out.append(b)
+    if pending and len(pending.split()) >= _MIN_WORDS:
+        out.append(pending)
     return out
 
 

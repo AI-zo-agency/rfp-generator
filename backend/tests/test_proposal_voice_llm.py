@@ -260,3 +260,30 @@ def test_several_edits_and_a_deletion_record_the_final_text(monkeypatch):
     final = "Alpha sentence stays here. Gamma sentence is short."
     assert res.text == final
     assert res.reviewed == [pv.block_hash(final, "r7")]
+
+
+def test_sentence_heading_reaches_the_editor_and_a_label_does_not():
+    text = (
+        "### The problem.\n\n"
+        "Awareness is high. Use is low.\n\n"
+        "### Payment gates\n\n"
+        "We'll invoice after acceptance of the named deliverable."
+    )
+    blocks = pv._blocks(text)
+    assert any(block.startswith("### The problem.") and "Awareness is high" in block for block in blocks)
+    assert all("Payment gates" not in block for block in blocks)
+
+
+def test_where_heading_stays_with_its_paragraph():
+    text = "### Where the proof is thinner\n\nOur record does not include that campaign."
+    blocks = pv._blocks(text)
+    assert blocks == ["### Where the proof is thinner\nOur record does not include that campaign."]
+
+
+def test_stated_limit_cannot_be_deleted(monkeypatch):
+    res = run(
+        [edit("We haven't held a HIPAA-covered engagement.", "", "self-reference")],
+        monkeypatch,
+    )
+    assert "haven't held" in res.text
+    assert any("stated limit" in why for _, why in res.rejected)
