@@ -219,9 +219,9 @@ async def _rewrite_section_for_contradiction(
         + TARGETED_EDIT_CONTRACT
     )
     try:
-        from app.services.proposal_brand_voice import CHAT_REV6_VOICE_HARD_RULES
+        from app.services.proposal_brand_voice import voice_standards_for
 
-        system = CHAT_REV6_VOICE_HARD_RULES + "\n\n" + system
+        system = voice_standards_for(rfp.id)[0] + "\n\n" + system
     except Exception:  # noqa: BLE001
         pass
     user = (

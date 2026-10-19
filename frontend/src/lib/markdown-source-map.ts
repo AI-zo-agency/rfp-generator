@@ -25,6 +25,7 @@ export interface SourceRange {
   end: number;
 }
 
+import { expandJammedTableLine } from "./expand-jammed-table-line";
 import { humanizeGapTag, isInternalScanTag } from "./gap-tag-humanize";
 const THEMATIC_BREAK = /^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 const CODE_FENCE = /^[ \t]*```/;
@@ -249,52 +250,22 @@ function expandInlineTablesWithMap(source: string): { text: string; map: number[
     if (lineEnd === -1) lineEnd = normalized.length;
     const line = normalized.slice(lineStart, lineEnd);
     const trimmed = line.trim();
-    const pipes = trimmed.match(/\|/g)?.length ?? 0;
+    const jammed = expandJammedTableLine(trimmed);
 
-    if (trimmed.includes("|") && pipes >= 6) {
-      if (isPipeNoiseLine(trimmed)) {
-        // Drop noise lines entirely from the expanded stream.
-      } else {
+    if (isPipeNoiseLine(trimmed)) {
+      // Drop noise lines entirely from the expanded stream.
+    } else if (jammed) {
       const lead = line.match(/^[ \t]*/)?.[0].length ?? 0;
-      const trailMatch = line.match(/[ \t]*$/);
-      const trail =
-        trailMatch && trailMatch[0].length > 0 && trailMatch[0] !== line
-          ? trailMatch[0].length
-          : 0;
       const coreStart = lineStart + lead;
-      const core = line.slice(lead, line.length - trail);
-
-      let i = 0;
-      while (i < core.length) {
-        const abs = coreStart + i;
-        const rest = core.slice(i);
-        const m1 = rest.match(/^\|(\s*)\|(?=\s*[-:–—])/);
-        if (m1) {
-          out.push("|");
-          map.push(normMap[abs] ?? abs);
-          out.push("\n");
-          map.push(normMap[abs] ?? abs);
-          const second = abs + 1 + m1[1].length;
-          out.push("|");
-          map.push(normMap[second] ?? second);
-          i += 1 + m1[1].length + 1;
-          continue;
+      let sourceAt = 0;
+      for (const ch of jammed) {
+        if (ch !== "\n") {
+          while (sourceAt < trimmed.length && trimmed[sourceAt] !== ch) sourceAt += 1;
         }
-        const m2 = rest.match(/^\|(\s+)(?=\|)/);
-        if (m2) {
-          out.push("|");
-          map.push(normMap[abs] ?? abs);
-          out.push("\n");
-          map.push(normMap[abs] ?? abs);
-          out.push("|");
-          map.push(normMap[abs + 1 + m2[1].length] ?? abs);
-          i += 1 + m2[1].length;
-          continue;
-        }
-        out.push(core[i]!);
-        map.push(normMap[abs] ?? abs);
-        i += 1;
-      }
+        const at = coreStart + Math.min(sourceAt, Math.max(trimmed.length - 1, 0));
+        out.push(ch);
+        map.push(normMap[at] ?? at);
+        if (ch !== "\n" && sourceAt < trimmed.length) sourceAt += 1;
       }
     } else if (!isPipeNoiseLine(trimmed)) {
       for (let i = 0; i < line.length; i += 1) {

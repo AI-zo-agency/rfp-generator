@@ -1,9 +1,8 @@
 """Shared zö brand voice formatting for all proposal LLM passes.
 
-Governing standard: branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md
-(rev 6 · August 2026). Compulsory for every proposal writing / rewrite /
-improve / Review-Fix / Complete Scan / section-chat persist pass.
-Older revs are dead on arrival.
+The governing text is the revision pinned to the proposal, or the Brand Voice
+default when the proposal has no pin. Nothing in this module substitutes an
+older revision.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 Register = Literal["narrative", "procurement", "cover_letter"]
 
 
-INTERESTING_PROPOSAL_ANSWER_BLOCK = """## INTERESTING PROPOSAL ANSWER (mandatory — still Rev 6 deliverable)
+INTERESTING_PROPOSAL_ANSWER_BLOCK = """## INTERESTING PROPOSAL ANSWER (mandatory)
 
 Interesting is NOT hype. Empty words stay banned (exciting, amazing, passionate, robust, seamless, leverage…).
 Interesting means the evaluator learns something specific they did not already write in the RFP.
@@ -36,22 +35,6 @@ REQUIRED for scored narrative tabs (Executive Summary, Understanding, Approach, 
 6. Never pack three outcomes into one "so" clause. Never open in third person about the agency. The first sentence is first person and carries one promise.
 7. ANTI-RFP-ECHO still holds: requirements are a private checklist; the body is only our answer.
 """
-
-# Compact hard rules for section-chat / selection / apply-fix rewrites.
-CHAT_REV6_VOICE_HARD_RULES = """## REV 6 VOICE (compulsory on every chat edit — branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md)
-
-Hard bans (cut or rewrite before returning):
-- Em dashes (use a comma, period, or new sentence).
-- Negation-contrast: rather than, instead of, "X, not Y", not just / not only / more than just / beyond just.
-- Significance-closes ("That's the kind of…", "which is what makes…").
-- Hedging announcements ("worth noting", "worth naming", "keep in mind").
-- Empty words: robust, seamless, leverage, unlock, impactful, exciting, passionate, amazing.
-- Writing for effect: hooks, punchlines, rhetorical questions, crafted repetition.
-
-Do: state what the thing is; first person we/our in narrative tabs; contractions + future tense (we'll); American English; company name always "zö agency".
-Exempt only the registered tagline: "We are more than your agency. We are your strongest advocate."
-"""
-
 
 def _render_standards(rev: bvr.Revision) -> str:
     return (
@@ -103,7 +86,7 @@ def voice_standards_for(rfp_id: str | None = None) -> tuple[str, str]:
 
 
 def load_writing_standards_rev3() -> str:
-    """Backward-compatible alias — always returns governing rev 6."""
+    """Backward-compatible alias. Returns the active Brand Voice revision."""
     return load_writing_standards()
 
 
@@ -126,7 +109,7 @@ NARRATIVE_REGISTER_BLOCK = """## NARRATIVE REGISTER (MANDATORY for this section)
 Write as zö agency speaking directly to the client. Not as a legal brief describing a vendor.
 
 REQUIRED:
-- Follow rev 6 writing standards above (company name, writing rules, voice). Proposal copy only.
+- Follow the writing standards above. That text is the revision pinned to this proposal, or the Brand Voice default. Proposal copy only.
 - First person: "we", "our", "us". zö is the author who did/will do the work.
 - Contractions + future tense: "we'll build", "we'll ship" — not bare present process tone.
 - Active voice and concrete verbs: "We built...", "We led...", "Our team designed..."
@@ -148,17 +131,17 @@ FORBIDDEN in narrative sections (never use):
 
 EXAMPLE · same fact, wrong vs right:
 - WRONG: "Gilroy is not asking us to build something new. You built a website and social channels."
-- RIGHT: "We'll run festival-week conversion checks on ticket and vendor flows, then keep Instagram and Facebook fed year-round with volunteer stories — the same handoff pattern we used at Rock the Locks."
+- RIGHT: "We'll run festival-week conversion checks on ticket and vendor flows, then keep Instagram and Facebook fed year-round with volunteer stories. That is the same handoff pattern we used at Rock the Locks."
 
 Note: RFP instructions may say "Vendor". That is form language. Narrative sections must still use first-person zö voice."""
 
-COVER_LETTER_REGISTER_BLOCK = """## COVER LETTER / TRANSMITTAL REGISTER (Rev 6 signed passage)
+COVER_LETTER_REGISTER_BLOCK = """## COVER LETTER / TRANSMITTAL REGISTER (signed passage)
 
-Governing standard: branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md — signed passages
-inside a proposal follow the correspondence standard; the rest of the proposal stays
-deliverable register.
+Signed passages follow the correspondence rules in the writing standards above
+(the revision pinned to this proposal, or the Brand Voice default). The rest of
+the proposal stays deliverable register.
 
-CONTENT / STRUCTURE (highest priority after Rev 6 voice bans):
+CONTENT / STRUCTURE (highest priority after those writing standards):
 - Follow THIS RFP's cover-letter / letter-of-transmittal format and required statements
   (addressee, required attestations, contact/signature block, page limit).
 - Do not invent a Zo template letter that ignores the RFP's own package instructions.
@@ -167,7 +150,7 @@ CONTENT / STRUCTURE (highest priority after Rev 6 voice bans):
   short offer summary → close / signature shape). NEVER copy their client names,
   project claims, dates, dollar figures, or prior RFP facts — rewrite for THIS buyer.
 
-VOICE (Rev 6 correspondence for signed passages):
+VOICE (correspondence for signed passages):
 - First person from the authorized signer (I / we). Address the recipient by name when known.
 - Warm, contracted, human — still no em dashes, no negation-contrast, no empty hype.
 - NEVER open with "On behalf of zö agency" or other third-person agency boilerplate.
@@ -295,11 +278,10 @@ def format_brand_voice_block(
     compact: bool = False,
     rfp_id: str | None = None,
 ) -> str:
-    """Full dual-layer voice block (full rev 6 + interesting answer + core zö + RFP adaptation).
+    """Voice block for one section.
 
-    ``compact=True`` (Review / fact-check lean path): hard Rev 6 rules + short zö
-    core only — full standards file is enforced by deterministic scrub, not by
-    stuffing ~10k tokens into every section rewrite.
+    The standards text is the proposal pin, or the Brand Voice default. Compact
+    keeps that same text and drops the interesting-answer addendum.
     """
     bv = brand_voice or {}
     zo_core = (
@@ -312,9 +294,10 @@ def format_brand_voice_block(
     )
     zo_core = zo_core.replace("—", ",").replace("–", "-")
 
+    standards = voice_standards_for(rfp_id)[0]
     if compact:
         lines = [
-            CHAT_REV6_VOICE_HARD_RULES,
+            standards,
             "",
             format_register_block(register),
             "",
@@ -327,9 +310,7 @@ def format_brand_voice_block(
 
     kb_voice = kb_zo_voice or bv.get("kbZoVoice") or bv.get("kb_zo_voice") or ""
     lines = [
-        voice_standards_for(rfp_id)[0],
-        "",
-        CHAT_REV6_VOICE_HARD_RULES,
+        standards,
         "",
         format_register_block(register),
         "",
@@ -424,7 +405,7 @@ async def fetch_zo_voice_excerpt(
 
 
 _DEFAULT_NARRATIVE_GUIDELINES = [
-    "Follow branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md for proposal copy (company name, writing rules, voice). Not for UI.",
+    "Follow the writing standards in this prompt (the revision pinned to this proposal, or the Brand Voice default). Not for UI.",
     "Always write the company name as 'zö agency' (lowercase z, umlaut).",
     "Never use em dashes. Prefer commas, periods, or new sentences.",
     "Never use negation-contrast (not X it's Y / not just / more than just). Say what the thing is.",

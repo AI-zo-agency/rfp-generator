@@ -90,6 +90,13 @@ across the Pacific Northwest since 2013.
 
 | Phase | Key Activities | Timing | | --- | --- | --- | | Foundation | Research weeks 2–25 | Week 2–25 |
 `,
+
+  "a form row with empty cells": `### Attachment D
+
+| # | Sub-Service Provider (Legal Name) | Service Performed | Certification / Classification | Estimated % of Contract |
+| --- | --- | --- | --- | --- |
+| 1 | | | | |
+`,
 };
 
 describe("projection parity with MarkdownReportBody", () => {

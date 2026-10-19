@@ -1,7 +1,6 @@
 import asyncio
 
 from app.models.proposal import ProposalDraft, ProposalSection
-from app.services import proposal_voice_llm as pv
 from app.services import proposal_voice_pass as vp
 from app.services.proposal_section_editor import (
     apply_chat_preview_quality_guards,
@@ -34,11 +33,15 @@ def _record_model_calls(monkeypatch):
     seen = []
     monkeypatch.setattr(vp, "voice_standards_for", lambda rfp_id=None: ("STD", "r7"))
 
-    async def fake(text, **kw):
-        seen.append(text)
-        return pv.VoiceResult(text=text)
+    async def fake(content, standards, *, rfp_id=None):
+        seen.append(content)
+        return {"misses": []}
 
-    monkeypatch.setattr(pv, "rewrite_for_voice", fake)
+    async def no_repair(content, standards, quotes, *, rfp_id=None):
+        raise AssertionError("repair")
+
+    monkeypatch.setattr(vp, "check_section", fake)
+    monkeypatch.setattr(vp, "repair_section", no_repair)
     return seen
 
 

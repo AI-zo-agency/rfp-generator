@@ -25,12 +25,12 @@ class TestCompulsoryRev6:
 
     def test_brand_voice_block_leads_with_rev6(self) -> None:
         block = format_brand_voice_block({"tone": "direct"}, register="narrative")
-        assert "rev 6" in block.casefold()
+        assert "REV 6 VOICE" not in block
         assert "INTERESTING PROPOSAL ANSWER" in block
         # Dead-on-arrival older revs must not govern.
         assert "rev 3 · July 2026) · COMPULSORY" not in block
 
-    def test_contradiction_rewrite_prompts_include_rev6(self) -> None:
+    def test_contradiction_rewrite_prompts_use_the_governing_revision(self) -> None:
         from pathlib import Path
 
         for rel in (
@@ -40,7 +40,8 @@ class TestCompulsoryRev6:
             src = (
                 Path(__file__).resolve().parents[1] / rel
             ).read_text(encoding="utf-8")
-            assert "CHAT_REV6_VOICE_HARD_RULES" in src
+            assert "voice_standards_for" in src
+            assert "CHAT_REV6_VOICE_HARD_RULES" not in src
             assert "apply_compulsory_rev6_to_section" in src
 
 
@@ -49,11 +50,11 @@ class TestReviewFixAntiEcho:
         assert "ANTI-RFP-ECHO" in SURGICAL_FIX_PROMPT
         assert "NEVER restate the RFP" in SURGICAL_FIX_PROMPT
 
-    def test_surgical_fix_rev6_is_compulsory(self) -> None:
+    def test_surgical_fix_follows_the_brand_voice_block(self) -> None:
         lower = SURGICAL_FIX_PROMPT.casefold()
-        assert "compulsory" in lower
-        assert "rev 6" in lower
-        assert "negation-contrast" in lower or "em dash" in lower
+        assert "brand voice block" in lower
+        assert "rev 6" not in lower
+        assert "compulsory" in lower or "follow the brand voice" in lower
 
     def test_presubmit_rev6_violations_are_critical(self) -> None:
         from app.models.proposal import ProposalDraft, ProposalSection

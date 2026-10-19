@@ -7,6 +7,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { expandJammedTableLine } from "@/lib/expand-jammed-table-line";
 import { humanizeGapTag, isInternalScanTag, isManualFillTag } from "@/lib/gap-tag-humanize";
 import type { EvidenceItem } from "@/types/proposal";
 
@@ -377,8 +378,10 @@ function isPlaceholderCell(cell: string): boolean {
 }
 
 /**
- * Pipe noise: `| | | | |`, `||||`, or ellipsis-only rows. These must never
- * render as paragraphs (raw pipes) or as table chrome.
+ * Pipe noise: `| | | | |`, `||||`, `| --- | --- |`, or ellipsis-only rows.
+ * These must never render as paragraphs (raw pipes) or as table chrome.
+ * A delimiter row is noise as text, and the table scanner still reads past it
+ * so the data row stays in the header's columns.
  */
 function isPipeNoiseLine(line: string): boolean {
   const trimmed = line.trim();
@@ -810,17 +813,9 @@ function expandInlineTableLines(text: string): string {
       const trimmed = line.trim();
       if (!trimmed.includes("|")) return line;
       if (isPipeNoiseLine(trimmed)) return "";
-      const pipes = trimmed.match(/\|/g)?.length ?? 0;
-      // LLM often emits header + separator + rows on one line — split row boundaries.
-      if (pipes < 6) return line;
-      let expanded = trimmed.replace(/\|\s*\|(?=\s*[-:–—])/g, "|\n|");
-      expanded = expanded.replace(/\|\s+(?=\|)/g, "|\n|");
-      // Collapse expand artifacts: `|| Foundation` → `| Foundation`
-      expanded = expanded
-        .split("\n")
-        .map((row) => row.replace(/^\|{2,}/, "|").replace(/\|{2,}$/, "|"))
-        .join("\n");
-      return expanded;
+      // A blank cell is `| |`. Only split a line that already holds a separator
+      // and real cells — that is several rows jammed together, not one form row.
+      return expandJammedTableLine(trimmed) ?? line;
     })
     .join("\n");
 }
@@ -877,6 +872,12 @@ function parseBlocks(body: string): Block[] {
             continue;
           }
           break;
+        }
+        // `| --- |` and `| | | |` sit between the header and a row of blank
+        // cells. Skip them and keep the data row in this table.
+        if (isPipeNoiseLine(current)) {
+          index += 1;
+          continue;
         }
         if (!isTableRow(current)) break;
         tableLines.push(current);

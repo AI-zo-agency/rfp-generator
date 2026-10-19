@@ -262,10 +262,10 @@ async def apply_feedback_blocker_suite(
         draft, rev6_logs = await apply_rev6_voice_scrub_to_draft(draft)
         if rev6_logs:
             logs.append(
-                f"Rev 6 zö voice scrub after contradiction suite: {len(rev6_logs)} fix(es)"
+                f"Brand voice scrub after contradiction suite: {len(rev6_logs)} fix(es)"
             )
     except Exception as rev6_exc:  # noqa: BLE001
-        logger.warning("Rev 6 scrub after blocker suite skipped: %s", rev6_exc)
+        logger.warning("Brand voice scrub after blocker suite skipped: %s", rev6_exc)
 
     return BlockerPreventionResult(
         draft=draft,

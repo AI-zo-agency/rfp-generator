@@ -20,6 +20,27 @@ class ReplacementJsonSalvageTests(unittest.TestCase):
         self.assertIn("Events conducted per island", parsed["replacement"])
         self.assertIn("Total attendance", parsed["replacement"])
 
+    def test_parses_prose_quotes_inside_a_string(self) -> None:
+        raw = """{
+ "compensation_outline": {
+  "ref": "V.B.6 Fair and Reasonable Cost Information",
+  "items": [
+   "6.a Submit Attachment C, "Fee Schedule", as directed in Section III"
+  ]
+ },
+ "asks": [{"id": "K1", "quote": "shall submit the "Fee Schedule""}]
+}"""
+        parsed = _parse_json_response(raw)
+        item = parsed["compensation_outline"]["items"][0]
+        self.assertIn("Fee Schedule", item)
+        self.assertIn("as directed", item)
+        self.assertIn("Fee Schedule", parsed["asks"][0]["quote"])
+
+    def test_parses_trailing_comma_before_close(self) -> None:
+        raw = '{"asks": [{"id": "K1", "required": true,},],}'
+        parsed = _parse_json_response(raw)
+        self.assertEqual(parsed["asks"][0]["id"], "K1")
+
     def test_salvages_fenced_truncated_issues_array(self) -> None:
         raw = '''```json
 {

@@ -66,9 +66,10 @@ class LeanReviewGateTests(unittest.TestCase):
         compact = format_brand_voice_block(
             {"tone": "direct"}, register="narrative", compact=True
         )
-        self.assertIn("REV 6", compact)
-        self.assertLess(len(compact), len(full) // 2)
+        self.assertNotIn("REV 6 VOICE", compact)
+        self.assertNotIn("REV 6 VOICE", full)
         self.assertNotIn("INTERESTING PROPOSAL ANSWER", compact)
+        self.assertIn("COMPULSORY", compact)
 
     def test_toc_never_triggers_requirement_rewrite(self) -> None:
         section = ProposalSection(

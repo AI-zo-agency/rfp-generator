@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from app.services.proposal_brand_voice import Register, classify_section_register, voice_standards_for
+from app.services.proposal_brand_voice import Register, classify_section_register
 
 _PROCUREMENT_ENTITY = re.compile(
     r"\b([Tt])he (Vendor|Offeror|Proposer|Respondent|Contractor)('s)?\b"
@@ -479,9 +479,9 @@ async def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["Prop
 
     if not isinstance(draft, _Draft):
         return draft, []
-    draft, logs = await apply_voice_pass(draft)
     draft, mech_logs = _apply_mechanics_to_draft(draft)
-    return draft, logs + mech_logs
+    draft, logs = await apply_voice_pass(draft)
+    return draft, mech_logs + logs
 
 
 async def apply_chat_rev6_voice_to_draft(
@@ -591,7 +591,6 @@ async def apply_compulsory_rev6_to_section(
 ) -> tuple["ProposalSection", list[str]]:
     """Voice pass on one section after any LLM edit (chat, contradiction, fill)."""
     from app.models.proposal import ProposalSection as _PS
-    from app.services import proposal_voice_llm as voice_llm
 
     if not isinstance(section, _PS):
         return section, []
@@ -604,20 +603,20 @@ async def apply_compulsory_rev6_to_section(
         title=section.title or "",
         zo_mode=getattr(section, "mode", None) or "write",
     )
-    standards, rev_id = voice_standards_for(rfp_id)
-    res = await voice_llm.rewrite_for_voice(
-        voiced,
-        register=classify_section_register(
-            section_id=section.id, title=section.title or "", zo_mode=getattr(section, "mode", None) or "write"
-        ),
-        standards=standards,
-        rev_id=rev_id,
-        rfp_id=rfp_id,
+    from app.models.proposal import ProposalDraft
+    from app.services.proposal_voice_pass import apply_voice_pass
+
+    voiced_section = section.model_copy(update={"content": voiced})
+    draft = ProposalDraft(
+        rfpId=rfp_id or "",
+        sections=[voiced_section],
+        updatedAt="",
     )
-    voiced = res.text.replace("—", ",").replace("–", "-")
-    if voiced == body:
-        return section, res.logs
-    return section.model_copy(update={"content": voiced}), res.logs
+    updated, logs = await apply_voice_pass(draft, section_ids={section.id})
+    out = updated.sections[0]
+    if (out.content or "") == body:
+        return section, logs
+    return section.model_copy(update={"content": out.content}), logs
 
 
 def is_duplicate_static_rfp_section(

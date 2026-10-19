@@ -728,6 +728,11 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
 
     if phase == "packet-redistribute":
         research = await aget_research_cache(rfp_id)
+        label = (
+            research.pipeline_checkpoint.activity_label
+            if research and research.pipeline_checkpoint
+            else None
+        )
         if research and research.pipeline_checkpoint:
             cp = research.pipeline_checkpoint
             await _save_checkpoint(
@@ -752,7 +757,11 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
             rfp_id,
             phase=phase,
             outcome="completed",
-            summary="Completed Place content (packet redistribute)",
+            summary=(
+                "Completed brand voice"
+                if label == "Brand voice"
+                else "Completed Place content (packet redistribute)"
+            ),
         )
         return
 

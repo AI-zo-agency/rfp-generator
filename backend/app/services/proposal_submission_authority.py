@@ -5,6 +5,7 @@ Principle-based LLM pass over focused RFP excerpts — no client-specific regex 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Literal
@@ -24,6 +25,129 @@ from app.services.proposal_rfp_excerpt import (
 
 logger = logging.getLogger(__name__)
 AGENT = "submission_authority"
+_QUOTE_AGENT = "cost_submittal_quotes"
+
+_COST_QUOTE_SYSTEM = """You copy sentences from one slice of an RFP. Return JSON only:
+{"quotes": ["sentence", "..."]}
+
+Copy a sentence only when it requires the offeror to submit their own price, fee, cost proposal, or rate schedule. That includes a separate binder or folder for pricing, and a completed cost or fee form.
+
+Do not copy a table-of-contents line that only names a section and a page.
+Do not copy a scope task that asks the offeror to build the buyer's own program budget or find funding for the buyer's marketing plan.
+Copy each sentence exactly as written in the slice. If this slice has none, return {"quotes": []}.
+"""
+
+
+def character_slices(text: str, *, size: int = 28_000, overlap: int = 600) -> list[str]:
+    """Fixed character windows. Overlap is so a sentence on a boundary is not cut in half."""
+    body = text or ""
+    if not body.strip():
+        return []
+    if size < 1:
+        return [body]
+    if len(body) <= size:
+        return [body]
+    step_overlap = overlap if overlap < size else 0
+    slices: list[str] = []
+    start = 0
+    while start < len(body):
+        end = min(len(body), start + size)
+        slices.append(body[start:end])
+        if end >= len(body):
+            break
+        start = end - step_overlap
+    return slices
+
+
+def _fold_for_grounding(text: str) -> str:
+    """Case and whitespace folded, punctuation ignored. No pattern matching."""
+    chars: list[str] = []
+    for ch in (text or "").casefold():
+        if ch.isalnum() or ch in "@.+":
+            chars.append(ch)
+        else:
+            chars.append(" ")
+    return " ".join("".join(chars).split())
+
+
+def grounded_verbatim_quotes(
+    quotes: list[Any],
+    source: str,
+    *,
+    limit: int = 6,
+) -> list[str]:
+    """Keep quotes the model copied only when they actually appear in the RFP."""
+    folded_source = _fold_for_grounding(source)
+    kept: list[str] = []
+    seen: set[str] = set()
+    for raw in quotes:
+        snippet = " ".join(str(raw or "").split())
+        folded = _fold_for_grounding(snippet)
+        if len(folded) < 40 or folded in seen or folded not in folded_source:
+            continue
+        seen.add(folded)
+        kept.append(snippet)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
+def format_cost_submittal_quotes(quotes: list[str]) -> str:
+    if not quotes:
+        return "(none copied)"
+    return "\n".join(f"- {quote}" for quote in quotes)
+
+
+def load_rfp_body_for_quotes(rfp_id: str) -> str:
+    """Full RFP text for the quote pass. Empty when the file cannot be read."""
+    rid = (rfp_id or "").strip()
+    if not rid:
+        return ""
+    try:
+        from app.services.go_no_go_service import combine_rfp_text
+        from app.services.rfp_content import load_local_rfp_text
+        from app.services.rfp_repository import get_rfp
+
+        record = get_rfp(rid)
+        if record is None:
+            return ""
+        description, pdf_text, *_rest = load_local_rfp_text(record)
+        return combine_rfp_text(description, pdf_text, max_chars=400_000)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cost quote source load failed rfp_id=%s err=%s", rid, exc)
+        return ""
+
+
+async def collect_cost_submittal_quotes(rfp_text: str) -> list[str]:
+    """LLM copies required fee-submittal sentences; ungrounded copies are dropped."""
+    body = (rfp_text or "").strip()
+    if len(_fold_for_grounding(body)) < 40:
+        return []
+    from app.services.proposal_intelligence.agent_base import safe_chat_json
+
+    async def _one(sl: str) -> list[str]:
+        raw, _provider = await safe_chat_json(
+            [
+                {"role": "system", "content": _COST_QUOTE_SYSTEM},
+                {"role": "user", "content": sl},
+            ],
+            max_tokens=800,
+            temperature=0.0,
+            agent_name=_QUOTE_AGENT,
+            cache_prefix=sl,
+        )
+        rows = raw.get("quotes") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return []
+        return [str(row) for row in rows]
+
+    parts = await asyncio.gather(*(_one(sl) for sl in character_slices(body)))
+    gathered: list[str] = []
+    for rows in parts:
+        gathered.extend(rows)
+    kept = grounded_verbatim_quotes(gathered, body)
+    logger.info("cost submittal quotes grounded=%d slices=%d", len(kept), len(parts))
+    return kept
 
 CHECKLIST_INSTRUMENTS = frozenset({"form", "references", "disclosure"})
 VALID_INSTRUMENTS = CHECKLIST_INSTRUMENTS | frozenset(
@@ -45,12 +169,19 @@ Rules (judge by meaning, not keyword lists):
   for removal.
 - Signature / authorized-representative rules are global constraints, NOT narrative tabs.
 - Page limits, deadlines, and copy-count rules are submissionConstraints, NOT tabs.
-- When early TOC lists an attachment (e.g. Cost Sheet) but operative submission text
-  marks the same attachment RESERVED or omits pricing instructions, set costRequirementStatus
-  to "ambiguous", stamp pricing-related tabs submissionInstrument "clarify", and add an
-  ambiguity with blocksBudget=true. Do NOT mark pricing as confirmed required.
-- When operative text clearly requires a pricing/cost form or fee schedule, set
-  costRequirementStatus "confirmed" and stamp the matching tab submissionInstrument "cost".
+- A required cost submittal is confirmed when operative text says the offeror must
+  submit a cost proposal, fee schedule, or pricing in a separate binder — including
+  "must be accompanied by" or "must be submitted separate". A missing pricing form
+  or line-item template, and zero evaluation points, does not make it absent or ambiguous.
+  Stamp the matching tab submissionInstrument "cost". Zero points means price is not
+  a scored factor, not that the binder is optional.
+- A scope task that asks the offeror to build the buyer's own program budget, or to
+  find funding for the buyer's marketing plan, is narrative scope. It is not the cost
+  submittal. Do not stamp that tab "cost".
+- Ambiguous + blocksBudget only when the sources contradict: one place requires a
+  cost submittal and another marks that same submittal reserved, prohibited, or not
+  to be submitted. A table-of-contents line whose body is not in the excerpts is
+  ambiguous. Stamp that tab "clarify".
 - When no operative pricing submittal exists, costRequirementStatus "absent".
 - The user message may include unresolved references. Those are facts: the upload
   cites that part, and its body is not in the file. Do not rediscover them and
@@ -479,9 +610,13 @@ async def apply_submission_authority_pass(
     if unresolved_references is None:
         unresolved_references = _load_unresolved_references(plan.metadata.rfp_id)
     reference_block = unresolved_reference_block(unresolved_references)
+    quote_source = load_rfp_body_for_quotes(plan.metadata.rfp_id) or rfp_context
+    cost_quotes = await collect_cost_submittal_quotes(quote_source)
     stable = (
         f"Current outline ({len(sections)} tabs):\n{titles_block}\n\n"
         f"{reference_block}\n\n"
+        f"Cost-submittal quotes copied from the full RFP:\n"
+        f"{format_cost_submittal_quotes(cost_quotes)}\n\n"
         f"Submission-documents excerpt:\n"
         f"{submission_documents_excerpt(rfp_context)[:24000]}\n\n"
         f"Closing/forms excerpt:\n{closing_package_excerpt(rfp_context)[:16000]}"

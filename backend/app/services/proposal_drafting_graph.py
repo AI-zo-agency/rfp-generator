@@ -270,14 +270,14 @@ Rules (strict):
        scope." Prefer "Working within buyer protocols" for media-buy / publish gates.
    (i) ACCESSIBILITY: Name a standard (e.g. WCAG) ONLY if KB/companyfacts support it;
        otherwise [VERIFY] or describe a compliance review without a fake standard.
-46. COVER LETTER / TRANSMITTAL (Rev 6 signed passage · RFP format first · won form second):
+46. COVER LETTER / TRANSMITTAL (signed passage · RFP format first · won form second):
    Structure and required fields follow THIS RFP's cover-letter / letter-of-transmittal
    instructions and submission package (addressee, required statements, page limits,
    attachments) — never a generic Zo template letter.
    When evidence includes 06_WON / past won cover letters or letters of transmittal,
    treat them as FORM / STRUCTURE / VOICE models (how zö writes a signed letter) —
    never copy their prior client, project claims, dates, or dollars into THIS letter.
-   Voice = Rev 6 correspondence for signed passages: first person from the authorized
+   Voice = the brand voice block's correspondence rules for signed passages: first person from the authorized
    signer (I/we), address the named recipient when known, real offer letter — NOT
    corporate boilerplate openers like "On behalf of zö agency". Name zö agency when
    stating the offeror, certifications, or contact block — not as a third-person
@@ -1486,7 +1486,7 @@ def _build_draft_prompt_zones(
     zone_c = ""
     if cover_letter_sections:
         zone_c += (
-            "COVER LETTER / TRANSMITTAL sections in this batch (Rev 6 signed passage):\n"
+            "COVER LETTER / TRANSMITTAL sections in this batch (signed passage):\n"
             f"{format_register_block('cover_letter')}\n\n"
             f"Brand voice for cover-letter sections:\n"
             f"{_brand_voice_block(state.get('brand_voice'), register='cover_letter', rfp_client=state['rfp_client'], rfp_id=state.get('rfp_id', ''))}\n\n"
@@ -1792,8 +1792,7 @@ def _build_draft_prompt_zones(
                     "letters of transmittal, mirror their letter FORM and correspondence "
                     "voice only. Never copy prior client names, project claims, dates, "
                     "or dollars — rewrite for THIS buyer and THIS RFP.\n"
-                    "3) VOICE — Rev 6 signed-passage / correspondence standard "
-                    "(branding/ZO_BRAND_AND_WRITING_STANDARDS_REV6.md): first person from "
+                    "3) VOICE — signed-passage / correspondence rules from the brand voice block: first person from "
                     "the authorized signer; use the recipient's name when known; "
                     "contractions warm prose. NEVER open with 'On behalf of zö agency' or "
                     "similar third-person agency boilerplate. State the offeror as "

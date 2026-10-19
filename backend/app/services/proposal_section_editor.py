@@ -1257,9 +1257,12 @@ async def _apply_suggested_fix_to_section(
 
     user_content += f"Current section content:\n{masked_prior[:12000]}"
 
-    system_prompt = APPLY_FIX_REDRAFT_PROMPT
+    from app.services.proposal_brand_voice import voice_standards_for
+
+    standards, _ = voice_standards_for(rfp_id)
+    system_prompt = f"{standards}\n\n{APPLY_FIX_REDRAFT_PROMPT}"
     if mfill_originals:
-        system_prompt = f"{APPLY_FIX_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
+        system_prompt = f"{system_prompt}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
     raw, provider = await llm.chat_json(
         [
@@ -2892,11 +2895,9 @@ Rules:
    user ask without dropping coverage. Answer what we will do/prove; do not paraphrase the
    buyer (anti-RFP-echo). Do not drop a required form field, eval criterion, or demanded
    subsection to polish tone.
-11. REV 6 / zö BRANDING (every editorInstruction): Require first-person we/our in narrative
-   tabs; company name "zö agency"; no em dashes; no negation-contrast (rather than / instead
-   of / "X, not Y" / not just); no significance-closes; no "worth noting/naming"; no empty
-   hype. Patches and rewrites must stay in Rev 6 voice — never flatten to generic consultant
-   prose.
+11. BRAND VOICE (every editorInstruction): Follow the brand voice block in this prompt.
+   It is the revision pinned to this proposal, or the Brand Voice default. Patches and
+   rewrites stay in that voice. Never flatten to generic consultant prose.
 
 Return siblingEdits (may be empty) in the same JSON:
   "siblingEdits": [{"sectionTitle": "exact sidebar title", "editorInstruction": "…"}]
@@ -3284,9 +3285,10 @@ async def _plan_edit_scope(
         rfp_client=rfp.client,
         register=register,
         compact=True,
+        rfp_id=rfp.id,
     )
     voice_plan = (
-        f"\n\nREV 6 / zö BRANDING (mandatory in every editorInstruction):\n{voice_block[:3_500]}\n"
+        f"\n\nBRAND VOICE (mandatory in every editorInstruction — pinned revision or the default):\n{voice_block}\n"
         if voice_block.strip()
         else ""
     )
@@ -3938,7 +3940,7 @@ Rules:
 - DEFAULT STYLE: Unless the user asks for more detail, instruct the editor to write concisely — cover every RFP requirement but in the fewest tight, proof-led sentences. No filler, no restating the RFP back to the evaluator. ANTI-RFP-ECHO: editorInstruction must require a proposal answer (what we will do/prove), never a paraphrase of the buyer's ask.
 - CROSS-SECTION (mandatory every turn when OTHER SECTIONS digest is present): editorInstruction MUST require matching agency facts already stated elsewhere (legal name, email/phone, team size, certifications, insurance, registration, budget totals, named personnel, primary contact, case-study claims) — never invent a conflicting value. Prefer MANUAL FILL / VERIFY over contradicting another tab. If the ask changes a shared fact, say which other tabs must stay aligned.
 - RFP (mandatory): editorInstruction MUST require covering this section's scored/demanded RFP needs from RFP CONTEXT without echoing the buyer. Partial coverage is unacceptable when needs are listed.
-- REV 6 / zö (mandatory every editorInstruction): first-person we/our in narrative; "zö agency"; no em dashes; no negation-contrast; no significance-closes; no worth noting/naming; no empty hype. Never flatten to generic consultant prose.
+- BRAND VOICE (mandatory every editorInstruction): follow the brand voice block. It is the revision pinned to this proposal, or the Brand Voice default. Never flatten to generic consultant prose.
 - SMART REPLACE: If the ask swaps/replaces any entity (person, contact, client, case), editorInstruction MUST require updating all related fields from KB for the NEW entity — not a name-only string swap. Plan kbQueries for the new entity's full profile."""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
@@ -3986,7 +3988,7 @@ Rules:
    CONSISTENCY: Once a paragraph starts with "We", do NOT switch to "zö agency" mid-paragraph.
    Use "zö agency" only on first mention or in headings; everywhere else use "we/our/us".
 7. PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation. User edits must NOT flatten tone into generic consultant/corporate prose.
-7a. REV 6 HARD BANS: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just / more than just); no significance-closes; no "worth noting/naming"; no empty hype. State what the thing is.
+7a. Follow the BRAND VOICE block. It is the revision pinned to this proposal, or the Brand Voice default. That text outranks any older habit.
 7b. RFP COVERAGE: Obey the COVERAGE CHECKLIST / RFP GAPS for this section. Voice-only asks still must fill gaps from evidence/KB — never invent, never drop scored asks to polish tone.
 8. Keep rhythm, confidence, warmth, and client-centered framing from the previous draft unless the user explicitly requests a tone change.
 9. Apply WRITING AVOIDANCES from lost bids when provided — do not repeat past loss patterns.
@@ -4042,9 +4044,9 @@ Rules:
    RFP CONTEXT show a contradiction or missed requirement that this span states, fix that
    fact inside the span too (do not invent; prefer VERIFY / MANUAL FILL).
 2. Match the surrounding section's voice, rhythm, and register (first person we/our in narrative sections).
-3. Preserve BRAND VOICE from the voice block — warm, proof-led, client-centered. Always
-   obey the Rev 6 / zö block when provided (even on lean edits).
-3a. REV 6 HARD BANS in the replacement: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just / more than just); no significance-closes ("That's the kind of…"); no hedging ("worth noting" / "worth naming"); no empty hype words. State what the thing is. Company name always "zö agency".
+3. Preserve BRAND VOICE from the voice block, including on lean edits. That block is the
+   revision pinned to this proposal, or the Brand Voice default.
+3a. The replacement follows that brand voice block. It outranks any older habit.
 4. Use ONLY facts from KB excerpts when provided. Use [VERIFY: specific field] if a fact is still missing.
 5. Do NOT invent reference contacts, phone numbers, or metrics.
 5a. CROSS-SECTION: Never write a value that contradicts OTHER SECTIONS digest (contacts,
@@ -4111,7 +4113,7 @@ Rules:
 - Keep markdown tables/lists/headings unless the instruction requires layout change.
 - For table cell fixes: same columns — change only the wrong value(s).
 - Never add deferred "upon request" language or new unverified contacts.
-- REV 6 VOICE: no em dashes; no negation-contrast (rather than / instead of / "X, not Y"); no significance-closes; no "worth noting/naming"; no empty hype. First person we/our in narrative tabs. Company name "zö agency".
+- Follow the brand voice standards at the top of this prompt. They are the revision pinned to this proposal, or the Brand Voice default.
 - Bios / Experience of Personnel: if a named person's specialization was invented,
   REPLACE it with 2–4 sentences from that person's 04_Bio KB. Never leave only a
   Role line when 04_Bio is provided. Never add government/municipal/enterprise
@@ -4155,7 +4157,7 @@ When the user asks to ADD a team bio alongside existing bios in the same tab (le
 
 NARRATIVE REGISTER: first person we/our — never "The Vendor" or third-person procurement language.
 PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation are mandatory.
-REV 6 HARD BANS: no em dashes; no negation-contrast (rather than / instead of / "X, not Y" / not just); no significance-closes; no "worth noting/naming"; no empty hype. State what the thing is.
+Follow the BRAND VOICE block. It is the revision pinned to this proposal, or the Brand Voice default. That text outranks any older habit.
 - Keep warm, confident, proof-led rhythm — not generic consultant prose.
 - Prefer concrete facts from KB over vague claims.
 - Fill [VERIFY: ...] tags when KB has the fact; otherwise keep a precise [VERIFY: ...] tag.
@@ -6001,8 +6003,8 @@ async def _improve_section_selection(
 ) -> tuple[ProposalSection, str, int]:
     """Surgical excerpt edit — splice replacement only.
 
-    lean=True: shorter prompt for planned patches, but still includes compact Rev 6,
-    RFP context, and OTHER SECTIONS digest so edits cannot contradict the manuscript.
+    lean=True: shorter wrapper, but the brand voice block is still the pinned
+    revision or the Brand Voice default, plus RFP context and OTHER SECTIONS.
     """
     content = section.content or ""
     if not _selection_bounds_valid(
@@ -6108,7 +6110,7 @@ async def _improve_section_selection(
             )
             rfp_snip = _budget_rfp_context(rfp_context)
             user_block = (
-                f"BRAND VOICE / REV 6 (mandatory):\n{voice_block}\n\n"
+                f"BRAND VOICE (mandatory — pinned revision or the default):\n{voice_block}\n\n"
                 f"Client: {rfp.client}\n"
                 f"Section: {section.title}\n"
                 f"Register: {register}\n\n"
@@ -6127,7 +6129,7 @@ async def _improve_section_selection(
                     if kb_block.strip()
                     else ""
                 )
-                + "Return ONLY the revised excerpt. Obey Rev 6 + OTHER SECTIONS. "
+                + "Return ONLY the revised excerpt. Obey the brand voice block + OTHER SECTIONS. "
                 "Do not rewrite surrounding text.\n"
             )
         else:
@@ -6139,7 +6141,7 @@ async def _improve_section_selection(
                 f"Section: {section.title}\n"
                 f"Register: {register}\n\n"
                 + (
-                    "COVER LETTER EDIT: Keep THIS RFP's letter format. Rev 6 signed-passage "
+                    "COVER LETTER EDIT: Keep THIS RFP's letter format. Signed-passage "
                     "voice (first person). Never introduce 'On behalf of zö agency' "
                     "boilerplate. Name zö agency only as the offeror where the RFP asks.\n\n"
                     if register == "cover_letter"
@@ -6636,7 +6638,7 @@ async def _redraft_rfp_section(
     voice_coverage_note = ""
     if voice_ask:
         voice_coverage_note = (
-            "\nVOICE/STYLE ASK — scrub Rev 6 bans only. PRESERVE structure, tables, "
+            "\nVOICE/STYLE ASK — follow the brand voice block only. PRESERVE structure, tables, "
             "headings, fee lines, and approximate word count. Do NOT shorten toward the "
             "word target. Do NOT regenerate the section. Keep substance already present; "
             "do not invent deliverables, metrics, or case studies.\n"
@@ -6682,7 +6684,7 @@ async def _redraft_rfp_section(
             "2) If KB / evidence includes 06_WON cover letters or letters of "
             "transmittal, mirror their letter FORM and correspondence voice only. "
             "Never copy prior client names, project claims, dates, or dollars.\n"
-            "3) Rev 6 signed-passage voice: first person from the authorized signer; "
+            "3) Signed-passage voice from the brand voice block: first person from the authorized signer; "
             "address the recipient by name when known; multi-paragraph letter prose "
             "(salutation → body → close). NEVER open with 'On behalf of zö agency' "
             "or third-person agency boilerplate. Name zö agency only as the offeror / "
@@ -6703,7 +6705,7 @@ async def _redraft_rfp_section(
             f"Section: {section.title}\n"
             + word_target_line
             + "ANTI-RFP-ECHO: answer with proposal substance only — never paraphrase the "
-            "requirement checklist. INTERESTING (Rev 6): concrete open + case proof + "
+            "requirement checklist. INTERESTING: concrete open + case proof + "
             "true cost when it matters + flat stop. No generic capability lists.\n"
             + length_hint
             + format_hint
@@ -7120,7 +7122,7 @@ async def _try_voice_style_only_pass(
 
     if content == before:
         reply = (
-            f"**{section.title}** — already matches Rev 6 / zö voice mechanics "
+            f"**{section.title}** — already matches the brand voice mechanics "
             "(no full rewrite). Structure and length preserved."
         )
         return section, draft, research, provider, reply, False
@@ -7143,7 +7145,7 @@ async def _try_voice_style_only_pass(
     before_w = word_count(before)
     after_w = word_count(working.content or "")
     reply = (
-        f"**Understood:** Align **{section.title}** with zö Rev 6 voice without "
+        f"**Understood:** Align **{section.title}** with the brand voice without "
         f"regenerating the tab.\n\n"
         f"Applied mechanical voice scrub only ({before_w} → {after_w} words). "
         "Structure and length preserved."

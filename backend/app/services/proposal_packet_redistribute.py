@@ -435,8 +435,14 @@ async def run_packet_redistribute(
     rfp_id: str,
     *,
     allow_static_reorder: bool = False,
+    voice_only: bool = False,
 ) -> dict[str, Any]:
     """Apply Place moves. Uses pending preview plan when present (0 LLM)."""
+    if voice_only:
+        from app.services.proposal_voice_pass import run_saved_voice_gate
+
+        logs = await run_saved_voice_gate(rfp_id)
+        return {"voiceOnly": True, "logs": logs}
     from app.services.proposal_common import load_rfp_for_proposal
     from app.services.proposal_draft_snapshots import push_proposal_snapshot
     from app.services.proposal_pipeline_checkpoint import (

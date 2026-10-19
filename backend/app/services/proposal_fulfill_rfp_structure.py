@@ -2661,7 +2661,7 @@ _COVER_LETTER_DRAFT_STUB = (
     "- Salutation to the buyer / selection committee\n"
     "- Statement of intent to bid on this RFP (name the client + opportunity)\n"
     "- Understanding of this buyer's need / opportunity (proposal stance)\n"
-    "- Why zö agency is a fit — proof-led specifics from KB (Rev 6 voice)\n"
+    "- Why zö agency is a fit — proof-led specifics from KB (brand voice)\n"
     "- Firm contact from companyfacts / Section 1.3\n"
     "- Every RFP-listed cover-letter element in letter prose\n"
     "- Closing signed by Sonja Anderson, Founder / Agency Director "

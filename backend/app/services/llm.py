@@ -2333,13 +2333,114 @@ def _escape_raw_controls_in_json_strings(text: str) -> str:
     return "".join(out)
 
 
+def _quote_closes_string(text: str, index: int) -> bool:
+    """True when the quote at ``index`` ends a JSON string.
+
+    A quote followed by a comma and then a word is prose copied from an RFP
+    (``"Fee Schedule", as directed``), not the end of the string.
+    """
+    j = index + 1
+    n = len(text)
+    while j < n and text[j] in " \t\r\n":
+        j += 1
+    if j >= n:
+        return True
+    nxt = text[j]
+    if nxt in ":}]":
+        return True
+    if nxt != ",":
+        return False
+    k = j + 1
+    while k < n and text[k] in " \t\r\n":
+        k += 1
+    if k >= n:
+        return True
+    if text.startswith(("true", "false", "null"), k):
+        return True
+    return text[k] in '"{[]}-0123456789}]'
+
+
+def _escape_prose_quotes(text: str) -> str:
+    """Escape double quotes that sit inside a JSON string."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for index, ch in enumerate(text):
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+        if in_string and ch == "\\":
+            out.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                out.append(ch)
+            elif _quote_closes_string(text, index):
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Drop commas that sit immediately before a closing brace or bracket."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    n = len(text)
+    index = 0
+    while index < n:
+        ch = text[index]
+        if escape:
+            out.append(ch)
+            escape = False
+            index += 1
+            continue
+        if in_string and ch == "\\":
+            out.append(ch)
+            escape = True
+            index += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            index += 1
+            continue
+        if ch == "," and not in_string:
+            look = index + 1
+            while look < n and text[look] in " \t\r\n":
+                look += 1
+            if look < n and text[look] in "}]":
+                index += 1
+                continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def _repair_loose_json(text: str) -> str:
+    return _strip_trailing_commas(_escape_prose_quotes(text))
+
+
 def _try_parse_json_object(text: str) -> dict[str, Any] | None:
     escaped = _escape_raw_controls_in_json_strings(text)
+    repaired = _repair_loose_json(text)
+    repaired_escaped = _escape_raw_controls_in_json_strings(repaired)
     for candidate in (
         text,
         escaped,
+        repaired,
+        repaired_escaped,
         _close_truncated_json(text),
         _close_truncated_json(escaped),
+        _close_truncated_json(repaired),
+        _close_truncated_json(repaired_escaped),
     ):
         try:
             parsed = json.loads(candidate)
@@ -2717,7 +2818,13 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
                     label,
                 )
                 return salvaged
-        raise LlmError(f"LLM returned invalid JSON: {raw[:200]}")
+        detail = ""
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as exc:
+            window = text[max(0, exc.pos - 60) : exc.pos + 60]
+            detail = f" ({exc.msg} at char {exc.pos}: {window!r})"
+        raise LlmError(f"LLM returned invalid JSON: {raw[:200]}{detail}")
 
     parsed = _unwrap_nested_json(parsed)
     # Only replace a successful parse when salvage recovers the *missing*

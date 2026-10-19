@@ -841,12 +841,12 @@ async def _run_fulfill_rfp_gaps_body(
                 if rev6_logs:
                     await asave_proposal_draft(draft)
                     report["logs"].append(
-                        f"Rev 6 zö voice scrub (compulsory): {len(rev6_logs)} fix(es) "
+                        f"Brand voice scrub (compulsory): {len(rev6_logs)} fix(es) "
                         "before Review Sections"
                     )
             except Exception as rev6_exc:  # noqa: BLE001
-                logger.warning("Review & Fix Rev 6 scrub skipped: %s", rev6_exc)
-                report["logs"].append(f"Rev 6 voice scrub skipped: {rev6_exc}")
+                logger.warning("Review & Fix brand voice scrub skipped: %s", rev6_exc)
+                report["logs"].append(f"Brand voice scrub skipped: {rev6_exc}")
 
             brand_voice = _brand_voice_payload(research)
             # Same rfp_context every other fact-check caller passes: the raw RFP
@@ -1028,7 +1028,7 @@ async def _run_fulfill_rfp_gaps_body(
                                 )
                                 section = draft.sections[idx]
                                 report["logs"].append(
-                                    f"Rev 6 voice mechanics on "
+                                    f"Brand voice mechanics on "
                                     f"{voice_target.title or voice_target.id}"
                                 )
 
@@ -1199,11 +1199,11 @@ async def _run_fulfill_rfp_gaps_body(
                         draft, won_rev6 = await apply_rev6_voice_scrub_to_draft(draft)
                         if won_rev6:
                             report["logs"].append(
-                                f"Rev 6 zö voice scrub after WON fill: {len(won_rev6)} fix(es)"
+                                f"Brand voice scrub after WON fill: {len(won_rev6)} fix(es)"
                             )
                     except Exception as won_rev6_exc:  # noqa: BLE001
                         logger.warning(
-                            "Rev 6 scrub after WON fill skipped: %s", won_rev6_exc
+                            "Brand voice scrub after WON fill skipped: %s", won_rev6_exc
                         )
                     await asave_proposal_draft(draft)
                     await record_targeted_fix_won_fill_done(rfp_id)
@@ -3383,10 +3383,10 @@ async def _run_fulfill_rfp_gaps_body(
         if final_rev6:
             await asave_proposal_draft(draft)
             report["logs"].append(
-                f"Final Rev 6 zö voice scrub (compulsory): {len(final_rev6)} fix(es)"
+                f"Final brand voice scrub (compulsory): {len(final_rev6)} fix(es)"
             )
     except Exception as final_rev6_exc:  # noqa: BLE001
-        logger.warning("Final Rev 6 scrub skipped: %s", final_rev6_exc)
+        logger.warning("Final brand voice scrub skipped: %s", final_rev6_exc)
 
     try:
         from app.services.proposal_submission_polish import run_submission_polish_pass

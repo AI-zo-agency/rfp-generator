@@ -15,6 +15,17 @@ function renderDoc(source: string): string {
   );
 }
 
+/** Proposal review keeps the markdown, including `| --- |` rows. */
+function renderReview(source: string): string {
+  return renderToStaticMarkup(
+    createElement(MarkdownReportBody, {
+      body: source,
+      variant: "document",
+      evidenceCorpus: [],
+    })
+  );
+}
+
 function visibleText(html: string): string {
   return html
     .replace(/<[^>]+>/g, " ")
@@ -94,6 +105,32 @@ describe("markdown table rendering", () => {
     expect(html).toContain("<table");
     expect(visibleText(html)).toContain("Creative Director");
     expect(visibleText(html)).toContain("$185");
+  });
+
+  it("keeps an empty form row in the header columns", () => {
+    const source = `### Attachment D
+
+| # | Sub-Service Provider (Legal Name) | Service Performed | Certification / Classification | Estimated % of Contract |
+| --- | --- | --- | --- | --- |
+| 1 | | | | |
+`;
+    for (const html of [renderDoc(source), renderReview(source)]) {
+      expect(html.match(/<table/g) ?? []).toHaveLength(1);
+      expect(html).toContain("Sub-Service Provider (Legal Name)");
+      expect(html).toContain("Estimated % of Contract");
+      expect(html).toContain("<span>1</span>");
+      expect(html).not.toMatch(/\|\s*1/);
+      expect(html.match(/<td/g) ?? []).toHaveLength(10);
+    }
+  });
+
+  it("keeps empty cells when a form table is jammed onto one line", () => {
+    const html = renderDoc(`| # | Name | Service | | --- | --- | --- | | 1 | | |`);
+    expect(html.match(/<table/g) ?? []).toHaveLength(1);
+    expect(html).toContain("<span>#</span>");
+    expect(html).toContain("<span>1</span>");
+    expect(html).not.toMatch(/\|\s*1/);
+    expect(html.match(/<td/g) ?? []).toHaveLength(6);
   });
 
   it("rolls up stair-step Fee Detail tables into one row per phase", () => {

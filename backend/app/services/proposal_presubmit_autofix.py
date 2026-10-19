@@ -80,7 +80,7 @@ SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed p
 
 MANDATORY:
 1. Preserve section structure — headings, lists, paragraph order, approximate length, and any [DESIGNER NOTE: ...] blocks.
-2. COMPULSORY zö Brand & Writing Standards rev 6 (voice block): first person we/our; company name 'zö agency'; no em dashes; no negation-contrast (rather than / instead of / X, not Y / not just); no empty hype (robust/seamless/cutting-edge/…); no hedging announcements (worth noting / worth naming); no significance-close fluff. Apply silently — never narrate the rule.
+2. Follow the BRAND VOICE block in the user message. That block is the revision pinned to this proposal, or the Brand Voice default. Apply it silently — never narrate the rule.
 3. Preserve zö BRAND VOICE from the voice block — first person we/our in narrative sections.
 4. Use ONLY facts from the evidence corpus / KB excerpts. Do NOT leave citation markers like [E1] or [E2] in the text.
 5. Replace [VERIFY: ...] tags with real prose FROM evidence when available; remove resolved tags entirely.

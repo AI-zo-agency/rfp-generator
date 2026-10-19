@@ -77,11 +77,15 @@ def test_without_supabase_the_repo_file_governs_and_no_draft_is_read(monkeypatch
     assert rev_id == bvr.BUILTIN_ID and "(rev 6)" in text
 
 
-def test_full_voice_block_uses_the_pinned_revision_and_compact_does_not(monkeypatch):
+def test_full_and_compact_voice_blocks_use_the_pinned_revision(monkeypatch):
     _, b = _seed()
     monkeypatch.setattr(repo, "get_proposal_draft", lambda rfp_id: SimpleNamespace(voice_rev_id=b.id))
-    assert "(rev 7)" in pbv.format_brand_voice_block(None, rfp_id="r1")
-    assert "(rev 7)" not in pbv.format_brand_voice_block(None, rfp_id="r1", compact=True)
+    full = pbv.format_brand_voice_block(None, rfp_id="r1")
+    compact = pbv.format_brand_voice_block(None, rfp_id="r1", compact=True)
+    assert "(rev 7)" in full
+    assert "(rev 7)" in compact
+    assert "REV 6 VOICE" not in full
+    assert "REV 6 VOICE" not in compact
 
 
 def test_voice_standards_for_falls_back_when_the_pinned_lookup_fails(monkeypatch):

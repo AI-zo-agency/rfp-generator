@@ -173,14 +173,20 @@ async def load_pricing_kb() -> PricingBook:
     return (await pricing_kb.load_pricing_book()).book
 
 
-async def _call(system: str, user: str, max_tokens: int = 24000) -> dict:
+async def _call(
+    system: str,
+    user: str,
+    max_tokens: int = 24000,
+    *,
+    reasoning_effort: str = "medium",
+) -> dict:
     raw, _provider = await llm.chat_json(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=max_tokens,
         temperature=0.2,
         tier="heavy",
         node_name=NODE,
-        reasoning_effort="medium",
+        reasoning_effort=reasoning_effort,
     )
     return raw
 
@@ -210,19 +216,35 @@ def _asks_rfp_context(rfp_text: str) -> str:
     return body
 
 
-async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
-    ctx = _asks_rfp_context(rfp_text)
-    asks = await _call(
-        ASKS_PROMPT, f"=== RFP (cost / pricing excerpts) ===\n{ctx}", ASKS_MAX_TOKENS
+def pricing_asks_user_message(excerpt: str, quotes: list[str]) -> str:
+    """Quotes from the full RFP first, so a mandatory fee binder is not dropped by the excerpt."""
+    from app.services.proposal_submission_authority import format_cost_submittal_quotes
+
+    return (
+        "=== Required cost-submittal quotes (verbatim from the full RFP) ===\n"
+        f"{format_cost_submittal_quotes(quotes)}\n\n"
+        f"=== RFP (cost / pricing excerpts) ===\n{excerpt}"
     )
+
+
+async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
+    from app.services.proposal_submission_authority import collect_cost_submittal_quotes
+
+    ctx = _asks_rfp_context(rfp_text)
+    quotes = await collect_cost_submittal_quotes(rfp_text)
+    user = pricing_asks_user_message(ctx, quotes)
+    # Low reasoning: medium thinking was consuming the JSON budget and
+    # returning a cut-off object for long RFPs.
+    asks = await _call(ASKS_PROMPT, user, ASKS_MAX_TOKENS, reasoning_effort="low")
     errs = verify_asks(asks, rfp_text)
     if errs:
         asks = await _call(
             ASKS_PROMPT,
-            f"=== RFP (cost / pricing excerpts) ===\n{ctx}\n\n"
+            f"{user}\n\n"
             f"=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
             "=== FIX THESE (quote exactly or drop the item) ===\n" + "\n".join(errs),
             ASKS_MAX_TOKENS,
+            reasoning_effort="low",
         )
         errs = verify_asks(asks, rfp_text)
     return asks, errs
