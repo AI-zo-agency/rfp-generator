@@ -346,11 +346,21 @@ export function stripEvidenceCitations(text: string): string {
       if (!trimmed.includes("|")) return true;
       const inner = trimmed.replace(/^\|/, "").replace(/\|$/, "");
       const cells = inner.split("|").map((c) => c.trim());
-      if (cells.length >= 1 && cells.every((c) => !c)) return false;
-      // Ellipsis / placeholder-only pipe rows
+      // Keep GFM delimiter rows — Preview needs them for header detection.
+      if (
+        cells.length >= 2 &&
+        cells.every((c) => /^:?-{3,}:?$/.test(c))
+      ) {
+        return true;
+      }
+      // Keep blank `| | |` data rows from rich-editor Add row.
+      if (cells.length >= 2 && cells.every((c) => !c)) {
+        return true;
+      }
+      // Ellipsis / placeholder-only pipe rows (not real --- separators).
       if (
         cells.length >= 1 &&
-        cells.every((c) => !c || /^(?:\.{2,}|…+|[-–—_*]+)$/i.test(c))
+        cells.every((c) => !c || /^(?:\.{2,}|…+)$/i.test(c))
       ) {
         return false;
       }
@@ -405,8 +415,14 @@ function isTableRow(line: string): boolean {
 
 function isTableSeparator(line: string): boolean {
   const trimmed = line.trim();
-  if (/^\|?[\s:\-–—]+\|[\s|:\-–—]+\|?$/.test(trimmed)) return true;
-  return isEmptyOrDashRow(parseTableRow(trimmed));
+  // Whole line must be a delimiter row. Do NOT substring-match `| --- |` inside
+  // jammed one-line tables (`| H | | --- | | cell |`) or expand never runs.
+  // Do NOT treat blank `| | | |` as separators — those are empty data rows.
+  const cells = parseTableRow(trimmed);
+  return (
+    cells.length >= 2 &&
+    cells.every((c) => /^:?-{3,}:?$/.test((c || "").trim()))
+  );
 }
 
 function parseTableRow(line: string): string[] {
@@ -433,9 +449,13 @@ function normalizeTableRows(headers: string[], rows: string[][]): string[][] {
   // Never strip that leading blank or the deliverable shifts into the Phase column.
   const preserveLeadingBlank = /phase/i.test((headers[0] || "").replace(/\*\*/g, "").trim());
   return rows.map((row) => {
-    const cells = preserveLeadingBlank
-      ? row.map((c) => (c || "").trim())
-      : trimEmptyEdgeCells(row);
+    const trimmed = row.map((c) => (c || "").trim());
+    // Fully blank editor rows must stay colCount-wide — trimEmptyEdgeCells
+    // would collapse them to [] and Preview would drop the Add-row line.
+    if (trimmed.length > 0 && trimmed.every((c) => !c)) {
+      return Array.from({ length: colCount }, () => "");
+    }
+    const cells = preserveLeadingBlank ? trimmed : trimEmptyEdgeCells(trimmed);
     if (cells.length === colCount) {
       return cells;
     }
@@ -516,21 +536,37 @@ function repairTableBlock(
   const { hadSeparator } = options;
   let h = collapseSpacedLetterColumns(headers.map((c) => (c || "").trim()));
   let r = rows
-    .map((row) => trimEmptyEdgeCells(row.map((c) => (c || "").trim())))
-    .filter((row) => !isEmptyOrDashRow(row) && !row.every(isPlaceholderCell));
+    .map((row) => {
+      // Preserve fully blank editor rows; only trim edges on rows with content.
+      const trimmed = row.map((c) => (c || "").trim());
+      if (trimmed.every((c) => !c)) return trimmed;
+      return trimEmptyEdgeCells(trimmed);
+    })
+    // Keep blank body rows from Add row; drop dash-only separator leftovers.
+    .filter(
+      (row) =>
+        row.every((c) => !c) ||
+        (!row.every((c) => /^:?-{3,}:?$/.test(c)) &&
+          !row.every((c) => /^[-–—:*\s]+$/.test(c) && c.length > 0)),
+    );
 
   // No markdown separator → every pipe row is data (common in bios / key-value cards).
   if (!hadSeparator) {
     const allRows = [h, ...r]
       .map((row) => collapseSpacedLetterColumns(row))
-      .filter((row) => row.length > 0 && !row.every(isPlaceholderCell));
+      // Keep fully blank editor rows; drop placeholder-only junk.
+      .filter(
+        (row) =>
+          row.every((c) => !c) ||
+          (row.length > 0 && !row.every(isPlaceholderCell)),
+      );
     if (allRows.length === 0) return null;
     const width = Math.max(...allRows.map((row) => row.length), 2);
     const first = allRows[0]!;
     const firstLooksLikeHeader =
       first.length >= 2 &&
       first.every((c) => c.length > 0 && c.length <= 28) &&
-      /^(field|label|name|item|category|information|value|detail|description|role|rate)$/i.test(
+      /^(field|label|name|item|category|information|value|detail|description|role|rate|phase|task)$/i.test(
         first[0] || ""
       );
     if (firstLooksLikeHeader && allRows.length > 1) {
@@ -592,9 +628,12 @@ function tableFromRawLines(
 function sanitizeTableBlock(
   headers: string[],
   rows: string[][],
-  rawLines: string[]
+  rawLines: string[],
+  options?: { hadSeparator?: boolean },
 ): { headers: string[]; rows: string[][] } | null {
-  const hadSeparator = rawLines.some((line) => isTableSeparator(line));
+  // Separators are skipped while collecting lines — callers must pass the flag.
+  const hadSeparator =
+    options?.hadSeparator ?? rawLines.some((line) => isTableSeparator(line));
   const repaired = repairTableBlock(headers, rows, { hadSeparator });
   const base = repaired ?? tableFromRawLines(rawLines);
   if (!base) return null;
@@ -812,7 +851,15 @@ function expandInlineTableLines(text: string): string {
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed.includes("|")) return line;
-      if (isPipeNoiseLine(trimmed)) return "";
+      // Keep GFM `| --- |` delimiters and blank `| | |` data rows.
+      if (isTableSeparator(trimmed)) return line;
+      if (isPipeNoiseLine(trimmed)) {
+        const cells = parseTableRow(trimmed);
+        if (cells.length >= 2 && cells.every((c) => !(c || "").trim())) {
+          return line;
+        }
+        return "";
+      }
       // A blank cell is `| |`. Only split a line that already holds a separator
       // and real cells — that is several rows jammed together, not one form row.
       return expandJammedTableLine(trimmed) ?? line;
@@ -860,6 +907,7 @@ function parseBlocks(body: string): Block[] {
 
     if (isTableRow(trimmed)) {
       const tableLines: string[] = [];
+      let sawSeparator = false;
       while (index < lines.length) {
         const current = lines[index]?.trim() ?? "";
         if (!current) {
@@ -867,15 +915,30 @@ function parseBlocks(body: string): Block[] {
           // keep scanning if the next non-empty line is still a pipe row.
           let peek = index + 1;
           while (peek < lines.length && !(lines[peek]?.trim() ?? "")) peek += 1;
-          if (peek < lines.length && isTableRow(lines[peek]!.trim())) {
+          const next = peek < lines.length ? (lines[peek]!.trim() ?? "") : "";
+          if (
+            next &&
+            (isTableRow(next) ||
+              isTableSeparator(next) ||
+              (tableLines.length > 0 && isPipeNoiseLine(next)))
+          ) {
             index = peek;
             continue;
           }
           break;
         }
-        // `| --- |` and `| | | |` sit between the header and a row of blank
-        // cells. Skip them and keep the data row in this table.
+        // Markdown separator `| --- | --- |` — skip; keep scanning for data.
+        if (isTableSeparator(current)) {
+          sawSeparator = true;
+          index += 1;
+          continue;
+        }
+        // Blank `| | | |` rows from the rich editor — keep as empty data rows
+        // so Add row shows up in Preview. Only skip if we have no header yet.
         if (isPipeNoiseLine(current)) {
+          if (tableLines.length > 0) {
+            tableLines.push(current);
+          }
           index += 1;
           continue;
         }
@@ -886,11 +949,19 @@ function parseBlocks(body: string): Block[] {
       const dataLines = tableLines.filter((row) => !isTableSeparator(row));
       const parsed = dataLines
         .map(parseTableRow)
-        .filter((cells) => !isEmptyOrDashRow(cells));
+        // Keep blank body rows (user-added). Drop only dash-separator leftovers.
+        .filter(
+          (cells, i) =>
+            i === 0
+              ? !isEmptyOrDashRow(cells)
+              : !cells.every((c) => /^:?-{3,}:?$/.test((c || "").trim())),
+        );
       if (parsed.length > 0) {
         const headers = parsed[0]!;
         const rows = parsed.slice(1);
-        const sanitized = sanitizeTableBlock(headers, rows, tableLines);
+        const sanitized = sanitizeTableBlock(headers, rows, tableLines, {
+          hadSeparator: sawSeparator,
+        });
         if (sanitized && sanitized.headers.length > 0) {
           blocks.push({
             type: "table",

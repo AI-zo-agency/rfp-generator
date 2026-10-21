@@ -37,11 +37,16 @@ async def get_all_key_personas() -> list[dict[str, Any]]:
     """Fetch all members list of zö whose resume/bio is available in Knowledge Base (Supermemory)."""
     personas_map: dict[str, dict[str, Any]] = {}
 
+    # Full container list is paginated and often 20–40s cold. The browser used to
+    # abort at 3s and this wait_for at 5s, so the modal opened with 0 people.
+    _PERSONAS_LIST_TIMEOUT_S = 45.0
+
     if supermemory.is_configured():
         try:
             import asyncio
             memories = await asyncio.wait_for(
-                supermemory.list_container_memories(limit=1000), timeout=5.0
+                supermemory.list_container_memories(limit=1000),
+                timeout=_PERSONAS_LIST_TIMEOUT_S,
             )
             for mem in memories:
                 meta = mem.get("metadata") if isinstance(mem.get("metadata"), dict) else {}
@@ -83,8 +88,17 @@ async def get_all_key_personas() -> list[dict[str, Any]]:
                 else:
                     if "bio" in fn_lower:
                         personas_map[person_id]["sourceFile"] = file_name
+        except TimeoutError:
+            logger.warning(
+                "Could not query Supermemory memories for personas: timed out after %.0fs",
+                _PERSONAS_LIST_TIMEOUT_S,
+            )
         except Exception as exc:
-            logger.warning("Could not query Supermemory memories for personas: %s", exc)
+            logger.warning(
+                "Could not query Supermemory memories for personas: %s: %s",
+                type(exc).__name__,
+                exc or repr(exc),
+            )
 
     from app.services.retired_staff_store import is_retired_id, retired_records
 

@@ -62,7 +62,7 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     id: "assistant",
     name: "Ask Ralph",
-    does: "Chat to revise a pinned section or excerpt. Changes stay on that tab unless you say across the proposal.",
+    does: "Chat to revise a pinned section or excerpt — verify claims, match zö brand voice, or rewrite. Uses the same Brand Voice default as proposal generation. Changes stay on that tab unless you say across the proposal.",
     doesnt: "Reorder the whole packet or run Review & fix for you.",
   },
   {
@@ -122,7 +122,7 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     id: "editPreview",
     name: "Edit / Preview",
-    does: "Switch between raw markdown editing and the formatted preview of this section.",
+    does: "Switch between the formatted Word-like editor and the read-only preview. Raw markdown is under More → Edit source.",
     doesnt: "Send changes to Ralph — use Revise content or Improve full section for that.",
   },
 ] as const;

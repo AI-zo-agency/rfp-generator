@@ -102,7 +102,11 @@ import type { PacketPlacePreview } from "@/lib/proposal-api";
 import type { AlignOutlinePreview } from "@/lib/proposal-api";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody, stripManuscriptDisplayArtifacts } from "./MarkdownReportBody";
-import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
+import {
+  DraftSectionEditor,
+  type SectionBodyMode,
+  type SectionRevisionRecord,
+} from "./DraftSectionEditor";
 import {
   ProposalSectionChatPanel,
   buildSectionPinReference,
@@ -530,7 +534,8 @@ function ProposalDraftWorkspaceInner({
   outlinePanePrefsRef.current = outlinePanePrefs;
   const [sectionListQuery, setSectionListQuery] = useState("");
   const [addingSection, setAddingSection] = useState(false);
-  const [editorPreview, setEditorPreview] = useState(true);
+  const [sectionBodyMode, setSectionBodyMode] =
+    useState<SectionBodyMode>("preview");
 
   const [hydrated, setHydrated] = useState(false);
   const [draftLoadState, setDraftLoadState] = useState<
@@ -1505,9 +1510,12 @@ function ProposalDraftWorkspaceInner({
     [actionableFlags, selectedSection],
   );
 
+  // Reset view only when switching sections — never on each keystroke, or Edit
+  // flips back to Preview after typing one character.
   useEffect(() => {
-    setEditorPreview(Boolean(selectedSection?.content));
-  }, [selectedSectionId, selectedSection?.content]);
+    setSectionBodyMode(selectedSection?.content ? "preview" : "rich");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- content must not re-trigger
+  }, [selectedSectionId]);
 
   const assistantViewSectionId =
     selectedSectionId ??
@@ -2075,7 +2083,7 @@ function ProposalDraftWorkspaceInner({
     if (focus) {
       setSelectedSectionId(focus.id);
       if ((focus.content || "").trim()) {
-        setEditorPreview(true);
+        setSectionBodyMode("preview");
       }
     }
   }, [applyOutlineFromServer]);
@@ -4839,13 +4847,15 @@ function ProposalDraftWorkspaceInner({
                         className="proposal-editor-action"
                         disabled={anyPipelineRunning || !selectedSection.content}
                         onClick={() => {
-                          setEditorPreview((prev) => !prev);
+                          setSectionBodyMode((prev) =>
+                            prev === "preview" ? "rich" : "preview",
+                          );
                         }}
                       >
                         <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
                           <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487z" />
                         </svg>
-                        {editorPreview ? "Edit section" : "Preview"}
+                        {sectionBodyMode === "preview" ? "Edit section" : "Preview"}
                       </button>
                       <button
                         type="button"
@@ -4893,6 +4903,17 @@ function ProposalDraftWorkspaceInner({
                                 },
                               ]
                             : []),
+                          {
+                            id: "edit-source",
+                            label:
+                              sectionBodyMode === "source"
+                                ? "Back to formatted view"
+                                : "Edit source",
+                            onClick: () =>
+                              setSectionBodyMode((prev) =>
+                                prev === "source" ? "preview" : "source",
+                              ),
+                          },
                           {
                             id: "remove",
                             label: "Remove section",
@@ -4983,8 +5004,8 @@ function ProposalDraftWorkspaceInner({
                         )
                       }
                       hideToolbar
-                      previewMode={editorPreview}
-                      onPreviewModeChange={setEditorPreview}
+                      bodyMode={sectionBodyMode}
+                      onBodyModeChange={setSectionBodyMode}
                     />
                   </div>
                 </div>

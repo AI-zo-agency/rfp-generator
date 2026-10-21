@@ -2553,6 +2553,8 @@ export async function improveProposalSection(
     improveSectionPinned?: boolean;
     /** Default true — revise but do not save until confirm-preview. */
     previewOnly?: boolean;
+    /** Abort in-flight Ask Ralph / section improve (Stop button). */
+    signal?: AbortSignal;
   }
 ): Promise<{
   section: OutlineSection;
@@ -2574,40 +2576,55 @@ export async function improveProposalSection(
     discrepancies: string[];
   } | null;
 }> {
-  const res = await fetch(
-    `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
-    {
-      method: "POST",
-      headers: withAuthUserEmail({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        message,
-        ...(options?.selection
-          ? {
-              selectionStart: options.selection.start,
-              selectionEnd: options.selection.end,
-              selectionText: options.selection.text.slice(0, 8000),
-            }
-          : {}),
-        ...(options?.conversationHistory?.length
-          ? {
-              conversationHistory: options.conversationHistory
-                .slice(-12)
-                .map((turn) => ({
-                  role: turn.role,
-                  content:
-                    turn.content.length > 11_900
-                      ? `${turn.content.slice(0, 11_900)}\n…[truncated]`
-                      : turn.content,
-                })),
-            }
-          : {}),
-        ...(options?.proposalWide ? { proposalWide: true } : {}),
-        ...(options?.applyFix ? { applyFix: true } : {}),
-        ...(options?.improveSectionPinned ? { improveSectionPinned: true } : {}),
-        previewOnly: options?.previewOnly !== false,
-      }),
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
+      {
+        method: "POST",
+        headers: withAuthUserEmail({ "Content-Type": "application/json" }),
+        signal: options?.signal,
+        body: JSON.stringify({
+          message,
+          ...(options?.selection
+            ? {
+                selectionStart: options.selection.start,
+                selectionEnd: options.selection.end,
+                selectionText: options.selection.text.slice(0, 8000),
+              }
+            : {}),
+          ...(options?.conversationHistory?.length
+            ? {
+                conversationHistory: options.conversationHistory
+                  .slice(-12)
+                  .map((turn) => ({
+                    role: turn.role,
+                    content:
+                      turn.content.length > 11_900
+                        ? `${turn.content.slice(0, 11_900)}\n…[truncated]`
+                        : turn.content,
+                  })),
+              }
+            : {}),
+          ...(options?.proposalWide ? { proposalWide: true } : {}),
+          ...(options?.applyFix ? { applyFix: true } : {}),
+          ...(options?.improveSectionPinned
+            ? { improveSectionPinned: true }
+            : {}),
+          previewOnly: options?.previewOnly !== false,
+        }),
+      },
+    );
+  } catch (err) {
+    if (
+      options?.signal?.aborted ||
+      (err instanceof DOMException && err.name === "AbortError") ||
+      (err instanceof Error && err.name === "AbortError")
+    ) {
+      throw new Error("Stopped.");
     }
-  );
+    throw err;
+  }
   const text = await res.text();
   let data: {
     detail?: unknown;
@@ -2845,12 +2862,16 @@ export async function fetchKeyPersonas(
     ? `/api/rfps/${encodeURIComponent(rfpId)}/proposal/key-personas`
     : `/api/knowledge-base/key-personas`;
 
+  // Supermemory container list is paginated and often 20–40s on a cold cache.
+  // A 3s abort left the Key Persons modal empty even when bios exist in KB.
+  const PERSONAS_FETCH_MS = 45_000;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3000);
+  const timer = setTimeout(() => controller.abort(), PERSONAS_FETCH_MS);
+  const fetchSignal = signal || controller.signal;
   try {
     const res = await fetch(primaryUrl, {
       cache: "no-store",
-      signal: signal || controller.signal,
+      signal: fetchSignal,
     });
     if (res.ok) {
       return (await res.json()) as KeyPersonasResponse;
@@ -2861,16 +2882,24 @@ export async function fetchKeyPersonas(
     clearTimeout(timer);
   }
 
-  // Fallback query
+  // Fallback query (same timeout budget — KB list is the same cold path)
+  const fallbackController = new AbortController();
+  const fallbackTimer = setTimeout(
+    () => fallbackController.abort(),
+    PERSONAS_FETCH_MS
+  );
   try {
     const fallbackRes = await fetch("/api/knowledge-base/key-personas", {
       cache: "no-store",
+      signal: fallbackController.signal,
     });
     if (fallbackRes.ok) {
       return (await fallbackRes.json()) as KeyPersonasResponse;
     }
   } catch {
     // ignore
+  } finally {
+    clearTimeout(fallbackTimer);
   }
 
   return { total: 0, personas: [] };

@@ -11,11 +11,19 @@ import type {
   ProposalOutline,
   ProposalResearch,
 } from "@/types/proposal";
+import { repairLeakedHtmlInMarkdown } from "@/lib/markdown-rich-text";
 import { MarkdownReportBody } from "./MarkdownReportBody";
+import { ProposalSectionRichEditor } from "./ProposalSectionRichEditor";
 import type { SectionChatReference } from "./ProposalSectionChatPanel";
-import { buildSectionPinReference } from "./ProposalSectionChatPanel";
+import {
+  buildSectionPinReference,
+  buildSelectionPinReference,
+} from "./ProposalSectionChatPanel";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
 import { capabilityById } from "@/lib/proposal-tool-guide";
+
+/** preview = formatted read-only; rich = TipTap WYSIWYG; source = raw markdown. */
+export type SectionBodyMode = "preview" | "rich" | "source";
 
 export interface SectionRevisionRecord {
   before: string;
@@ -55,6 +63,9 @@ interface DraftSectionEditorProps {
   onRevisionDrawerOpenChange?: (open: boolean) => void;
   /** Parent chrome owns Edit / Improve; keep the manuscript itself here. */
   hideToolbar?: boolean;
+  bodyMode?: SectionBodyMode;
+  onBodyModeChange?: (mode: SectionBodyMode) => void;
+  /** @deprecated Prefer bodyMode — true maps to preview, false to source. */
   previewMode?: boolean;
   onPreviewModeChange?: (preview: boolean) => void;
   evidenceCorpus?: EvidenceItem[];
@@ -76,6 +87,8 @@ export function DraftSectionEditor({
   revisionDrawerOpen = false,
   onRevisionDrawerOpenChange,
   hideToolbar = false,
+  bodyMode: bodyModeProp,
+  onBodyModeChange,
   previewMode: previewModeProp,
   onPreviewModeChange,
   evidenceCorpus,
@@ -87,28 +100,59 @@ export function DraftSectionEditor({
   const programmaticSelectionRef = useRef(false);
   const appliedHighlightKeyRef = useRef<string | null>(null);
   const [selection, setSelection] = useState<TextSelection | null>(null);
-  const [uncontrolledPreview, setUncontrolledPreview] = useState(() => Boolean(value));
-  const previewControlled =
-    previewModeProp !== undefined && typeof onPreviewModeChange === "function";
-  const previewMode = previewControlled ? previewModeProp : uncontrolledPreview;
-  const setPreviewMode = (next: boolean) => {
-    if (previewControlled) onPreviewModeChange?.(next);
-    else setUncontrolledPreview(next);
+  const [uncontrolledMode, setUncontrolledMode] = useState<SectionBodyMode>(() =>
+    value ? "preview" : "rich",
+  );
+  const modeControlled =
+    bodyModeProp !== undefined && typeof onBodyModeChange === "function";
+  const legacyControlled =
+    !modeControlled &&
+    previewModeProp !== undefined &&
+    typeof onPreviewModeChange === "function";
+  const bodyMode: SectionBodyMode = modeControlled
+    ? (bodyModeProp as SectionBodyMode)
+    : legacyControlled
+      ? previewModeProp
+        ? "preview"
+        : "source"
+      : uncontrolledMode;
+  const setBodyMode = (next: SectionBodyMode) => {
+    if (modeControlled) onBodyModeChange?.(next);
+    else if (legacyControlled) onPreviewModeChange?.(next === "preview");
+    else setUncontrolledMode(next);
   };
 
   const busy = disabled || chatBusy;
 
+  const displayValue = useMemo(
+    () => repairLeakedHtmlInMarkdown(value),
+    [value],
+  );
+
+  // Persist TipTap HTML / leftover td-tr fragments so Preview stays clean.
+  useEffect(() => {
+    if (displayValue === value) return;
+    onUserEditStart?.();
+    onChange(displayValue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section.id, value, displayValue]);
+
   // Preview selections arrive as rendered text; this maps them back onto raw
   // markdown offsets. Projected once per section body, not once per mouseup.
-  const sourceMap = useMemo(() => createMarkdownSourceMap(value), [value]);
+  const sourceMap = useMemo(
+    () => createMarkdownSourceMap(displayValue),
+    [displayValue],
+  );
 
   useEffect(() => {
     setSelection(null);
     appliedHighlightKeyRef.current = null;
-    if (!previewControlled) setUncontrolledPreview(Boolean(value));
+    if (!modeControlled && !legacyControlled) {
+      setUncontrolledMode(value ? "preview" : "rich");
+    }
     // Only when the open section changes — not on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [section.id, previewControlled]);
+  }, [section.id, modeControlled, legacyControlled]);
 
   useEffect(() => {
     if (!highlightRange || busy) return;
@@ -116,7 +160,7 @@ export function DraftSectionEditor({
     const highlightKey = `${section.id}:${highlightRange.start}:${highlightRange.end}:${highlightRange.text}`;
     if (appliedHighlightKeyRef.current === highlightKey) return;
     appliedHighlightKeyRef.current = highlightKey;
-    setPreviewMode(true);
+    setBodyMode("preview");
   }, [busy, highlightRange, section.id]);
 
   const clearSelection = useCallback(() => {
@@ -206,13 +250,13 @@ export function DraftSectionEditor({
     // not map 1:1 onto markdown — still show the tip with the visible excerpt.
     const range = sourceMap.find(text);
     setSelection({
-      text: range ? value.slice(range.start, range.end) : trimmed,
+      text: range ? displayValue.slice(range.start, range.end) : trimmed,
       start: range?.start ?? 0,
       end: range?.end ?? 0,
       top: rect.top,
       left: rect.left + Math.max(rect.width, 8) / 2,
     });
-  }, [sourceMap, value]);
+  }, [sourceMap, displayValue]);
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
@@ -247,7 +291,7 @@ export function DraftSectionEditor({
       ta?.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
     };
-  }, [section.id, captureTextareaSelection, previewMode]);
+  }, [section.id, captureTextareaSelection, bodyMode]);
 
   const openChat = (mode: "selection" | "section") => {
     onUserEditStart?.();
@@ -256,22 +300,15 @@ export function DraftSectionEditor({
     if (mode === "selection" && selection) {
       if (!onOpenRevisionChat) return;
       const mapped = selection.end > selection.start;
-      onOpenRevisionChat({
-        mode: "selection",
-        sectionId: section.id,
-        sectionTitle: section.title,
-        text: selection.text,
-        // Soft table selections may lack markdown offsets — pin by excerpt text.
-        ...(mapped
-          ? {
-              selection: {
-                start: selection.start,
-                end: selection.end,
-                text: selection.text,
-              },
-            }
-          : {}),
-      });
+      onOpenRevisionChat(
+        buildSelectionPinReference(
+          section,
+          selection.text,
+          mapped
+            ? { start: selection.start, end: selection.end }
+            : undefined,
+        ),
+      );
       clearSelection();
       window.getSelection()?.removeAllRanges();
       return;
@@ -301,17 +338,16 @@ export function DraftSectionEditor({
                   <button
                     type="button"
                     onClick={() => {
-                      if (previewMode) {
-                        setPreviewMode(false);
-                        window.setTimeout(() => textareaRef.current?.focus(), 50);
+                      if (bodyMode === "preview") {
+                        setBodyMode("rich");
                       } else {
-                        setPreviewMode(true);
+                        setBodyMode("preview");
                         clearSelection();
                       }
                     }}
                     className="flex items-center gap-1 rounded-md border border-zo-border bg-zo-surface px-2 py-1 text-[11px] font-semibold text-zo-text-secondary transition-smooth hover:border-zo-orange hover:text-zo-orange"
                   >
-                    {previewMode ? (
+                    {bodyMode === "preview" ? (
                       <>
                         <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                         Edit
@@ -324,6 +360,18 @@ export function DraftSectionEditor({
                     )}
                   </button>
                 </CapabilityHoverTip>
+              ) : null}
+              {bodyMode === "rich" || bodyMode === "preview" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBodyMode("source");
+                    window.setTimeout(() => textareaRef.current?.focus(), 50);
+                  }}
+                  className="rounded-md border border-zo-border bg-zo-surface px-2 py-1 text-[11px] font-semibold text-zo-text-muted transition-smooth hover:border-zo-orange hover:text-zo-orange"
+                >
+                  Edit source
+                </button>
               ) : null}
               {storedRevision && !revisionDrawerOpen ? (
                 <button
@@ -361,7 +409,7 @@ export function DraftSectionEditor({
           ) : null}
 
           <div className="proposal-draft-textarea-shell">
-            {previewMode && value ? (
+            {bodyMode === "preview" && value ? (
               <div
                 ref={previewRef}
                 className="proposal-draft-preview-pane custom-scrollbar"
@@ -369,13 +417,25 @@ export function DraftSectionEditor({
                 onKeyUp={capturePreviewSelection}
               >
                 <MarkdownReportBody
-                  body={value}
+                  body={displayValue}
                   variant="report"
                   evidenceCorpus={evidenceCorpus}
                   citationMap={citationMap}
                   highlightTexts={highlightRange ? [highlightRange.text] : []}
                 />
               </div>
+            ) : bodyMode === "rich" ? (
+              <ProposalSectionRichEditor
+                value={value}
+                disabled={busy}
+                onUserEditStart={onUserEditStart}
+                onChange={(content) => {
+                  appliedHighlightKeyRef.current = null;
+                  onChange(content);
+                  setSelection(null);
+                }}
+                placeholder="Run Build my proposal to auto-fill, or write manually…"
+              />
             ) : (
               <textarea
                 ref={textareaRef}

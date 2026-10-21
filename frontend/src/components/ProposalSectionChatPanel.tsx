@@ -16,6 +16,11 @@ import type { SectionRevisionRecord } from "./DraftSectionEditor";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 import { composeApplyFixInstruction, resolveApplyFixTarget } from "./compose-apply-fix-instruction";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
+import {
+  ralphVerifyPrompt,
+  ralphVoicePrompt,
+  selectionPayloadForPin,
+} from "@/lib/ralph-chat-intent";
 import "./ProposalSectionChatPanel.css";
 
 export interface SectionChatSuggestedFix {
@@ -170,14 +175,23 @@ export function buildSectionPinReference(
 /** Pin a highlighted manuscript excerpt into Ask Ralph (selection revise). */
 export function buildSelectionPinReference(
   section: OutlineSection,
-  selectedText: string
+  selectedText: string,
+  offsets?: { start: number; end: number },
 ): SectionChatReference {
   const text = selectedText.replace(/\u00a0/g, " ").trim().slice(0, 8000);
+  const pinText = text || section.title;
   return {
     mode: "selection",
     sectionId: section.id,
     sectionTitle: section.title,
-    text: text || section.title,
+    text: pinText,
+    // Always attach selection text so improve API can locate the excerpt
+    // even when DOM→markdown offsets could not be mapped.
+    selection: {
+      start: offsets?.start ?? 0,
+      end: offsets?.end ?? 0,
+      text: pinText,
+    },
   };
 }
 
@@ -213,6 +227,14 @@ export function ProposalSectionChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const applyExtrasRef = useRef<HTMLTextAreaElement>(null);
+  const improveAbortRef = useRef<AbortController | null>(null);
+
+  const stopChat = useCallback(() => {
+    improveAbortRef.current?.abort();
+    improveAbortRef.current = null;
+    onStatusLineChange(null);
+    onBusyChange?.(false);
+  }, [onBusyChange, onStatusLineChange]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -232,6 +254,11 @@ export function ProposalSectionChatPanel({
   useEffect(() => {
     if (reference?.text) {
       window.setTimeout(() => inputRef.current?.focus(), 60);
+    }
+    if (reference?.mode === "selection") {
+      // Excerpt pinned — leave compose empty so Verify / Match zö voice are obvious.
+      setInput("");
+      return;
     }
     if (reference?.mode === "section") {
       // Always bind the compose box to the newly pinned tab — do not keep a
@@ -393,25 +420,37 @@ export function ProposalSectionChatPanel({
       );
       onBusyChange?.(true);
 
-      const selectionForRequest =
-        activeReference?.mode === "selection" &&
-        activeReference.sectionId === targetSection.id
-          ? activeReference.selection
-          : undefined;
+      const pinForTarget =
+        activeReference?.sectionId === targetSection.id ? activeReference : null;
+      const selectionForRequest = selectionPayloadForPin(
+        pinForTarget,
+        targetSection.id,
+      );
+      // Free-text is sent verbatim — no keyword/regex rewrite of the ask.
+      // Brand voice + KB judgment live in the improve LLM (same as generation).
+      improveAbortRef.current?.abort();
+      const abort = new AbortController();
+      improveAbortRef.current = abort;
 
       try {
         const history = nextMessages.slice(0, -1).map((m) => ({
           role: m.role,
           content: m.content,
         }));
-        const result = await improveProposalSection(rfpId, targetSection.id, trimmed, {
+        const result = await improveProposalSection(
+          rfpId,
+          targetSection.id,
+          trimmed,
+          {
           selection: selectionForRequest,
           conversationHistory: history,
           proposalWide: proposalWideAsk,
           improveSectionPinned:
             activeReference?.mode === "section" &&
             activeReference.sectionId === targetSection.id,
-        });
+          signal: abort.signal,
+        },
+        );
 
         // The resolver can legitimately land on a section other than the one
         // open in the editor (a named mention, a proposal-wide ask, a stale
@@ -485,22 +524,31 @@ export function ProposalSectionChatPanel({
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";
+        const stopped =
+          abort.signal.aborted || /^stopped\.?$/i.test(detail.trim());
         onMessagesChange([
           ...nextMessages,
           {
             id: `e-${Date.now()}`,
             role: "assistant",
-            content: detail,
+            content: stopped ? "Stopped." : detail,
             draftUnchanged: true,
             agentActivity: {
-              outcome: "needs_review",
-              steps: ["Tried to run your instruction"],
+              outcome: stopped ? "cancelled" : "needs_review",
+              steps: [
+                stopped
+                  ? "Stopped before finishing"
+                  : "Tried to run your instruction",
+              ],
               changes: ["No manuscript text was changed."],
-              discrepancies: [detail],
+              discrepancies: stopped ? [] : [detail],
             },
           },
         ]);
       } finally {
+        if (improveAbortRef.current === abort) {
+          improveAbortRef.current = null;
+        }
         onStatusLineChange(null);
         onBusyChange?.(false);
       }
@@ -557,6 +605,10 @@ export function ProposalSectionChatPanel({
       onBusyChange?.(true);
       onFocusSection?.(target.id);
 
+      improveAbortRef.current?.abort();
+      const abort = new AbortController();
+      improveAbortRef.current = abort;
+
       try {
         const history = nextMessages.slice(0, -1).map((m) => ({
           role: m.role,
@@ -570,6 +622,7 @@ export function ProposalSectionChatPanel({
             conversationHistory: history,
             applyFix: true,
             improveSectionPinned: true,
+            signal: abort.signal,
           }
         );
 
@@ -628,22 +681,31 @@ export function ProposalSectionChatPanel({
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Apply fix failed";
+        const stopped =
+          abort.signal.aborted || /^stopped\.?$/i.test(detail.trim());
         onMessagesChange([
           ...nextMessages,
           {
             id: `e-${Date.now()}`,
             role: "assistant",
-            content: detail,
+            content: stopped ? "Stopped." : detail,
             draftUnchanged: true,
             agentActivity: {
-              outcome: "needs_review",
-              steps: ["Tried to apply the suggested fix"],
+              outcome: stopped ? "cancelled" : "needs_review",
+              steps: [
+                stopped
+                  ? "Stopped before finishing"
+                  : "Tried to apply the suggested fix",
+              ],
               changes: ["No manuscript text was changed."],
-              discrepancies: [detail],
+              discrepancies: stopped ? [] : [detail],
             },
           },
         ]);
       } finally {
+        if (improveAbortRef.current === abort) {
+          improveAbortRef.current = null;
+        }
         onStatusLineChange(null);
         onBusyChange?.(false);
       }
@@ -784,6 +846,60 @@ export function ProposalSectionChatPanel({
                     <span>Fix issues in this section</span>
                     <RalphActionIcon kind="chevron" />
                   </button>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() =>
+                      void sendMessage(
+                        ralphVerifyPrompt(
+                          reference?.sectionId === viewingSection.id
+                            ? reference
+                            : {
+                                mode: "section",
+                                sectionTitle: viewingSection.title,
+                                text: viewingSection.title,
+                              },
+                        ),
+                      )
+                    }
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="check" />
+                    <span>
+                      {reference?.mode === "selection" &&
+                      reference.sectionId === viewingSection.id
+                        ? "Verify this passage"
+                        : "Verify this section"}
+                    </span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() =>
+                      void sendMessage(
+                        ralphVoicePrompt(
+                          reference?.sectionId === viewingSection.id
+                            ? reference
+                            : {
+                                mode: "section",
+                                sectionTitle: viewingSection.title,
+                                text: viewingSection.title,
+                              },
+                        ),
+                      )
+                    }
+                    className="proposal-ralph-action"
+                  >
+                    <RalphActionIcon kind="sparkle" />
+                    <span>
+                      {reference?.mode === "selection" &&
+                      reference.sectionId === viewingSection.id
+                        ? "Match zö voice"
+                        : "Match zö voice (section)"}
+                    </span>
+                    <RalphActionIcon kind="chevron" />
+                  </button>
                 </>
               ) : (
                 <p className="proposal-ralph-empty-copy">
@@ -915,10 +1031,20 @@ export function ProposalSectionChatPanel({
           ))
         )}
         {busy ? (
-          <ChatLiveTicker
-            statusLine={statusLine}
-            stepIndex={liveStepIndex}
-          />
+          <div className="proposal-ralph-busy-row">
+            <ChatLiveTicker
+              statusLine={statusLine}
+              stepIndex={liveStepIndex}
+            />
+            <button
+              type="button"
+              className="proposal-ralph-stop-btn"
+              onClick={stopChat}
+              aria-label="Stop Ask Ralph"
+            >
+              Stop
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -952,6 +1078,27 @@ export function ProposalSectionChatPanel({
           </div>
         ) : null}
 
+        {reference?.mode === "selection" && !busy ? (
+          <div className="proposal-ralph-pin-actions">
+            <button
+              type="button"
+              disabled={disabled}
+              className="proposal-ralph-pin-action"
+              onClick={() => void sendMessage(ralphVerifyPrompt(reference))}
+            >
+              Verify this passage
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              className="proposal-ralph-pin-action"
+              onClick={() => void sendMessage(ralphVoicePrompt(reference))}
+            >
+              Match zö voice
+            </button>
+          </div>
+        ) : null}
+
         {error ? <p className="proposal-section-chat-error mb-1">{error}</p> : null}
 
         <div className="proposal-section-chat-input-row">
@@ -970,15 +1117,26 @@ export function ProposalSectionChatPanel({
               }
             }}
           />
-          <button
-            type="button"
-            disabled={disabled || busy || !input.trim()}
-            className="proposal-section-chat-send"
-            aria-label="Send"
-            onClick={() => void sendMessage(input)}
-          >
-            ↑
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              className="proposal-ralph-stop-btn proposal-ralph-stop-btn--composer"
+              onClick={stopChat}
+              aria-label="Stop Ask Ralph"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={disabled || !input.trim()}
+              className="proposal-section-chat-send"
+              aria-label="Send"
+              onClick={() => void sendMessage(input)}
+            >
+              ↑
+            </button>
+          )}
         </div>
 
         {messages.length > 0 ? (

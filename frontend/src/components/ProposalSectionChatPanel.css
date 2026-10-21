@@ -257,3 +257,63 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.proposal-ralph-pin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0 0 0.45rem;
+}
+
+.proposal-ralph-pin-action {
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  border-radius: 9999px;
+  background: #fff;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--zo-text-secondary, #4b5563);
+  cursor: pointer;
+}
+
+.proposal-ralph-pin-action:hover:not(:disabled) {
+  border-color: rgba(239, 80, 24, 0.35);
+  background: #fff7f2;
+  color: #c2410c;
+}
+
+.proposal-ralph-pin-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proposal-ralph-busy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.proposal-ralph-stop-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(185, 28, 28, 0.35);
+  border-radius: 0.55rem;
+  background: #fff;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #b91c1c;
+  cursor: pointer;
+}
+
+.proposal-ralph-stop-btn:hover {
+  background: #fef2f2;
+  border-color: rgba(185, 28, 28, 0.55);
+}
+
+.proposal-ralph-stop-btn--composer {
+  height: 2.25rem;
+  min-width: 3.5rem;
+  border-radius: 9999px;
+}

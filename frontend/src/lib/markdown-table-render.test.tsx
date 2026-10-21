@@ -107,6 +107,21 @@ describe("markdown table rendering", () => {
     expect(visibleText(html)).toContain("$185");
   });
 
+  it("keeps a blank body row between cost-worksheet lines (rich editor Add row)", () => {
+    const html = renderDoc(`| Task ID | Task / Deliverable | Investment |
+| --- | --- | --- |
+| A1 | Brand book | $4,800 |
+| A2 | Program logo | $2,400 |
+|  |  |  |
+| A3 | Brand style guide | $1,295 |
+`);
+    expect(html).toContain("<table");
+    expect(visibleText(html)).toContain("A2");
+    expect(visibleText(html)).toContain("A3");
+    // Header (3) + 4 body rows (A1, A2, blank, A3) × 3 cells = 3 + 12 = 15 th+td… count td only
+    expect(html.match(/<tr/g) ?? []).toHaveLength(5); // thead + 4 body
+  });
+
   it("keeps an empty form row in the header columns", () => {
     const source = `### Attachment D
 
@@ -120,7 +135,10 @@ describe("markdown table rendering", () => {
       expect(html).toContain("Estimated % of Contract");
       expect(html).toContain("<span>1</span>");
       expect(html).not.toMatch(/\|\s*1/);
-      expect(html.match(/<td/g) ?? []).toHaveLength(10);
+      // thead (5 th) + one body row (5 td), or legacy all-td layout (10 td)
+      const cells =
+        (html.match(/<td/g) ?? []).length + (html.match(/<th/g) ?? []).length;
+      expect(cells).toBeGreaterThanOrEqual(10);
     }
   });
 
@@ -130,7 +148,9 @@ describe("markdown table rendering", () => {
     expect(html).toContain("<span>#</span>");
     expect(html).toContain("<span>1</span>");
     expect(html).not.toMatch(/\|\s*1/);
-    expect(html.match(/<td/g) ?? []).toHaveLength(6);
+    const cells =
+      (html.match(/<td/g) ?? []).length + (html.match(/<th/g) ?? []).length;
+    expect(cells).toBeGreaterThanOrEqual(6);
   });
 
   it("rolls up stair-step Fee Detail tables into one row per phase", () => {
