@@ -551,8 +551,13 @@ def partition_phase3_sections(
     *,
     static_section_text: str = "",
     skip_static_dedupe: bool = False,
+    form_field_values: dict[str, str] | None = None,
 ) -> tuple[list[RfpSectionMap], list[ProposalSection]]:
-    """Split mapped sections into ones still needing a draft vs already filled."""
+    """Split mapped sections into ones still needing a draft vs already filled.
+
+    ``form_field_values`` — optional Zo identity map (e.g. Offeror Name → legal
+    name) used only when a form/disclosure tab already has RFP field labels.
+    """
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
     to_draft: list[RfpSectionMap] = []
@@ -656,10 +661,16 @@ def partition_phase3_sections(
                         mapped.title or "",
                         str(instrument or "form"),
                         requirement=reason,
+                        form_fields=list(getattr(mapped, "form_fields", None) or []),
+                        field_values=form_field_values,
                     )
                 else:
                     body = attachment_checklist_stub(
-                        mapped.title or "", "form", requirement=reason
+                        mapped.title or "",
+                        "form",
+                        requirement=reason,
+                        form_fields=list(getattr(mapped, "form_fields", None) or []),
+                        field_values=form_field_values,
                     )
                 already.append(
                     ProposalSection(

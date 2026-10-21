@@ -44,6 +44,9 @@ class RfpSectionMap(BaseModel):
     submission_instrument: str | None = Field(
         default=None, alias="submissionInstrument"
     )
+    # RFP-provided form field / blank labels (outline children / requiredHeadings).
+    # Empty → attach-only stub; never invent fields the RFP did not list.
+    form_fields: list[str] = Field(default_factory=list, alias="formFields")
     # Exact Fit / buyer lot label; "" = shared / track-agnostic.
     track: str = ""
 

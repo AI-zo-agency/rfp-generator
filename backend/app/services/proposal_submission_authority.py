@@ -315,16 +315,72 @@ def phase35_budget_gate(
     return "skip", None
 
 
+def resolve_form_field_response(
+    label: str,
+    field_values: dict[str, str] | None = None,
+) -> str:
+    """Fill a form field from Zo identity facts when the label matches; else MANUAL FILL.
+
+    Match is exact or containment on the whole label/key (casefold) — no synonym
+    tables or token regex. Callers pass structured RFP field labels only.
+    """
+    handoff = f"[MANUAL FILL: Sonja — {label}]"
+    if not field_values:
+        return handoff
+    label_cf = (label or "").casefold().strip()
+    if not label_cf:
+        return handoff
+    for key, value in field_values.items():
+        val = (value or "").strip()
+        if not val:
+            continue
+        key_cf = (key or "").casefold().strip()
+        if not key_cf:
+            continue
+        if key_cf == label_cf or key_cf in label_cf or label_cf in key_cf:
+            return val
+    return handoff
+
+
+def _render_form_fields_table(
+    form_fields: list[str],
+    field_values: dict[str, str] | None = None,
+) -> list[str]:
+    lines = [
+        "### Form fields (from RFP format)",
+        "",
+        "| Field | Response |",
+        "| --- | --- |",
+    ]
+    for field in form_fields:
+        label = " ".join((field or "").split()).strip()
+        if not label:
+            continue
+        response = resolve_form_field_response(label, field_values)
+        # Escape pipes so markdown table cells stay intact
+        safe_label = label.replace("|", "/")
+        safe_response = response.replace("|", "/")
+        lines.append(f"| {safe_label} | {safe_response} |")
+    lines.append("")
+    return lines
+
+
 def attachment_checklist_stub(
     title: str,
     instrument: str,
     *,
     requirement: str = "",
+    form_fields: list[str] | None = None,
+    field_values: dict[str, str] | None = None,
 ) -> str:
     """Handoff for a buyer form/references/disclosure tab.
 
     The note names THIS section. A shared sentence made Vendor Questionnaire
     and Insurance Requirements look like the same task.
+
+    When ``form_fields`` is non-empty (RFP showed a field layout), scaffold a
+    Field | Response table — fill from ``field_values`` / Zo identity when
+    matched, otherwise MANUAL FILL. When empty, attach-only (no invented fields).
     """
     label = (title or "Required attachment").strip()
     inst = (instrument or "form").strip().casefold()
@@ -339,6 +395,11 @@ def attachment_checklist_stub(
         ask = ask[:277].rstrip() + "…"
     if ask.casefold() == label.casefold():
         ask = ""
+    fields = [
+        " ".join(str(f or "").split()).strip()
+        for f in (form_fields or [])
+        if " ".join(str(f or "").split()).strip()
+    ]
     lines = [
         f"## {label}",
         "",
@@ -350,6 +411,8 @@ def attachment_checklist_stub(
     ]
     if ask:
         lines.extend([f"What the RFP asks here: {ask}", ""])
+    if fields:
+        lines.extend(_render_form_fields_table(fields, field_values))
     lines.extend(
         [
             (

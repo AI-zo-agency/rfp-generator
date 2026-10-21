@@ -249,6 +249,78 @@ class Phase3PartitionRoutingTests(unittest.TestCase):
         self.assertIn("Certificate of insurance meeting the stated limits.", insurance)
         self.assertNotEqual(vendor, insurance)
 
+    def test_attach_only_when_rfp_gave_no_form_fields(self) -> None:
+        from app.services.proposal_submission_authority import attachment_checklist_stub
+
+        body = attachment_checklist_stub(
+            "Campaign Contribution Disclosure Form",
+            "disclosure",
+            requirement="Attach the signed disclosure form with the proposal.",
+        )
+        self.assertIn("DESIGNER NOTE", body)
+        self.assertIn("MANUAL FILL", body)
+        self.assertNotIn("| Field | Response |", body)
+
+    def test_scaffolds_field_table_when_rfp_format_labels_present(self) -> None:
+        from app.services.proposal_submission_authority import attachment_checklist_stub
+
+        body = attachment_checklist_stub(
+            "Campaign Contribution Disclosure Form",
+            "disclosure",
+            form_fields=[
+                "Offeror Name",
+                "Authorized Representative",
+                "Date",
+                "Signature",
+            ],
+            field_values={
+                "Offeror Name": "Z'Onion Creative Group LLC dba zö agency",
+            },
+        )
+        self.assertIn("| Field | Response |", body)
+        self.assertIn("| Offeror Name |", body)
+        self.assertIn("Z'Onion Creative Group LLC dba zö agency", body)
+        self.assertIn("| Date | [MANUAL FILL:", body)
+        self.assertIn("| Signature | [MANUAL FILL:", body)
+        # Signed buyer PDF still needed
+        self.assertIn("DESIGNER NOTE", body)
+        self.assertIn("attach the signed", body.casefold())
+
+    def test_phase3_form_with_structured_fields_scaffolds_table(self) -> None:
+        mapped = [
+            RfpSectionMap(
+                id="f1",
+                title="Campaign Contribution Disclosure Form",
+                submissionInstrument="disclosure",
+                requirements=["Attach signed disclosure with submission."],
+                formFields=["Offeror Name", "Signature"],
+            ),
+        ]
+        _to_draft, already = partition_phase3_sections(
+            mapped,
+            {},
+            form_field_values={"Offeror Name": "zö agency"},
+        )
+        self.assertEqual(len(already), 1)
+        content = already[0].content or ""
+        self.assertIn("| Field | Response |", content)
+        self.assertIn("| Offeror Name | zö agency |", content)
+        self.assertIn("| Signature | [MANUAL FILL:", content)
+
+    def test_phase3_form_without_structured_fields_stays_attach_only(self) -> None:
+        mapped = [
+            RfpSectionMap(
+                id="f1",
+                title="Campaign Contribution Disclosure Form",
+                submissionInstrument="disclosure",
+                requirements=["Attach signed disclosure with submission."],
+            ),
+        ]
+        _to_draft, already = partition_phase3_sections(mapped, {})
+        content = already[0].content or ""
+        self.assertNotIn("| Field | Response |", content)
+        self.assertIn("DESIGNER NOTE", content)
+
 
 if __name__ == "__main__":
     unittest.main()

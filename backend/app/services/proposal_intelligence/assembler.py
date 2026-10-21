@@ -889,7 +889,23 @@ def derive_legacy_fields(
                 requirements = [reason, *[item for item in requirements if item != reason]]
         # Cost / form tabs carry more independent sub-asks (rate schedule,
         # assumptions, fee method) — keep enough so chat Improve can fill them.
-        req_cap = 24 if str(instrument or "").casefold() in {"cost", "form"} else 16
+        inst_cf = str(instrument or "").casefold()
+        req_cap = 24 if inst_cf in {"cost", "form", "disclosure"} else 16
+        # Structured RFP field labels only (outline children / requiredHeadings).
+        # Checklist stubs scaffold a Field|Response table when non-empty — never
+        # invent blanks from narrative requirements text.
+        form_fields: list[str] = []
+        if inst_cf in {"form", "disclosure", "references"}:
+            seen_ff: set[str] = set()
+            for heading in section.children or []:
+                label = " ".join(str(heading or "").split()).strip()
+                if not label:
+                    continue
+                key = label.casefold()
+                if key in seen_ff:
+                    continue
+                seen_ff.add(key)
+                form_fields.append(label)
         rfp_sections.append(
             RfpSectionMap(
                 id=section.id,
@@ -900,6 +916,7 @@ def derive_legacy_fields(
                 evaluationWeight=weight,
                 protectFromCap=bool(getattr(section, "protect_from_cap", False)),
                 submissionInstrument=instrument,
+                formFields=form_fields,
                 track=str(getattr(section, "track", "") or ""),
             )
         )
