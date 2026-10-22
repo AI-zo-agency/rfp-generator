@@ -25,7 +25,7 @@ from app.services.rfp_storage import (  # noqa: E402
 
 def ensure_bucket() -> None:
     if not supabase_storage.is_configured():
-        print("ERROR: Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in backend/.env")
+        print("ERROR: Set SUPABASE_URL and SUPABASE_SECRET_KEY in backend/.env")
         sys.exit(1)
 
     bucket = settings.supabase_rfp_bucket

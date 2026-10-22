@@ -2187,6 +2187,65 @@ def _clip(text: str, limit: int) -> str:
     return f"{text[:limit].rstrip()}\n…[truncated]"
 
 
+def _pack_advisory_rfp_context(
+    *,
+    rfp_context: str,
+    rfp_full_text: str,
+    section_title: str,
+    research: ProposalResearchCache | None,
+    section_id: str,
+    sidebar_number_ask: bool,
+    informational_ask: bool,
+    budget_or_compliance: bool,
+) -> str:
+    """RFP pack for Ask Ralph — prefer pages for THIS open tab over TOC head."""
+    from app.services.proposal_rfp_excerpt import rfp_window_around_section_title
+
+    source = (rfp_full_text or rfp_context or "").strip()
+    focused = ""
+    if source and (section_title or "").strip():
+        focused = rfp_window_around_section_title(
+            source,
+            section_title,
+            max_chars=14_000,
+        ).strip()
+        if not focused:
+            from app.services.proposal_kb_fact_checker import _rfp_excerpt_for_section
+
+            focused = _rfp_excerpt_for_section(
+                source,
+                section_title=section_title,
+                requirements=_rfp_section_requirements_list(
+                    research, section_id, section_title=section_title
+                ),
+                max_chars=14_000,
+            ).strip()
+
+    if focused:
+        label = (
+            f"RFP pages for THIS open tab ({section_title}) — use these for "
+            "form fields / attachment layout questions:\n"
+        )
+        if sidebar_number_ask:
+            planner = _budget_rfp_context(
+                rfp_context, body_chars=800, keep=_PLANNER_MARKERS
+            )[:1_500]
+            return (
+                f"{label}{focused}\n\n"
+                f"Other RFP context (secondary — do not remap section numbers):\n"
+                f"{planner}"
+            )[:16_000]
+        return f"{label}{focused}"[:16_000]
+
+    if sidebar_number_ask or informational_ask:
+        return _budget_rfp_context(
+            rfp_context, body_chars=1_200, keep=_PLANNER_MARKERS
+        )[:2_500]
+    if budget_or_compliance:
+        return _budget_rfp_context(rfp_context, body_chars=3_500)[:10_000]
+    return _budget_rfp_context(rfp_context, body_chars=2_500)[:8_000]
+
+
 def _budget_rfp_context(
     rfp_context: str,
     *,
@@ -3789,14 +3848,20 @@ async def _section_chat_advisory_reply(
         if cost_compliance_block:
             cost_compliance_block = f"\n\n{cost_compliance_block}\n"
 
-    if sidebar_number_ask or _is_informational_only_ask(user_message):
-        packed_rfp = _budget_rfp_context(
-            rfp_context, body_chars=1_200, keep=_PLANNER_MARKERS
-        )[:2_500]
-    elif budget_ask or compliance_ask:
-        packed_rfp = _budget_rfp_context(rfp_context, body_chars=3_500)[:10_000]
-    else:
-        packed_rfp = _budget_rfp_context(rfp_context, body_chars=2_500)[:8_000]
+    # Prefer RFP pages for THIS open tab (Attachment A form body, Exhibit
+    # blanks, etc.). Informational / verify asks used to get only the TOC head
+    # of rfp_context (~2.5k), so Ralph said the RFQ was truncated before the
+    # form even when pdf_text still held it.
+    packed_rfp = _pack_advisory_rfp_context(
+        rfp_context=rfp_context,
+        rfp_full_text=rfp_full_text,
+        section_title=section.title or "",
+        research=research,
+        section_id=section.id or "",
+        sidebar_number_ask=bool(sidebar_number_ask),
+        informational_ask=_is_informational_only_ask(user_message),
+        budget_or_compliance=bool(budget_ask or compliance_ask),
+    )
     open_tab_block = (
         f"Open-tab draft (THIS is what 'section N' refers to when a target is bound):\n"
         f"{(section.content or '')[:6000]}"

@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def get_supabase_client() -> Client:
     try:
         url = settings.supabase_url.strip()
-        key = getattr(settings, "supabase_anon_key", settings.supabase_service_role_key).strip()
+        key = getattr(settings, "supabase_anon_key", settings.supabase_key).strip()
         return create_client(url, key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase client error: {str(e)}")

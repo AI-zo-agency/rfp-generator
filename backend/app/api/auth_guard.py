@@ -33,7 +33,7 @@ _verified: dict[str, tuple[str, float]] = {}
 def _supabase_email(token: str) -> str | None:
     from supabase import create_client
 
-    client = create_client(settings.supabase_url.strip(), settings.supabase_service_role_key.strip())
+    client = create_client(settings.supabase_url.strip(), settings.supabase_key)
     response = client.auth.get_user(token)
     user = getattr(response, "user", None)
     return (getattr(user, "email", None) or "").strip().lower() or None

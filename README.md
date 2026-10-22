@@ -73,7 +73,7 @@ Leave `REDIS_URL` unset (or don't run the worker) to fall back to the original i
 
 | Service | File | Required |
 |---------|------|----------|
-| Backend | `backend/.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, LLM keys (`FIREWORKS_API_KEY` or `OPENROUTER_API_KEY`), `SUPERMEMORY_API_KEY` |
+| Backend | `backend/.env` | `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, LLM keys (`FIREWORKS_API_KEY` or `OPENROUTER_API_KEY`), `SUPERMEMORY_API_KEY` |
 | Frontend | `frontend/.env` | `BACKEND_URL` |
 | Teamwork (optional) | `backend/.env` | `TEAMWORK_BASE_URL`, `TEAMWORK_API_KEY` |
 | Celery worker (optional) | `backend/.env` | `REDIS_URL` — unset means proposal/Go-No-Go jobs run in-process instead |

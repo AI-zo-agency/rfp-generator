@@ -294,7 +294,7 @@ def main() -> int:
         if not sb.use_supabase_db():
             print(
                 "ERROR: Supabase not configured. Set SUPABASE_URL / "
-                "SUPABASE_SERVICE_ROLE_KEY in backend/.env, or pass --sqlite PATH",
+                "SUPABASE_SECRET_KEY in backend/.env, or pass --sqlite PATH",
                 file=sys.stderr,
             )
             return 1

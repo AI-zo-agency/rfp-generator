@@ -94,7 +94,7 @@ def _get_client():
     options = SyncClientOptions(httpx_client=http_client, postgrest_client_timeout=120)
     _client_local.client = create_client(
         settings.supabase_url.strip(),
-        settings.supabase_service_role_key.strip(),
+        settings.supabase_key,
         options=options,
     )
     return _client_local.client

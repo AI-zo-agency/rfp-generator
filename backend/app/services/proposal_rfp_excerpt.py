@@ -498,3 +498,102 @@ def budget_and_cost_excerpt(rfp_text: str, *, max_chars: int = 28_000) -> str:
         if used >= max_chars:
             break
     return "\n\n---\n\n".join(parts)
+
+
+def _alnum_fold_with_map(text: str) -> tuple[str, list[int]]:
+    """Casefold letters/digits only; map each folded index back to ``text``."""
+    folded: list[str] = []
+    index_map: list[int] = []
+    prev_space = True
+    for i, ch in enumerate(text or ""):
+        if ch.isalnum():
+            folded.append(ch.casefold())
+            index_map.append(i)
+            prev_space = False
+        elif not prev_space:
+            folded.append(" ")
+            index_map.append(i)
+            prev_space = True
+    return "".join(folded).strip(), index_map
+
+
+def rfp_window_around_section_title(
+    rfp_text: str,
+    section_title: str,
+    *,
+    max_chars: int = 14_000,
+    before: int = 400,
+) -> str:
+    """Slice the RFP around THIS draft tab's buyer heading.
+
+    Uses plain ``str.find`` on the section title (and shorter splits of it) —
+    no form-type synonym regex. Prefers the **later** hit so a mid-doc
+    "Attachment A, …" checklist line does not beat the real form page
+    (often ``ATTACHMENT A\\nSTATEMENT OF QUALIFICATIONS`` without a comma).
+    Punctuation is ignored when matching so comma / em-dash / newline variants
+    of the same buyer heading still resolve.
+    """
+    body = rfp_text or ""
+    title = " ".join((section_title or "").split()).strip()
+    if not body.strip() or not title:
+        return ""
+    if len(body) <= max_chars and title.casefold() in body.casefold():
+        return body
+
+    candidates: list[str] = [title]
+    # Punctuation-stripped full title (comma/emdash → space)
+    alnum_title = " ".join(
+        "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title).split()
+    )
+    if alnum_title and alnum_title.casefold() != title.casefold():
+        candidates.append(alnum_title)
+    for sep in (",", "—", "–", " - ", ":", "–", "—"):
+        if sep not in title:
+            continue
+        left, right = title.split(sep, 1)
+        left, right = left.strip(), right.strip()
+        if len(left) >= 8:
+            candidates.append(left)
+        if len(right) >= 8:
+            candidates.append(right)
+    words = title.split()
+    if len(words) >= 3:
+        candidates.append(" ".join(words[-3:]))
+    if len(words) >= 4:
+        candidates.append(" ".join(words[:4]))
+
+    folded, index_map = _alnum_fold_with_map(body)
+    if not folded or not index_map:
+        return ""
+
+    best_idx = -1
+    best_needle_len = 0
+    for cand in candidates:
+        needle = " ".join(
+            "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in cand).split()
+        ).casefold()
+        if len(needle) < 8:
+            continue
+        last_folded = -1
+        search_from = 0
+        while True:
+            found = folded.find(needle, search_from)
+            if found < 0:
+                break
+            last_folded = found
+            search_from = found + max(1, len(needle))
+        if last_folded < 0 or last_folded >= len(index_map):
+            continue
+        orig = index_map[last_folded]
+        # Later page wins; on a tie prefer the longer heading match.
+        if orig > best_idx or (orig == best_idx and len(needle) > best_needle_len):
+            best_idx = orig
+            best_needle_len = len(needle)
+
+    if best_idx < 0:
+        return ""
+    start = max(0, best_idx - before)
+    end = min(len(body), start + max_chars)
+    if end - start < max_chars:
+        end = min(len(body), best_idx + max_chars - before)
+    return body[start:end].strip()

@@ -41,7 +41,7 @@ def _rfp_row(row: sqlite3.Row) -> dict:
 
 def migrate(*, sqlite_file: Path, dry_run: bool) -> None:
     if not sb.use_supabase_db():
-        print("ERROR: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in backend/.env")
+        print("ERROR: SUPABASE_URL and SUPABASE_SECRET_KEY must be set in backend/.env")
         sys.exit(1)
 
     if not sqlite_file.is_file():

@@ -264,7 +264,8 @@ class Settings(BaseSettings):
     langsmith_project: str = "proposal generation"
 
     supabase_url: str = ""
-    supabase_service_role_key: str = ""
+    # Supabase secret API key (sb_secret_...). Replaces the legacy service_role JWT.
+    supabase_secret_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"
 
     # Activity audit store: auto | sqlite | supabase
@@ -314,6 +315,11 @@ class Settings(BaseSettings):
             return self.supermemory_container_tag
         legacy = self.supermemory_container_tags.split(",")[0].strip()
         return legacy or self.supermemory_container_tag
+
+    @property
+    def supabase_key(self) -> str:
+        """Server-side Supabase secret key (sb_secret_...)."""
+        return self.supabase_secret_key.strip()
 
     @property
     def cors_origin_list(self) -> list[str]:

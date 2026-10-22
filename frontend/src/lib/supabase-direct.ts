@@ -8,9 +8,10 @@ let _client: SupabaseClient | null = null;
 /** Lazy client — never construct at module load (breaks `next build` without secrets). */
 export function getSupabase(): SupabaseClient {
   if (_client) return _client;
-  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  // Supabase secret key (sb_secret_...). Server-side only.
+  const key = (process.env.SUPABASE_SECRET_KEY || "").trim();
   if (!key) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+    throw new Error("SUPABASE_SECRET_KEY is not configured");
   }
   _client = createClient(SUPABASE_URL, key, {
     auth: { persistSession: false },

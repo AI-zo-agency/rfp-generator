@@ -21,7 +21,7 @@ from prompt_store import PROMPT_FILES, _disk_prompt, _upsert_row, supabase_confi
 
 def main() -> int:
     if not supabase_configured():
-        print("Supabase not configured (SUPABASE_URL / SERVICE_ROLE_KEY)")
+        print("Supabase not configured (SUPABASE_URL / SUPABASE_SECRET_KEY)")
         return 1
     a1 = _disk_prompt("agent1")
     a2 = _disk_prompt("agent2")

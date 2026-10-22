@@ -21,7 +21,7 @@ class SupabaseStorageError(Exception):
 
 
 def is_configured() -> bool:
-    return bool(settings.supabase_url.strip() and settings.supabase_service_role_key.strip())
+    return bool(settings.supabase_url.strip() and settings.supabase_key)
 
 
 def _get_client():
@@ -40,7 +40,7 @@ def _get_client():
 
     _client = create_client(
         settings.supabase_url.strip(),
-        settings.supabase_service_role_key.strip(),
+        settings.supabase_key,
     )
     return _client
 
