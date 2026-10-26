@@ -85,6 +85,32 @@ class MatrixRebuildTests(unittest.TestCase):
         self.assertEqual(tech, 5)
         self.assertEqual(by_dim["Technical Capability Match"], 5)
 
+    def test_win_floor_skipped_while_pass_fail_gate_open(self) -> None:
+        """Minnesota Lottery: an unresolved Phase 1 office gate kept Win at the analyst's 2."""
+        rows = [
+            _cap("Creative production", "verified"),
+            _cap("Media planning and buying", "verified"),
+            _cap("B2C campaigns for ages 25-44", "partial"),
+        ]
+        open_gate = "Phase 1 pass/fail: office with 2+ dedicated full-time employees"
+        matrix, _ = rebuild_decision_matrix_scores(
+            _matrix(4, 2, 4, 4, 2), rows, open_gates=[open_gate]
+        )
+        win = next(r for r in matrix if r.dimension == "Win Probability")
+        self.assertEqual(win.score, 2)
+        self.assertNotIn("Raised to", win.notes)
+        self.assertIn(open_gate, win.notes)
+
+    def test_win_floor_still_applies_without_open_gates(self) -> None:
+        rows = [
+            _cap("Creative production", "verified"),
+            _cap("Media planning and buying", "verified"),
+            _cap("B2C campaigns for ages 25-44", "partial"),
+        ]
+        matrix, _ = rebuild_decision_matrix_scores(_matrix(4, 2, 4, 4, 2), rows)
+        win = next(r for r in matrix if r.dimension == "Win Probability")
+        self.assertEqual(win.score, 3)
+
 
 class SharedWonCaseStudyEnrichmentTests(unittest.TestCase):
     def test_santa_clara_won_proposal_shared_across_craft_rows(self) -> None:

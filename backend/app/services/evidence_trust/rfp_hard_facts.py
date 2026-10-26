@@ -40,6 +40,7 @@ _ELIGIBILITY_DOLLAR_CONTEXT_RE = re.compile(
 )
 _EVAL_ANCHOR_RE = re.compile(
     r"(?:points?\s+will\s+be\s+awarded|evaluation\s+criteria|"
+    r"evaluation\s+(?:procedure|process|factors)|factors\s+and\s+weight|"
     r"selection\s+criteria|scoring\s+(?:criteria|factors|matrix)|"
     r"maximum\s+points|point\s+allocation|weighted\s+as\s+follows|"
     r"weighted\s+criteria|criteria\s+and\s+points|"
@@ -72,8 +73,9 @@ _EVAL_ROW_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 # Colon/dash OR whitespace between label and points (DuPage: "Firm Qualifications 20 points").
+# Commas allowed: "Agency Philosophy, Strengths, and Capabilities 125 points".
 _EVAL_POINTS_LINE_RE = re.compile(
-    r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-]{3,80}?)"
+    r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-,]{3,80}?)"
     r"(?:\s*(?:[:\-–—])\s*|[ \t]+)"
     r"(?P<pts>\d{1,3})\s*(?:points?|pts\.?)\b",
     re.IGNORECASE,
@@ -171,6 +173,16 @@ def format_money(value: float) -> str:
 
 def _is_eligibility_dollar_context(window: str) -> bool:
     return bool(_ELIGIBILITY_DOLLAR_CONTEXT_RE.search(window or ""))
+
+
+# Rows inside an evaluation window that are not criteria: the table's own total,
+# preference points added on top of it, and PDF footers ("Final Page 13 of 17").
+_EVAL_NOISE_WORDS = frozenset({"total", "subtotal", "preference", "page"})
+
+
+def _is_eval_label_noise(label: str) -> bool:
+    words = label.casefold().replace(",", " ").replace(".", " ").split()
+    return any(word in _EVAL_NOISE_WORDS for word in words)
 
 
 def _normalize_eval_label(label: str) -> str:
@@ -299,7 +311,7 @@ def extract_rfp_hard_facts(
             label = re.sub(r"\s+", " ", match.group("label")).strip()
             pts = int(match.group("pts"))
             # Allow 1000-point RFP scales (e.g. Price 350 of 1000) — not only ≤100.
-            if pts <= 0 or pts > 2000:
+            if pts <= 0 or pts > 2000 or _is_eval_label_noise(label):
                 continue
             collected_points.append((label, pts))
         for row_m in _EVAL_POINTS_LINE_RE.finditer(window):
@@ -308,6 +320,8 @@ def extract_rfp_hard_facts(
             if pts <= 0 or pts > 2000:
                 continue
             if len(label) < 4 or label.casefold() in {"section", "page", "item", "group", "total"}:
+                continue
+            if _is_eval_label_noise(label):
                 continue
             collected_points.append((label, pts))
         for row_m in _EVAL_BARE_WEIGHT_LINE_RE.finditer(window):
@@ -329,6 +343,8 @@ def extract_rfp_hard_facts(
             }:
                 continue
             if re.search(r"(?i)\b(?:years?|months?|employees?|days?|hours?)\b", label):
+                continue
+            if _is_eval_label_noise(label):
                 continue
             collected_points.append((label, pts))
         flat_window = _flatten_wrapped_percent_criteria(window)

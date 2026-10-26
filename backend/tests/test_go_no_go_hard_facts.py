@@ -81,6 +81,34 @@ Total 100 points.
 """
 
 
+# Minnesota Lottery shape: "Evaluation Procedure and Criteria" heading, numbered
+# rows with commas in the labels, a TOTAL row, preference points on top, and
+# PDF page footers inside the window.
+MN_LOTTERY_EVAL_SNIPPET = """
+TABLE OF CONTENTS
+SECTION 4 – PROPOSAL CONTENT ......................................... 9
+SECTION 5 – EVALUATION PROCEDURE AND CRITERIA ........................ 13
+Final Page 13 of 17
+SECTION 5 – EVALUATION PROCEDURE AND CRITERIA
+Phase 1 – Responsiveness and Pass/Fail Requirements
+• Agency staff must have at least five years of experience relating to state-of-the-art digital and traditional
+marketing, advertising, and media buying.
+Phase 2 – Evaluate Responses
+The factors and weighting on which responses will be evaluated are:
+1. Agency Philosophy, Strengths, and Capabilities   125 points
+2. Client Service   125 points
+3. Media Strategy, Planning and Buying   80 points
+4. Measurement and Reporting   50 points
+5. PR, Sponsorship, and Event Planning   20 points
+6. Social Strategy and Content   100 points
+7. Case Studies   125 points
+8. Staffing Proposal and Key Biographies   75 points
+9. Price   300 points
+10. TOTAL   1,000 points
+11. Preference Points (if applicable in addition to 1,000 available) 120 points
+Final Page 14 of 17
+"""
+
 class GoNoGoHardFactsTests(unittest.TestCase):
     def test_extracts_ceiling_and_year_budgets(self) -> None:
         facts = _extract_rfp_hard_facts(HTA_SNIPPET)
@@ -143,6 +171,25 @@ class GoNoGoHardFactsTests(unittest.TestCase):
         self.assertIn("key qualifications", blob)
         self.assertTrue(evaluation_table_is_reliable(facts), facts)
         self.assertEqual(facts["evaluation_total"], 100)
+
+    def test_extracts_evaluation_procedure_table_with_commas(self) -> None:
+        """'Evaluation Procedure and Criteria' tables were read as 'not disclosed'."""
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(MN_LOTTERY_EVAL_SNIPPET)
+        lines = facts["evaluation_lines"]
+        blob = " | ".join(lines).casefold()
+        self.assertIn("agency philosophy, strengths, and capabilities: 125", blob)
+        self.assertIn("pr, sponsorship, and event planning: 20", blob)
+        self.assertIn("price: 300", blob)
+        self.assertNotIn("total", blob)
+        self.assertNotIn("preference", blob)
+        self.assertNotIn("page", blob)
+        self.assertEqual(len(lines), 9, lines)
+        self.assertEqual(facts["evaluation_total"], 1000)
+        self.assertTrue(evaluation_table_is_reliable(facts), facts)
 
     def test_extracts_evaluation_point_rows(self) -> None:
         facts = _extract_rfp_hard_facts(HTA_SNIPPET)

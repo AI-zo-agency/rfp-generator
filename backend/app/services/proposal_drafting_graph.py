@@ -557,6 +557,8 @@ def partition_phase3_sections(
 
     ``form_field_values`` — optional Zo identity map (e.g. Offeror Name → legal
     name) used only when a form/disclosure tab already has RFP field labels.
+    ``None`` means the KB was not searched; a dict (even empty) means it was,
+    so labels still open are listed by name on the stub.
     """
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
@@ -647,7 +649,20 @@ def partition_phase3_sections(
         if instrument_skips_full_narrative_draft(instrument):
             prior = existing_by_id.get(mapped.id)
             if prior is None or not _phase3_content_is_usable(prior.content):
-                reason = (mapped.requirements or [""])[0]
+                from app.services.proposal_intelligence.assembler import (
+                    HEADING_REQUIREMENT_PREFIX,
+                )
+
+                # Sub-heading items are the form labels themselves — the ask
+                # line is the first real requirement, not "Must cover … Offeror Name".
+                reason = next(
+                    (
+                        req
+                        for req in (mapped.requirements or [])
+                        if not str(req).startswith(HEADING_REQUIREMENT_PREFIX)
+                    ),
+                    "",
+                )
                 if instrument == "clarify":
                     body = clarify_blocker_stub(mapped.title or "", reason)
                 elif str(instrument or "").casefold() == "cost":
@@ -663,6 +678,7 @@ def partition_phase3_sections(
                         requirement=reason,
                         form_fields=list(getattr(mapped, "form_fields", None) or []),
                         field_values=form_field_values,
+                        kb_searched=form_field_values is not None,
                     )
                 else:
                     body = attachment_checklist_stub(
@@ -671,6 +687,7 @@ def partition_phase3_sections(
                         requirement=reason,
                         form_fields=list(getattr(mapped, "form_fields", None) or []),
                         field_values=form_field_values,
+                        kb_searched=form_field_values is not None,
                     )
                 already.append(
                     ProposalSection(

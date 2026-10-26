@@ -171,6 +171,13 @@ def _is_identity_or_portfolio_section(section: ProposalSection) -> bool:
     return False
 
 
+def _has_rfp_form_table(section: ProposalSection) -> bool:
+    """RFP form-field tables are the buyer's own layout — never trimmed."""
+    from app.services.proposal_submission_authority import FORM_FIELDS_HEADING
+
+    return FORM_FIELDS_HEADING in (section.content or "")
+
+
 def _is_hard_fit_protected(
     section: ProposalSection,
     *,
@@ -243,6 +250,8 @@ def _hard_fit_sections_to_budget(
             if _is_identity_or_portfolio_section(section):
                 continue
             if i == budget_idx or section_is_budgetish(section):
+                continue
+            if _has_rfp_form_table(section):
                 continue
             protected = _is_hard_fit_protected(
                 section, budget_idx=budget_idx, index=i
@@ -325,7 +334,12 @@ def apply_ralph_to_draft(
         ceiling: int | None = None
         protect_budget = i == budget_idx or section_is_budgetish(section)
         wt = section.word_target
-        if not protect_budget and isinstance(wt, int) and wt > 0:
+        if (
+            not protect_budget
+            and not _has_rfp_form_table(section)
+            and isinstance(wt, int)
+            and wt > 0
+        ):
             soft = int(wt * _SECTION_OVERSHOOT_RATIO)
             if _word_count(section.content or "") > soft:
                 ceiling = soft

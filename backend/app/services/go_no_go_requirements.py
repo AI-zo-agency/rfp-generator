@@ -76,7 +76,8 @@ row per tactic creates permanent false gaps on every RFP.
 
 DO still split truly different crafts/platforms: website redesign vs CMS vs
 hosting vs content migration; brand identity vs media buying; insurance vs
-EEO. Do not merge those. Do not summarise away real gaps. Do not skip items
+EEO; public relations / earned media vs promotional collateral design. Do not
+merge those. Do not summarise away real gaps. Do not skip items
 you suspect the vendor lacks — those matter most.
 
 For EACH requirement give 1 short seed kbQuery (fallback only — a dedicated
@@ -99,6 +100,14 @@ certification, or bond required to bid. These are pass/fail, not scored
 preferences: a vendor that cannot meet one cannot win by writing well.
 Everything the RFP merely scores, weights, or prefers is disqualifying=false —
 do NOT flag a capability just because it is important or heavily weighted.
+
+PASS/FAIL GATES: when the RFP lists pass/fail or mandatory requirements (often in
+the evaluation section), emit EACH one as its own requirement row quoting it —
+never merge two gates, never skip one because it looks easy. An office or local
+presence gate is category=logistics; a staff-experience gate ("agency staff must
+have at least five years of experience in…") is category=role with
+disqualifying=true. An office gate the vendor may meet by committing to open one
+("existence or willingness to establish") is disqualifying=false.
 
 Never set disqualifying=true on something the vendor SUPPLIES in the proposal.
 "Provide three client references" is a form any agency with clients fills out;

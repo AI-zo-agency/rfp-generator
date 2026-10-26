@@ -121,3 +121,39 @@ class GoNoGoReportBuilderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoNoGoReportLabelTests(unittest.TestCase):
+    def test_declaration_form_gap_is_assembled_not_a_real_gap(self) -> None:
+        """Minnesota Lottery: the Workforce and Equal Pay Declaration read as 🔴 Real gap."""
+        from app.services.go_no_go_report_builder import render_capability_assessment_table
+
+        rows = [
+            GoNoGoCapabilityRow(
+                requirement="Workforce and Equal Pay Declaration Page and Equal Pay Certificate Form",
+                status="gap",
+                isCore=True,
+                category="compliance",
+                downgradeReason="no KB document evidences this requirement",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Insurance limits meeting State requirements",
+                status="gap",
+                isCore=True,
+                category="compliance",
+                downgradeReason="no KB document evidences this requirement",
+            ),
+        ]
+        table = render_capability_assessment_table(rows)
+        self.assertNotIn("Real gap", table)
+        self.assertIn("📋 Assemble at submission", table)
+        self.assertIn("Not on file", table)
+
+    def test_recommendation_header_counts_its_items(self) -> None:
+        from app.services.go_no_go_report_builder import render_recommendation_section
+
+        out = render_recommendation_section(
+            "review", conditions=["a", "b", "c"], critical_gaps=[]
+        )
+        self.assertNotIn("Two things", out)
+        self.assertIn("3 things need resolution", out)

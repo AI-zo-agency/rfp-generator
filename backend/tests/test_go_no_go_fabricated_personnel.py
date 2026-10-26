@@ -198,6 +198,64 @@ class FabricatedPersonnelGroundingTests(unittest.TestCase):
         self.assertIn("retired", gaps.casefold())
 
 
+    def test_two_retired_names_leave_one_placeholder_and_scrub_team_summary(self) -> None:
+        """Minnesota Lottery: 'X and Y are retired' became the placeholder twice."""
+        from unittest.mock import patch
+
+        from app.services.go_no_go_service import _scrub_invented_eval_and_people
+
+        raw = {
+            "summary": "Bench is thin.",
+            "stageOneReport": "Resource notes.",
+            "fitScore": 3,
+            "worthScore": 4,
+            "recommendation": "review",
+            "criticalGaps": [],
+            "teamMatch": {
+                "summary": "Ron Comer and Rachel Rice are retired and not assignable.",
+                "scoreImpact": "",
+                "flags": [],
+            },
+            "decisionMatrix": [
+                {
+                    "dimension": "Resource Availability",
+                    "score": 2,
+                    "notes": "Bench is thin; Ron Comer and Rachel Rice are retired/not assignable.",
+                }
+            ],
+        }
+        with patch(
+            "app.services.retired_staff_store.retired_names",
+            return_value=("Ron Comer", "Rachel Rice"),
+        ):
+            _scrub_invented_eval_and_people(raw, evaluation_points_found=True)
+        notes = raw["decisionMatrix"][0]["notes"]
+        self.assertEqual(notes.count("[retired staff removed"), 1, notes)
+        self.assertNotIn("Ron Comer", raw["teamMatch"]["summary"])
+        self.assertNotIn("Rachel Rice", raw["teamMatch"]["summary"])
+        gaps = " | ".join(str(g) for g in raw["criticalGaps"])
+        self.assertIn("Ron Comer", gaps)
+        self.assertIn("Rachel Rice", gaps)
+
+    def test_roster_spelling_variant_of_retired_name_is_retired(self) -> None:
+        """retired_staff.json says 'Rachel Rice'; the roster spells it 'Rachael Rice'."""
+        from unittest.mock import patch
+
+        from app.services.evidence_trust.personnel_grounding import (
+            is_retired_team_member,
+            roster_names_in_text,
+        )
+
+        with patch(
+            "app.services.retired_staff_store.retired_names",
+            return_value=("Ron Comer", "Rachel Rice"),
+        ):
+            self.assertTrue(is_retired_team_member("Rachael Rice"))
+            found = roster_names_in_text("Rachael Rice and Haley Neff lead the account.")
+        self.assertNotIn("Rachael Rice", found)
+        self.assertIn("Haley Neff", found)
+
+
 class EnforceFabricatedCapabilityRowTests(unittest.TestCase):
     def test_enforce_downgrades_brittany_verified_row(self) -> None:
         from app.models.go_no_go import (

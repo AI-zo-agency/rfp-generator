@@ -1791,6 +1791,7 @@ def compress_rfp_company_identity_forms(
     Never wipe multi-ask questionnaires (see ``is_rfp_company_identity_form_section``).
     """
     from app.models.proposal import ProposalDraft, ProposalSection
+    from app.services.proposal_submission_authority import FORM_FIELDS_HEADING
 
     if not isinstance(draft, ProposalDraft):
         return draft, []
@@ -1855,6 +1856,10 @@ def compress_rfp_company_identity_forms(
             sections.append(section)
             continue
         if word_count(body) < 40 and "[manual fill" in body.casefold():
+            sections.append(section)
+            continue
+        # The RFP's own form layout (labels verbatim) — never swap it for 1.3's table.
+        if FORM_FIELDS_HEADING in body:
             sections.append(section)
             continue
         sections.append(section.model_copy(update={"content": compact, "status": "generated"}))

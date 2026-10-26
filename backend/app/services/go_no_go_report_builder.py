@@ -32,16 +32,33 @@ def _cell(text: str) -> str:
     return str(text or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
+# Forms the bidder signs or fills in for this bid: declarations, affidavits,
+# certification forms. Every bidder completes them; none is a capability.
+_BID_FORM_WORDS = ("declaration", "affidavit", "attestation", "certificate form", "certification form", "signature page")
+
+
+def _is_bid_form(requirement: str) -> bool:
+    low = (requirement or "").casefold()
+    return any(word in low for word in _BID_FORM_WORDS)
+
+
 def _status_display(row: GoNoGoCapabilityRow) -> str:
     # Proposal-content asks are authored at submission time, so "no KB document
     # evidences this" is the expected state, not a finding. Reading them as
     # capability gaps is what made an assemble-the-packet checklist look like
     # five holes in the agency's craft.
-    if (row.category or "").casefold() == SUBMISSION_CATEGORY and row.status not in {
-        "verified",
-        "partial",
-    }:
+    unmet = row.status not in {"verified", "partial"}
+    if unmet and (
+        (row.category or "").casefold() == SUBMISSION_CATEGORY
+        or _is_bid_form(row.requirement)
+    ):
         return "📋 Assemble at submission — written for this bid, not drawn from past work"
+    # A compliance document missing from the KB is paperwork to confirm, not a
+    # hole in the agency's craft. "Real gap" on an Equal Pay declaration read as
+    # a reason not to bid.
+    if unmet and (row.category or "").casefold() == "compliance":
+        reason = (row.downgrade_reason or "no KB document evidences this").strip()
+        return f"🟠 Not on file — confirm before submission ({reason[:120]})"
 
     icon = _STATUS_ICON.get(row.status, "🔴")
     label = _STATUS_LABEL.get(row.status, "Gap")
@@ -178,8 +195,13 @@ def render_recommendation_section(
     lines = ["## Recommendation", "", f"**{label}**", ""]
     items = conditions or critical_gaps
     if items:
-        lines.append("Two things need resolution before drafting begins, not after:" if label == "GO WITH CONDITIONS" else "Before pursuing:")
-        for idx, item in enumerate(items[:8], start=1):
+        shown = items[:8]
+        if label == "GO WITH CONDITIONS":
+            count = "One thing needs" if len(shown) == 1 else f"{len(shown)} things need"
+            lines.append(f"{count} resolution before drafting begins, not after:")
+        else:
+            lines.append("Before pursuing:")
+        for idx, item in enumerate(shown, start=1):
             lines.append(f"{idx}. {item}")
     return "\n".join(lines)
 

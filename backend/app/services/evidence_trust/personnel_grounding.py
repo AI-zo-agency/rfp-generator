@@ -164,17 +164,36 @@ def documented_name_in_text(name: str, text: str) -> bool:
     return False
 
 
+def _spelling_key(name: str) -> str:
+    """'Rachael Rice' and 'Rachel Rice' → 'rchl rice': same surname, first-name consonants."""
+    words = _folded(name).split()
+    if len(words) < 2:
+        return " ".join(words)
+    given = [w[0] + "".join(ch for ch in w[1:] if ch not in "aeiouy") for w in words[:-1]]
+    return " ".join([*given, words[-1]])
+
+
 def retired_team_personnel() -> tuple[str, ...]:
-    """Names the UI marked retired — agents must never assign them as current staff."""
+    """Names the UI marked retired — agents must never assign them as current staff.
+
+    Roster spellings of a retired name count too: the store says "Rachel Rice"
+    while the roster says "Rachael Rice", which kept her assignable.
+    """
+    names: tuple[str, ...] = RETIRED_TEAM_PERSONNEL
     try:
         from app.services.retired_staff_store import retired_names
 
-        names = retired_names()
-        if names:
-            return names
+        names = retired_names() or RETIRED_TEAM_PERSONNEL
     except Exception:
         pass
-    return RETIRED_TEAM_PERSONNEL
+    keys = {_spelling_key(n) for n in names}
+    folded = {_folded(n) for n in names}
+    variants = tuple(
+        n
+        for n in DOCUMENTED_TEAM_PERSONNEL
+        if _spelling_key(n) in keys and _folded(n) not in folded
+    )
+    return tuple(names) + variants
 
 
 def _retired_by_key() -> dict[str, str]:

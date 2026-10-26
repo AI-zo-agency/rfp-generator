@@ -125,7 +125,7 @@ def _is_cert_requirement(requirement: str) -> bool:
     return bool(_CERT_REQUIREMENT_RE.search(requirement or ""))
 
 
-def scrub_capability_row(row: GoNoGoCapabilityRow) -> GoNoGoCapabilityRow:
+def _scrub_fabricated_claims(row: GoNoGoCapabilityRow) -> GoNoGoCapabilityRow:
     """Scrub one capability row; rewrite cert rows that listed invented badges."""
     if row.status not in {"verified", "partial"}:
         return row
@@ -198,6 +198,93 @@ def scrub_capability_row(row: GoNoGoCapabilityRow) -> GoNoGoCapabilityRow:
         )
 
     return row.model_copy(update={"evidence": scrubbed[:400]})
+
+
+# A proposal says what zö WILL do. "will help Maricopa County…" and the scope
+# task list ("Produce broadcast-quality video for TV/cinema") were rated Strong
+# on the Minnesota Lottery run although neither describes delivered work.
+_COMMITMENT_MARKERS = (
+    " will ",
+    " we'll ",
+    " we’ll ",
+    " shall ",
+    " would ",
+    " plan to ",
+    " intend to ",
+    " propose ",
+)
+_TASK_LIST_VERBS = frozenset(
+    {
+        "produce",
+        "develop",
+        "create",
+        "design",
+        "deliver",
+        "execute",
+        "manage",
+        "coordinate",
+        "ensure",
+        "provide",
+        "conduct",
+        "build",
+        "launch",
+        "implement",
+        "establish",
+        "prepare",
+        "support",
+        "oversee",
+        "maintain",
+    }
+)
+
+
+def _is_proposal_source(source: str) -> bool:
+    low = (source or "").casefold()
+    return "proposal" in low and "03_cs" not in low
+
+
+def is_commitment_language(text: str) -> bool:
+    """True for promises and scope task lines, not accounts of finished work."""
+    folded = " " + " ".join((text or "").casefold().split()) + " "
+    if any(marker in folded for marker in _COMMITMENT_MARKERS):
+        return True
+    first = folded.strip().lstrip("-•*·– ").split(" ", 1)[0]
+    return first in _TASK_LIST_VERBS
+
+
+# Experience totals in a proposal's capability list ("30+ years of combined
+# experience") are the agency describing itself; they can include people who
+# have since left.
+_SELF_DESCRIPTION_MARKERS = ("years of combined", "years of experience", "combined experience")
+
+
+def cap_proposal_commitment(row: GoNoGoCapabilityRow) -> GoNoGoCapabilityRow:
+    """A proposal's promise or self-description can support a capability, never prove it alone."""
+    if row.status != "verified" or not _is_proposal_source(row.kb_source):
+        return row
+    folded = " ".join((row.evidence or "").casefold().split())
+    if is_commitment_language(row.evidence):
+        reason = (
+            "quote is what a proposal promised, not delivered work — "
+            "cite the case study for this engagement"
+        )
+    elif any(marker in folded for marker in _SELF_DESCRIPTION_MARKERS):
+        reason = (
+            "quote is the agency describing itself in a proposal, not delivered "
+            "work — cite a case study or a current staff bio"
+        )
+    else:
+        return row
+    logger.info(
+        "go_no_go evidence capped requirement=%r: %s",
+        (row.requirement or "")[:80],
+        reason[:40],
+    )
+    return row.model_copy(update={"status": "partial", "downgrade_reason": reason})
+
+
+def scrub_capability_row(row: GoNoGoCapabilityRow) -> GoNoGoCapabilityRow:
+    return cap_proposal_commitment(_scrub_fabricated_claims(row))
 
 
 def scrub_capability_rows(

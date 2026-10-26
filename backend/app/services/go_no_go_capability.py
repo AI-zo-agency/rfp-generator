@@ -630,6 +630,8 @@ def resolve_headline_technical_score(rows: list[GoNoGoCapabilityRow]) -> tuple[i
 def rebuild_decision_matrix_scores(
     matrix: list[Any],
     capability_rows: list[GoNoGoCapabilityRow],
+    *,
+    open_gates: list[str] | None = None,
 ) -> tuple[list[Any], int | None]:
     """Thoroughly recalculate all five matrix cells for every RFP.
 
@@ -640,7 +642,8 @@ def rebuild_decision_matrix_scores(
       3. Financial ← analyst seed (opportunity caps applied earlier) — independent
       4. Strategic ← analyst seed, capped at Technical+2
       5. Win       ← analyst seed, capped at Technical+1; floor min(3, tech)
-                     when core craft ratio ≥ 0.4 and no unmet disqualifier
+                     when core craft ratio ≥ 0.4, no unmet disqualifier, and no
+                     open pass/fail gate (``open_gates``)
 
     Overall Go Score = arithmetic mean of the five scores (caller averages).
     """
@@ -713,12 +716,33 @@ def rebuild_decision_matrix_scores(
 
         out.append(row.model_copy(update={"score": score, "notes": notes}))
 
+    # An unresolved pass/fail gate (a critical compliance flag such as a required
+    # in-state office) can end the pursuit on its own. Craft proof says nothing
+    # about it, so the analyst's lower Win score stands. On the Minnesota Lottery
+    # run the floor lifted Win 2 → 3 over an open Phase 1 office requirement.
+    gates = [g.strip() for g in (open_gates or []) if g and g.strip()]
+    if gates:
+        held: list[GoNoGoDecisionMatrixRow] = []
+        for row in out:
+            if row.dimension.casefold() == "win probability" and row.score < 3:
+                row = row.model_copy(
+                    update={
+                        "notes": (
+                            f"{row.notes} | Not raised to the 3/5 floor: open "
+                            f"pass/fail gate — {gates[0]}"
+                        ).strip(" |")
+                    }
+                )
+            held.append(row)
+        out = held
+
     # Win floor after all caps — only when craft proof is real and responsive.
     if (
         derived is not None
         and derived >= 3
         and evidenced_core_craft_ratio(capability_rows) >= 0.4
         and not blocked
+        and not gates
     ):
         win_floor = min(3, derived)
         raised: list[GoNoGoDecisionMatrixRow] = []

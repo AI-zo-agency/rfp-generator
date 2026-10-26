@@ -21,6 +21,9 @@ from app.services.proposal_section_aliases import PROPOSAL_SECTION_ALIAS_GROUPS
 
 logger = logging.getLogger(__name__)
 
+# Requirement items made from RFP sub-headings / form labels (outline children).
+HEADING_REQUIREMENT_PREFIX = "Must cover the RFP's required sub-heading: "
+
 
 def refresh_proposal_memory(plan: ProposalExecutionPlan) -> ProposalExecutionPlan:
     """Consolidate known facts from opportunity/delivery into proposalMemory."""
@@ -840,7 +843,7 @@ def derive_legacy_fields(
         # Prepended (not appended) so they survive the requirements[:12] cap
         # below even on a section whose brief already has a full key-message list.
         heading_requirements = [
-            f"Must cover the RFP's required sub-heading: {heading}"
+            f"{HEADING_REQUIREMENT_PREFIX}{heading}"
             for heading in section.children
             if not any(heading.casefold() in req.casefold() for req in requirements)
         ]

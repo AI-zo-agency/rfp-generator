@@ -2448,16 +2448,53 @@ async def _run_phase3_drafting_inner(
         section.id: section for section in (existing.sections if existing else [])
     }
     from app.services.proposal_drafting_graph import (
+        _phase3_content_is_usable,
         _zo_sections_context,
         partition_phase3_sections,
     )
+    from app.services.proposal_form_fields import (
+        collect_form_field_labels,
+        form_field_sections,
+        resolve_form_field_values_from_kb,
+    )
+
+    static_section_text = _zo_sections_context(static_sections)
+    # RFP built-in forms: look every field label up in the KB (Ask Ralph's
+    # manual-fill bar — copied values only). Unfilled labels stay MANUAL FILL.
+    form_field_values: dict[str, str] | None = None
+    unstubbed_forms = [
+        mapped
+        for mapped in form_field_sections(research.rfp_sections)
+        if not (
+            existing_by_id.get(mapped.id)
+            and _phase3_content_is_usable(existing_by_id[mapped.id].content)
+        )
+    ]
+    if unstubbed_forms:
+        try:
+            form_field_values = await resolve_form_field_values_from_kb(
+                collect_form_field_labels(unstubbed_forms),
+                rfp_client=rfp.client or "",
+                rfp_sector=rfp.sector or "",
+                static_section_text=static_section_text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Phase 3 form field KB fill skipped for %s: %s", rfp_id, exc)
+            form_field_values = None
+        step_trace(
+            "phase3_form_field_fill",
+            rfp_id=rfp_id,
+            form_tabs=len(unstubbed_forms),
+            filled=sorted((form_field_values or {}).keys())[:30],
+        )
 
     sections_to_draft, already_filled = partition_phase3_sections(
         research.rfp_sections,
         existing_by_id,
-        static_section_text=_zo_sections_context(static_sections),
+        static_section_text=static_section_text,
         skip_static_dedupe=_normalize_outline_mode(research.outline_mode)
         == "strict_rfp",
+        form_field_values=form_field_values,
     )
 
     logger.info(
@@ -2723,6 +2760,13 @@ async def _run_phase3_drafting_inner(
             logger.info("Phase 3 Ralph: %s — %s", rfp_id, line)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 Ralph skipped for %s: %s", rfp_id, exc)
+
+    # Every RFP form label must survive the content passes above.
+    from app.services.proposal_form_fields import restore_missing_form_fields
+
+    draft, form_logs = restore_missing_form_fields(draft, research.rfp_sections)
+    for line in form_logs[:16]:
+        logger.info("Phase 3 form fields: %s — %s", rfp_id, line)
 
     # Manuscript-fulfill guards — previously reachable only from Scan-RFP's
     # mode="full" path, which the live Scan button never reaches. Run them here
@@ -4140,6 +4184,12 @@ async def generate_full_proposal(
                 rfp_text=final_rfp_text,
                 label="post-self-edit",
             )
+            from app.services.proposal_form_fields import restore_missing_form_fields
+
+            draft, form_re = restore_missing_form_fields(
+                draft, research.rfp_sections if research else []
+            )
+            ralph_re = [*ralph_re, *form_re]
             if ralph_re:
                 await asave_proposal_draft(draft)
                 for line in ralph_re[:10]:
@@ -4295,6 +4345,14 @@ async def generate_full_proposal(
                     rfp_text=limit_text,
                     label="pre-phase-4",
                 )
+                from app.services.proposal_form_fields import (
+                    restore_missing_form_fields,
+                )
+
+                draft, form_pre4 = restore_missing_form_fields(
+                    draft, research.rfp_sections if research else []
+                )
+                ralph_pre4 = [*ralph_pre4, *form_pre4]
                 if ralph_pre4:
                     await asave_proposal_draft(draft)
                     for line in ralph_pre4[:10]:

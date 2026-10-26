@@ -330,6 +330,11 @@ def resolve_form_field_response(
     label_cf = (label or "").casefold().strip()
     if not label_cf:
         return handoff
+    # Exact label first so "Name" never wins over "Contact Name" by containment.
+    for key, value in field_values.items():
+        val = (value or "").strip()
+        if val and (key or "").casefold().strip() == label_cf:
+            return val
     for key, value in field_values.items():
         val = (value or "").strip()
         if not val:
@@ -342,12 +347,15 @@ def resolve_form_field_response(
     return handoff
 
 
+FORM_FIELDS_HEADING = "### Form fields (from RFP format)"
+
+
 def _render_form_fields_table(
     form_fields: list[str],
     field_values: dict[str, str] | None = None,
 ) -> list[str]:
     lines = [
-        "### Form fields (from RFP format)",
+        FORM_FIELDS_HEADING,
         "",
         "| Field | Response |",
         "| --- | --- |",
@@ -372,6 +380,7 @@ def attachment_checklist_stub(
     requirement: str = "",
     form_fields: list[str] | None = None,
     field_values: dict[str, str] | None = None,
+    kb_searched: bool = False,
 ) -> str:
     """Handoff for a buyer form/references/disclosure tab.
 
@@ -381,6 +390,8 @@ def attachment_checklist_stub(
     When ``form_fields`` is non-empty (RFP showed a field layout), scaffold a
     Field | Response table — fill from ``field_values`` / Zo identity when
     matched, otherwise MANUAL FILL. When empty, attach-only (no invented fields).
+    ``kb_searched`` — the KB was already searched for these labels, so any still
+    open are listed by name for Ask Ralph / the KB (same handoff as Ask Ralph).
     """
     label = (title or "Required attachment").strip()
     inst = (instrument or "form").strip().casefold()
@@ -413,6 +424,23 @@ def attachment_checklist_stub(
         lines.extend([f"What the RFP asks here: {ask}", ""])
     if fields:
         lines.extend(_render_form_fields_table(fields, field_values))
+        open_fields = [
+            f
+            for f in fields
+            if resolve_form_field_response(f, field_values).startswith("[MANUAL FILL")
+        ]
+        if kb_searched and open_fields:
+            lines.extend(
+                [
+                    (
+                        "Not found in the knowledge base: "
+                        + "; ".join(open_fields)
+                        + ". Give the values in Ask Ralph (e.g. \"Offeror Name is …\") "
+                        "or add them to the KB — they are not invented."
+                    ),
+                    "",
+                ]
+            )
     lines.extend(
         [
             (

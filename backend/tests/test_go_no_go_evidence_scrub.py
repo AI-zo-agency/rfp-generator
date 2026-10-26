@@ -198,3 +198,71 @@ class OrthogonalEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProposalCommitmentEvidenceTests(unittest.TestCase):
+    """A won proposal's plans are not delivered work (Minnesota Lottery / Maricopa)."""
+
+    def _row(self, evidence: str, source: str, status: str = "verified") -> GoNoGoCapabilityRow:
+        return GoNoGoCapabilityRow(
+            requirement="Creative production across video, radio, digital",
+            status=status,
+            isCore=True,
+            category="service",
+            evidence=evidence,
+            kbSource=source,
+        )
+
+    def test_task_list_line_from_won_proposal_caps_at_partial(self) -> None:
+        row = scrub_capability_row(
+            self._row(
+                "Produce broadcast-quality video for TV/cinema",
+                "06_WON_MaricopaCounty_Proposal_2025.pdf",
+            )
+        )
+        self.assertEqual(row.status, "partial")
+        self.assertIn("not delivered work", row.downgrade_reason)
+
+    def test_will_help_promise_caps_at_partial(self) -> None:
+        row = scrub_capability_row(
+            self._row(
+                "zö agency will help Maricopa County strengthen its connection with residents.",
+                "06_WON_MaricopaCounty_Proposal_2025.pdf",
+            )
+        )
+        self.assertEqual(row.status, "partial")
+
+    def test_past_delivery_in_won_proposal_stays_verified(self) -> None:
+        row = scrub_capability_row(
+            self._row(
+                "Over multiple years, we've completed more than 200 projects for Deschutes Public Library.",
+                "06_WON_CityofUmatilla_Proposal_2026.pdf",
+            )
+        )
+        self.assertEqual(row.status, "verified")
+
+    def test_case_study_is_not_touched(self) -> None:
+        row = scrub_capability_row(
+            self._row(
+                "We will keep producing the video series next season.",
+                "03_CS_Hampton Lumber_Educational Packet_2025.pdf",
+            )
+        )
+        self.assertEqual(row.status, "verified")
+
+
+class ProposalSelfDescriptionTests(unittest.TestCase):
+    def test_years_of_experience_line_caps_at_partial(self) -> None:
+        """'30+ years of combined experience' is the agency describing itself, not proof."""
+        row = scrub_capability_row(
+            GoNoGoCapabilityRow(
+                requirement="Omnichannel media planning and buying",
+                status="verified",
+                isCore=True,
+                category="service",
+                evidence="Media Strategy & Buying: Traditional and digital media planning with 30+ years of combined experience",
+                kbSource="06_WON_CityofUmatilla_Proposal_2026.pdf",
+            )
+        )
+        self.assertEqual(row.status, "partial")
+        self.assertIn("describing itself", row.downgrade_reason)

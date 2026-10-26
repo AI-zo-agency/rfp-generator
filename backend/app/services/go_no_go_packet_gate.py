@@ -155,12 +155,73 @@ def _clip(text: str, limit: int) -> str:
     return cleaned[: limit - 1].rstrip() + "…"
 
 
-def _body_follows_target(target: str, quote: str, source: str) -> bool:
-    """True when the cited part has its own text outside the citing sentence.
+# Words that name a separately bound part of a solicitation. "Exhibit C",
+# "Attachment A", "Appendix 2" — the family word plus a short identifier.
+_PART_FAMILIES = frozenset(
+    {
+        "attachment",
+        "exhibit",
+        "appendix",
+        "schedule",
+        "addendum",
+        "annex",
+        "enclosure",
+        "form",
+        "section",
+    }
+)
+# Sections are almost always in the upload; only bound parts get the TOC backstop.
+_LISTED_PART_FAMILIES = _PART_FAMILIES - {"section"}
+_PART_ID_STOPWORDS = frozenset({"OF", "TO", "IN", "ON", "AT", "BY", "OR", "AN", "AS"})
+_LIST_MARKS = " \t•·▪◦*-–—()."
 
-    The quote is removed first, so a table-of-contents mention of the same
-    name does not count as the body. A short leftover title does not either.
-    """
+
+def _strip_list_marker(line: str) -> str:
+    """Drop bullets and numbering: '• Exhibit C', '1. Attachment A', 'o Form'."""
+    text = line.strip().lstrip(_LIST_MARKS + "0123456789")
+    head, _, rest = text.partition(" ")
+    if head in {"o", "a.", "b.", "c.", "d."} and rest:
+        text = rest
+    return text.strip()
+
+
+def _part_key(text: str) -> str:
+    """'Exhibit C: Scope of Work' → 'exhibit c'; '' when it names no bound part."""
+    words = _strip_list_marker(text).split()
+    if len(words) < 2 or words[0].casefold() not in _PART_FAMILIES:
+        return ""
+    ident = words[1].strip(":.,;–—-()")
+    if not ident or len(ident) > 5:
+        return ""
+    has_digit = any(ch.isdigit() for ch in ident)
+    if not has_digit and not (ident.isupper() and ident not in _PART_ID_STOPWORDS):
+        return ""
+    return f"{words[0].casefold()} {ident.casefold()}"
+
+
+def _is_list_entry(lines: list[str], index: int) -> bool:
+    """A TOC or submission-list line: dotted leaders, or a neighbour naming another part."""
+    if "...." in lines[index]:
+        return True
+    for step in (-1, 1):
+        j = index + step
+        while 0 <= j < len(lines) and not lines[j].strip():
+            j += step
+        if 0 <= j < len(lines) and _part_key(lines[j]):
+            return True
+    return False
+
+
+def _starts_unit(prefix: str) -> bool:
+    """True when the text before a mention leaves it standing as a heading."""
+    rest = prefix.strip().strip(_LIST_MARKS + "0123456789")
+    if len(rest) <= 1:
+        return True
+    # In-line heading after a finished sentence: "…for details. Section 7: …"
+    return prefix.rstrip().endswith((".", "!", "?")) and prefix.endswith((" ", "\t"))
+
+
+def _normalized_body_follows(target: str, quote: str, source: str) -> bool:
     folded_source = _normalize(source)
     folded_quote = _normalize(quote)
     folded_target = _normalize(target)
@@ -175,10 +236,70 @@ def _body_follows_target(target: str, quote: str, source: str) -> bool:
     return alnum >= 120
 
 
+def _body_follows_target(target: str, quote: str, source: str) -> bool:
+    """True when the cited part has its own text in the upload.
+
+    A body starts at a heading: the part's name standing at the start of a line
+    or right after a finished sentence, not inside a table of contents or a
+    submission checklist. Any other mention is a reference. Counting every later
+    mention as a body dropped "Exhibit C" and "Exhibit D" on the Minnesota Lottery
+    upload, because "is included in Exhibit C." is followed by more RFP text.
+    """
+    key = _part_key(target)
+    if not key:
+        return _normalized_body_follows(target, quote, source)
+    quote_folded = " ".join((quote or "").casefold().split())
+    lines = (source or "").splitlines()
+    for index, line in enumerate(lines):
+        folded = " ".join(line.casefold().split())
+        if quote_folded and quote_folded in folded and len(folded) <= len(quote_folded) + 40:
+            continue
+        start = folded.find(key)
+        while start >= 0:
+            end = start + len(key)
+            boundary = end >= len(folded) or not folded[end].isalnum()
+            if boundary and _starts_unit(folded[:start]) and not _is_list_entry(lines, index):
+                after = folded[end:] + " " + " ".join(lines[index + 1 : index + 12])
+                if sum(ch.isalnum() for ch in after[:500]) >= 120:
+                    return True
+            start = folded.find(key, end)
+    return False
+
+
+def _listed_missing_parts(
+    source: str, already: list[UnresolvedReference]
+) -> list[UnresolvedReference]:
+    """Bound parts named in a TOC or checklist line whose body is not in the upload.
+
+    The classifier lists unresolved references by judgment and skipped four of
+    nine on the Minnesota Lottery packet. Every part the RFP itself lists is
+    checked here so the "cited, not included" list does not depend on the model.
+    """
+    seen = {_part_key(ref.target) for ref in already}
+    found: list[UnresolvedReference] = []
+    for raw_line in (source or "").splitlines():
+        line = raw_line.strip()
+        key = _part_key(line)
+        if not key or key in seen or len(line) > 140:
+            continue
+        if key.split()[0] not in _LISTED_PART_FAMILIES:
+            continue
+        seen.add(key)
+        target = _strip_list_marker(line.split("....")[0]).strip(" .")
+        if len(_normalize(target)) < 8 or _body_follows_target(target, line, source):
+            continue
+        found.append(UnresolvedReference(target=_clip(target, 200), quote=_clip(line, 500)))
+    return found
+
+
+# A full packet names 8+ attachments and exhibits (Minnesota Lottery: 9).
+_MAX_UNRESOLVED_REFERENCES = 16
+
+
 def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[UnresolvedReference]:
     rows = raw.get("unresolvedReferences") or raw.get("unresolved_references") or []
     if not isinstance(rows, list):
-        return []
+        rows = []
     kept: list[UnresolvedReference] = []
     for item in rows:
         if not isinstance(item, dict):
@@ -204,8 +325,10 @@ def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[Unres
             )
             continue
         kept.append(UnresolvedReference(target=target, quote=_clip(quote, 500)))
-        if len(kept) >= 8:
+        if len(kept) >= _MAX_UNRESOLVED_REFERENCES:
             break
+    kept.extend(_listed_missing_parts(source, kept))
+    kept = kept[:_MAX_UNRESOLVED_REFERENCES]
     logger.info("unresolved references kept=%s", len(kept))
     return kept
 

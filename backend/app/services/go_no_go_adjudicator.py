@@ -50,6 +50,12 @@ different craft or no relevant delivery proof appears.
 06_WON_* Proposal files are CONFIRMED WINS — never call them pursuit texts.
 Prefer 06_WON_*Proposal* and 03_CS_* over 07_FIN_* and over 06_WON_*RFP*
 (buyer solicitations are not delivery proof).
+Inside a proposal, quote what zö DID (past work, results, named past clients),
+not what it promised that buyer. "We will…", "zö agency will help…" and scope
+task lines ("Produce broadcast-quality video") are commitments, not delivery
+proof: when a 03_CS case study of the same engagement is retrieved, quote the
+case study. A capability-list line or a years-of-experience figure is the
+agency describing itself — "partial" at most.
 A won municipal / government communications Proposal that discusses press,
 social, surveys, or strategic planning evidences those craft families when
 the quote supports it — that is verified/partial proof, not a weak partial

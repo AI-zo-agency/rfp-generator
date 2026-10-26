@@ -261,6 +261,59 @@ class PacketGateParseTests(unittest.TestCase):
         )
         self.assertEqual(parsed.unresolved_references, [])
 
+    def test_listed_attachments_without_bodies_are_reported(self) -> None:
+        """Minnesota Lottery: the model listed 5 of 9 missing parts; the TOC names all."""
+        upload = (
+            "TABLE OF CONTENTS\n"
+            "SECTION 1 – INSTRUCTIONS TO RESPONDERS ........ 3\n"
+            "Solicitation Attachments\n"
+            "• Attachment A: Responder Declarations\n"
+            "• Attachment C: Cost Detail\n"
+            "Sample Contract\n"
+            "• Exhibit C: Scope of Work\n"
+            "• Exhibit D: Pricing\n"
+            "Final Page 3 of 17\n"
+            "SECTION 1 – INSTRUCTIONS TO RESPONDERS\n"
+            + ("Responders must follow every instruction in this section. " * 12)
+            + "\nThe full scope of work is included in Exhibit C. "
+            + "The price proposal should be in the format found in Exhibit D. "
+            + ("Proposals are evaluated by a committee of Lottery staff. " * 12)
+        )
+        parsed = parse_packet_read(
+            {
+                "documentKind": "complete_rfp",
+                "blocksScoring": False,
+                "unresolvedReferences": [
+                    {
+                        "target": "Exhibit D",
+                        "quote": "The price proposal should be in the format found in Exhibit D.",
+                    }
+                ],
+            },
+            rfp_text=upload,
+        )
+        targets = " | ".join(r.target for r in parsed.unresolved_references).casefold()
+        for part in ("attachment a", "attachment c", "exhibit c", "exhibit d"):
+            self.assertIn(part, targets)
+        self.assertEqual(len(parsed.unresolved_references), 4, targets)
+
+    def test_listed_attachment_with_its_body_is_not_reported(self) -> None:
+        upload = (
+            "Attachments\n"
+            "• Attachment A: Responder Declarations\n"
+            "• Attachment B: Exceptions\n"
+            "Final Page 9 of 9\n"
+            "ATTACHMENT A: RESPONDER DECLARATIONS\n"
+            + ("The responder declares that it has read and complies with all terms. " * 6)
+            + "\nATTACHMENT B: EXCEPTIONS\n"
+            + ("List every exception to the State's terms and conditions here. " * 6)
+        )
+        parsed = parse_packet_read(
+            {"documentKind": "complete_rfp", "blocksScoring": False},
+            rfp_text=upload,
+        )
+        self.assertEqual(parsed.unresolved_references, [])
+
     def test_ungrounded_reference_is_dropped(self) -> None:
         parsed = parse_packet_read(
             {
