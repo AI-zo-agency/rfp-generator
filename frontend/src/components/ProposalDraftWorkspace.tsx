@@ -591,6 +591,10 @@ function ProposalDraftWorkspaceInner({
   /** Sync lock — React state lags a tick; prevents a second click aborting the first run. */
   const fullProposalInFlightRef = useRef(false);
   const fulfillAbortRef = useRef<AbortController | null>(null);
+  /** Controller of the job the reconnect effect re-attached to. While set, that
+   * attach owns the busy flag it raised and must clear it itself — re-runs of
+   * the effect (its own flag flip, checkpoint changes) leave it alone. */
+  const reconnectAttachRef = useRef<AbortController | null>(null);
   /** Prevents double green-banner when request race + poll both see completion. */
   const fulfillCompletionShownRef = useRef(false);
   /** True once this run's live poll saw inProgressPhase === fulfill-scan. */
@@ -2375,6 +2379,7 @@ function ProposalDraftWorkspaceInner({
       isAligningRfpOutline
     )
       return;
+    if (reconnectAttachRef.current) return;
 
     let cancelled = false;
     let stopPoll: (() => void) | null = null;
@@ -2383,7 +2388,7 @@ function ProposalDraftWorkspaceInner({
     async function reconnect() {
       const checkpointPhase = research?.pipelineCheckpoint?.inProgressPhase;
       const job = await getProposalJobStatus(rfp.id);
-      if (cancelled) return;
+      if (cancelled || reconnectAttachRef.current) return;
 
       const jobRunning =
         job?.status === "running" && Boolean(job.jobType);
@@ -2428,11 +2433,13 @@ function ProposalDraftWorkspaceInner({
         setIsFulfillingRfpGaps(true);
         fulfillCompletionShownRef.current = false;
         fulfillSawRunningRef.current = true;
-        abort = new AbortController();
-        fulfillAbortRef.current = abort;
+        const attach = new AbortController();
+        abort = attach;
+        reconnectAttachRef.current = attach;
+        fulfillAbortRef.current = attach;
         try {
-          const waited = await pollFulfillScanCompletion(rfp.id, abort.signal);
-          if (cancelled) return;
+          const waited = await pollFulfillScanCompletion(rfp.id, attach.signal);
+          if (attach.signal.aborted) return;
           await applyFulfillScanSuccessUi({
             draft: waited.draft,
             research: waited.research,
@@ -2441,9 +2448,8 @@ function ProposalDraftWorkspaceInner({
               null,
           });
         } catch (error) {
-          if (cancelled) return;
           // User Stop only — not poll/timeout AbortErrors.
-          if (abort.signal.aborted) {
+          if (attach.signal.aborted) {
             setGenerateNotice(
               "Review & fix stopped — progress saved. Use Review & fix to resume from the last step."
             );
@@ -2454,11 +2460,17 @@ function ProposalDraftWorkspaceInner({
             error instanceof Error ? error.message : "Review & fix failed";
           setGenerateError(message);
         } finally {
-          if (fulfillAbortRef.current === abort) {
+          // A newer Review & fix run took over the controller — its flag, not ours.
+          const replaced =
+            fulfillAbortRef.current !== null && fulfillAbortRef.current !== attach;
+          if (fulfillAbortRef.current === attach) {
             fulfillAbortRef.current = null;
           }
           stopPoll?.();
-          if (!cancelled) setIsFulfillingRfpGaps(false);
+          if (reconnectAttachRef.current === attach) {
+            reconnectAttachRef.current = null;
+          }
+          if (!replaced) setIsFulfillingRfpGaps(false);
         }
         return;
       }
@@ -2467,13 +2479,15 @@ function ProposalDraftWorkspaceInner({
       if (activePhase === ALIGN_RFP_OUTLINE_PHASE) {
         if (!jobRunning) return;
         setIsAligningRfpOutline(true);
-        abort = new AbortController();
+        const attach = new AbortController();
+        abort = attach;
+        reconnectAttachRef.current = attach;
         try {
           const waited = await pollAlignRfpOutlineCompletion(
             rfp.id,
-            abort.signal
+            attach.signal
           );
-          if (cancelled) return;
+          if (attach.signal.aborted) return;
           if (waited.draft) applyOutlineFromServer(waited.draft);
           if (waited.research) {
             handleResearchPollRef.current(waited.research);
@@ -2491,9 +2505,8 @@ function ProposalDraftWorkspaceInner({
               : "Align finished — outline already matched the RFP order (prose unchanged)."
           );
         } catch (error) {
-          if (cancelled) return;
           if (
-            abort.signal.aborted ||
+            attach.signal.aborted ||
             (error instanceof DOMException && error.name === "AbortError")
           ) {
             setGenerateNotice("Align to RFP outline stopped.");
@@ -2505,7 +2518,10 @@ function ProposalDraftWorkspaceInner({
           );
         } finally {
           stopPoll?.();
-          if (!cancelled) setIsAligningRfpOutline(false);
+          if (reconnectAttachRef.current === attach) {
+            reconnectAttachRef.current = null;
+          }
+          setIsAligningRfpOutline(false);
         }
         return;
       }
@@ -2526,15 +2542,20 @@ function ProposalDraftWorkspaceInner({
       // Server is still drafting (Celery chained the next phase, or the tab
       // reconnected mid-run). Re-attach the client orchestrator so the UI does
       // not sit idle after Phase 2 while Phase 3+ keeps going.
+      // Raising the flag re-runs this effect, whose cleanup used to mark this
+      // attach cancelled — so its finally skipped the reset and the spinner
+      // stayed on after the backend finished. The attach ref keeps it the owner.
+      const attach = new AbortController();
+      abort = attach;
+      reconnectAttachRef.current = attach;
       setIsFullProposalRunning(true);
       setFullProposalProgress(mapped);
       fullProposalInFlightRef.current = true;
-      abort = new AbortController();
-      fullProposalAbortRef.current = abort;
+      fullProposalAbortRef.current = attach;
       try {
         const { draft, research: updatedResearch } =
           await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
-            signal: abort.signal,
+            signal: attach.signal,
             outlineMode:
               research?.outlineMode === "strict_rfp"
                 ? "strict_rfp"
@@ -2546,24 +2567,31 @@ function ProposalDraftWorkspaceInner({
             onDraftUpdate: (d) => handleLiveDraftUpdateRef.current(d),
             onResearchUpdate: (r) => handleResearchPollRef.current(r),
           });
-        if (cancelled || abort.signal.aborted) return;
+        if (attach.signal.aborted) return;
         applyOutlineFromServer(draft);
         if (updatedResearch) {
           handleResearchPollRef.current(updatedResearch);
         }
         setGenerateNotice(null);
       } catch (error) {
-        if (cancelled || abort.signal.aborted) return;
+        if (attach.signal.aborted) return;
         setGenerateError(
           error instanceof Error ? error.message : "Proposal generation failed"
         );
       } finally {
-        fullProposalInFlightRef.current = false;
-        if (fullProposalAbortRef.current === abort) {
+        // A newer Generate run took over the controller — its flag, not ours.
+        const replaced =
+          fullProposalAbortRef.current !== null &&
+          fullProposalAbortRef.current !== attach;
+        if (!replaced) {
+          fullProposalInFlightRef.current = false;
           fullProposalAbortRef.current = null;
         }
         stopPoll?.();
-        if (!cancelled) {
+        if (reconnectAttachRef.current === attach) {
+          reconnectAttachRef.current = null;
+        }
+        if (!replaced) {
           setIsFullProposalRunning(false);
           setFullProposalProgress(null);
         }
@@ -2573,6 +2601,9 @@ function ProposalDraftWorkspaceInner({
     void reconnect();
     return () => {
       cancelled = true;
+      // An attached run outlives this pass of the effect: it stops its own poll
+      // and clears its own busy flag when the job ends.
+      if (abort && reconnectAttachRef.current === abort) return;
       stopPoll?.();
       // Never abort the live Generate controller — that made Phase 2→3 look
       // "Stopped" when this effect re-ran on checkpoint updates.
@@ -2592,6 +2623,15 @@ function ProposalDraftWorkspaceInner({
     applyOutlineFromServer,
     applyFulfillScanSuccessUi,
   ]);
+
+  // Leaving the RFP ends any re-attached poll (the server job keeps running).
+  useEffect(
+    () => () => {
+      reconnectAttachRef.current?.abort();
+      reconnectAttachRef.current = null;
+    },
+    [rfp.id]
+  );
 
   /**
    * Safety net: if Celery finishes while the long POST/race is still hanging,
@@ -2646,15 +2686,16 @@ function ProposalDraftWorkspaceInner({
         setGenerateNotice(
           pipelineServerStillWorkingMessage(job.jobType as PipelineInProgressPhase)
         );
-        if (job.jobType === FULFILL_SCAN_PHASE) {
-          setIsFulfillingRfpGaps(true);
+        // Only re-label a Generate run this tab is driving. Raising a busy flag
+        // here with nothing attached to the job left the spinner on forever;
+        // the reconnect effect attaches to an orphaned server job instead.
+        if (
+          !fullProposalInFlightRef.current ||
+          job.jobType === FULFILL_SCAN_PHASE ||
+          job.jobType === ALIGN_RFP_OUTLINE_PHASE
+        ) {
           return;
         }
-        if (job.jobType === ALIGN_RFP_OUTLINE_PHASE) {
-          setIsAligningRfpOutline(true);
-          return;
-        }
-        setIsFullProposalRunning(true);
         setFullProposalProgress(
           fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase)
         );

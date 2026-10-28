@@ -476,6 +476,10 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 4_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
+/** A Generate phase only times out after this long with NO server progress.
+ * A fixed total ceiling gave up on long but healthy phases (Phase 2 alone can
+ * run 30+ min) and left the UI out of step with a backend that kept going. */
+const STAGE_NO_PROGRESS_MAX_MS = 22 * 60 * 1000;
 const LIVE_DRAFT_POLL_INTERVAL_MS = 2_000;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
@@ -661,9 +665,10 @@ async function waitForProposalPhase(
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
 }> {
-  const deadline = Date.now() + STAGE_POLL_MAX_MS;
   let observedRunning = false;
   const startedWall = Date.now();
+  let lastProgressAt = Date.now();
+  let lastCheckpointAt = "";
   let lastFingerprint = "";
 
   const fingerprint = (draft: ProposalOutline) => {
@@ -673,15 +678,16 @@ async function waitForProposalPhase(
     return `${draft.updatedAt}|${parts.join("|")}`;
   };
 
-  while (Date.now() < deadline) {
+  for (;;) {
     throwIfAborted(signal);
 
     const snapshot = await fetchProposalDraft(rfpId);
-    if (snapshot.draft && onDraftUpdate) {
+    if (snapshot.draft) {
       const next = fingerprint(snapshot.draft);
       if (next !== lastFingerprint) {
         lastFingerprint = next;
-        onDraftUpdate(snapshot.draft);
+        lastProgressAt = Date.now();
+        onDraftUpdate?.(snapshot.draft);
       }
     }
     if (snapshot.research && onResearchUpdate) {
@@ -693,6 +699,21 @@ async function waitForProposalPhase(
     const inProg = asGeneratePipelinePhase(cp?.inProgressPhase);
     const lastDone = asGeneratePipelinePhase(cp?.lastCompletedPhase);
     const jobPhase = asGeneratePipelinePhase(job?.jobType ?? null);
+
+    // Server still holds the job for this phase (or the one chaining into it),
+    // or the checkpoint moved: the phase is alive, however long it takes.
+    const serverJobLive = Boolean(
+      jobPhase &&
+        (job?.status === "running" || job?.status === "queued") &&
+        phaseIndex(jobPhase) <= phaseIndex(phase)
+    );
+    if (serverJobLive) {
+      lastProgressAt = Date.now();
+    }
+    if (cp?.updatedAt && cp.updatedAt !== lastCheckpointAt) {
+      lastCheckpointAt = cp.updatedAt;
+      lastProgressAt = Date.now();
+    }
 
     if (cp?.inProgressPhase === phase) {
       observedRunning = true;
@@ -741,6 +762,13 @@ async function waitForProposalPhase(
     }
 
     if (observedRunning && cp?.inProgressPhase !== phase) {
+      // normalizeCheckpointForDisplay calls a checkpoint idle for 15 min
+      // "interrupted", but a silent step (Phase 2 LangExtract) can run longer.
+      // The live server job lock outranks that client-side guess.
+      if (serverJobLive) {
+        await sleep(STAGE_POLL_INTERVAL_MS);
+        continue;
+      }
       if (cp?.lastFailedPhase === phase) {
         const err = cp.lastError ?? `${phase} failed`;
         if (/stopped|cancel/i.test(err)) {
@@ -792,10 +820,16 @@ async function waitForProposalPhase(
       );
     }
 
+    if (Date.now() - lastProgressAt > STAGE_NO_PROGRESS_MAX_MS) {
+      throw new Error(
+        `Timed out waiting for ${phase} to finish — no server progress for ${Math.round(
+          STAGE_NO_PROGRESS_MAX_MS / 60_000
+        )} minutes.`
+      );
+    }
+
     await sleep(STAGE_POLL_INTERVAL_MS);
   }
-
-  throw new Error(`Timed out waiting for ${phase} to finish.`);
 }
 
 const FULFILL_POLL_MAX_MS = 90 * 60 * 1000;

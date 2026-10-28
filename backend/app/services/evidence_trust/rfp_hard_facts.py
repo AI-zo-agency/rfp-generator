@@ -241,6 +241,102 @@ def evaluation_table_is_reliable(facts: dict[str, Any]) -> bool:
     return True
 
 
+_WEIGHT_HEADER_WORDS = frozenset(
+    {
+        "topic",
+        "factor",
+        "factors",
+        "weight",
+        "weights",
+        "criteria",
+        "criterion",
+        "points",
+        "score",
+        "scoring",
+        "category",
+        "description",
+        "maximum",
+        "max",
+    }
+)
+
+
+def _is_weight_header(line: str) -> bool:
+    """'Topic Factor Weight' / 'Criteria Points' — the header row of a weight table."""
+    words = line.casefold().replace("/", " ").split()
+    return (
+        2 <= len(words) <= 6
+        and all(word in _WEIGHT_HEADER_WORDS for word in words)
+        and any(word in {"weight", "weights", "points", "score"} for word in words)
+    )
+
+
+def _trailing_weight(line: str) -> tuple[str, int | None]:
+    """'…the nature of the contract 5' → ('…the nature of the contract', 5); '30' → ('', 30)."""
+    head, _, last = line.rpartition(" ")
+    token = last.rstrip("%")
+    if not token.isdigit() or not 1 <= int(token) <= 100:
+        return line, None
+    return head.strip(), int(token)
+
+
+def _block_topic(block: list[str]) -> str:
+    """The criterion name: the short lines a wrapped table cell starts with."""
+    parts: list[str] = []
+    for line in block:
+        if len(line) > 40 or line.startswith("•"):
+            break
+        parts.append(line)
+        if line.endswith("."):
+            break
+    label = " ".join(" ".join(parts).split()).strip(" .:")
+    return label if 3 <= len(label) <= 80 else ""
+
+
+def _wrapped_weight_rows(window: str) -> list[tuple[str, int]]:
+    """Read a Topic / Factor / Weight table that a PDF extract wrapped line by line.
+
+    Anoka-Ramsey printed each topic over several short lines, a long factor
+    description, then the weight on its own line or at the end of the last
+    description line. The row regexes need label and weight on one line, so the
+    table came back empty and the report said weights were "not disclosed".
+
+    Only a table with a header row counts, and only when the weights add up to
+    the printed total (or to 100 when no total is printed).
+    """
+    lines = [ln.strip() for ln in (window or "").splitlines()]
+    start = next((i for i, ln in enumerate(lines) if _is_weight_header(ln)), None)
+    if start is None:
+        return []
+    rows: list[tuple[str, int]] = []
+    block: list[str] = []
+    printed_total: int | None = None
+    for line in lines[start + 1 :]:
+        if not line:
+            continue
+        if line.casefold().startswith("total"):
+            digits = "".join(ch for ch in line if ch.isdigit())
+            printed_total = int(digits) if digits else None
+            break
+        rest, weight = _trailing_weight(line)
+        if weight is None:
+            block.append(line)
+            continue
+        if rest:
+            block.append(rest)
+        topic = _block_topic(block)
+        block = []
+        if topic:
+            rows.append((topic, weight))
+        if printed_total is None and sum(pts for _, pts in rows) >= 100:
+            break
+    if len(rows) < 3:
+        return []
+    if sum(pts for _, pts in rows) != (printed_total or 100):
+        return []
+    return rows
+
+
 def extract_rfp_hard_facts(
     text: str,
     *,
@@ -376,11 +472,16 @@ def extract_rfp_hard_facts(
         evaluation_lines = _dedupe_evaluation_rows(
             collected_percent, unit="percent"
         )[:16]
-    total_pts = 0
-    for line in evaluation_lines:
-        weight = _parse_eval_weight(line)
-        if weight is not None:
-            total_pts += weight
+    total_pts = sum(w for w in map(_parse_eval_weight, evaluation_lines) if w is not None)
+    if not evaluation_table_is_reliable(
+        {"evaluation_lines": evaluation_lines, "evaluation_total": total_pts}
+    ):
+        for m in _EVAL_ANCHOR_RE.finditer(body):
+            wrapped = _wrapped_weight_rows(body[m.start() : m.start() + 6000])
+            if wrapped:
+                evaluation_lines = _dedupe_evaluation_rows(wrapped, unit="points")[:16]
+                total_pts = sum(pts for _, pts in wrapped)
+                break
 
     # Opportunity/compensation: set by Go/No-Go LLM classifier (analyze_rfp). Sync
     # callers without classification default to ambiguous/undisclosed — never regex.

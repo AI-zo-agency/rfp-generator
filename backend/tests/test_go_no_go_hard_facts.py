@@ -109,6 +109,55 @@ The factors and weighting on which responses will be evaluated are:
 Final Page 14 of 17
 """
 
+# Anoka-Ramsey shape: a three-column Topic / Factor / Weight table where the PDF
+# wraps each topic over several short lines and puts the weight on its own line
+# or at the end of a long description line.
+ANOKA_WRAPPED_WEIGHT_SNIPPET = """
+Evaluation Factors
+The following factors and their identified weight will be used to evaluate the responses:
+Topic Factor Weight
+Adherence to
+Minnesota State
+Terms and
+Conditions.
+A statement of the objectives, goals, and tasks to show or demonstrate its view and understanding of
+the nature of the contract 5
+Work Plan.
+ A description of the deliverables to be provided by the Responder along with a detailed work plan
+that identifies the major tasks to be accomplished and be used as a scheduling and managing tool, as
+well as the basis for invoicing.
+•Articulation of process for creating and delivering digital marketing strategies
+•
+Detailed description of how success would be measured
+30
+Cost/Value.
+Identify the level of the participation of Minnesota State in the contract, as well as any other services
+to be provided by Minnesota State, and details of cost allowances for this participation.
+•Clearly communicate commission/service fee rate and structure
+20
+Qualifications of
+Respondent and its
+personnel.
+An outline of the Responder's background and experience with examples of similar work complete
+by the Responder and a list of personnel who will conduct the project, detailing their training, and
+work experience.
+•Qualifications of personnel and capacity to provide required services
+30
+Completeness,
+thoroughness and
+detail of the
+response
+Completeness, thoroughness and detail of the response as reflected by the proposal's discussions and
+coverage of all elements of work listed above 10
+Accessibility
+A completed response to the linked Voluntary Product/Service Accessibility Template(s)(VPAT)
+for all software, hardware, and websites as applicable (guidance available in the 'Products' tab).
+5
+ Total: 100
+Oral Presentations
+After evaluation of written proposals, Minnesota State may shortlist responders for 2 rounds.
+"""
+
 class GoNoGoHardFactsTests(unittest.TestCase):
     def test_extracts_ceiling_and_year_budgets(self) -> None:
         facts = _extract_rfp_hard_facts(HTA_SNIPPET)
@@ -189,6 +238,25 @@ class GoNoGoHardFactsTests(unittest.TestCase):
         self.assertNotIn("page", blob)
         self.assertEqual(len(lines), 9, lines)
         self.assertEqual(facts["evaluation_total"], 1000)
+        self.assertTrue(evaluation_table_is_reliable(facts), facts)
+
+    def test_extracts_wrapped_topic_factor_weight_table(self) -> None:
+        """Anoka-Ramsey: weights on their own lines were read as 'not disclosed'."""
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(ANOKA_WRAPPED_WEIGHT_SNIPPET)
+        lines = facts["evaluation_lines"]
+        blob = " | ".join(lines).casefold()
+        self.assertEqual(len(lines), 6, lines)
+        self.assertIn("adherence to minnesota state terms and conditions: 5", blob)
+        self.assertIn("work plan: 30", blob)
+        self.assertIn("cost/value: 20", blob)
+        self.assertIn("qualifications of respondent and its personnel: 30", blob)
+        self.assertIn("completeness, thoroughness and detail of the response: 10", blob)
+        self.assertIn("accessibility: 5", blob)
+        self.assertEqual(facts["evaluation_total"], 100)
         self.assertTrue(evaluation_table_is_reliable(facts), facts)
 
     def test_extracts_evaluation_point_rows(self) -> None:

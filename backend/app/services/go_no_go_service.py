@@ -323,6 +323,22 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
 16. DATES: Never tell the team to act by a date earlier than TODAY. If an RFP step's date has
    passed (questions, registration, pre-proposal meeting), say it has passed and give the next
    step that is still open.
+17. DEAL-BREAKER SCAN (zö fit rules — run before scoring). Answer each Yes / No / Unknown and
+   open compliance.summary with one line: "Deal-breakers: 1 No; 2 Unknown (…); …".
+   1. Has the submission deadline passed?
+   2. Does the RFP require a certification, license, registration, or bond zö can't get in time?
+   3. Does it require work outside zö's lane, or at a scale zö doesn't staff (e.g. a media buy
+      larger than anything the KB shows zö placing, with no named media buyer on the roster)?
+   4. Does it require full-time dedicated staff zö can't assign?
+   5. Does the work conflict with an existing client? Check 01_ClientList excerpts, including
+      clients inside the same buyer system (another campus or agency of the same state system).
+   6. Is the contract value below $100,000 or above $1,000,000? Say whether you read the annual
+      or the total value; when the two land on different sides, answer Unknown.
+   7. Must zö front costs (media, production, travel) and wait for reimbursement?
+   Each Yes is a compliance flag, category "deal_breaker", severity "critical", and the
+   recommendation is "no_go" unless leadership overrides (add that override as a condition).
+   Each Unknown is a compliance flag, category "deal_breaker", severity "critical", plus a
+   condition naming who must answer it. A No needs no flag.
 
 """ + SCORING_RUBRIC + """
 
@@ -2094,7 +2110,8 @@ def _apply_hard_rules(
     disqualifying = any(
         isinstance(flag, dict)
         and flag.get("severity") == "critical"
-        and flag.get("category") in {"compliance", "certification", "registration"}
+        and flag.get("category")
+        in {"compliance", "certification", "registration", "deal_breaker"}
         for flag in compliance_flags
     )
 

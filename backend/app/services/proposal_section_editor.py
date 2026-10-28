@@ -6569,6 +6569,37 @@ async def _plan_refined_queries(
     return cleaned[:6]
 
 
+def _redraft_rfp_excerpt(
+    *,
+    rfp_context: str,
+    rfp_full_text: str,
+    section_title: str,
+    instrument: str | None,
+) -> str:
+    """RFP text for a whole-tab rewrite.
+
+    A form / disclosure / references tab gets the pages where the buyer printed
+    that form. The RFP head alone made Ralph say the packet had no form wording
+    and invent its own field list.
+    """
+    from app.services.proposal_rfp_excerpt import rfp_window_around_section_title
+    from app.services.proposal_submission_authority import instrument_is_checklist
+
+    head = rfp_context[:4000]
+    if not instrument_is_checklist(instrument) or not (rfp_full_text or "").strip():
+        return head
+    pages = rfp_window_around_section_title(
+        rfp_full_text, section_title, max_chars=12_000
+    )
+    if not pages:
+        return head
+    return (
+        f"RFP pages where the buyer printed THIS form ({section_title}). Fill in "
+        "this form's own fields in its printed order; do not invent fields:\n"
+        f"{pages}"
+    )
+
+
 async def _redraft_rfp_section(
     *,
     draft: ProposalDraft,
@@ -6586,6 +6617,7 @@ async def _redraft_rfp_section(
     research: ProposalResearchCache | None = None,
     compliance_user_message: str | None = None,
     rfp_full_text: str = "",
+    rfp_packet_text: str = "",
 ) -> tuple[ProposalSection, str]:
     requirements = list(rfp_section.requirements if rfp_section else [])
     uncovered = list(rfp_section.uncovered_requirements if rfp_section else [])
@@ -6629,6 +6661,12 @@ async def _redraft_rfp_section(
         rfp_client=rfp.client,
         register=register,
         rfp_id=rfp.id,
+    )
+    rfp_excerpt = _redraft_rfp_excerpt(
+        rfp_context=rfp_context,
+        rfp_full_text=rfp_packet_text or rfp_full_text,
+        section_title=section.title or "",
+        instrument=getattr(rfp_section, "submission_instrument", None) or outline_inst,
     )
 
     original_content = (section.content or "").strip()
@@ -6792,7 +6830,7 @@ async def _redraft_rfp_section(
                 else ""
             )
             + f"\nPrevious draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
-            f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
+            f"RFP excerpt:\n{rfp_excerpt}\n\n"
             f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
             + (f"{avoidance_block}\n\n" if avoidance_block else "")
             + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
@@ -8412,11 +8450,19 @@ async def improve_proposal_section(
         raise ProposalError("Edit message is required.", status_code=400)
 
     rfp, _content, rfp_context = await aload_rfp_for_proposal(rfp_id)
+    from app.services.proposal_form_fields import FORM_RFP_TEXT_MAX_CHARS
     from app.services.rfp_content import combine_rfp_text
 
     rfp_full_text = combine_rfp_text(
         getattr(_content, "description", "") or "",
         getattr(_content, "pdf_text", "") or "",
+    )
+    # Whole packet, only for locating a form tab's own pages: appendix forms sit
+    # past the 120k above, which pricing still sends to the model whole.
+    rfp_packet_text = combine_rfp_text(
+        getattr(_content, "description", "") or "",
+        getattr(_content, "pdf_text", "") or "",
+        max_chars=FORM_RFP_TEXT_MAX_CHARS,
     )
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
@@ -11547,6 +11593,7 @@ async def improve_proposal_section(
             research=research,
             compliance_user_message=raw_user_message,
             rfp_full_text=rfp_full_text,
+            rfp_packet_text=rfp_packet_text,
         )
 
         new_queries = {

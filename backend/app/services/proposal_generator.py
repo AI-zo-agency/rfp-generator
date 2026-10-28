@@ -2453,10 +2453,25 @@ async def _run_phase3_drafting_inner(
         partition_phase3_sections,
     )
     from app.services.proposal_form_fields import (
+        FORM_RFP_TEXT_MAX_CHARS,
         collect_form_field_labels,
+        fill_missing_form_fields_from_rfp,
         form_field_sections,
         resolve_form_field_values_from_kb,
     )
+
+    # Forms printed in the appendix never reach the planner's excerpts, so their
+    # tabs arrive with no field labels. Read the labels off the form's own pages.
+    form_maps, form_label_logs = await fill_missing_form_fields_from_rfp(
+        list(research.rfp_sections),
+        combine_rfp_text(
+            content.description, content.pdf_text, max_chars=FORM_RFP_TEXT_MAX_CHARS
+        ),
+    )
+    if form_label_logs:
+        logger.info("Phase 3 %s: %s", rfp_id, form_label_logs)
+        research = research.model_copy(update={"rfp_sections": form_maps})
+        await asave_research_cache(research)
 
     static_section_text = _zo_sections_context(static_sections)
     # RFP built-in forms: look every field label up in the KB (Ask Ralph's

@@ -45,6 +45,122 @@ Return ONLY JSON:
 {"fields": [{"label": "<label as given>", "value": "<copied value or null>"}]}"""
 
 
+_LABEL_AGENT = "rfp_form_label_extract"
+_FORM_PAGES_CHARS = 14_000
+# combine_rfp_text defaults to 120k; appendix forms sit past that (Lake Oswego
+# Attachment B starts ~149k into an 84-page packet).
+FORM_RFP_TEXT_MAX_CHARS = 400_000
+
+_LABEL_SYSTEM = """You read the buyer's own RFP form for zö agency (the offeror).
+
+You receive the form's title and the RFP pages where that form is printed.
+The pages may run past the form into the next attachment or contract terms.
+
+List every field the offeror must fill in on THIS form only, in the order printed:
+blanks, name/address/ID lines, numbered items the offeror completes, yes/no
+checks, signature and date lines. Copy each label character for character from
+the pages. Stop at the end of this form.
+- A checkbox or yes/no item is labelled by its printed item heading
+  (e.g. "11. TAX COMPLIANCE"), never by the box text ("Yes No",
+  "Required Not Required").
+- Skip a bare column word ("Name", "Signature") when the form prints a fuller
+  label for that line.
+
+Return an empty list when these pages do not contain the form itself (only a
+mention of it, e.g. a table-of-contents or checklist line).
+
+Return ONLY JSON:
+{"labels": ["<label as printed>", "..."]}"""
+
+
+async def extract_form_field_labels_from_rfp(
+    section_title: str,
+    rfp_text: str,
+) -> list[str]:
+    """Field labels copied from the RFP pages of THIS form (ungrounded dropped).
+
+    The outline planner only sees front-loaded excerpts, so a form printed in
+    the appendix reaches Phase 3 with no labels and becomes an attach-only stub.
+    """
+    from app.services.proposal_rfp_excerpt import rfp_window_around_section_title
+
+    pages = rfp_window_around_section_title(
+        rfp_text or "", section_title or "", max_chars=_FORM_PAGES_CHARS
+    )
+    if not pages.strip():
+        return []
+
+    from app.services.proposal_intelligence.agent_base import safe_chat_json
+
+    raw, _provider = await safe_chat_json(
+        [
+            {"role": "system", "content": _LABEL_SYSTEM},
+            {
+                "role": "user",
+                "content": f"FORM TITLE: {section_title}\n\nRFP PAGES:\n{pages}",
+            },
+        ],
+        max_tokens=1_500,
+        temperature=0.0,
+        agent_name=_LABEL_AGENT,
+    )
+    rows = raw.get("labels") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return []
+
+    folded_pages = _fold_for_grounding(pages)
+    seen: set[str] = set()
+    labels: list[str] = []
+    for row in rows:
+        label = _clean_label(row if isinstance(row, str) else "")
+        folded = _fold_for_grounding(label)
+        if not folded or folded in seen:
+            continue
+        # Same grounding bar as KB values: the label must be printed on the form.
+        if folded not in folded_pages:
+            logger.info("form label extract: dropped ungrounded label %r", label)
+            continue
+        seen.add(folded)
+        labels.append(label)
+    return labels[:_MAX_LABELS]
+
+
+async def fill_missing_form_fields_from_rfp(
+    rfp_sections: list[RfpSectionMap],
+    rfp_text: str,
+) -> tuple[list[RfpSectionMap], list[str]]:
+    """Give form / disclosure / references tabs with no labels their RFP labels."""
+    targets = [
+        i
+        for i, mapped in enumerate(rfp_sections or [])
+        if instrument_is_checklist(getattr(mapped, "submission_instrument", None))
+        and not (mapped.form_fields or [])
+        and (mapped.title or "").strip()
+    ]
+    if not targets or not (rfp_text or "").strip():
+        return list(rfp_sections or []), []
+
+    async def _one(i: int) -> list[str]:
+        try:
+            return await extract_form_field_labels_from_rfp(rfp_sections[i].title, rfp_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("form label extract failed for %r: %s", rfp_sections[i].title, exc)
+            return []
+
+    found = await asyncio.gather(*(_one(i) for i in targets))
+    out = list(rfp_sections)
+    logs: list[str] = []
+    for i, labels in zip(targets, found):
+        if not labels:
+            continue
+        out[i] = out[i].model_copy(update={"form_fields": labels})
+        logs.append(
+            f"form-fields:read {len(labels)} label(s) from the RFP for "
+            f"{out[i].title}: {', '.join(labels[:6])}"
+        )
+    return out, logs
+
+
 def form_field_sections(rfp_sections: list[RfpSectionMap]) -> list[RfpSectionMap]:
     """Form / disclosure / references tabs whose RFP printed field labels."""
     return [

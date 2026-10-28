@@ -9,6 +9,8 @@ from app.models.proposal import ProposalDraft, ProposalSection, RfpSectionMap
 from app.services.proposal_drafting_graph import partition_phase3_sections
 from app.services.proposal_form_fields import (
     collect_form_field_labels,
+    extract_form_field_labels_from_rfp,
+    fill_missing_form_fields_from_rfp,
     resolve_form_field_values_from_kb,
     restore_missing_form_fields,
 )
@@ -130,6 +132,75 @@ class ResolveFromKbTests(unittest.IsolatedAsyncioTestCase):
             collect_form_field_labels(maps),
             ["Offeror Name", "Federal Tax ID", "Authorized Signature", "DBA"],
         )
+
+
+# The form body sits in the appendix, far past the TOC line that names it and
+# past the 120k default of combine_rfp_text (Lake Oswego: B-1 at ~149k chars).
+_ATTACHMENT_B_TITLE = "Attachment B: Proposer Certifications and Representations"
+_RFP_WITH_APPENDIX_FORM = (
+    "Request for Proposals\nAttachment B: Proposer Information Form/Certifications\n"
+    "3.2 Attachment B: Proposer Certifications and Representations\n"
+    "Each proposal shall include a completed and executed Attachment B.\n"
+    + ("Scope of work filler. " * 7_000)
+    + "\nB-1\nATTACHMENT B\nPROPOSER CERTIFICATIONS AND REPRESENTATIONS\n"
+    "PROPOSAL FORM (To Be Returned)\n"
+    "1. ACKNOWLEDGEMENT OF RECEIPT OF ADDENDA\nAddenda through received.\n"
+    "12. PROPOSER'S SIGNATURE AND IDENTIFICATION\n"
+    "Name of Proprietor, Partnership, or Corporation\nStreet Address\n"
+    "Employer ID Number State of Incorporation\n"
+)
+
+
+class ExtractFormLabelsFromRfpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_labels_come_from_the_form_pages_and_must_be_grounded(self) -> None:
+        chat = AsyncMock(
+            return_value=(
+                {
+                    "labels": [
+                        "Employer ID Number",
+                        "Street Address",
+                        "Proposer legal name",  # not printed on the form
+                    ]
+                },
+                "test",
+            )
+        )
+        with patch("app.services.proposal_intelligence.agent_base.safe_chat_json", new=chat):
+            labels = await extract_form_field_labels_from_rfp(
+                _ATTACHMENT_B_TITLE, _RFP_WITH_APPENDIX_FORM
+            )
+        self.assertEqual(labels, ["Employer ID Number", "Street Address"])
+        sent = chat.await_args.args[0][1]["content"]
+        self.assertIn("ACKNOWLEDGEMENT OF RECEIPT OF ADDENDA", sent)
+
+    async def test_form_not_in_rfp_skips_llm(self) -> None:
+        chat = AsyncMock()
+        with patch("app.services.proposal_intelligence.agent_base.safe_chat_json", new=chat):
+            labels = await extract_form_field_labels_from_rfp(
+                "Attachment Z: Vendor Questionnaire", _RFP_WITH_APPENDIX_FORM
+            )
+        self.assertEqual(labels, [])
+        chat.assert_not_called()
+
+    async def test_only_form_tabs_without_labels_are_filled(self) -> None:
+        maps = [
+            _form_map(
+                id="att-b",
+                title=_ATTACHMENT_B_TITLE,
+                submissionInstrument="disclosure",
+                formFields=[],
+            ),
+            _form_map(),  # already has labels
+            _form_map(id="narr", submissionInstrument="narrative", formFields=[]),
+        ]
+        chat = AsyncMock(return_value=({"labels": ["Employer ID Number"]}, "test"))
+        with patch("app.services.proposal_intelligence.agent_base.safe_chat_json", new=chat):
+            out, logs = await fill_missing_form_fields_from_rfp(maps, _RFP_WITH_APPENDIX_FORM)
+        self.assertEqual(out[0].form_fields, ["Employer ID Number"])
+        self.assertEqual(out[1].form_fields, maps[1].form_fields)
+        self.assertEqual(out[2].form_fields, [])
+        self.assertEqual(chat.await_count, 1)
+        self.assertTrue(logs)
 
 
 class RestoreMissingFormFieldsTests(unittest.TestCase):
