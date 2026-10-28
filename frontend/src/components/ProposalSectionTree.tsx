@@ -96,6 +96,8 @@ interface ProposalSectionTreeProps {
   highlightedSectionId: string | null;
   manualFillFlags: ManualFillFlag[];
   sectionRevisions: Record<string, SectionRevisionRecord>;
+  /** Section Ask Ralph is working on right now (survives a page refresh). */
+  improvingSectionId?: string | null;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
@@ -113,6 +115,7 @@ function SectionRow({
   flagCount,
   hasRevision,
   awaitingConfirmRevision = false,
+  improving = false,
   canDelete,
   canDrag,
   listLabel,
@@ -133,6 +136,7 @@ function SectionRow({
   flagCount: number;
   hasRevision: boolean;
   awaitingConfirmRevision?: boolean;
+  improving?: boolean;
   canDelete: boolean;
   canDrag: boolean;
   listLabel: string;
@@ -156,6 +160,7 @@ function SectionRow({
     draftHint = deadSectionLabel(health);
   }
   const titleHint = [
+    improving ? "Ralph is improving this section" : "",
     draftHint,
     flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
     hasRevision
@@ -244,6 +249,13 @@ function SectionRow({
         >
           {listLabel}
         </span>
+        {improving ? (
+          <span
+            className="proposal-ralph-working-dot"
+            role="status"
+            aria-label="Ralph is improving this section"
+          />
+        ) : null}
         {flagCount > 0 ? (
           <span className="proposal-section-flag-count" title={`${flagCount} items need input`}>
             {flagCount}
@@ -276,6 +288,7 @@ function SectionGroup({
   highlightedSectionId,
   manualFillFlags,
   sectionRevisions,
+  improvingSectionId,
   canDelete,
   canDrag,
   dragOverId,
@@ -296,6 +309,7 @@ function SectionGroup({
   highlightedSectionId: string | null;
   manualFillFlags: ManualFillFlag[];
   sectionRevisions: Record<string, SectionRevisionRecord>;
+  improvingSectionId?: string | null;
   canDelete: boolean;
   canDrag: boolean;
   dragOverId: string | null;
@@ -353,6 +367,7 @@ function SectionGroup({
               awaitingConfirmRevision={Boolean(
                 sectionRevisions[section.id]?.awaitingConfirm
               )}
+              improving={improvingSectionId === section.id}
               canDelete={canDelete}
               canDrag={canDrag}
               listLabel={sectionListLabel(section, rfpTabNumberById)}
@@ -379,6 +394,7 @@ export function ProposalSectionTree({
   highlightedSectionId,
   manualFillFlags,
   sectionRevisions,
+  improvingSectionId = null,
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
@@ -470,6 +486,7 @@ export function ProposalSectionTree({
             highlightedSectionId={highlightedSectionId}
             manualFillFlags={manualFillFlags}
             sectionRevisions={sectionRevisions}
+            improvingSectionId={improvingSectionId}
             canDelete={canDelete}
             canDrag={canDrag}
             dragOverId={dragOverId}
@@ -501,6 +518,7 @@ export function ProposalSectionTree({
             awaitingConfirmRevision={Boolean(
               sectionRevisions[node.section.id]?.awaitingConfirm
             )}
+            improving={improvingSectionId === node.section.id}
             canDelete={canDelete}
             canDrag={canDrag}
             listLabel={sectionListLabel(node.section, rfpTabNumberById)}

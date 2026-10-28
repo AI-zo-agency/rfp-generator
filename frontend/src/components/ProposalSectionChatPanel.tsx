@@ -1,7 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { improveProposalSection } from "@/lib/proposal-api";
+import {
+  ImproveRequestDetachedError,
+  improveProposalSection,
+  type ImproveSectionResult,
+} from "@/lib/proposal-api";
+import {
+  isPageUnloading,
+  newRalphRunId,
+  type RalphInflightRun,
+} from "@/lib/ralph-chat-persistence";
 import {
   chatBusyStatusLabel,
   chatLiveWorkSteps,
@@ -80,6 +89,143 @@ interface ProposalSectionChatPanelProps {
   showClose?: boolean;
   onClose?: () => void;
   evidenceCorpus?: EvidenceItem[];
+  /** Persist the request that is running so a page refresh can resume it. */
+  onInflightChange?: (run: RalphInflightRun | null) => void;
+  /** Stop pressed with no request owned by this page (resumed after reload). */
+  onStopResumed?: () => void;
+  /** The request's connection dropped mid-run (e.g. refresh) — the server may
+   * still be working, so the parent polls the run for its outcome. */
+  onRequestDetached?: (run: RalphInflightRun) => void;
+}
+
+export interface ImproveDeliveryCallbacks {
+  onMessagesChange: (messages: SectionChatMessage[]) => void;
+  onSectionUpdated: (draft: ProposalOutline, research: ProposalResearch | null) => void;
+  onRevisionRecorded?: (sectionId: string, revision: SectionRevisionRecord) => void;
+  onRevisionDrawerOpenChange?: (sectionId: string, open: boolean) => void;
+  onFocusSection?: (sectionId: string) => void;
+}
+
+/** Post a finished improve / apply-fix run into the chat and the editor. Shared
+ * by the live request and by a run picked back up after a page refresh. */
+export function deliverImproveResult({
+  result,
+  runId,
+  kind,
+  priorMessages,
+  sections,
+  targetSection,
+  viewingSectionId,
+  instruction,
+  callbacks,
+}: {
+  result: ImproveSectionResult;
+  runId: string;
+  kind: RalphInflightRun["kind"];
+  priorMessages: SectionChatMessage[];
+  sections: OutlineSection[];
+  targetSection: { id: string; title: string };
+  viewingSectionId: string | null;
+  instruction: string;
+  callbacks: ImproveDeliveryCallbacks;
+}): void {
+  let content = result.assistantMessage;
+  if (kind === "improve") {
+    // The resolver can legitimately land on a section other than the one
+    // open in the editor (a named mention, a proposal-wide ask, a stale
+    // pin). When that happens, say so up front — a reader who has a
+    // different tab open should never have to infer which section a
+    // response is actually about from its content.
+    const viewingSection = viewingSectionId
+      ? sections.find((s) => s.id === viewingSectionId) ?? null
+      : null;
+    if (viewingSection !== null && viewingSection.id !== targetSection.id) {
+      content = `_Acted on "${targetSection.title}" — not "${viewingSection.title}", which is open in the editor._\n\n${result.assistantMessage}`;
+    }
+  }
+
+  callbacks.onMessagesChange([
+    ...priorMessages,
+    {
+      id: `a-${Date.now()}`,
+      role: "assistant",
+      content,
+      draftUnchanged: !result.draftChanged,
+      ...(kind === "improve"
+        ? {
+            suggestedFix:
+              !result.draftChanged && result.suggestedFix ? result.suggestedFix : null,
+          }
+        : {}),
+      agentActivity: result.agentActivity,
+    },
+  ]);
+
+  if (!result.draftChanged) return;
+  const beforeById = new Map(sections.map((s) => [s.id, s.content || ""] as const));
+  const changed = result.draft.sections.filter((s) => {
+    const prev = beforeById.get(s.id);
+    return prev !== undefined && (s.content || "") !== prev;
+  });
+  const focusId = targetSection.id;
+  const targetChanged = changed.find((s) => s.id === focusId) ?? changed[0] ?? null;
+
+  if (result.previewPending) {
+    // Preview-first: do NOT write the live draft until Apply.
+    if (targetChanged) {
+      callbacks.onRevisionRecorded?.(focusId, {
+        before: beforeById.get(focusId) || "",
+        after: targetChanged.content || "",
+        summary: result.assistantMessage,
+        instruction,
+        updatedAt: Date.now(),
+        awaitingConfirm: true,
+        pendingDraft: result.draft,
+        pendingResearch: result.research,
+        runId,
+      });
+      callbacks.onRevisionDrawerOpenChange?.(focusId, true);
+    }
+  } else {
+    callbacks.onSectionUpdated(result.draft, result.research);
+    if (targetChanged) {
+      callbacks.onRevisionRecorded?.(focusId, {
+        before: beforeById.get(focusId) || "",
+        after: targetChanged.content || "",
+        summary: result.assistantMessage,
+        instruction,
+        updatedAt: Date.now(),
+      });
+      callbacks.onRevisionDrawerOpenChange?.(focusId, true);
+    }
+  }
+  callbacks.onFocusSection?.(focusId);
+}
+
+/** Chat bubble for a run that failed or was stopped — nothing was changed. */
+export function improveFailureMessage(
+  kind: RalphInflightRun["kind"],
+  detail: string,
+  stopped: boolean,
+): SectionChatMessage {
+  return {
+    id: `e-${Date.now()}`,
+    role: "assistant",
+    content: stopped ? "Stopped." : detail,
+    draftUnchanged: true,
+    agentActivity: {
+      outcome: stopped ? "cancelled" : "needs_review",
+      steps: [
+        stopped
+          ? "Stopped before finishing"
+          : kind === "apply"
+            ? "Tried to apply the suggested fix"
+            : "Tried to run your instruction",
+      ],
+      changes: ["No manuscript text was changed."],
+      discrepancies: stopped ? [] : [detail],
+    },
+  };
 }
 
 function normalizeChatPlain(text: string): string {
@@ -215,6 +361,9 @@ export function ProposalSectionChatPanel({
   showClose = false,
   onClose,
   evidenceCorpus,
+  onInflightChange,
+  onStopResumed,
+  onRequestDetached,
 }: ProposalSectionChatPanelProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -230,11 +379,15 @@ export function ProposalSectionChatPanel({
   const improveAbortRef = useRef<AbortController | null>(null);
 
   const stopChat = useCallback(() => {
+    if (!improveAbortRef.current) {
+      // Busy but no request in this page: a run resumed after refresh.
+      onStopResumed?.();
+    }
     improveAbortRef.current?.abort();
     improveAbortRef.current = null;
     onStatusLineChange(null);
     onBusyChange?.(false);
-  }, [onBusyChange, onStatusLineChange]);
+  }, [onBusyChange, onStatusLineChange, onStopResumed]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -411,14 +564,26 @@ export function ProposalSectionChatPanel({
           messageLooksProposalWide(trimmed));
 
       setError(null);
-      onStatusLineChange(
-        chatBusyStatusLabel(trimmed, targetSection.title, {
-          proposalWide: proposalWideAsk,
-          referenceMode: activeReference?.mode ?? null,
-          sameSectionPinned: activeReference?.sectionId === targetSection.id,
-        })
-      );
+      const busyStatusLine = chatBusyStatusLabel(trimmed, targetSection.title, {
+        proposalWide: proposalWideAsk,
+        referenceMode: activeReference?.mode ?? null,
+        sameSectionPinned: activeReference?.sectionId === targetSection.id,
+      });
+      onStatusLineChange(busyStatusLine);
       onBusyChange?.(true);
+      const runId = newRalphRunId();
+      const inflightRun: RalphInflightRun = {
+        runId,
+        kind: "improve",
+        sectionId: targetSection.id,
+        sectionTitle: targetSection.title,
+        viewingSectionId,
+        instruction: trimmed,
+        statusLine: busyStatusLine,
+        startedAt: Date.now(),
+      };
+      onInflightChange?.(inflightRun);
+      let detached = false;
 
       const pinForTarget =
         activeReference?.sectionId === targetSection.id ? activeReference : null;
@@ -449,108 +614,53 @@ export function ProposalSectionChatPanel({
             activeReference?.mode === "section" &&
             activeReference.sectionId === targetSection.id,
           signal: abort.signal,
+          runId,
         },
         );
 
-        // The resolver can legitimately land on a section other than the one
-        // open in the editor (a named mention, a proposal-wide ask, a stale
-        // pin). When that happens, say so up front — a reader who has a
-        // different tab open should never have to infer which section a
-        // response is actually about from its content.
-        const viewingSection = viewingSectionId
-          ? sections.find((s) => s.id === viewingSectionId) ?? null
-          : null;
-        const targetDiffersFromOpenTab =
-          viewingSection !== null && viewingSection.id !== targetSection.id;
-        const responseContent = targetDiffersFromOpenTab
-          ? `_Acted on "${targetSection.title}" — not "${viewingSection.title}", which is open in the editor._\n\n${result.assistantMessage}`
-          : result.assistantMessage;
-
-        onMessagesChange([
-          ...nextMessages,
-          {
-            id: `a-${Date.now()}`,
-            role: "assistant",
-            content: responseContent,
-            draftUnchanged: !result.draftChanged,
-            suggestedFix:
-              !result.draftChanged && result.suggestedFix ? result.suggestedFix : null,
-            agentActivity: result.agentActivity,
+        deliverImproveResult({
+          result,
+          runId,
+          kind: "improve",
+          priorMessages: nextMessages,
+          sections,
+          targetSection,
+          viewingSectionId,
+          instruction: trimmed,
+          callbacks: {
+            onMessagesChange,
+            onSectionUpdated,
+            onRevisionRecorded,
+            onRevisionDrawerOpenChange,
+            onFocusSection,
           },
-        ]);
-
-        if (result.draftChanged) {
-          const beforeById = new Map(
-            sections.map((s) => [s.id, s.content || ""] as const)
-          );
-          const changed = result.draft.sections.filter((s) => {
-            const prev = beforeById.get(s.id);
-            return prev !== undefined && (s.content || "") !== prev;
-          });
-          const focusId = targetSection.id;
-          const targetChanged =
-            changed.find((s) => s.id === focusId) ?? changed[0] ?? null;
-
-          if (result.previewPending) {
-            // Preview-first: do NOT write the live draft until Apply.
-            if (targetChanged) {
-              onRevisionRecorded?.(focusId, {
-                before: beforeById.get(focusId) || "",
-                after: targetChanged.content || "",
-                summary: result.assistantMessage,
-                instruction: trimmed,
-                updatedAt: Date.now(),
-                awaitingConfirm: true,
-                pendingDraft: result.draft,
-                pendingResearch: result.research,
-              });
-              onRevisionDrawerOpenChange?.(focusId, true);
-            }
-            onFocusSection?.(focusId);
-          } else {
-            onSectionUpdated(result.draft, result.research);
-            if (targetChanged) {
-              onRevisionRecorded?.(focusId, {
-                before: beforeById.get(focusId) || "",
-                after: targetChanged.content || "",
-                summary: result.assistantMessage,
-                instruction: trimmed,
-                updatedAt: Date.now(),
-              });
-              onRevisionDrawerOpenChange?.(focusId, true);
-            }
-            onFocusSection?.(focusId);
-          }
-        }
+        });
       } catch (err) {
+        // Refresh / dropped connection cut the request off ("Failed to fetch"
+        // fires before pagehide) — the server is still working, so hand the run
+        // to polling instead of recording a failed turn.
+        if (isPageUnloading() || err instanceof ImproveRequestDetachedError) {
+          detached = true;
+          onRequestDetached?.(inflightRun);
+          return;
+        }
         const detail = err instanceof Error ? err.message : "Chat request failed";
         const stopped =
           abort.signal.aborted || /^stopped\.?$/i.test(detail.trim());
         onMessagesChange([
           ...nextMessages,
-          {
-            id: `e-${Date.now()}`,
-            role: "assistant",
-            content: stopped ? "Stopped." : detail,
-            draftUnchanged: true,
-            agentActivity: {
-              outcome: stopped ? "cancelled" : "needs_review",
-              steps: [
-                stopped
-                  ? "Stopped before finishing"
-                  : "Tried to run your instruction",
-              ],
-              changes: ["No manuscript text was changed."],
-              discrepancies: stopped ? [] : [detail],
-            },
-          },
+          improveFailureMessage("improve", detail, stopped),
         ]);
       } finally {
         if (improveAbortRef.current === abort) {
           improveAbortRef.current = null;
         }
-        onStatusLineChange(null);
-        onBusyChange?.(false);
+        // A detached run stays busy + in flight: the parent polls for it.
+        if (!detached) {
+          onInflightChange?.(null);
+          onStatusLineChange(null);
+          onBusyChange?.(false);
+        }
       }
     },
     [
@@ -562,6 +672,8 @@ export function ProposalSectionChatPanel({
       onRevisionDrawerOpenChange,
       onRevisionRecorded,
       onFocusSection,
+      onInflightChange,
+      onRequestDetached,
       onSectionUpdated,
       onSetReference,
       reference,
@@ -601,9 +713,23 @@ export function ProposalSectionChatPanel({
       setPendingApply(null);
       setApplyExtras("");
       setError(null);
-      onStatusLineChange(`Applying fix on ${target.title}…`);
+      const busyStatusLine = `Applying fix on ${target.title}…`;
+      onStatusLineChange(busyStatusLine);
       onBusyChange?.(true);
       onFocusSection?.(target.id);
+      const runId = newRalphRunId();
+      const inflightRun: RalphInflightRun = {
+        runId,
+        kind: "apply",
+        sectionId: target.id,
+        sectionTitle: target.title,
+        viewingSectionId,
+        instruction,
+        statusLine: busyStatusLine,
+        startedAt: Date.now(),
+      };
+      onInflightChange?.(inflightRun);
+      let detached = false;
 
       improveAbortRef.current?.abort();
       const abort = new AbortController();
@@ -623,91 +749,50 @@ export function ProposalSectionChatPanel({
             applyFix: true,
             improveSectionPinned: true,
             signal: abort.signal,
+            runId,
           }
         );
 
-        onMessagesChange([
-          ...nextMessages,
-          {
-            id: `a-${Date.now()}`,
-            role: "assistant",
-            content: result.assistantMessage,
-            draftUnchanged: !result.draftChanged,
-            agentActivity: result.agentActivity,
+        deliverImproveResult({
+          result,
+          runId,
+          kind: "apply",
+          priorMessages: nextMessages,
+          sections,
+          targetSection: target,
+          viewingSectionId,
+          instruction,
+          callbacks: {
+            onMessagesChange,
+            onSectionUpdated,
+            onRevisionRecorded,
+            onRevisionDrawerOpenChange,
+            onFocusSection,
           },
-        ]);
-
-        if (result.draftChanged) {
-          const beforeById = new Map(
-            sections.map((s) => [s.id, s.content || ""] as const)
-          );
-          const changed = result.draft.sections.filter((s) => {
-            const prev = beforeById.get(s.id);
-            return prev !== undefined && (s.content || "") !== prev;
-          });
-          const focusId = target.id;
-          const targetChanged =
-            changed.find((s) => s.id === focusId) ?? changed[0] ?? null;
-
-          if (result.previewPending) {
-            if (targetChanged) {
-              onRevisionRecorded?.(focusId, {
-                before: beforeById.get(focusId) || "",
-                after: targetChanged.content || "",
-                summary: result.assistantMessage,
-                instruction,
-                updatedAt: Date.now(),
-                awaitingConfirm: true,
-                pendingDraft: result.draft,
-                pendingResearch: result.research,
-              });
-              onRevisionDrawerOpenChange?.(focusId, true);
-            }
-            onFocusSection?.(focusId);
-          } else {
-            onSectionUpdated(result.draft, result.research);
-            if (targetChanged) {
-              onRevisionRecorded?.(focusId, {
-                before: beforeById.get(focusId) || "",
-                after: targetChanged.content || "",
-                summary: result.assistantMessage,
-                instruction,
-                updatedAt: Date.now(),
-              });
-              onRevisionDrawerOpenChange?.(focusId, true);
-            }
-            onFocusSection?.(focusId);
-          }
-        }
+        });
       } catch (err) {
+        if (isPageUnloading() || err instanceof ImproveRequestDetachedError) {
+          detached = true;
+          onRequestDetached?.(inflightRun);
+          return;
+        }
         const detail = err instanceof Error ? err.message : "Apply fix failed";
         const stopped =
           abort.signal.aborted || /^stopped\.?$/i.test(detail.trim());
         onMessagesChange([
           ...nextMessages,
-          {
-            id: `e-${Date.now()}`,
-            role: "assistant",
-            content: stopped ? "Stopped." : detail,
-            draftUnchanged: true,
-            agentActivity: {
-              outcome: stopped ? "cancelled" : "needs_review",
-              steps: [
-                stopped
-                  ? "Stopped before finishing"
-                  : "Tried to apply the suggested fix",
-              ],
-              changes: ["No manuscript text was changed."],
-              discrepancies: stopped ? [] : [detail],
-            },
-          },
+          improveFailureMessage("apply", detail, stopped),
         ]);
       } finally {
         if (improveAbortRef.current === abort) {
           improveAbortRef.current = null;
         }
-        onStatusLineChange(null);
-        onBusyChange?.(false);
+        // A detached run stays busy + in flight: the parent polls for it.
+        if (!detached) {
+          onInflightChange?.(null);
+          onStatusLineChange(null);
+          onBusyChange?.(false);
+        }
       }
     },
     [
@@ -717,7 +802,9 @@ export function ProposalSectionChatPanel({
       onBusyChange,
       onStatusLineChange,
       onFocusSection,
+      onInflightChange,
       onMessagesChange,
+      onRequestDetached,
       onRevisionDrawerOpenChange,
       onRevisionRecorded,
       onSectionUpdated,

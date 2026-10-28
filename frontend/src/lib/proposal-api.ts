@@ -2541,22 +2541,7 @@ export async function runPhase4PreSubmitAutoFix(
   };
 }
 
-export async function improveProposalSection(
-  rfpId: string,
-  sectionId: string,
-  message: string,
-  options?: {
-    selection?: { start: number; end: number; text: string };
-    conversationHistory?: { role: "user" | "assistant"; content: string }[];
-    proposalWide?: boolean;
-    applyFix?: boolean;
-    improveSectionPinned?: boolean;
-    /** Default true — revise but do not save until confirm-preview. */
-    previewOnly?: boolean;
-    /** Abort in-flight Ask Ralph / section improve (Stop button). */
-    signal?: AbortSignal;
-  }
-): Promise<{
+export interface ImproveSectionResult {
   section: OutlineSection;
   draft: ProposalOutline;
   research: ProposalResearch | null;
@@ -2575,86 +2560,30 @@ export async function improveProposalSection(
     changes: string[];
     discrepancies: string[];
   } | null;
-}> {
-  let res: Response;
-  try {
-    res = await fetch(
-      `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
-      {
-        method: "POST",
-        headers: withAuthUserEmail({ "Content-Type": "application/json" }),
-        signal: options?.signal,
-        body: JSON.stringify({
-          message,
-          ...(options?.selection
-            ? {
-                selectionStart: options.selection.start,
-                selectionEnd: options.selection.end,
-                selectionText: options.selection.text.slice(0, 8000),
-              }
-            : {}),
-          ...(options?.conversationHistory?.length
-            ? {
-                conversationHistory: options.conversationHistory
-                  .slice(-12)
-                  .map((turn) => ({
-                    role: turn.role,
-                    content:
-                      turn.content.length > 11_900
-                        ? `${turn.content.slice(0, 11_900)}\n…[truncated]`
-                        : turn.content,
-                  })),
-              }
-            : {}),
-          ...(options?.proposalWide ? { proposalWide: true } : {}),
-          ...(options?.applyFix ? { applyFix: true } : {}),
-          ...(options?.improveSectionPinned
-            ? { improveSectionPinned: true }
-            : {}),
-          previewOnly: options?.previewOnly !== false,
-        }),
-      },
-    );
-  } catch (err) {
-    if (
-      options?.signal?.aborted ||
-      (err instanceof DOMException && err.name === "AbortError") ||
-      (err instanceof Error && err.name === "AbortError")
-    ) {
-      throw new Error("Stopped.");
-    }
-    throw err;
-  }
-  const text = await res.text();
-  let data: {
-    detail?: unknown;
-    section?: OutlineSection;
-    draft?: ApiProposalDraft;
-    research?: ProposalResearch;
-    assistantMessage?: string;
-    draftChanged?: boolean;
-    previewPending?: boolean;
-    suggestedFix?: {
-      sectionId?: string;
-      instruction?: string;
-      summary?: string;
-      sectionTitle?: string;
-    } | null;
-    agentActivity?: {
-      outcome?: string;
-      steps?: string[];
-      changes?: string[];
-      discrepancies?: string[];
-    } | null;
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (section improve may have timed out).");
-  }
-  if (!res.ok) {
-    throw new Error(formatApiDetail(data.detail, "Section improve failed"));
-  }
+}
+
+interface ImproveSectionPayload {
+  section?: OutlineSection;
+  draft?: ApiProposalDraft;
+  research?: ProposalResearch;
+  assistantMessage?: string;
+  draftChanged?: boolean;
+  previewPending?: boolean;
+  suggestedFix?: {
+    sectionId?: string;
+    instruction?: string;
+    summary?: string;
+    sectionTitle?: string;
+  } | null;
+  agentActivity?: {
+    outcome?: string;
+    steps?: string[];
+    changes?: string[];
+    discrepancies?: string[];
+  } | null;
+}
+
+function parseImproveSectionPayload(data: ImproveSectionPayload): ImproveSectionResult {
   if (!data.section || !data.draft) {
     throw new Error("No section data returned from server");
   }
@@ -2700,6 +2629,142 @@ export async function improveProposalSection(
     suggestedFix,
     agentActivity,
   };
+}
+
+/** The connection to the improve request dropped (page refresh, network blip)
+ * — the server may still be working, so poll the run instead of failing it. */
+export class ImproveRequestDetachedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImproveRequestDetachedError";
+  }
+}
+
+export async function improveProposalSection(
+  rfpId: string,
+  sectionId: string,
+  message: string,
+  options?: {
+    selection?: { start: number; end: number; text: string };
+    conversationHistory?: { role: "user" | "assistant"; content: string }[];
+    proposalWide?: boolean;
+    applyFix?: boolean;
+    improveSectionPinned?: boolean;
+    /** Default true — revise but do not save until confirm-preview. */
+    previewOnly?: boolean;
+    /** Abort in-flight Ask Ralph / section improve (Stop button). */
+    signal?: AbortSignal;
+    /** Server keeps the outcome under this id so a reloaded page can fetch it. */
+    runId?: string;
+  }
+): Promise<ImproveSectionResult> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
+      {
+        method: "POST",
+        headers: withAuthUserEmail({ "Content-Type": "application/json" }),
+        signal: options?.signal,
+        body: JSON.stringify({
+          message,
+          ...(options?.selection
+            ? {
+                selectionStart: options.selection.start,
+                selectionEnd: options.selection.end,
+                selectionText: options.selection.text.slice(0, 8000),
+              }
+            : {}),
+          ...(options?.conversationHistory?.length
+            ? {
+                conversationHistory: options.conversationHistory
+                  .slice(-12)
+                  .map((turn) => ({
+                    role: turn.role,
+                    content:
+                      turn.content.length > 11_900
+                        ? `${turn.content.slice(0, 11_900)}\n…[truncated]`
+                        : turn.content,
+                  })),
+              }
+            : {}),
+          ...(options?.proposalWide ? { proposalWide: true } : {}),
+          ...(options?.applyFix ? { applyFix: true } : {}),
+          ...(options?.improveSectionPinned
+            ? { improveSectionPinned: true }
+            : {}),
+          previewOnly: options?.previewOnly !== false,
+          ...(options?.runId ? { runId: options.runId } : {}),
+        }),
+      },
+    );
+  } catch (err) {
+    if (
+      options?.signal?.aborted ||
+      (err instanceof DOMException && err.name === "AbortError") ||
+      (err instanceof Error && err.name === "AbortError")
+    ) {
+      throw new Error("Stopped.");
+    }
+    if (options?.runId && err instanceof TypeError) {
+      throw new ImproveRequestDetachedError(err.message);
+    }
+    throw err;
+  }
+  const text = await res.text();
+  let data: ImproveSectionPayload & { detail?: unknown };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (section improve may have timed out).");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Section improve failed"));
+  }
+  return parseImproveSectionPayload(data);
+}
+
+export type ImproveSectionRunStatus =
+  | { status: "running" }
+  | { status: "completed"; result: ImproveSectionResult }
+  | { status: "failed"; detail: string }
+  /** Server has no record (expired, or the backend restarted). */
+  | { status: "missing" };
+
+/** Poll an Ask Ralph improve run started before a page reload. */
+export async function getImproveSectionRun(
+  rfpId: string,
+  runId: string,
+): Promise<ImproveSectionRunStatus> {
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/improve-runs/${encodeURIComponent(runId)}`,
+    { headers: withAuthUserEmail({ Accept: "application/json" }), cache: "no-store" },
+  );
+  if (res.status === 404) return { status: "missing" };
+  const text = await res.text();
+  let data: {
+    status?: string;
+    detail?: unknown;
+    result?: ImproveSectionPayload | null;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response while checking Ask Ralph progress.");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Could not check Ask Ralph progress"));
+  }
+  if (data.status === "completed" && data.result) {
+    return { status: "completed", result: parseImproveSectionPayload(data.result) };
+  }
+  if (data.status === "failed") {
+    return {
+      status: "failed",
+      detail: formatApiDetail(data.detail, "Section improve failed"),
+    };
+  }
+  return { status: "running" };
 }
 
 export async function confirmChatPreview(

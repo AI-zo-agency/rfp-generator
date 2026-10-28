@@ -36,6 +36,9 @@ export interface SectionRevisionRecord {
   /** Full preview draft to persist on Apply (includes multi-section edits). */
   pendingDraft?: ProposalOutline;
   pendingResearch?: ProposalResearch | null;
+  /** Ask Ralph run that produced the preview — after a refresh the preview
+   * draft is fetched back from the server by this id (not kept in the tab). */
+  runId?: string;
 }
 
 interface TextSelection {

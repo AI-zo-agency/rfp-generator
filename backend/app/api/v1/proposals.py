@@ -1250,7 +1250,55 @@ async def improve_section_endpoint(
     section_id: str,
     body: SectionImproveRequest,
 ) -> ProposalSectionImproveResponse:
-    """Re-query KB with new detailed queries and re-draft one section from user feedback."""
+    """Re-query KB with new detailed queries and re-draft one section from user feedback.
+
+    With a runId, the outcome is also kept so a page reloaded mid-run can fetch it
+    from GET .../proposal/improve-runs/{run_id} instead of losing the turn.
+    """
+    from app.services.proposal_improve_runs import (
+        finish_improve_run,
+        mark_improve_run_started,
+    )
+
+    run_id = (body.run_id or "").strip()
+    if not run_id:
+        return await _improve_section(rfp_id, section_id, body)
+
+    await mark_improve_run_started(rfp_id, run_id, section_id)
+    try:
+        response = await _improve_section(rfp_id, section_id, body)
+    except HTTPException as exc:
+        await finish_improve_run(rfp_id, run_id, section_id, error=str(exc.detail))
+        raise
+    except Exception as exc:
+        await finish_improve_run(
+            rfp_id, run_id, section_id, error=f"Section improve failed: {exc}"
+        )
+        raise
+    await finish_improve_run(
+        rfp_id,
+        run_id,
+        section_id,
+        result=response.model_dump(mode="json", by_alias=True),
+    )
+    return response
+
+
+@router.get("/{rfp_id}/proposal/improve-runs/{run_id}")
+async def get_improve_run_endpoint(rfp_id: str, run_id: str) -> dict[str, object]:
+    from app.services.proposal_improve_runs import get_improve_run
+
+    record = await get_improve_run(rfp_id, run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Improve run not found.")
+    return record
+
+
+async def _improve_section(
+    rfp_id: str,
+    section_id: str,
+    body: SectionImproveRequest,
+) -> ProposalSectionImproveResponse:
     from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
     from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
 

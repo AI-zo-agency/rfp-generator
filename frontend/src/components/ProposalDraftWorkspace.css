@@ -421,6 +421,54 @@
   white-space: nowrap;
 }
 
+/* Ask Ralph is working on this section (also shown after a page refresh). */
+.proposal-editor-ralph-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: #eff6ff;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #1e3a8a;
+  white-space: nowrap;
+}
+
+.proposal-ralph-working-dot {
+  position: relative;
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.5rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: #3b82f6;
+}
+
+.proposal-ralph-working-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #60a5fa;
+  animation: proposal-ralph-working-ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes proposal-ralph-working-ping {
+  75%,
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proposal-ralph-working-dot::after {
+    animation: none;
+  }
+}
+
 .proposal-editor-chrome-actions {
   display: flex;
   justify-self: end;

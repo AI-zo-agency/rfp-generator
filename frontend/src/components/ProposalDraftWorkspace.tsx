@@ -72,6 +72,7 @@ import {
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
   getProposalJobStatus,
+  getImproveSectionRun,
   pollFulfillScanCompletion,
   matchCaseStudiesForRfp,
   type CaseStudyMatchResult,
@@ -111,9 +112,18 @@ import {
   ProposalSectionChatPanel,
   buildSectionPinReference,
   buildSelectionPinReference,
+  deliverImproveResult,
+  improveFailureMessage,
   type SectionChatMessage,
   type SectionChatReference,
 } from "./ProposalSectionChatPanel";
+import {
+  loadRalphChat,
+  loadRalphInflight,
+  persistRalphChat,
+  persistRalphInflight,
+  type RalphInflightRun,
+} from "@/lib/ralph-chat-persistence";
 import { SectionRevisionCompare } from "./SectionRevisionCompare";
 import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
 import { ProposalReviewToolbar } from "./ProposalReviewToolbar";
@@ -190,15 +200,18 @@ function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): v
   if (typeof window === "undefined") return;
   try {
     // Never session-store pending preview drafts (large + not yet confirmed).
+    // A pending preview with a run id keeps only its compare text; Apply
+    // fetches the preview draft back from the server after a refresh.
     const slim: SectionRevisionMap = {};
     for (const [id, rev] of Object.entries(revisions)) {
-      if (rev.awaitingConfirm) continue;
+      if (rev.awaitingConfirm && !rev.runId) continue;
       slim[id] = {
         before: rev.before,
         after: rev.after,
         summary: rev.summary,
         instruction: rev.instruction,
         updatedAt: rev.updatedAt,
+        ...(rev.awaitingConfirm ? { awaitingConfirm: true, runId: rev.runId } : {}),
       };
     }
     if (Object.keys(slim).length === 0) {
@@ -210,6 +223,11 @@ function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): v
     // ignore quota errors
   }
 }
+
+/** Poll cadence for an Ask Ralph run picked back up after a page refresh. */
+const RALPH_RESUME_POLL_MS = 3000;
+/** Past this a resumed run cannot still be working — stop waiting on it. */
+const RALPH_RESUME_GIVE_UP_MS = 50 * 60 * 1000;
 
 /** Flip to false when Review & fix is ready for users again. */
 const REVIEW_FIX_TEMPORARILY_DISABLED = true;
@@ -664,6 +682,32 @@ function ProposalDraftWorkspaceInner({
   // the panel unmounting when the user switches to Review/Download and back.
   const [sectionChatStatusLine, setSectionChatStatusLine] = useState<string | null>(null);
   const [sectionChatMessages, setSectionChatMessages] = useState<SectionChatMessage[]>([]);
+  const sectionChatMessagesRef = useRef<SectionChatMessage[]>([]);
+  // The Ask Ralph request currently running (sessionStorage-backed), so a
+  // refresh still shows which section Ralph is improving.
+  const [ralphInflight, setRalphInflight] = useState<RalphInflightRun | null>(null);
+  // Set when the page loaded with a run already in flight, or the live request's
+  // connection dropped: this page owns no request for it, so it polls the
+  // server for the outcome instead.
+  const [resumedRalphRun, setResumedRalphRun] = useState<RalphInflightRun | null>(null);
+  const ralphImprovingSectionId = sectionChatBusy ? ralphInflight?.sectionId ?? null : null;
+
+  const updateSectionChatMessages = useCallback(
+    (messages: SectionChatMessage[]) => {
+      sectionChatMessagesRef.current = messages;
+      setSectionChatMessages(messages);
+      persistRalphChat(rfp.id, messages);
+    },
+    [rfp.id]
+  );
+
+  const updateRalphInflight = useCallback(
+    (run: RalphInflightRun | null) => {
+      setRalphInflight(run);
+      persistRalphInflight(rfp.id, run);
+    },
+    [rfp.id]
+  );
   const [showKeyPersonas, setShowKeyPersonas] = useState(true);
   const assistantPaneRef = useRef<HTMLDivElement>(null);
 
@@ -1001,6 +1045,39 @@ function ProposalDraftWorkspaceInner({
     });
   }, [rfp.id]);
 
+  // Restore Ask Ralph after a refresh: the conversation, and any run that was
+  // still working (shown as busy on its section while we poll for the result).
+  useEffect(() => {
+    const messages = loadRalphChat(rfp.id);
+    const run = loadRalphInflight(rfp.id);
+    queueMicrotask(() => {
+      sectionChatMessagesRef.current = messages;
+      setSectionChatMessages(messages);
+      setRalphInflight(run);
+      setResumedRalphRun(run);
+      setSectionChatBusy(Boolean(run));
+      setSectionChatStatusLine(
+        run ? run.statusLine || `Improving ${run.sectionTitle}…` : null
+      );
+    });
+  }, [rfp.id]);
+
+  const finishResumedRalphRun = useCallback(() => {
+    setResumedRalphRun(null);
+    updateRalphInflight(null);
+    setSectionChatBusy(false);
+    setSectionChatStatusLine(null);
+  }, [updateRalphInflight]);
+
+  const stopResumedRalphRun = useCallback(() => {
+    if (!resumedRalphRun) return;
+    updateSectionChatMessages([
+      ...sectionChatMessagesRef.current,
+      improveFailureMessage(resumedRalphRun.kind, "", true),
+    ]);
+    finishResumedRalphRun();
+  }, [finishResumedRalphRun, resumedRalphRun, updateSectionChatMessages]);
+
   const activeRevision =
     revisionDrawerSectionId && sectionRevisions[revisionDrawerSectionId]
       ? sectionRevisions[revisionDrawerSectionId]
@@ -1031,6 +1108,76 @@ function ProposalDraftWorkspaceInner({
     // Always land in the editor for the clicked section — including empty ones.
     setActiveTab("outline");
   }, []);
+
+  // The server kept working on a run cut off by a refresh — poll for its
+  // outcome and post it exactly as the live request would have.
+  useEffect(() => {
+    if (!resumedRalphRun) return;
+    const run = resumedRalphRun;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      let status: Awaited<ReturnType<typeof getImproveSectionRun>>;
+      try {
+        status = await getImproveSectionRun(rfp.id, run.runId);
+      } catch {
+        status = { status: "running" }; // transient — try again
+      }
+      if (cancelled) return;
+      const gaveUp = Date.now() - run.startedAt > RALPH_RESUME_GIVE_UP_MS;
+      // Wait for the draft to load too — the result is diffed against it.
+      const draftLoaded = outlineRef.current.sections.length > 0;
+      if ((status.status === "running" && !gaveUp) || (status.status === "completed" && !draftLoaded)) {
+        timer = window.setTimeout(() => void poll(), RALPH_RESUME_POLL_MS);
+        return;
+      }
+      if (status.status === "completed") {
+        deliverImproveResult({
+          result: status.result,
+          runId: run.runId,
+          kind: run.kind,
+          priorMessages: sectionChatMessagesRef.current,
+          sections: outlineRef.current.sections,
+          targetSection: { id: run.sectionId, title: run.sectionTitle },
+          viewingSectionId: run.viewingSectionId,
+          instruction: run.instruction,
+          callbacks: {
+            onMessagesChange: updateSectionChatMessages,
+            onSectionUpdated: applySectionImproveFromServer,
+            onRevisionRecorded: recordSectionRevision,
+            onRevisionDrawerOpenChange: (sectionId, open) => {
+              if (open) selectSection(sectionId);
+              setRevisionDrawerSectionId(open ? sectionId : null);
+            },
+            onFocusSection: selectSection,
+          },
+        });
+      } else {
+        const detail =
+          status.status === "failed"
+            ? status.detail
+            : `The page was refreshed while Ralph was working on "${run.sectionTitle}" and that request could not be recovered. Nothing was changed — send it again.`;
+        updateSectionChatMessages([
+          ...sectionChatMessagesRef.current,
+          improveFailureMessage(run.kind, detail, false),
+        ]);
+      }
+      finishResumedRalphRun();
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    applySectionImproveFromServer,
+    finishResumedRalphRun,
+    recordSectionRevision,
+    resumedRalphRun,
+    rfp.id,
+    selectSection,
+    updateSectionChatMessages,
+  ]);
 
   const openWholeProposalPreview = useCallback(() => {
     setReviewFocusMode(true);
@@ -4777,6 +4924,7 @@ function ProposalDraftWorkspaceInner({
                 highlightedSectionId={highlightedSectionId}
                 manualFillFlags={actionableFlags}
                 sectionRevisions={sectionRevisions}
+                improvingSectionId={ralphImprovingSectionId}
                 sectionButtonRefs={sectionButtonRefs}
                 query={sectionListQuery}
                 onSelectSection={(id) => {
@@ -4840,6 +4988,12 @@ function ProposalDraftWorkspaceInner({
                       <span className="proposal-editor-chrome-words">
                         Word count {countWords(selectedSection.content).toLocaleString()}
                       </span>
+                      {ralphImprovingSectionId === selectedSection.id ? (
+                        <span className="proposal-editor-ralph-working" role="status">
+                          <span className="proposal-ralph-working-dot" aria-hidden />
+                          Ralph is improving this section…
+                        </span>
+                      ) : null}
                     </div>
                     <div className="proposal-editor-chrome-actions">
                       <button
@@ -5070,7 +5224,10 @@ function ProposalDraftWorkspaceInner({
               reference={sectionChatReference}
               onSetReference={setSectionChatReference}
               messages={sectionChatMessages}
-              onMessagesChange={setSectionChatMessages}
+              onMessagesChange={updateSectionChatMessages}
+              onInflightChange={updateRalphInflight}
+              onStopResumed={stopResumedRalphRun}
+              onRequestDetached={setResumedRalphRun}
               onSectionUpdated={applySectionImproveFromServer}
               evidenceCorpus={research?.evidenceCorpus}
               onRevisionRecorded={(sectionId, revision) =>
@@ -5296,6 +5453,7 @@ function ProposalDraftWorkspaceInner({
                   highlightedSectionId={highlightedSectionId}
                   manualFillFlags={actionableFlags}
                   sectionRevisions={sectionRevisions}
+                  improvingSectionId={ralphImprovingSectionId}
                   sectionButtonRefs={sectionButtonRefs}
                   onSelectSection={scrollToManuscriptSection}
                   onOpenRevision={(sectionId) => {
@@ -5905,24 +6063,41 @@ function ProposalDraftWorkspaceInner({
                   awaitingConfirm={!!activeRevision.awaitingConfirm}
                   confirmBusy={revisionConfirmBusy}
                   onConfirmApply={async () => {
-                    if (!revisionDrawerSectionId || !activeRevision.pendingDraft) {
+                    if (
+                      !revisionDrawerSectionId ||
+                      (!activeRevision.pendingDraft && !activeRevision.runId)
+                    ) {
                       return;
                     }
                     setRevisionConfirmBusy(true);
                     try {
-                      const confirmed = await confirmChatPreview(
-                        rfp.id,
-                        activeRevision.pendingDraft
-                      );
+                      let pendingDraft = activeRevision.pendingDraft;
+                      let pendingResearch = activeRevision.pendingResearch ?? null;
+                      if (!pendingDraft && activeRevision.runId) {
+                        // Page was refreshed since the preview — the server
+                        // still holds the run's preview draft.
+                        const run = await getImproveSectionRun(rfp.id, activeRevision.runId);
+                        if (run.status !== "completed") {
+                          dismissSectionRevision(revisionDrawerSectionId);
+                          throw new Error(
+                            "This preview expired after the page was refreshed. Nothing was changed — ask Ralph again."
+                          );
+                        }
+                        pendingDraft = run.result.draft;
+                        pendingResearch = run.result.research;
+                      }
+                      if (!pendingDraft) return;
+                      const confirmed = await confirmChatPreview(rfp.id, pendingDraft);
                       applySectionImproveFromServer(
                         confirmed.draft,
-                        confirmed.research ?? activeRevision.pendingResearch ?? null
+                        confirmed.research ?? pendingResearch
                       );
                       recordSectionRevision(revisionDrawerSectionId, {
                         ...activeRevision,
                         awaitingConfirm: false,
                         pendingDraft: undefined,
                         pendingResearch: undefined,
+                        runId: undefined,
                         summary: confirmed.assistantMessage,
                         updatedAt: Date.now(),
                       });

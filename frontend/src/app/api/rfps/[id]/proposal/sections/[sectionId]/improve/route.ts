@@ -24,6 +24,7 @@ export async function POST(
     applyFix?: boolean;
     improveSectionPinned?: boolean;
     previewOnly?: boolean;
+    runId?: string;
   };
   try {
     body = await request.json();
@@ -50,6 +51,7 @@ export async function POST(
           applyFix: body.applyFix === true,
           improveSectionPinned: body.improveSectionPinned === true,
           previewOnly: body.previewOnly !== false,
+          runId: body.runId,
         }),
         timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }

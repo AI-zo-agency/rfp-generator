@@ -1080,6 +1080,12 @@ class SectionImproveRequest(BaseModel):
             "Client shows Original vs Revised; confirm-preview saves."
         ),
     )
+    run_id: str | None = Field(
+        default=None,
+        alias="runId",
+        max_length=64,
+        description="Client run id — the result is kept so a reloaded page can fetch it.",
+    )
 
     @field_validator("conversation_history", mode="before")
     @classmethod
