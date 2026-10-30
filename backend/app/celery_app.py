@@ -74,6 +74,7 @@ _PHASE_DISPATCH: dict[str, tuple[str, str]] = {
 async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     import uuid
 
+    from app.services.activity_runs import ledger_run_scope, new_ledger_run_id
     from app.services.llm_call_context import llm_call_context, normalize_user_email
     from app.services.proposal_generation_cancel import aclear_generation_cancel
     from app.services.proposal_pipeline_checkpoint import pipeline_phase
@@ -87,6 +88,8 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     # Reserved for the worker orchestrator — never pass through to phase funcs.
     chain_next = kwargs.pop("chain_next", True)
     user_email = normalize_user_email(str(kwargs.pop("user_email", "") or ""))
+    # One Generate click shares a ledger run id across its chained phases.
+    ledger_run_id = str(kwargs.pop("ledger_run_id", "") or "") or new_ledger_run_id()
     module_path, func_name = _PHASE_DISPATCH[phase]
     module = __import__(module_path, fromlist=[func_name])
     func = getattr(module, func_name)
@@ -96,17 +99,24 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     # otherwise the fresh run aborts on start with no real logs.
     await aclear_generation_cancel(rfp_id)
     run_id = str(uuid.uuid4())
-    async with pipeline_phase(rfp_id, phase):
-        with llm_call_context(
-            rfp_id=rfp_id,
-            run_id=run_id,
-            node_name=phase,
-            user_email=user_email,
-        ):
-            await func(rfp_id, **kwargs)
+    # The scope sits OUTSIDE pipeline_phase: its completed/failed rows are written
+    # after the inner LLM context has ended, and would otherwise be owned by "system".
+    with ledger_run_scope(
+        ledger_run_id=ledger_run_id, owner_email=user_email, llm_run_id=run_id
+    ):
+        async with pipeline_phase(rfp_id, phase):
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=run_id,
+                node_name=phase,
+                user_email=user_email,
+            ):
+                await func(rfp_id, **kwargs)
 
-    if chain_next:
-        await _enqueue_next_generate_phase(rfp_id, phase, user_email=user_email)
+        if chain_next:
+            await _enqueue_next_generate_phase(
+                rfp_id, phase, user_email=user_email, ledger_run_id=ledger_run_id
+            )
 
 
 async def _enqueue_next_generate_phase(
@@ -114,6 +124,7 @@ async def _enqueue_next_generate_phase(
     completed_phase: str,
     *,
     user_email: str = "",
+    ledger_run_id: str = "",
 ) -> None:
     """Keep Generate proposal moving without requiring the browser to POST next.
 
@@ -168,8 +179,32 @@ async def _enqueue_next_generate_phase(
     except Exception:  # noqa: BLE001 — never block the chain on a read
         prior_profile = None
     await record_phase_started(rfp_id, next_phase, scan_profile=prior_profile)
-    chain_kwargs: dict = {"chain_next": True}
     email = (user_email or "").strip().lower()
+    # Chained phases belong to the click that began the run: same ledger id, own started row.
+    from app.services.activity_runs import (
+        emit_phase_started,
+        latest_ledger_run_id,
+        new_ledger_run_id,
+    )
+
+    chain_run_id = ledger_run_id or latest_ledger_run_id(rfp_id) or new_ledger_run_id()
+    title = rfp_id
+    try:
+        from app.services.rfp_repository import get_rfp
+
+        rfp = get_rfp(rfp_id)
+        title = (rfp.title if rfp else None) or rfp_id
+    except Exception:  # noqa: BLE001 — a missing title must not skip the row
+        pass
+    emit_phase_started(
+        rfp_id,
+        next_phase,
+        title=title,
+        ledger_run_id=chain_run_id,
+        owner_email=email,
+        chained=True,
+    )
+    chain_kwargs: dict = {"chain_next": True, "ledger_run_id": chain_run_id}
     if email:
         chain_kwargs["user_email"] = email
     async_result = run_pipeline_phase_task.delay(
@@ -220,9 +255,12 @@ def run_pipeline_phase_task(self, rfp_id: str, phase: str, kwargs: dict | None =
         raise
 
 
-async def _dispatch_go_no_go(rfp_id: str, *, user_email: str = "") -> None:
+async def _dispatch_go_no_go(
+    rfp_id: str, *, user_email: str = "", ledger_run_id: str = ""
+) -> None:
     import uuid
 
+    from app.services.activity_runs import emit_gonogo_outcome, ledger_run_scope, new_ledger_run_id
     from app.services.go_no_go_service import GoNoGoError, analyze_rfp
     from app.services.llm_call_context import llm_call_context, normalize_user_email
     from app.services.rfp_repository import get_rfp, save_go_no_go_analysis
@@ -230,22 +268,45 @@ async def _dispatch_go_no_go(rfp_id: str, *, user_email: str = "") -> None:
     current = get_rfp(rfp_id)
     if not current:
         raise GoNoGoError("RFP not found", status_code=404)
-    with llm_call_context(
-        rfp_id=rfp_id,
-        run_id=str(uuid.uuid4()),
-        node_name="go_no_go",
-        user_email=normalize_user_email(user_email),
+    owner = normalize_user_email(user_email)
+    llm_run_id = str(uuid.uuid4())
+    title = current.title or rfp_id
+    # The worker has no HTTP request: the scope carries the owner and run into the rows.
+    with ledger_run_scope(
+        ledger_run_id=ledger_run_id or new_ledger_run_id(),
+        owner_email=owner,
+        llm_run_id=llm_run_id,
     ):
-        analysis = await analyze_rfp(current)
-    updated = save_go_no_go_analysis(rfp_id, analysis)
-    if not updated:
-        raise GoNoGoError("RFP not found after save", status_code=404)
+        try:
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=llm_run_id,
+                node_name="go_no_go",
+                user_email=owner,
+            ):
+                analysis = await analyze_rfp(current)
+            updated = save_go_no_go_analysis(rfp_id, analysis)
+            if not updated:
+                raise GoNoGoError("RFP not found after save", status_code=404)
+        except Exception as exc:
+            emit_gonogo_outcome(rfp_id, title=title, ok=False, error=str(exc))
+            raise
+        emit_gonogo_outcome(
+            rfp_id,
+            title=title,
+            ok=True,
+            recommendation=getattr(analysis, "recommendation", None),
+        )
 
 
 @celery_app.task(bind=True, name="proposal.run_go_no_go")
-def run_go_no_go_task(self, rfp_id: str, user_email: str = "") -> None:
+def run_go_no_go_task(
+    self, rfp_id: str, user_email: str = "", ledger_run_id: str = ""
+) -> None:
     try:
-        asyncio.run(_dispatch_go_no_go(rfp_id, user_email=user_email))
+        asyncio.run(
+            _dispatch_go_no_go(rfp_id, user_email=user_email, ledger_run_id=ledger_run_id)
+        )
     except Exception as exc:
         logger.exception("Celery Go/No-Go analysis failed for %s", rfp_id)
         from app.api.v1.rfps import _mark_analyze_failed

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { formatRelativeTime } from "@/lib/format";
 import {
+  RFP_OPEN_ACTION,
   fetchUserActivity,
   hrefForActivityEvent,
   type ActivityWorkspace,
@@ -60,6 +61,8 @@ export function UserActivityPanel({
   });
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [actorFilter, setActorFilter] = useState("");
+  // Opens are context, not actions: hidden unless asked for (RFP workspace only).
+  const [showOpens, setShowOpens] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +79,7 @@ export function UserActivityPanel({
           limit: 40,
           cursor: opts?.cursor,
           actor: actorFilter || undefined,
+          excludeAction: workspace === "rfp" && !showOpens ? RFP_OPEN_ACTION : undefined,
         });
         setStats(data.stats || { events_today: 0, unique_actors_7d: 0 });
         setNextCursor(data.next_cursor);
@@ -89,7 +93,7 @@ export function UserActivityPanel({
         setLoadingMore(false);
       }
     },
-    [workspace, actorFilter],
+    [workspace, actorFilter, showOpens],
   );
 
   useEffect(() => {
@@ -145,6 +149,16 @@ export function UserActivityPanel({
         >
           Refresh
         </button>
+        {workspace === "rfp" ? (
+          <label className="flex items-center gap-1.5 text-xs text-zo-text-secondary">
+            <input
+              type="checkbox"
+              checked={showOpens}
+              onChange={(e) => setShowOpens(e.target.checked)}
+            />
+            Show opens
+          </label>
+        ) : null}
       </form>
 
       {loading ? (

@@ -29,6 +29,8 @@ WORKSPACES: frozenset[str] = frozenset({"rfp", "financial", "leads"})
 OUTCOMES: frozenset[str] = frozenset(
     {"recorded", "started", "completed", "failed", "cancelled"}
 )
+# Opens are context, not actions: header counts never include them.
+OPEN_ACTION = "rfp.opened"
 
 _SQLITE_DDL = """
 CREATE TABLE IF NOT EXISTS user_activity_events (
@@ -178,6 +180,8 @@ def list_activity(
     entity_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
+    exclude_action: str | None = None,
+    with_stats: bool = True,
 ) -> dict[str, Any]:
     """Paginated activity feed for one workspace (newest first)."""
     ws = (workspace or "").strip().lower()
@@ -198,6 +202,7 @@ def list_activity(
                 entity_id=entity_id,
                 from_ts=from_ts,
                 to_ts=to_ts,
+                exclude_action=exclude_action,
             )
             has_more = len(rows) > limit
             page = rows[:limit]
@@ -206,7 +211,7 @@ def list_activity(
                 "workspace": ws,
                 "items": [_serialize(r) for r in page],
                 "next_cursor": next_cursor,
-                "stats": _stats_sqlite(ws),
+                "stats": _stats_sqlite(ws) if with_stats else _empty_stats(),
                 "store": "sqlite",
             }
 
@@ -240,6 +245,9 @@ def list_activity(
             act = (action or "").strip()
             if act:
                 q = q.eq("action", act)
+            skip = (exclude_action or "").strip()
+            if skip:
+                q = q.neq("action", skip)
             eid = (entity_id or "").strip()
             if eid:
                 q = q.eq("entity_id", eid)
@@ -260,7 +268,7 @@ def list_activity(
             "workspace": ws,
             "items": [_serialize(r) for r in page],
             "next_cursor": next_cursor,
-            "stats": _stats_for_workspace_supabase(ws),
+            "stats": _stats_for_workspace_supabase(ws) if with_stats else _empty_stats(),
             "store": "supabase",
         }
     except Exception as exc:  # noqa: BLE001
@@ -317,6 +325,7 @@ def _list_sqlite(
     entity_id: str | None,
     from_ts: str | None,
     to_ts: str | None,
+    exclude_action: str | None = None,
 ) -> list[dict[str, Any]]:
     from app.services.rfp_repository import _connect
 
@@ -330,6 +339,10 @@ def _list_sqlite(
     if act:
         clauses.append("action = ?")
         params.append(act)
+    skip = (exclude_action or "").strip()
+    if skip:
+        clauses.append("action != ?")
+        params.append(skip)
     eid = (entity_id or "").strip()
     if eid:
         clauses.append("entity_id = ?")
@@ -375,13 +388,14 @@ def _stats_sqlite(workspace: str) -> dict[str, Any]:
         with _connect() as conn:
             events_today = conn.execute(
                 "SELECT COUNT(*) FROM user_activity_events "
-                "WHERE workspace = ? AND created_at >= ?",
-                (workspace, today_start),
+                "WHERE workspace = ? AND created_at >= ? AND action != ?",
+                (workspace, today_start, OPEN_ACTION),
             ).fetchone()[0]
             actors = conn.execute(
                 "SELECT DISTINCT actor_email FROM user_activity_events "
-                "WHERE workspace = ? AND created_at >= ? AND trim(actor_email) != ''",
-                (workspace, week_iso),
+                "WHERE workspace = ? AND created_at >= ? AND trim(actor_email) != '' "
+                "AND action != ?",
+                (workspace, week_iso, OPEN_ACTION),
             ).fetchall()
         return {
             "events_today": int(events_today or 0),
@@ -439,6 +453,7 @@ def _stats_for_workspace_supabase(workspace: str) -> dict[str, Any]:
                 .table("user_activity_events")
                 .select("id", count="exact")
                 .eq("workspace", workspace)
+                .neq("action", OPEN_ACTION)
                 .gte("created_at", today_start)
                 .limit(1)
                 .execute()
@@ -451,6 +466,7 @@ def _stats_for_workspace_supabase(workspace: str) -> dict[str, Any]:
                 .table("user_activity_events")
                 .select("actor_email")
                 .eq("workspace", workspace)
+                .neq("action", OPEN_ACTION)
                 .gte("created_at", week_iso)
                 .limit(500)
                 .execute()

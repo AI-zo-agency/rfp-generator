@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import { RfpDetailContent } from "@/components/RfpDetailContent";
+import { RfpOpenBeacon } from "@/components/RfpOpenBeacon";
 import { RfpDetailSkeleton } from "@/components/loading/RfpDetailSkeleton";
 
 interface RfpDetailPageProps {
@@ -12,6 +13,7 @@ export default async function RfpDetailPage({ params }: RfpDetailPageProps) {
 
   return (
     <div className="space-y-10">
+      <RfpOpenBeacon rfpId={id} />
       <Link
         href="/rfps"
         className="inline-block text-sm font-semibold text-zo-teal transition-colors hover:text-zo-orange"

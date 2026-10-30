@@ -9,6 +9,8 @@ interface RunGoNoGoButtonProps {
   rfpId: string;
   hasPdf: boolean;
   hasDescription: boolean;
+  /** An analysis is already saved — the button re-runs it instead. */
+  hasAnalysis?: boolean;
   onLoadingChange?: (loading: boolean) => void;
 }
 
@@ -29,6 +31,7 @@ export function RunGoNoGoButton({
   rfpId,
   hasPdf,
   hasDescription,
+  hasAnalysis = false,
   onLoadingChange,
 }: RunGoNoGoButtonProps) {
   const router = useRouter();
@@ -120,6 +123,14 @@ export function RunGoNoGoButton({
   }, [rfpId]);
 
   async function handleAnalyze() {
+    if (
+      hasAnalysis &&
+      !window.confirm(
+        "Re-run Go/No-Go? This replaces the current analysis and uses AI credit."
+      )
+    ) {
+      return;
+    }
     stopRef.current = false;
     setAnalyzing(true);
     setError(null);
@@ -162,11 +173,17 @@ export function RunGoNoGoButton({
           className="zo-btn secondary disabled:opacity-60"
           title={
             canAnalyze
-              ? "Run AI Go/No-Go analysis against the knowledge base"
+              ? hasAnalysis
+                ? "Run the AI Go/No-Go analysis again and replace the current result"
+                : "Run AI Go/No-Go analysis against the knowledge base"
               : "Upload an RFP PDF or add a description first"
           }
         >
-          {loading ? "Analyzing… (this can take a few minutes)" : "Run Go/No-Go Analysis"}
+          {loading
+            ? "Analyzing… (this can take a few minutes)"
+            : hasAnalysis
+              ? "Re-run Go/No-Go Analysis"
+              : "Run Go/No-Go Analysis"}
         </button>
         {loading && (
           <button

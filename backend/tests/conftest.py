@@ -43,6 +43,16 @@ def _builtin_voice_revision(request, monkeypatch):
     monkeypatch.setattr(brand_voice_revisions, "enabled", lambda: False)
 
 
+@pytest.fixture()
+def sqlite_activity_store(tmp_path, monkeypatch):
+    """Point activity and tweak storage at a throwaway SQLite file, never Supabase."""
+    db = tmp_path / "rfps.db"
+    monkeypatch.setattr("app.services.supabase_db.use_supabase_db", lambda: False)
+    monkeypatch.setattr("app.services.rfp_repository._db_path", lambda: db)
+    monkeypatch.setattr("app.services.user_activity._activity_store", lambda: "sqlite")
+    return db
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_auth: run with the real require_user dependency")
     config.addinivalue_line("markers", "real_voice_llm: exercise proposal_voice_llm itself (the model is stubbed by the test)")

@@ -36,12 +36,15 @@ export interface UserActivityResponse {
   error?: string;
 }
 
+export const RFP_OPEN_ACTION = "rfp.opened";
+
 export async function fetchUserActivity(params: {
   workspace: ActivityWorkspace;
   limit?: number;
   cursor?: string | null;
   actor?: string;
   action?: string;
+  excludeAction?: string;
 }): Promise<UserActivityResponse> {
   const qs = new URLSearchParams();
   qs.set("workspace", params.workspace);
@@ -49,6 +52,7 @@ export async function fetchUserActivity(params: {
   if (params.cursor) qs.set("cursor", params.cursor);
   if (params.actor?.trim()) qs.set("actor", params.actor.trim());
   if (params.action?.trim()) qs.set("action", params.action.trim());
+  if (params.excludeAction?.trim()) qs.set("exclude_action", params.excludeAction.trim());
 
   const res = await fetch(`${BACKEND}/api/v1/activity?${qs.toString()}`, {
     cache: "no-store",
@@ -59,6 +63,24 @@ export async function fetchUserActivity(params: {
     throw new Error(text || `Activity request failed (${res.status})`);
   }
   return (await res.json()) as UserActivityResponse;
+}
+
+/** Tell the backend this person opened an RFP. Fire and forget: never throws. */
+export async function recordRfpOpen(rfpId: string): Promise<void> {
+  try {
+    await fetch(`${BACKEND}/api/v1/activity/rfp-opened`, {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+      headers: withAuthUserEmail({
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      }),
+      body: JSON.stringify({ rfpId }),
+    });
+  } catch {
+    // An open that fails to record must never affect the page.
+  }
 }
 
 export function hrefForActivityEvent(event: UserActivityEvent): string | null {

@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { describeSyncResult, type SyncCounts } from "@/lib/justwin-sync-message";
 import { IconSync } from "./ui/icons";
 import { ZoAmuletLoader } from "./ZoAmuletLoader";
 
@@ -10,6 +11,9 @@ interface SyncJustWinModalProps {
   open: boolean;
   onClose: () => void;
   onSuccess?: () => void;
+  /** Told whenever this window starts or stops following a sync, so the
+   * button can keep showing progress after "Keep working" closes it. */
+  onSyncingChange?: (syncing: boolean) => void;
 }
 
 type SyncMode = "today" | "specific" | "all";
@@ -35,6 +39,7 @@ export function SyncJustWinModal({
   open,
   onClose,
   onSuccess,
+  onSyncingChange,
 }: SyncJustWinModalProps) {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
@@ -49,26 +54,40 @@ export function SyncJustWinModal({
     finishedAt?: string;
   } | null>(null);
   const syncingRef = useRef(false);
+  const openRef = useRef(open);
+  const onSuccessRef = useRef(onSuccess);
+  // Set when a sync ends while this window is closed, so the next open shows
+  // how it ended instead of wiping it with a fresh form.
+  const unseenOutcomeRef = useRef(false);
 
   useEffect(() => {
     syncingRef.current = syncing;
-  }, [syncing]);
+    onSyncingChange?.(syncing);
+  }, [syncing, onSyncingChange]);
+
+  useEffect(() => {
+    openRef.current = open;
+    onSuccessRef.current = onSuccess;
+  });
+
+  // False once this modal is gone (page change), so its polling loop stops
+  // instead of running alongside the one a newly opened window starts.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   // The sync runs in the background on the server, so the POST only tells us it
   // started. Poll the job until it reports a terminal state before claiming
   // success and refreshing the dashboard.
   const waitForJob = useCallback(
-    async (
-      jobId: string
-    ): Promise<{
-      rfpsFound: number;
-      rfpsCreated: number;
-      rfpsSkipped: number;
-      pdfsDownloaded: number;
-    }> => {
+    async (jobId: string): Promise<SyncCounts> => {
       const deadline = Date.now() + 10 * 60 * 1000;
 
-      while (Date.now() < deadline) {
+      while (aliveRef.current && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 2500));
 
         const res = await fetch("/api/justwin/status", { cache: "no-store" });
@@ -106,6 +125,7 @@ export function SyncJustWinModal({
         }
       }
 
+      if (!aliveRef.current) throw new Error("Stopped watching the JustWin sync.");
       throw new Error("Sync timed out after 10 minutes. Check the backend logs.");
     },
     []
@@ -125,24 +145,90 @@ export function SyncJustWinModal({
     setMounted(true);
   }, []);
 
-  // Opening the button must show the date/tab picker — never auto-start a sync.
-  // Background progress lives in the floating job widget; if a real job is
-  // already running we only surface a note so Start Sync isn't a surprise 409.
+  // Wait for a job to finish and show how it ended. Deliberately not tied to
+  // the window being open — closing it ("Keep working") must not stop this.
+  const followJob = useCallback(
+    async (jobId: string, opts: { tab?: string; scope?: string }) => {
+      const counts = await waitForJob(jobId);
+      setSuccessResult({
+        message: describeSyncResult(counts, opts),
+        finishedAt: new Date().toISOString(),
+      });
+      if (!openRef.current) unseenOutcomeRef.current = true;
+
+      router.refresh();
+      onSuccessRef.current?.();
+    },
+    [router, waitForJob]
+  );
+
+  const reportFailure = useCallback((err: unknown) => {
+    setErrorMessage(
+      err instanceof Error ? err.message : "An unexpected error occurred during sync"
+    );
+    if (!openRef.current) unseenOutcomeRef.current = true;
+  }, []);
+
+  const finishRun = useCallback(() => {
+    syncingRef.current = false;
+    setSyncing(false);
+    setStatusMessage(null);
+  }, []);
+
+  // A sync is already running on the server but this window has no memory of
+  // starting it (a different button, or the page was changed since). Show it
+  // as in progress rather than a blank form whose Start Sync would only 409.
+  const resumeRunningJob = useCallback(
+    async (job: { id: string; startedAt?: string }) => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      setSyncing(true);
+      setErrorMessage(null);
+      setSuccessResult(null);
+
+      const since = job.startedAt ? new Date(job.startedAt) : null;
+      setStatusMessage(
+        since && !Number.isNaN(since.getTime())
+          ? `A JustWin sync started at ${since.toLocaleTimeString()} is still running. You can close this and keep working.`
+          : "A JustWin sync is still running. You can close this and keep working."
+      );
+
+      try {
+        await followJob(job.id, {});
+      } catch (err) {
+        reportFailure(err);
+      } finally {
+        finishRun();
+      }
+    },
+    [followJob, reportFailure, finishRun]
+  );
+
+  // Opening the button shows the date/tab picker and never auto-starts a sync.
+  // If this window is already following a sync, leave it showing that; if one
+  // ended while the window was closed, show its outcome once; if the server
+  // reports one running that this window didn't start, pick it back up.
   useEffect(() => {
     if (!open) return;
     if (syncingRef.current) return;
+    if (unseenOutcomeRef.current) {
+      unseenOutcomeRef.current = false;
+      return;
+    }
 
     resetForm();
     let cancelled = false;
     void (async () => {
       try {
         const res = await fetch("/api/justwin/status", { cache: "no-store" });
-        if (!res.ok || cancelled) return;
-        const job = (await res.json()) as { status?: string };
-        if (job.status === "running" && !cancelled) {
-          setStatusMessage(
-            "A JustWin sync is already running in the background. You can close this and keep working — progress shows in the job widget."
-          );
+        if (!res.ok || cancelled || syncingRef.current) return;
+        const job = (await res.json()) as {
+          id?: string;
+          status?: string;
+          startedAt?: string;
+        };
+        if (job.status === "running" && job.id) {
+          void resumeRunningJob({ id: job.id, startedAt: job.startedAt });
         }
       } catch {
         // ignore
@@ -152,7 +238,7 @@ export function SyncJustWinModal({
     return () => {
       cancelled = true;
     };
-  }, [open, resetForm]);
+  }, [open, resetForm, resumeRunningJob]);
 
   // Handle overflow and escape key — Escape always closes; sync keeps running.
   useEffect(() => {
@@ -176,6 +262,7 @@ export function SyncJustWinModal({
 
   async function handleStartSync(e?: React.FormEvent) {
     if (e) e.preventDefault();
+    syncingRef.current = true;
     setSyncing(true);
     setErrorMessage(null);
     setSuccessResult(null);
@@ -210,44 +297,11 @@ export function SyncJustWinModal({
         `Fetching ${tabFilter} leads ${scope}… You can close this and keep working.`
       );
 
-      const { rfpsFound, rfpsCreated, rfpsSkipped, pdfsDownloaded } = await waitForJob(
-        result.jobId ?? ""
-      );
-
-      let message: string;
-      if (rfpsFound === 0) {
-        message = `No ${tabFilter} leads found ${scope}.`;
-      } else if (rfpsCreated === 0 && rfpsSkipped > 0) {
-        message =
-          `No new RFPs ${scope} — ${rfpsSkipped} already in ZO were skipped` +
-          (pdfsDownloaded > 0
-            ? ` (${pdfsDownloaded} missing PDF${pdfsDownloaded === 1 ? "" : "s"} backfilled).`
-            : ".");
-      } else if (rfpsSkipped > 0) {
-        message =
-          `Added ${rfpsCreated} new RFP${rfpsCreated === 1 ? "" : "s"} ${scope}` +
-          ` (${rfpsSkipped} already synced skipped` +
-          `, ${pdfsDownloaded} PDF${pdfsDownloaded === 1 ? "" : "s"} downloaded).`;
-      } else {
-        message =
-          `Synced ${rfpsCreated} ${tabFilter} RFP${rfpsCreated === 1 ? "" : "s"} ${scope}` +
-          ` (${pdfsDownloaded} PDF${pdfsDownloaded === 1 ? "" : "s"} downloaded).`;
-      }
-
-      setSuccessResult({
-        message,
-        finishedAt: new Date().toISOString(),
-      });
-
-      router.refresh();
-      if (onSuccess) onSuccess();
+      await followJob(result.jobId ?? "", { tab: tabFilter, scope });
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : "An unexpected error occurred during sync"
-      );
+      reportFailure(err);
     } finally {
-      setSyncing(false);
-      setStatusMessage(null);
+      finishRun();
     }
   }
 

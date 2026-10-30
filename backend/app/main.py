@@ -58,15 +58,38 @@ app.add_middleware(
 
 @app.middleware("http")
 async def attach_llm_user_email(request, call_next):  # type: ignore[no-untyped-def]
-    """Attribute proposal LLM spend to the signed-in email (X-User-Email)."""
+    """Attribute spend and activity to the signed-in email.
+
+    The Bearer-verified email wins; the client-sent X-User-Email is only a
+    fallback for calls that carry no (valid) token.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from app.api import auth_guard
     from app.services.llm_call_context import reset_llm_user_email, set_llm_user_email
 
-    email = request.headers.get("x-user-email") or request.headers.get("X-User-Email") or ""
+    auth = request.headers.get("authorization") or ""
+    bearer = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    # verified_email is cached per token but blocks on the first call, so keep it off the loop.
+    verified = await run_in_threadpool(auth_guard.verified_email, bearer) if bearer else None
+    email = verified or request.headers.get("x-user-email") or ""
     token = set_llm_user_email(email)
     try:
         return await call_next(request)
     finally:
         reset_llm_user_email(token)
+
+
+@app.middleware("http")
+async def attach_tweak_source(request, call_next):  # type: ignore[no-untyped-def]
+    """Mark manuscript-changing requests so a save can tell a person from a pipeline."""
+    from app.services.proposal_tweaks import classify_proposal_request, tweak_source_scope
+
+    source = classify_proposal_request(request.method, request.url.path)
+    if not source:
+        return await call_next(request)
+    with tweak_source_scope(source):
+        return await call_next(request)
 
 
 app.include_router(api_router)

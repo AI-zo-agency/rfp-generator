@@ -35,6 +35,24 @@ JOBS: tuple[ScheduledJob, ...] = (
         timeout_seconds=120,
         run_on_start=False,
     ),
+    # The 10:00 run above only sees leads JustWin has created so far that IST
+    # day, and the next morning asks for the next date — so everything created
+    # later in the day was never fetched. Re-check the full previous day once
+    # it is over. Re-syncing a date skips leads already in ZO. Runs after the
+    # morning job so the two never hold the one-sync-at-a-time lease together.
+    ScheduledJob(
+        id="justwin_catchup",
+        path="/api/v1/sync-jobs/trigger",
+        cron="30 10 * * *",
+        timezone="Asia/Kolkata",
+        body={
+            "syncMode": "specific",
+            "syncDate": "__YESTERDAY__",
+            "tab": "all",
+        },
+        timeout_seconds=120,
+        run_on_start=False,
+    ),
     ScheduledJob(
         id="iworker_nightly",
         path="/api/v1/financials/iworker/sync",

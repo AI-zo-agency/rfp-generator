@@ -385,15 +385,29 @@ def _emit_pipeline_outcome(
 ) -> None:
     """Best-effort audit for phase completed / failed / stopped."""
     try:
+        from app.services.activity_runs import (
+            get_ledger_llm_run_id,
+            get_ledger_run_id,
+            latest_ledger_run_id,
+        )
         from app.services.rfp_repository import get_rfp
         from app.services.user_activity import emit_activity
 
-        rfp = get_rfp(rfp_id)
+        try:
+            rfp = get_rfp(rfp_id)
+        except Exception:  # noqa: BLE001 — a title lookup must not drop the row
+            rfp = None
         label = (rfp.title if rfp else None) or rfp_id
         phase_label = phase.replace("_", " ").replace("-", " ")
         meta: dict[str, object] = {"phase": phase}
+        llm_run_id = get_ledger_llm_run_id()
+        if llm_run_id:
+            meta["llm_run_id"] = llm_run_id
         if error:
             meta["error"] = error[:500]
+        # Inside a job the scope knows the run; for a Stop pressed in the API
+        # process, fall back to the run that is currently in flight.
+        ledger_run_id = get_ledger_run_id() or latest_ledger_run_id(rfp_id) or None
         action = {
             "completed": "proposal.phase_completed",
             "failed": "proposal.phase_failed",
@@ -407,6 +421,7 @@ def _emit_pipeline_outcome(
             entity_id=rfp_id,
             entity_label=str(label)[:300],
             metadata=meta,
+            run_id=ledger_run_id,
             outcome=outcome,  # type: ignore[arg-type]
         )
     except Exception:  # noqa: BLE001

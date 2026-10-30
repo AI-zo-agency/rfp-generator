@@ -2,9 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
+import { JUSTWIN_SYNC_ENABLED } from "@/lib/justwin-config";
 import { listActiveProposalJobs, type ActiveProposalJob } from "@/lib/proposal-api";
 
 const POLL_MS = 2000;
+// Slower than the proposal poll: each JustWin status check reads two backend
+// endpoints, and a sync lasts minutes.
+const JUSTWIN_POLL_MS = 5000;
+const JUSTWIN_JOB_TYPE = "justwin-sync";
 const POSITION_KEY = "zo-job-widget-position";
 const WIDGET_WIDTH = 320;
 const COLLAPSED_HEIGHT = 56;
@@ -40,9 +45,33 @@ function dismissKey(job: TrackedJob): string {
 // page is where Go/No-Go actually lives; every other job type is a proposal
 // pipeline phase, which does belong in the workspace.
 function jobHref(job: ActiveProposalJob): string {
+  if (job.jobType === JUSTWIN_JOB_TYPE) return "/rfps";
   return job.jobType === "go-no-go"
     ? `/rfps/${encodeURIComponent(job.rfpId)}`
     : `/proposals?rfp=${encodeURIComponent(job.rfpId)}`;
+}
+
+// A JustWin sync belongs to no single RFP, so it is shown as one job of its
+// own. null = not running; undefined = couldn't tell (keep what we last knew,
+// so a failed check isn't mistaken for the sync finishing).
+async function fetchRunningJustWinJob(): Promise<ActiveProposalJob | null | undefined> {
+  if (!JUSTWIN_SYNC_ENABLED) return null;
+  try {
+    const res = await fetch("/api/justwin/status", { cache: "no-store" });
+    if (!res.ok) return undefined;
+    const job = (await res.json()) as { status?: string; startedAt?: string };
+    if (job.status !== "running") return null;
+    return {
+      rfpId: "justwin",
+      title: "Pulling new RFPs from JustWin",
+      jobType: JUSTWIN_JOB_TYPE,
+      jobLabel: "JustWin sync",
+      status: "running",
+      startedAt: job.startedAt ?? new Date().toISOString(),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function clampX(x: number): number {
@@ -118,11 +147,17 @@ export function GlobalJobStatusWidget() {
 
   useEffect(() => {
     let cancelled = false;
+    let justWinJob: ActiveProposalJob | null = null;
+    let justWinCheckedAt = 0;
     const poll = async () => {
-      // Proposal / Go-No-Go only — JustWin sync status is polled by SyncJustWinModal
-      // when the user opens it, not on this global 2s ticker.
-      const active = await listActiveProposalJobs({ includeGoNoGo: true });
+      const proposalJobs = await listActiveProposalJobs({ includeGoNoGo: true });
+      if (Date.now() - justWinCheckedAt >= JUSTWIN_POLL_MS) {
+        justWinCheckedAt = Date.now();
+        const checked = await fetchRunningJustWinJob();
+        if (checked !== undefined) justWinJob = checked;
+      }
       if (cancelled) return;
+      const active = justWinJob ? [...proposalJobs, justWinJob] : proposalJobs;
       startTransition(() => {
         setTracked((prev) => {
           const activeKeys = new Set(active.map(jobKey));

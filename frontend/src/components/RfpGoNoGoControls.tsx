@@ -1,12 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useState, type ReactNode } from "react";
 import { BidScopePicker } from "@/components/BidScopePicker";
 import { DeleteRfpButton } from "@/components/DeleteRfpButton";
+import { GenerateProposalButton } from "@/components/GenerateProposalButton";
 import { GoNoGoAnalysisPanel } from "@/components/GoNoGoAnalysisPanel";
 import { GoSign } from "@/components/GoSign";
-import { MarkGoButton } from "@/components/MarkGoButton";
 import { RunGoNoGoButton } from "@/components/RunGoNoGoButton";
 import { PriorityBadge, StatusBadge } from "@/components/StatusBadge";
 import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
@@ -79,6 +78,26 @@ export function RfpGoNoGoControls({
 
   return (
     <>
+      <div className="flex flex-wrap items-start justify-end gap-3">
+        <GenerateProposalButton
+          rfpId={rfpId}
+          isGo={isGoRfp}
+          disabled={!goNoGoAnalysis || analyzing}
+          disabledReason={
+            analyzing
+              ? "Go/No-Go analysis is running"
+              : "Run the Go/No-Go analysis first"
+          }
+        />
+        <RunGoNoGoButton
+          rfpId={rfpId}
+          hasPdf={hasPdf}
+          hasDescription={hasDescription}
+          hasAnalysis={Boolean(goNoGoAnalysis)}
+          onLoadingChange={setAnalyzing}
+        />
+      </div>
+
       <section className="zo-card p-8">
         <div className="flex flex-wrap items-start justify-between gap-6">
           <div className="space-y-4">
@@ -86,7 +105,6 @@ export function RfpGoNoGoControls({
               {isGoRfp && <GoSign />}
               <StatusBadge status={analyzing ? "new" : status} />
               <PriorityBadge priority={priority} />
-              <MarkGoButton rfpId={rfpId} current={displayGoNoGo} />
             </div>
             <dl className="grid gap-4 sm:grid-cols-3">
               <div>
@@ -120,18 +138,7 @@ export function RfpGoNoGoControls({
             </dl>
           </div>
 
-          <div className="flex flex-wrap gap-3">
-            <RunGoNoGoButton
-              rfpId={rfpId}
-              hasPdf={hasPdf}
-              hasDescription={hasDescription}
-              onLoadingChange={setAnalyzing}
-            />
-            {isGoRfp && (
-              <Link href={`/proposals?rfp=${rfpId}`} className="zo-btn">
-                Open in Proposals →
-              </Link>
-            )}
+          <div className="flex flex-wrap justify-end gap-3">
             {pdfUrl && (
               <a
                 href={pdfUrl}

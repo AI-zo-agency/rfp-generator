@@ -171,27 +171,40 @@ async def _enqueue_pipeline_phase(
         from app.services.llm_call_context import llm_call_context
 
         run_id = str(uuid.uuid4())
+        # One click = one ledger run. Chained Generate phases share it; it is
+        # separate from run_id, which stays the per-phase LLM cost key.
+        from app.services.activity_runs import (
+            emit_phase_started,
+            ledger_run_scope,
+            resolve_ledger_run_id,
+        )
+
+        ledger_run_id = resolve_ledger_run_id(rfp_id, phase)
         # Stamp email into Celery kwargs so worker process can attribute spend
         # after the HTTP request (and its middleware context) is gone.
         celery_kwargs = dict(job_kwargs or {})
         email = get_llm_user_email()
         if email and not celery_kwargs.get("user_email"):
             celery_kwargs["user_email"] = email
+        celery_kwargs["ledger_run_id"] = ledger_run_id
 
         async def _run() -> Any:
             import asyncio
 
             try:
-                async with pipeline_phase(rfp_id, phase):
-                    with llm_call_context(
-                        rfp_id=rfp_id,
-                        run_id=run_id,
-                        node_name=phase,
-                        user_email=email or None,
-                    ):
-                        if timeout_sec is not None:
-                            return await asyncio.wait_for(work(), timeout=timeout_sec)
-                        return await work()
+                with ledger_run_scope(
+                    ledger_run_id=ledger_run_id, owner_email=email or "", llm_run_id=run_id
+                ):
+                    async with pipeline_phase(rfp_id, phase):
+                        with llm_call_context(
+                            rfp_id=rfp_id,
+                            run_id=run_id,
+                            node_name=phase,
+                            user_email=email or None,
+                        ):
+                            if timeout_sec is not None:
+                                return await asyncio.wait_for(work(), timeout=timeout_sec)
+                            return await work()
             except TimeoutError:
                 # pipeline_phase's own except-Exception cleanup does not run here:
                 # wait_for cancels work() by raising CancelledError inside the
@@ -217,21 +230,15 @@ async def _enqueue_pipeline_phase(
             rfp_id, phase, _run, celery_dispatch=_celery_dispatch
         )
         try:
-            from app.services.user_activity import emit_activity
-
             rfp_rec = get_rfp(rfp_id)
             label = (rfp_rec.title if rfp_rec else None) or rfp_id
-            phase_label = phase.replace("_", " ").replace("-", " ")
-            emit_activity(
-                workspace="rfp",
-                action="proposal.phase_started",
-                summary=f"Started proposal phase: {phase_label}",
-                entity_type="rfp",
-                entity_id=rfp_id,
-                entity_label=str(label)[:300],
-                metadata={"phase": phase},
-                run_id=run_id,
-                outcome="started",
+            emit_phase_started(
+                rfp_id,
+                phase,
+                title=str(label),
+                ledger_run_id=ledger_run_id,
+                owner_email=email or "",
+                llm_run_id=run_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1255,10 +1262,21 @@ async def improve_section_endpoint(
     With a runId, the outcome is also kept so a page reloaded mid-run can fetch it
     from GET .../proposal/improve-runs/{run_id} instead of losing the turn.
     """
+    from app.services.llm_call_context import get_llm_user_email
     from app.services.proposal_improve_runs import (
         finish_improve_run,
         mark_improve_run_started,
     )
+    from app.services.proposal_tweaks import (
+        remember_preview_instruction,
+        set_tweak_instruction,
+    )
+
+    # The typed instruction rides along with whatever tweak this request saves;
+    # a preview is remembered so the later confirm-preview can recover it.
+    set_tweak_instruction(body.message)
+    if body.preview_only:
+        remember_preview_instruction(rfp_id, get_llm_user_email(), body.message)
 
     run_id = (body.run_id or "").strip()
     if not run_id:

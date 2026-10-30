@@ -472,9 +472,12 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
 
     user_email = get_llm_user_email()
 
-    async def _run() -> None:
-        import uuid
+    from app.services.activity_runs import emit_gonogo_outcome, ledger_run_scope, new_ledger_run_id
 
+    # One click = one ledger run. The worker gets the id and the owner explicitly.
+    ledger_run_id = new_ledger_run_id()
+
+    async def _run_inner(llm_run_id: str) -> None:
         from app.services.llm_call_context import llm_call_context
 
         try:
@@ -483,7 +486,7 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
                 raise GoNoGoError("RFP not found", status_code=404)
             with llm_call_context(
                 rfp_id=rfp_id,
-                run_id=str(uuid.uuid4()),
+                run_id=llm_run_id,
                 node_name="go_no_go",
                 user_email=user_email or None,
             ):
@@ -492,65 +495,36 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
             if not updated:
                 raise GoNoGoError("RFP not found after save", status_code=404)
             logger.info("Go/No-Go background job completed for %s", rfp_id)
-            try:
-                from app.services.user_activity import emit_activity
-
-                rec = getattr(analysis, "recommendation", None)
-                emit_activity(
-                    workspace="rfp",
-                    action="rfp.gonogo_completed",
-                    summary=f"Go/No-Go finished: {rec or 'unknown'}",
-                    entity_type="rfp",
-                    entity_id=rfp_id,
-                    entity_label=(current.title or rfp_id)[:300],
-                    metadata={"recommendation": rec},
-                    outcome="completed",
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            emit_gonogo_outcome(
+                rfp_id,
+                title=current.title or rfp_id,
+                ok=True,
+                recommendation=getattr(analysis, "recommendation", None),
+            )
         except GoNoGoError as exc:
             logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
             _mark_analyze_failed(rfp_id, str(exc))
-            try:
-                from app.services.user_activity import emit_activity
-
-                emit_activity(
-                    workspace="rfp",
-                    action="rfp.gonogo_failed",
-                    summary=f"Go/No-Go failed: {exc}",
-                    entity_type="rfp",
-                    entity_id=rfp_id,
-                    entity_label=(rfp.title or rfp_id)[:300],
-                    metadata={"error": str(exc)[:500]},
-                    outcome="failed",
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            emit_gonogo_outcome(rfp_id, title=rfp.title or rfp_id, ok=False, error=str(exc))
             raise
         except Exception as exc:
             logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
             _mark_analyze_failed(rfp_id, f"Go/No-Go analysis failed: {exc}")
-            try:
-                from app.services.user_activity import emit_activity
-
-                emit_activity(
-                    workspace="rfp",
-                    action="rfp.gonogo_failed",
-                    summary=f"Go/No-Go failed: {exc}",
-                    entity_type="rfp",
-                    entity_id=rfp_id,
-                    entity_label=(rfp.title or rfp_id)[:300],
-                    metadata={"error": str(exc)[:500]},
-                    outcome="failed",
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            emit_gonogo_outcome(rfp_id, title=rfp.title or rfp_id, ok=False, error=str(exc))
             raise
+
+    async def _run() -> None:
+        import uuid
+
+        llm_run_id = str(uuid.uuid4())
+        with ledger_run_scope(
+            ledger_run_id=ledger_run_id, owner_email=user_email or "", llm_run_id=llm_run_id
+        ):
+            await _run_inner(llm_run_id)
 
     def _celery_dispatch() -> object:
         from app.celery_app import run_go_no_go_task
 
-        return run_go_no_go_task.delay(rfp_id, user_email)
+        return run_go_no_go_task.delay(rfp_id, user_email, ledger_run_id)
 
     await start_proposal_job(
         rfp_id,
@@ -569,6 +543,7 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
             entity_type="rfp",
             entity_id=rfp_id,
             entity_label=(rfp.title or rfp_id)[:300],
+            run_id=ledger_run_id,
             outcome="started",
         )
     except Exception:  # noqa: BLE001

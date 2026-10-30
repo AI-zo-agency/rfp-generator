@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,12 +16,14 @@ from app.scheduler.jobs import ScheduledJob
 logger = logging.getLogger(__name__)
 
 _TODAY_SENTINEL = "__TODAY__"
+_YESTERDAY_SENTINEL = "__YESTERDAY__"
 
 
 def resolve_job_body(job: ScheduledJob, *, now: datetime | None = None) -> dict[str, Any]:
-    """Copy job.body; expand syncDate=__TODAY__ to YYYY-MM-DD in the job timezone."""
+    """Copy job.body; expand syncDate __TODAY__ / __YESTERDAY__ to YYYY-MM-DD in the job timezone."""
     body = dict(job.body or {})
-    if body.get("syncDate") != _TODAY_SENTINEL:
+    sentinel = body.get("syncDate")
+    if sentinel not in (_TODAY_SENTINEL, _YESTERDAY_SENTINEL):
         return body
     tz = ZoneInfo(job.timezone)
     stamp = now if now is not None else datetime.now(tz)
@@ -29,6 +31,8 @@ def resolve_job_body(job: ScheduledJob, *, now: datetime | None = None) -> dict[
         stamp = stamp.replace(tzinfo=tz)
     else:
         stamp = stamp.astimezone(tz)
+    if sentinel == _YESTERDAY_SENTINEL:
+        stamp = stamp - timedelta(days=1)
     body["syncDate"] = stamp.strftime("%Y-%m-%d")
     return body
 

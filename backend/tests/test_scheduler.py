@@ -126,6 +126,40 @@ def test_resolve_job_body_expands_today_in_job_timezone():
     assert body2["syncDate"] == "2026-10-06"
 
 
+def test_justwin_catchup_rechecks_yesterday_after_the_morning_job():
+    morning = scheduler_jobs.job_by_id("justwin_morning")
+    catchup = scheduler_jobs.job_by_id("justwin_catchup")
+    assert morning is not None and catchup is not None
+    assert catchup.cron == "30 10 * * *"
+    assert catchup.timezone == morning.timezone == "Asia/Kolkata"
+    assert catchup.path == morning.path
+    assert catchup.body == {
+        "syncMode": "specific",
+        "syncDate": "__YESTERDAY__",
+        "tab": "all",
+    }
+    assert catchup.run_on_start is False
+
+
+def test_resolve_job_body_expands_yesterday_in_job_timezone():
+    from app.scheduler.trigger import resolve_job_body
+
+    job = scheduler_jobs.job_by_id("justwin_catchup")
+    assert job is not None
+    # 2026-10-06 00:30 IST is still Oct 5 in UTC; yesterday is IST Oct 5.
+    body = resolve_job_body(
+        job,
+        now=datetime(2026, 10, 5, 19, 0, tzinfo=ZoneInfo("UTC")),
+    )
+    assert body["syncDate"] == "2026-10-05"
+    assert body["syncMode"] == "specific"
+    # Across a month boundary.
+    body2 = resolve_job_body(
+        job, now=datetime(2026, 11, 1, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata"))
+    )
+    assert body2["syncDate"] == "2026-10-31"
+
+
 def test_trigger_justwin_posts_resolved_ist_date(monkeypatch):
     captured = {}
 

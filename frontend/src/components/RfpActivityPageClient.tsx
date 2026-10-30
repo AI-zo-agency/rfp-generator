@@ -1,15 +1,27 @@
 "use client";
 
 import { useState } from "react";
+import { RfpLedgerPanel } from "@/components/RfpLedgerPanel";
 import { UserActivityPanel } from "@/components/UserActivityPanel";
 import { UserAnalyticsPanel } from "@/components/UserAnalyticsPanel";
 
 export function RfpActivityPageClient() {
-  const [mode, setMode] = useState<"audit" | "analytics">("analytics");
+  const [mode, setMode] = useState<"ledger" | "audit" | "analytics">("ledger");
 
   return (
     <div className="mx-auto w-full max-w-[1100px] px-5 py-6 sm:px-8">
       <div className="mb-4 flex gap-1 rounded-lg border border-black/10 bg-white p-0.5 w-fit">
+        <button
+          type="button"
+          onClick={() => setMode("ledger")}
+          className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+            mode === "ledger"
+              ? "bg-[#ef5018] text-white"
+              : "text-zo-text-secondary hover:bg-black/[0.03]"
+          }`}
+        >
+          RFP ledger
+        </button>
         <button
           type="button"
           onClick={() => setMode("audit")}
@@ -33,7 +45,9 @@ export function RfpActivityPageClient() {
           Product analytics
         </button>
       </div>
-      {mode === "audit" ? (
+      {mode === "ledger" ? (
+        <RfpLedgerPanel className="min-h-[70vh]" />
+      ) : mode === "audit" ? (
         <UserActivityPanel
           workspace="rfp"
           tone="rfp"

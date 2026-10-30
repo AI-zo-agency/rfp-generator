@@ -11,6 +11,7 @@ import httpx
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache
 from app.services import supabase_db as sb
+from app.services.proposal_tweaks import begin_tweak_capture
 from app.services.rfp_repository import _connect, init_db as init_rfp_db
 
 logger = logging.getLogger(__name__)
@@ -306,11 +307,25 @@ def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
             section.content = repaired
 
 
+def get_proposal_draft_fresh(rfp_id: str) -> ProposalDraft | None:
+    """Read straight from the store, skipping the short poll cache."""
+    _cache_invalidate(_draft_read_cache, _draft_read_cache_lock, rfp_id)
+    return get_proposal_draft(rfp_id)
+
+
 def save_proposal_draft(draft: ProposalDraft) -> None:
     _preserve_selected_key_personas(draft)
     _preserve_voice_state(draft)
     _stamp_voice_rev(draft)
     _repair_markdown_tables_in_draft(draft)
+    # Only a person's request yields a capture (see proposal_tweaks); pipelines get None.
+    capture = begin_tweak_capture(draft.rfp_id)
+    _persist_proposal_draft(draft)
+    if capture is not None:
+        capture.finish(draft)
+
+
+def _persist_proposal_draft(draft: ProposalDraft) -> None:
     try:
         if _use_supabase():
             _with_supabase_retry(
@@ -427,6 +442,17 @@ def list_proposal_draft_summaries() -> list[dict]:
 
 def delete_proposal_draft(rfp_id: str) -> None:
     """Hard-delete the proposal draft from DB so Reset starts completely fresh."""
+    capture = begin_tweak_capture(rfp_id)
+    try:
+        _delete_proposal_draft_row(rfp_id)
+    finally:
+        # A deleted draft must not be served from the short poll cache.
+        _cache_invalidate(_draft_read_cache, _draft_read_cache_lock, rfp_id)
+    if capture is not None:
+        capture.finish(None)
+
+
+def _delete_proposal_draft_row(rfp_id: str) -> None:
     if _use_supabase():
         _with_supabase_retry(
             "delete_proposal_draft",
