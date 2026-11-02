@@ -13,6 +13,7 @@ from app.services.company_qualification.schemas import (
     ProposalContext,
 )
 from app.services.llm import LlmError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,19 @@ def _heuristic_prioritize(
     return PrioritizedCapabilities(primary=primary, secondary=secondary, omit=omit)
 
 
+_PROMPT_RUN_CAPABILITY_PRIORITIZATION_AGENT = (
+    "You are the Capability Prioritization Agent for zö agency Section 1.\n"
+    "Rank the given capabilities into primary / secondary / omit for THIS RFP.\n"
+    "Do NOT retrieve content. Do NOT write proposal prose.\n"
+    "Return compact JSON only — no markdown fences.\n"
+    "Every capability string must appear in exactly one tier.\n"
+    "Rationale ≤8 words each.\n"
+    "Schema:\n"
+    '{"primary":[{"capability":"…","rationale":"…"}],'
+    '"secondary":[…],"omit":[…]}'
+)
+
+
 async def run_capability_prioritization_agent(
     *,
     company_truth: CompanyTruth,
@@ -77,15 +91,7 @@ async def run_capability_prioritization_agent(
                 {
                     "role": "system",
                     "content": (
-                        "You are the Capability Prioritization Agent for zö agency Section 1.\n"
-                        "Rank the given capabilities into primary / secondary / omit for THIS RFP.\n"
-                        "Do NOT retrieve content. Do NOT write proposal prose.\n"
-                        "Return compact JSON only — no markdown fences.\n"
-                        "Every capability string must appear in exactly one tier.\n"
-                        "Rationale ≤8 words each.\n"
-                        "Schema:\n"
-                        '{"primary":[{"capability":"…","rationale":"…"}],'
-                        '"secondary":[…],"omit":[…]}'
+                        get_prompt("capability_prioritization.run_capability_prioritization_agent", _PROMPT_RUN_CAPABILITY_PRIORITIZATION_AGENT)
                     ),
                 },
                 {

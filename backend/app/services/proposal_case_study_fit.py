@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.services import supermemory
 from app.services.llm import LlmError, chat_json
 from app.services.proposal_knowledge_base_tools import normalize_zo_kb_query
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,7 @@ async def _call_planner(
     """The one LLM call. Never raises — returns ({}, "none") on any failure."""
     capability_lines = "\n".join(f"- {c}" for c in capabilities)
     messages = [
-        {"role": "system", "content": CASE_STUDY_QUERY_PROMPT},
+        {"role": "system", "content": get_prompt("proposal_case_study_fit.case_study_query", CASE_STUDY_QUERY_PROMPT)},
         {
             "role": "user",
             "content": (

@@ -22,6 +22,7 @@ from app.models.proposal import (
 )
 from app.models.rfp import RfpRecord
 from app.services import llm
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +573,25 @@ def scan_manuscript_lock_issues(
     return issues
 
 
+_PROMPT_AUDIT_MANUSCRIPT_LOCKS_WITH_LLM = (
+    "You audit proposal manuscript locks. Return JSON only:\n"
+    "{\n"
+    '  "issues": [\n'
+    "    {\n"
+    '      "severity": "critical",\n'
+    '      "sectionId": "string or null",\n'
+    '      "sectionTitle": "string or null",\n'
+    '      "message": "string"\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Flag ONLY: (1) someone other than the locked primary named as "
+    "primary liaison / dedicated account rep / day-to-day POC; "
+    "(2) RFQ-named KPIs missing from methodology/reporting sections.\n"
+    "Do not invent issues."
+)
+
+
 async def audit_manuscript_locks_with_llm(
     *,
     draft: ProposalDraft,
@@ -596,21 +616,7 @@ async def audit_manuscript_locks_with_llm(
             {
                 "role": "system",
                 "content": (
-                    "You audit proposal manuscript locks. Return JSON only:\n"
-                    "{\n"
-                    '  "issues": [\n'
-                    "    {\n"
-                    '      "severity": "critical",\n'
-                    '      "sectionId": "string or null",\n'
-                    '      "sectionTitle": "string or null",\n'
-                    '      "message": "string"\n'
-                    "    }\n"
-                    "  ]\n"
-                    "}\n"
-                    "Flag ONLY: (1) someone other than the locked primary named as "
-                    "primary liaison / dedicated account rep / day-to-day POC; "
-                    "(2) RFQ-named KPIs missing from methodology/reporting sections.\n"
-                    "Do not invent issues."
+                    get_prompt("proposal_manuscript_locks.audit_manuscript_locks_with_llm", _PROMPT_AUDIT_MANUSCRIPT_LOCKS_WITH_LLM)
                 ),
             },
             {

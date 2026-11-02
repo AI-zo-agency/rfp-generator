@@ -14,6 +14,7 @@ from typing import Any
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import llm
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ async def run_scan_rfp_contradiction_pass(
         )
         try:
             raw, _ = await llm.chat_json(
-                [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+                [{"role": "system", "content": get_prompt("proposal_scan_rfp_contradictions.system", _SYSTEM)}, {"role": "user", "content": user}],
                 max_tokens=16000,
                 temperature=0.0,
                 node_name="scan_rfp_contradiction_audit",

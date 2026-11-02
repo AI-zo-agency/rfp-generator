@@ -19,6 +19,7 @@ from app.services.proposal_draft_structure_stubs import (
     content_looks_like_instructional_checklist,
 )
 from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,27 @@ def _evidence_blob(research: ProposalResearchCache | None, *, max_chars: int = 2
     return "\n".join(parts)
 
 
+_PROMPT_LLM_REPAIR_SECTION = (
+    "You are a proposal content-risk editor for zö agency.\n"
+    "Fix ONLY the issues in the instruction. Keep brand voice.\n"
+    "NEVER invent phones, emails, titles, metrics, contract lengths, "
+    "renewals, years, specializations, or client quotes. If KB/evidence "
+    "lacks a fact, use [VERIFY: specific field] or remove the overclaim — "
+    "do not fabricate a replacement.\n"
+    "Bios: REPLACE invented sentences with 04_Bio wording. Never leave a "
+    "named person with only a Role line when 04_Bio is provided. Keep "
+    "existing [E#] markers that still match the evidence corpus; add [E#] "
+    "when you ground a new claim. Drop empty headers with no body.\n"
+    "These rules govern how you write; they are never content. Never write "
+    "sentences about submission requirements, pass/fail status, what cannot be "
+    "submitted, or what must be verified or confirmed with anyone — apply the "
+    "rule silently instead of narrating it. The [VERIFY: ...] tag is the only "
+    "trace of a gap; never explain or preface it.\n"
+    "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
+    "\"notes\": \"one line\"}"
+)
+
+
 async def _llm_repair_section(
     section: ProposalSection,
     *,
@@ -115,23 +137,7 @@ async def _llm_repair_section(
     if not llm.is_configured():
         return section, False, ""
     system = (
-        "You are a proposal content-risk editor for zö agency.\n"
-        "Fix ONLY the issues in the instruction. Keep brand voice.\n"
-        "NEVER invent phones, emails, titles, metrics, contract lengths, "
-        "renewals, years, specializations, or client quotes. If KB/evidence "
-        "lacks a fact, use [VERIFY: specific field] or remove the overclaim — "
-        "do not fabricate a replacement.\n"
-        "Bios: REPLACE invented sentences with 04_Bio wording. Never leave a "
-        "named person with only a Role line when 04_Bio is provided. Keep "
-        "existing [E#] markers that still match the evidence corpus; add [E#] "
-        "when you ground a new claim. Drop empty headers with no body.\n"
-        "These rules govern how you write; they are never content. Never write "
-        "sentences about submission requirements, pass/fail status, what cannot be "
-        "submitted, or what must be verified or confirmed with anyone — apply the "
-        "rule silently instead of narrating it. The [VERIFY: ...] tag is the only "
-        "trace of a gap; never explain or preface it.\n"
-        "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
-        "\"notes\": \"one line\"}"
+        get_prompt("proposal_chat_content_repair.llm_repair_section", _PROMPT_LLM_REPAIR_SECTION)
     )
     bio_kb = ""
     from app.services.proposal_capability_bio_grounding import (
@@ -314,7 +320,7 @@ async def run_content_risk_repair(
     for idx, section in enumerate(sections):
         if _section_matches(section, "reference", "qualif", "relevant experience"):
             if "reference" in ask or ("content" in ask and "reference" in (section.title or "").casefold()):
-                jobs.append((idx, _REF_INSTRUCTION, "chat_content_risk_refs"))
+                jobs.append((idx, get_prompt("proposal_chat_content_repair.ref", _REF_INSTRUCTION), "chat_content_risk_refs"))
             if any(
                 k in ask
                 for k in (
@@ -332,7 +338,7 @@ async def run_content_risk_repair(
                 )
             ):
                 if _section_matches(section, "qualif", "experience", "relevant"):
-                    jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_claims"))
+                    jobs.append((idx, get_prompt("proposal_chat_content_repair.claim", _CLAIM_INSTRUCTION), "chat_content_risk_claims"))
         if _section_matches(
             section,
             "approach",
@@ -358,7 +364,7 @@ async def run_content_risk_repair(
                     "fabricat",
                 )
             ):
-                jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_capability"))
+                jobs.append((idx, get_prompt("proposal_chat_content_repair.claim", _CLAIM_INSTRUCTION), "chat_content_risk_capability"))
         if (section.id or "").startswith("section-2-bio-") or _section_matches(
             section, "bio", "personnel", "key staff", "team"
         ):
@@ -372,15 +378,15 @@ async def run_content_risk_repair(
                     "unverif",
                 )
             ):
-                jobs.append((idx, _BIO_INSTRUCTION, "chat_content_risk_bio"))
+                jobs.append((idx, get_prompt("proposal_chat_content_repair.bio", _BIO_INSTRUCTION), "chat_content_risk_bio"))
         if _section_matches(
             section, "approach", "work plan", "methodology", "schedule", "timeline"
         ):
             if any(k in ask for k in ("tagline", "chapter", "positioning", "campaign theme")):
-                jobs.append((idx, _TAGLINE_INSTRUCTION, "chat_content_risk_tagline"))
+                jobs.append((idx, get_prompt("proposal_chat_content_repair.tagline", _TAGLINE_INSTRUCTION), "chat_content_risk_tagline"))
         if _section_matches(section, "executive summary", "exec summary"):
             if any(k in ask for k in ("executive", "criteria", "evaluation")):
-                jobs.append((idx, _EXEC_INSTRUCTION, "chat_content_risk_exec"))
+                jobs.append((idx, get_prompt("proposal_chat_content_repair.exec", _EXEC_INSTRUCTION), "chat_content_risk_exec"))
 
     # Deduplicate jobs per section+node (keep first instruction merge for same section)
     seen_keys: set[str] = set()

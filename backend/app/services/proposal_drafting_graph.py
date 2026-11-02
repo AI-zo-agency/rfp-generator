@@ -46,6 +46,7 @@ from app.services.proposal_draft_llm import (
 from app.services.proposal_langchain import _provider_name
 from app.services.proposal_ralph import inject_ralph_into_system_prompt
 from app.services.proposal_generation_cancel import ProposalGenerationCancelled
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1162,7 +1163,7 @@ async def _retry_plan_driven_section(
     try:
         raw, _provider = await chat_json_with_repair(
             [
-                {"role": "system", "content": DRAFT_BATCH_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_drafting_graph.draft_batch", DRAFT_BATCH_PROMPT)},
                 {"role": "user", "content": retry_user},
             ],
             max_tokens=max_tokens,
@@ -1947,7 +1948,7 @@ async def _draft_batch_once(
         ):
             raw, provider = await chat_json_with_repair(
                 [
-                    {"role": "system", "content": DRAFT_BATCH_PROMPT},
+                    {"role": "system", "content": get_prompt("proposal_drafting_graph.draft_batch", DRAFT_BATCH_PROMPT)},
                     {"role": "user", "content": user_content},
                 ],
                 max_tokens=draft_max_tokens,

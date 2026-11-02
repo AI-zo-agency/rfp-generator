@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,7 @@ from app.api.router import api_router
 from app.api.auth import router as auth_router
 from app.core.config import settings
 from app.core.langsmith_tracing import configure_langsmith_tracing
+from app.services.prompt_store import sync_catalog_safely
 from app.services.proposal_repository import init_proposal_db
 
 logging.basicConfig(
@@ -23,6 +25,8 @@ configure_langsmith_tracing()
 async def lifespan(_app: FastAPI):
     configure_langsmith_tracing()
     init_proposal_db()
+    # Imports every prompt's module, so it stays off the startup path.
+    threading.Thread(target=sync_catalog_safely, name="prompt-sync", daemon=True).start()
     yield
 
 

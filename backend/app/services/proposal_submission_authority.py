@@ -22,6 +22,7 @@ from app.services.proposal_rfp_excerpt import (
     closing_package_excerpt,
     submission_documents_excerpt,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "submission_authority"
@@ -128,7 +129,7 @@ async def collect_cost_submittal_quotes(rfp_text: str) -> list[str]:
     async def _one(sl: str) -> list[str]:
         raw, _provider = await safe_chat_json(
             [
-                {"role": "system", "content": _COST_QUOTE_SYSTEM},
+                {"role": "system", "content": get_prompt("proposal_submission_authority.cost_quote", _COST_QUOTE_SYSTEM)},
                 {"role": "user", "content": sl},
             ],
             max_tokens=800,
@@ -714,7 +715,7 @@ async def apply_submission_authority_pass(
     )
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _AUTHORITY_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_submission_authority.authority", _AUTHORITY_SYSTEM)},
             {"role": "user", "content": ""},
         ],
         max_tokens=4096,

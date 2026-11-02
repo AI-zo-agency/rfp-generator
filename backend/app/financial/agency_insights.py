@@ -23,6 +23,7 @@ from app.financial.ai_insights_repository import upsert_insight
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
 from app.financial.insight_prose import BRIEF_FORMAT, NOTE_FORMAT
 from app.services.llm import chat_json_soft, resolve_llm_model
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         'Reply with JSON shaped exactly: {"brief": "...", "notes": {"<id>": "..."}}'
     )
     return [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": get_prompt("agency_insights.system", _SYSTEM)},
         {"role": "user", "content": user},
     ]
 

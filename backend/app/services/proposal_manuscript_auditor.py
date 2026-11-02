@@ -19,6 +19,7 @@ from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_presubmit_review import run_presubmit_review
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ async def _run_llm_residual_audit(
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": _AUDIT_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_manuscript_auditor.audit", _AUDIT_PROMPT)},
                 {"role": "user", "content": user_content},
             ],
             max_tokens=16000,

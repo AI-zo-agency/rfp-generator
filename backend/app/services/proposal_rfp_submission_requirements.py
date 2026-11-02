@@ -16,6 +16,7 @@ from app.services.proposal_rfp_compliance import (
     OPEN_TAG_MARKERS,
     requirement_likely_covered,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,38 @@ def _manuscript_blob(draft: ProposalDraft) -> str:
     )
 
 
+_PROMPT_INVENTORY_RFP_SUBMISSION_REQUIREMENTS = (
+    "You read ONE RFP's submission instructions (any government, college, "
+    "nonprofit, or commercial buyer). List EVERY deliverable the proposer must "
+    "submit — narrative sections, forms, attachments, exhibits, appendices, "
+    "signatures, addenda ack, insurance certificates, W-9, pricing forms.\n\n"
+    "Rules:\n"
+    "- Use the RFP's own titles/labels.\n"
+    "- Be thorough: if Section/Exhibit/Attachment/Form is named as required "
+    "for submission, include it.\n"
+    "- signed_form / notarized form → kind=signed_form "
+    "(Checklist only — do NOT invent a full proposal section per form).\n"
+    "- narrative_proposal → mustInManuscript=true (needs prose in PDF).\n"
+    "- attachment (Excel, COI PDF, exhibits) → kind=attachment "
+    "(Checklist only — attach file; no per-item sidebar section).\n"
+    "- Do NOT invent items not in the excerpt.\n"
+    "- Prefer accurate kinds over inventing narrative tabs for forms.\n\n"
+    "Return JSON:\n"
+    "{\n"
+    '  "items": [\n'
+    "    {\n"
+    '      "id": "del-1",\n'
+    '      "title": "RFP label",\n'
+    '      "kind": "narrative_proposal|signed_form|attachment|signature_block|other",\n'
+    '      "mustInManuscript": true,\n'
+    '      "draftInstructions": "what zö should write or [MANUAL FILL]",\n'
+    '      "rfpCitation": "short quote from RFP"\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
+
+
 async def inventory_rfp_submission_requirements(
     rfp_excerpt: str,
     *,
@@ -231,34 +264,7 @@ async def inventory_rfp_submission_requirements(
                 {
                     "role": "system",
                     "content": (
-                        "You read ONE RFP's submission instructions (any government, college, "
-                        "nonprofit, or commercial buyer). List EVERY deliverable the proposer must "
-                        "submit — narrative sections, forms, attachments, exhibits, appendices, "
-                        "signatures, addenda ack, insurance certificates, W-9, pricing forms.\n\n"
-                        "Rules:\n"
-                        "- Use the RFP's own titles/labels.\n"
-                        "- Be thorough: if Section/Exhibit/Attachment/Form is named as required "
-                        "for submission, include it.\n"
-                        "- signed_form / notarized form → kind=signed_form "
-                        "(Checklist only — do NOT invent a full proposal section per form).\n"
-                        "- narrative_proposal → mustInManuscript=true (needs prose in PDF).\n"
-                        "- attachment (Excel, COI PDF, exhibits) → kind=attachment "
-                        "(Checklist only — attach file; no per-item sidebar section).\n"
-                        "- Do NOT invent items not in the excerpt.\n"
-                        "- Prefer accurate kinds over inventing narrative tabs for forms.\n\n"
-                        "Return JSON:\n"
-                        "{\n"
-                        '  "items": [\n'
-                        "    {\n"
-                        '      "id": "del-1",\n'
-                        '      "title": "RFP label",\n'
-                        '      "kind": "narrative_proposal|signed_form|attachment|signature_block|other",\n'
-                        '      "mustInManuscript": true,\n'
-                        '      "draftInstructions": "what zö should write or [MANUAL FILL]",\n'
-                        '      "rfpCitation": "short quote from RFP"\n'
-                        "    }\n"
-                        "  ]\n"
-                        "}"
+                        get_prompt("proposal_rfp_submission_requirements.inventory_rfp_submission_requirements", _PROMPT_INVENTORY_RFP_SUBMISSION_REQUIREMENTS)
                     ),
                 },
                 {
@@ -430,6 +436,23 @@ def _is_per_form_stub_section(section: ProposalSection) -> bool:
     return attach_only and len(content) < 6000
 
 
+_PROMPT_DRAFT_GENERIC_DELIVERABLE = (
+    "Draft ONE proposal section for zö agency matching THIS RFP submission item.\n"
+    "Use only RFP + verified zö facts.\n"
+    "If kind is signed_form or attachment: write a short compliance checklist "
+    "with [MANUAL FILL: attach …] — do NOT invent signatures or file contents.\n"
+    "If kind is narrative_proposal: write substantive prose.\n"
+    "These rules govern how you write; they are never content. Never write "
+    "sentences about submission requirements, pass/fail status, what cannot be "
+    "submitted, or what must be verified or confirmed with anyone — apply the "
+    "rule silently instead of narrating it. When something is missing or needs a "
+    "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
+    "nothing else. Never explain the tag, never preface it, never restate the "
+    "rule that produced it.\n"
+    'Return JSON: {"content": "markdown"}'
+)
+
+
 async def _draft_generic_deliverable(
     *,
     item: SubmissionDeliverable,
@@ -457,19 +480,7 @@ async def _draft_generic_deliverable(
                 {
                     "role": "system",
                     "content": (
-                        "Draft ONE proposal section for zö agency matching THIS RFP submission item.\n"
-                        "Use only RFP + verified zö facts.\n"
-                        "If kind is signed_form or attachment: write a short compliance checklist "
-                        "with [MANUAL FILL: attach …] — do NOT invent signatures or file contents.\n"
-                        "If kind is narrative_proposal: write substantive prose.\n"
-                        "These rules govern how you write; they are never content. Never write "
-                        "sentences about submission requirements, pass/fail status, what cannot be "
-                        "submitted, or what must be verified or confirmed with anyone — apply the "
-                        "rule silently instead of narrating it. When something is missing or needs a "
-                        "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
-                        "nothing else. Never explain the tag, never preface it, never restate the "
-                        "rule that produced it.\n"
-                        'Return JSON: {"content": "markdown"}'
+                        get_prompt("proposal_rfp_submission_requirements.draft_generic_deliverable", _PROMPT_DRAFT_GENERIC_DELIVERABLE)
                     ),
                 },
                 {

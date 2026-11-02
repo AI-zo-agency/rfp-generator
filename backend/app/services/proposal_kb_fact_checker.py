@@ -26,6 +26,7 @@ from app.services.proposal_brand_voice import classify_section_register, format_
 from app.services.proposal_drafting_prompts import ANTI_HALLUCINATION_RULES
 from app.services.proposal_manual_flags import _replace_verify_tags_from_blob
 from app.services.proposal_section_quality import word_count
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,24 @@ def _eval_percent_claimed_without_rfp(content: str, rfp_text: str) -> list[str]:
     return bad
 
 
+_PROMPT_REPAIR_EVAL_PERCENTAGES = (
+    "You fix fabricated evaluation weights in proposal sections.\n"
+    "If the RFP uses ranked Best Value (no point percentages), remove ALL "
+    "invented percentage weights and restate criteria in the RFP's order and "
+    "exact category names from the excerpt only.\n"
+    "Never invent new percentages. Never rename criteria to generic labels "
+    "like 'Technical Approach' unless the RFP uses that phrase.\n"
+    "These rules govern how you write; they are never content. Never write "
+    "sentences about submission requirements, pass/fail status, what cannot be "
+    "submitted, or what must be verified or confirmed with anyone — apply the "
+    "rule silently instead of narrating it. When something is missing or needs a "
+    "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
+    "nothing else. Never explain the tag, never preface it, never restate the "
+    "rule that produced it.\n"
+    "Return JSON: {\"content\": \"full section markdown\"}"
+)
+
+
 async def _repair_eval_percentages(
     section: ProposalSection,
     rfp_excerpt: str,
@@ -252,20 +271,7 @@ async def _repair_eval_percentages(
                 {
                     "role": "system",
                     "content": (
-                        "You fix fabricated evaluation weights in proposal sections.\n"
-                        "If the RFP uses ranked Best Value (no point percentages), remove ALL "
-                        "invented percentage weights and restate criteria in the RFP's order and "
-                        "exact category names from the excerpt only.\n"
-                        "Never invent new percentages. Never rename criteria to generic labels "
-                        "like 'Technical Approach' unless the RFP uses that phrase.\n"
-                        "These rules govern how you write; they are never content. Never write "
-                        "sentences about submission requirements, pass/fail status, what cannot be "
-                        "submitted, or what must be verified or confirmed with anyone — apply the "
-                        "rule silently instead of narrating it. When something is missing or needs a "
-                        "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
-                        "nothing else. Never explain the tag, never preface it, never restate the "
-                        "rule that produced it.\n"
-                        "Return JSON: {\"content\": \"full section markdown\"}"
+                        get_prompt("proposal_kb_fact_checker.repair_eval_percentages", _PROMPT_REPAIR_EVAL_PERCENTAGES)
                     ),
                 },
                 {
@@ -900,6 +906,20 @@ async def _kb_blob_for_section(
     return context, sources
 
 
+_PROMPT_REPAIR_FALSE_VERIFY_STUB = (
+    "You replace false [VERIFY: insufficient evidence] stubs with KB-backed prose.\n"
+    "Use ONLY facts in the knowledge-base context. Prefer 07_FIN/06_WON *Proposal* "
+    "and 03_CS case studies over client RFP PDFs.\n"
+    "If KB lacks a required fact, keep a specific [VERIFY: field — reason] tag.\n"
+    "Do not invent metrics, clients, or certifications.\n"
+    "These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently. The tag is the only trace of a gap; never explain or "
+    "preface it.\n"
+    'Return JSON: {"content": "full section markdown"}'
+)
+
+
 async def _repair_false_verify_stub(
     section: ProposalSection,
     kb_context: str,
@@ -916,16 +936,7 @@ async def _repair_false_verify_stub(
                 {
                     "role": "system",
                     "content": (
-                        "You replace false [VERIFY: insufficient evidence] stubs with KB-backed prose.\n"
-                        "Use ONLY facts in the knowledge-base context. Prefer 07_FIN/06_WON *Proposal* "
-                        "and 03_CS case studies over client RFP PDFs.\n"
-                        "If KB lacks a required fact, keep a specific [VERIFY: field — reason] tag.\n"
-                        "Do not invent metrics, clients, or certifications.\n"
-                        "These rules govern how you write; they are never content. Never write "
-                        "sentences about verification requirements or your own constraints — apply "
-                        "the rule silently. The tag is the only trace of a gap; never explain or "
-                        "preface it.\n"
-                        'Return JSON: {"content": "full section markdown"}'
+                        get_prompt("proposal_kb_fact_checker.repair_false_verify_stub", _PROMPT_REPAIR_FALSE_VERIFY_STUB)
                     ),
                 },
                 {
@@ -1012,6 +1023,19 @@ def _dedupe_section3_case_studies(
     return [*non_s3, *by_client.values(), *anon], removed
 
 
+_PROMPT_FLAG_UNVERIFIED_METRICS_IN_CASE_STUDY = (
+    "Remove or replace unverified statistics in a proposal section.\n"
+    "Metrics must appear verbatim in the KB context or become "
+    "[VERIFY: metric — confirm from 03_CS / 01_companyfacts].\n"
+    "Do not invent replacement numbers.\n"
+    "These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently. The tag is the only trace of a gap; never explain or "
+    "preface it.\n"
+    'Return JSON: {"content": "..."}'
+)
+
+
 async def _flag_unverified_metrics_in_case_study(
     section: ProposalSection,
     kb_context: str,
@@ -1038,15 +1062,7 @@ async def _flag_unverified_metrics_in_case_study(
                 {
                     "role": "system",
                     "content": (
-                        "Remove or replace unverified statistics in a proposal section.\n"
-                        "Metrics must appear verbatim in the KB context or become "
-                        "[VERIFY: metric — confirm from 03_CS / 01_companyfacts].\n"
-                        "Do not invent replacement numbers.\n"
-                        "These rules govern how you write; they are never content. Never write "
-                        "sentences about verification requirements or your own constraints — apply "
-                        "the rule silently. The tag is the only trace of a gap; never explain or "
-                        "preface it.\n"
-                        'Return JSON: {"content": "..."}'
+                        get_prompt("proposal_kb_fact_checker.flag_unverified_metrics_in_case_study", _PROMPT_FLAG_UNVERIFIED_METRICS_IN_CASE_STUDY)
                     ),
                 },
                 {

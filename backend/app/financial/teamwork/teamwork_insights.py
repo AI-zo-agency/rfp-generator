@@ -14,6 +14,7 @@ from app.financial.figure_guard import check_magnitude_claims, check_quantities,
 from app.financial.insight_prose import BRIEF_FORMAT, NOTE_FORMAT
 from app.financial.teamwork.teamwork_capacity import capacity_history_state, capacity_signals
 from app.services.llm import chat_json_soft, resolve_llm_model
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +385,7 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         f"Notes may use only these signal ids: {sorted(_known_ids(evidence))}. "
         f"{history_instruction}"
     )
-    return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": get_prompt("teamwork_insights.system", _SYSTEM)}, {"role": "user", "content": user}]
 
 
 def _unsupported_figure(text: str, allowed: set[float]) -> str | None:

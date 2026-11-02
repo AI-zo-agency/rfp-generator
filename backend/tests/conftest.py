@@ -43,6 +43,14 @@ def _builtin_voice_revision(request, monkeypatch):
     monkeypatch.setattr(brand_voice_revisions, "enabled", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def _code_default_prompts(monkeypatch):
+    """Agents see the prompts in code. A test must never read edits from the real table."""
+    from app.services import prompt_store
+
+    monkeypatch.setattr(prompt_store, "enabled", lambda: False)
+
+
 @pytest.fixture()
 def sqlite_activity_store(tmp_path, monkeypatch):
     """Point activity and tweak storage at a throwaway SQLite file, never Supabase."""

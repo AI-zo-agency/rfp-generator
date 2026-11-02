@@ -15,6 +15,7 @@ from app.services import llm
 from app.services.proposal_fulfill_guard import fulfill_scan_preserves_section
 from app.services.proposal_fulfill_truncation_repair import looks_truncated_for_fulfill
 from app.services.proposal_rfp_excerpt import submission_documents_excerpt
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,58 @@ def _format_specs_cache_key(
     return hashlib.sha256(payload.encode("utf-8", "ignore")).hexdigest()
 
 
+_PROMPT_EXTRACT_RFP_SUBMISSION_FORMAT_SPECS = (
+    "Read ONE RFP. Find whatever section(s) define the mandatory "
+    "proposal content format, submission layout, or required packet "
+    "structure — use the buyer's own section labels from THIS RFP only.\n"
+    "Return the EXACT sequence that section mandates, in order. "
+    "That sequence outranks evaluation-criteria numbering or labels "
+    "from other parts of the RFP when they conflict.\n\n"
+    "Include EVERY row the format/layout / proposal-content section "
+    "requires the offeror to submit — narrative sections, signed forms, "
+    "packet exhibits the offeror returns, attachments, compliance "
+    "statements, AND table-shaped deliverables (reference contact "
+    "tables, pricing/rate schedules, submission checklists) — using "
+    "the buyer's verbatim headings.\n"
+    "When the RFP shows a TABLE the offeror must fill (references, "
+    "pricing, checklist), emit ONE deliverable row for that table and "
+    "put the column headers / row labels into requiredHeadings so the "
+    "writer rebuilds the same table shape.\n"
+    "Do NOT emit rows for sample Professional Services Agreement / "
+    "exemplar contract / Exhibit B|C clause titles (Construction, "
+    "Captions, Severability, Governing Law, Entire Agreement, etc.). "
+    "Those are post-award contract text, not proposal tabs. If the "
+    "buyer wants exceptions or acceptance of the sample agreement, "
+    "that belongs under Exceptions / compliance — not as each clause.\n"
+    "Every row must be a DELIVERABLE the offeror submits, named in the "
+    "buyer's own wording for that deliverable. An instruction/container "
+    "heading that only describes HOW to respond (e.g. \"Required Elements "
+    "in Response\", \"Response Format\", \"Proposal Content and Format\", "
+    "\"Submission Requirements\") is never itself a row: when such a "
+    "heading enumerates deliverables, emit ONE ROW PER ENUMERATED "
+    "DELIVERABLE in the RFP's order and do not emit the container. "
+    "requiredHeadings is only for headings that live WITHIN a single "
+    "deliverable, not for deliverables the container merely lists.\n"
+    "Use the buyer's OWN wording in rfpTitle — never substitute generic "
+    "agency tab names or evaluation-point labels from a different section.\n"
+    "For signed forms / attach-PDF submittals: instructions must say "
+    "[DESIGNER NOTE: Attach signed PDF] / [MANUAL FILL: signature]. "
+    "When THIS RFP prints field labels, blanks, or a fill-in table on "
+    "that form, put those exact buyer labels in requiredHeadings so "
+    "the stub can scaffold input fields. If the RFP only names the "
+    "form with no field layout, leave requiredHeadings empty — never "
+    "invent fields.\n"
+    "sameAskAs = existing draft tab titles that already cover the same "
+    "mandated item (by meaning, not keyword matching).\n"
+    "If this RFP has no dedicated format/layout section, return "
+    '{"sections":[]}.\n'
+    "Return JSON:\n"
+    '{"sections":[{"rfpTitle":"<buyer heading from THIS RFP>",'
+    '"requiredHeadings":[],"instructions":"...",'
+    '"sameAskAs":[],"satisfiedByStaticCompanyBlock":false}]}'
+)
+
+
 async def extract_rfp_submission_format_specs(
     rfp_text: str,
     *,
@@ -447,54 +500,7 @@ async def extract_rfp_submission_format_specs(
                 {
                     "role": "system",
                     "content": (
-                        "Read ONE RFP. Find whatever section(s) define the mandatory "
-                        "proposal content format, submission layout, or required packet "
-                        "structure — use the buyer's own section labels from THIS RFP only.\n"
-                        "Return the EXACT sequence that section mandates, in order. "
-                        "That sequence outranks evaluation-criteria numbering or labels "
-                        "from other parts of the RFP when they conflict.\n\n"
-                        "Include EVERY row the format/layout / proposal-content section "
-                        "requires the offeror to submit — narrative sections, signed forms, "
-                        "packet exhibits the offeror returns, attachments, compliance "
-                        "statements, AND table-shaped deliverables (reference contact "
-                        "tables, pricing/rate schedules, submission checklists) — using "
-                        "the buyer's verbatim headings.\n"
-                        "When the RFP shows a TABLE the offeror must fill (references, "
-                        "pricing, checklist), emit ONE deliverable row for that table and "
-                        "put the column headers / row labels into requiredHeadings so the "
-                        "writer rebuilds the same table shape.\n"
-                        "Do NOT emit rows for sample Professional Services Agreement / "
-                        "exemplar contract / Exhibit B|C clause titles (Construction, "
-                        "Captions, Severability, Governing Law, Entire Agreement, etc.). "
-                        "Those are post-award contract text, not proposal tabs. If the "
-                        "buyer wants exceptions or acceptance of the sample agreement, "
-                        "that belongs under Exceptions / compliance — not as each clause.\n"
-                        "Every row must be a DELIVERABLE the offeror submits, named in the "
-                        "buyer's own wording for that deliverable. An instruction/container "
-                        "heading that only describes HOW to respond (e.g. \"Required Elements "
-                        "in Response\", \"Response Format\", \"Proposal Content and Format\", "
-                        "\"Submission Requirements\") is never itself a row: when such a "
-                        "heading enumerates deliverables, emit ONE ROW PER ENUMERATED "
-                        "DELIVERABLE in the RFP's order and do not emit the container. "
-                        "requiredHeadings is only for headings that live WITHIN a single "
-                        "deliverable, not for deliverables the container merely lists.\n"
-                        "Use the buyer's OWN wording in rfpTitle — never substitute generic "
-                        "agency tab names or evaluation-point labels from a different section.\n"
-                        "For signed forms / attach-PDF submittals: instructions must say "
-                        "[DESIGNER NOTE: Attach signed PDF] / [MANUAL FILL: signature]. "
-                        "When THIS RFP prints field labels, blanks, or a fill-in table on "
-                        "that form, put those exact buyer labels in requiredHeadings so "
-                        "the stub can scaffold input fields. If the RFP only names the "
-                        "form with no field layout, leave requiredHeadings empty — never "
-                        "invent fields.\n"
-                        "sameAskAs = existing draft tab titles that already cover the same "
-                        "mandated item (by meaning, not keyword matching).\n"
-                        "If this RFP has no dedicated format/layout section, return "
-                        '{"sections":[]}.\n'
-                        "Return JSON:\n"
-                        '{"sections":[{"rfpTitle":"<buyer heading from THIS RFP>",'
-                        '"requiredHeadings":[],"instructions":"...",'
-                        '"sameAskAs":[],"satisfiedByStaticCompanyBlock":false}]}'
+                        get_prompt("proposal_fulfill_rfp_structure.extract_rfp_submission_format_specs", _PROMPT_EXTRACT_RFP_SUBMISSION_FORMAT_SPECS)
                     ),
                 },
                 {
@@ -1034,6 +1040,19 @@ def apply_rfp_mandated_section_titles(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+_PROMPT_CLEAN_SIDEBAR_TITLES_VIA_LLM = (
+    "You clean proposal sidebar tab titles.\n"
+    "Return JSON: {\"renames\": [{\"id\": \"...\", \"newTitle\": \"...\"}]}\n"
+    "Rules:\n"
+    "- newTitle is a short deliverable / form name (typically under 60 chars).\n"
+    "- Never keep Upload… / Please provide… / DO NOT… instruction sentences.\n"
+    "- Prefer the form or instrument the buyer wants (e.g. UT Supplemental Terms, "
+    "Primary Bid Contact, W9 Submission).\n"
+    "- Only include tabs that need renaming. Skip already-clean labels.\n"
+    "- Do not invent clients, people, or certifications."
+)
+
+
 async def clean_sidebar_titles_via_llm(
     draft: ProposalDraft,
 ) -> tuple[ProposalDraft, list[str]]:
@@ -1060,15 +1079,7 @@ async def clean_sidebar_titles_via_llm(
                 {
                     "role": "system",
                     "content": (
-                        "You clean proposal sidebar tab titles.\n"
-                        "Return JSON: {\"renames\": [{\"id\": \"...\", \"newTitle\": \"...\"}]}\n"
-                        "Rules:\n"
-                        "- newTitle is a short deliverable / form name (typically under 60 chars).\n"
-                        "- Never keep Upload… / Please provide… / DO NOT… instruction sentences.\n"
-                        "- Prefer the form or instrument the buyer wants (e.g. UT Supplemental Terms, "
-                        "Primary Bid Contact, W9 Submission).\n"
-                        "- Only include tabs that need renaming. Skip already-clean labels.\n"
-                        "- Do not invent clients, people, or certifications."
+                        get_prompt("proposal_fulfill_rfp_structure.clean_sidebar_titles_via_llm", _PROMPT_CLEAN_SIDEBAR_TITLES_VIA_LLM)
                     ),
                 },
                 {
@@ -1116,6 +1127,43 @@ async def clean_sidebar_titles_via_llm(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+_PROMPT_EXTRACT_RFP_SCORED_SECTION_SPECS = (
+    "Read ONE RFP. Return the proposer's submission sequence IN ORDER — "
+    "this RFP's TOC / 'proposal shall include' / numbered contents list.\n"
+    "Use only titles this RFP actually names. Do not invent a default stack "
+    "or generic agency section labels the RFP's own TOC does not use.\n"
+    "Never invent a mega-section that bundles multiple separately-named RFP "
+    "items — that duplicates content under two titles.\n"
+    "When THIS RFP has a mandatory content-format or submission-layout section, "
+    "prefer its headings and order over evaluation-criteria labels from "
+    "elsewhere when they conflict.\n"
+    "Skip text that describes the BUYER's own internal review process — "
+    "not something the proposer submits.\n"
+    "Every exhibit, appendix, or attachment THIS RFP's submittal list marks "
+    "as required gets its own tab.\n"
+    "If this RFP states an order, the JSON array must match that order.\n"
+    "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
+    "Do NOT emit two titles that are the same ask (near-duplicate labels for "
+    "one requirement) — keep the RFP's primary TOC wording only.\n"
+    "The draft already keeps static company/team/experience tabs. Those stay "
+    "as-is — do not ask to rewrite them.\n"
+    "If a TOC item is ONLY the firm's identity block already covered by those "
+    "static tabs, set satisfiedByStaticCompanyBlock true — header label only.\n"
+    "If a TOC item is a scored narrative evaluators read as its own tab, set "
+    "satisfiedByStaticCompanyBlock false — substance is required.\n"
+    "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
+    "Mandatory compliance items that require a detailed narrative response and "
+    "evidence — not only a signed form — are dynamic tabs; do not skip them.\n"
+    "sameAskAs = existing draft titles that are the SAME ask by meaning — "
+    "not a keyword synonym list.\n"
+    "Return JSON:\n"
+    '{"sections":[{"rfpTitle":"...","requiredHeadings":["A. ..."],'
+    '"instructions":"how to align prose","evaluationWeight":"35 pts",'
+    '"sameAskAs":["existing draft title if same ask"],'
+    '"satisfiedByStaticCompanyBlock":false}]}'
+)
+
+
 async def extract_rfp_scored_section_specs(
     rfp_text: str,
     *,
@@ -1150,39 +1198,7 @@ async def extract_rfp_scored_section_specs(
                 {
                     "role": "system",
                     "content": (
-                        "Read ONE RFP. Return the proposer's submission sequence IN ORDER — "
-                        "this RFP's TOC / 'proposal shall include' / numbered contents list.\n"
-                        "Use only titles this RFP actually names. Do not invent a default stack "
-                        "or generic agency section labels the RFP's own TOC does not use.\n"
-                        "Never invent a mega-section that bundles multiple separately-named RFP "
-                        "items — that duplicates content under two titles.\n"
-                        "When THIS RFP has a mandatory content-format or submission-layout section, "
-                        "prefer its headings and order over evaluation-criteria labels from "
-                        "elsewhere when they conflict.\n"
-                        "Skip text that describes the BUYER's own internal review process — "
-                        "not something the proposer submits.\n"
-                        "Every exhibit, appendix, or attachment THIS RFP's submittal list marks "
-                        "as required gets its own tab.\n"
-                        "If this RFP states an order, the JSON array must match that order.\n"
-                        "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
-                        "Do NOT emit two titles that are the same ask (near-duplicate labels for "
-                        "one requirement) — keep the RFP's primary TOC wording only.\n"
-                        "The draft already keeps static company/team/experience tabs. Those stay "
-                        "as-is — do not ask to rewrite them.\n"
-                        "If a TOC item is ONLY the firm's identity block already covered by those "
-                        "static tabs, set satisfiedByStaticCompanyBlock true — header label only.\n"
-                        "If a TOC item is a scored narrative evaluators read as its own tab, set "
-                        "satisfiedByStaticCompanyBlock false — substance is required.\n"
-                        "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
-                        "Mandatory compliance items that require a detailed narrative response and "
-                        "evidence — not only a signed form — are dynamic tabs; do not skip them.\n"
-                        "sameAskAs = existing draft titles that are the SAME ask by meaning — "
-                        "not a keyword synonym list.\n"
-                        "Return JSON:\n"
-                        '{"sections":[{"rfpTitle":"...","requiredHeadings":["A. ..."],'
-                        '"instructions":"how to align prose","evaluationWeight":"35 pts",'
-                        '"sameAskAs":["existing draft title if same ask"],'
-                        '"satisfiedByStaticCompanyBlock":false}]}'
+                        get_prompt("proposal_fulfill_rfp_structure.extract_rfp_scored_section_specs", _PROMPT_EXTRACT_RFP_SCORED_SECTION_SPECS)
                     ),
                 },
                 {
@@ -3027,6 +3043,35 @@ def ensure_missing_scored_section_stubs(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+_PROMPT_REFRAME_SECTION_TO_RFP_SPEC = (
+    "Rewrite ONE proposal section so it matches THIS RFP's required structure and scoring "
+    "criteria — not a generic agency template.\n"
+    "Rules:\n"
+    "- Use the required headings/outline exactly (markdown ## with RFP labels).\n"
+    "- Preserve verified facts, team names, and numbers from the current draft.\n"
+    "- Do NOT recopy full case-study narratives or the same example in new words — "
+    "one-line cross-ref to the draft's dedicated portfolio / past-work tab, then NEW detail only.\n"
+    "- Do NOT invent clients, case studies, reference contacts, metrics, or geographies "
+    "not evidenced in the draft or knowledge base.\n"
+    "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
+    "- Fold timeline/phases INTO this section when THIS RFP embeds schedule in this tab.\n"
+    "- Do NOT rewrite team bios or static company-identity tabs already in the draft.\n"
+    "- HARD LENGTH CEILING = the Word target below. Fully answer THIS tab's ask "
+    "within it and STOP — never exceed it. Shorter is better when the ask is "
+    "covered. Cut any sentence that does not add RFP-specific substance; do not "
+    "add subsections the RFP did not ask for. Prefer tight paragraphs, markdown "
+    "bullets, and markdown tables over long essays. Never pad for length.\n"
+    "- When a table/timeline/swimlane would help evaluators, add "
+    "[DESIGNER NOTE: concrete layout hint] near that block.\n"
+    "- These rules govern how you write; they are never content. Never write "
+    "sentences about submission requirements, pass/fail status, what cannot be "
+    "submitted, or what must be verified or confirmed with anyone — apply the "
+    "rule silently instead of narrating it. The [VERIFY: ...] / [DESIGNER NOTE: ...] "
+    "tag is the only trace of a gap; never explain or preface it.\n"
+    'Return JSON: {"content": "full markdown section", "designerNote": "hint or null"}'
+)
+
+
 async def _reframe_section_to_rfp_spec(
     *,
     section: ProposalSection,
@@ -3040,31 +3085,7 @@ async def _reframe_section_to_rfp_spec(
         return stub
 
     system = (
-        "Rewrite ONE proposal section so it matches THIS RFP's required structure and scoring "
-        "criteria — not a generic agency template.\n"
-        "Rules:\n"
-        "- Use the required headings/outline exactly (markdown ## with RFP labels).\n"
-        "- Preserve verified facts, team names, and numbers from the current draft.\n"
-        "- Do NOT recopy full case-study narratives or the same example in new words — "
-        "one-line cross-ref to the draft's dedicated portfolio / past-work tab, then NEW detail only.\n"
-        "- Do NOT invent clients, case studies, reference contacts, metrics, or geographies "
-        "not evidenced in the draft or knowledge base.\n"
-        "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
-        "- Fold timeline/phases INTO this section when THIS RFP embeds schedule in this tab.\n"
-        "- Do NOT rewrite team bios or static company-identity tabs already in the draft.\n"
-        "- HARD LENGTH CEILING = the Word target below. Fully answer THIS tab's ask "
-        "within it and STOP — never exceed it. Shorter is better when the ask is "
-        "covered. Cut any sentence that does not add RFP-specific substance; do not "
-        "add subsections the RFP did not ask for. Prefer tight paragraphs, markdown "
-        "bullets, and markdown tables over long essays. Never pad for length.\n"
-        "- When a table/timeline/swimlane would help evaluators, add "
-        "[DESIGNER NOTE: concrete layout hint] near that block.\n"
-        "- These rules govern how you write; they are never content. Never write "
-        "sentences about submission requirements, pass/fail status, what cannot be "
-        "submitted, or what must be verified or confirmed with anyone — apply the "
-        "rule silently instead of narrating it. The [VERIFY: ...] / [DESIGNER NOTE: ...] "
-        "tag is the only trace of a gap; never explain or preface it.\n"
-        'Return JSON: {"content": "full markdown section", "designerNote": "hint or null"}'
+        get_prompt("proposal_fulfill_rfp_structure.reframe_section_to_rfp_spec", _PROMPT_REFRAME_SECTION_TO_RFP_SPEC)
     )
     word_target = getattr(section, "word_target", None) or 550
     # Cap output near the target so the model physically cannot write a

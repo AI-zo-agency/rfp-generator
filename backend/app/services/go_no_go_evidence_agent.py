@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 
 from app.services import llm
 from app.services.go_no_go_requirements import RfpRequirement, all_queries
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +335,7 @@ async def plan_evidence_searches(
     if not requirements:
         return []
     messages = [
-        {"role": "system", "content": QUERY_PLAN_PROMPT},
+        {"role": "system", "content": get_prompt("go_no_go_evidence_agent.query_plan", QUERY_PLAN_PROMPT)},
         {
             "role": "user",
             "content": (
@@ -458,7 +459,7 @@ async def run_evidence_agent(
     if allow_follow_up and max_follow_up > 0 and missing_cores:
         digest = build_evidence_digest(missing_cores, hits_by_req)
         messages = [
-            {"role": "system", "content": FOLLOW_UP_PROMPT},
+            {"role": "system", "content": get_prompt("go_no_go_evidence_agent.follow_up", FOLLOW_UP_PROMPT)},
             {
                 "role": "user",
                 "content": (

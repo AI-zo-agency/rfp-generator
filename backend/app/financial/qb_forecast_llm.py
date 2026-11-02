@@ -42,6 +42,7 @@ from typing import Any
 from app.financial import qb_repository as repo
 from app.financial.ai_insights_repository import upsert_insight
 from app.services.llm import chat_json_soft, resolve_llm_model
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -630,7 +631,7 @@ async def _narrate(payload: dict[str, Any], year: int) -> dict[str, Any] | None:
         return None
     try:
         prose, _provider = await _ask(
-            _NARRATIVE_SYSTEM, narrative_prompt(payload, year), NARRATIVE_NODE
+            get_prompt("qb_forecast_llm.narrative", _NARRATIVE_SYSTEM), narrative_prompt(payload, year), NARRATIVE_NODE
         )
     except Exception:  # noqa: BLE001 — prose is the optional half
         return None
@@ -640,8 +641,8 @@ async def _narrate(payload: dict[str, Any], year: int) -> dict[str, Any] | None:
 async def _generate(evidence: dict[str, Any], year: int) -> dict[str, Any]:
     """Both forecasts concurrently. One failing must not take the other with it."""
     cash, year_out = await asyncio.gather(
-        _ask(_CASH_SYSTEM, cash_prompt(evidence), CASH_NODE, _CASH_MAX_TOKENS),
-        _ask(_YEAR_SYSTEM, year_prompt(evidence, year=year), YEAR_NODE),
+        _ask(get_prompt("qb_forecast_llm.cash", _CASH_SYSTEM), cash_prompt(evidence), CASH_NODE, _CASH_MAX_TOKENS),
+        _ask(get_prompt("qb_forecast_llm.year", _YEAR_SYSTEM), year_prompt(evidence, year=year), YEAR_NODE),
         return_exceptions=True,
     )
     def _unwrap(result: Any) -> dict[str, Any] | None:
@@ -762,7 +763,7 @@ async def _narrate_hybrid(
     base = narrative_prompt(payload, year)
     try:
         prose, _provider = await _ask(
-            _NARRATIVE_SYSTEM,
+            get_prompt("qb_forecast_llm.narrative", _NARRATIVE_SYSTEM),
             base.replace("\n\nExplain this to him.", extra + "\n\nExplain this to him."),
             NARRATIVE_NODE,
         )

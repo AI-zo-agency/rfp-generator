@@ -17,6 +17,7 @@ from app.services.proposal_budget_validation import (
     is_commission_style_budget,
 )
 from app.services.rfp_page_limit import resolve_page_limit
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1598,7 +1599,7 @@ async def _draft_one_added_section(
     try:
         query_raw, query_provider = await llm.chat_json_soft(
             [
-                {"role": "system", "content": REFINE_QUERIES_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_section_editor.refine_queries", REFINE_QUERIES_PROMPT)},
                 {
                     "role": "user",
                     "content": (
@@ -1700,7 +1701,7 @@ async def _draft_one_added_section(
     try:
         draft_raw, draft_provider = await llm.chat_json_soft(
             [
-                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_section_editor.section_redraft", SECTION_REDRAFT_PROMPT)},
                 {"role": "user", "content": user_block},
             ],
             max_tokens=16000,

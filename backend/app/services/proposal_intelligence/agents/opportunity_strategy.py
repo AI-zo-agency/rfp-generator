@@ -7,6 +7,7 @@ import logging
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, merge_memory, set_provider
 from app.services.proposal_intelligence.schemas import OpportunityStrategy, ProposalExecutionPlan
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "opportunity_strategy"
@@ -39,7 +40,7 @@ async def run_opportunity_strategy(
 ) -> ProposalExecutionPlan:
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("opportunity_strategy.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

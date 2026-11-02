@@ -84,6 +84,7 @@ from app.core.step_debug_logger import (
     summarize_budget,
     summarize_sections,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -447,14 +448,19 @@ def _page_ratio(index: int) -> float:
     return ratios[index] if index < len(ratios) else 0.1
 
 
+_PROMPT_MAP_RFP_SECTIONS = (
+    "Map the RFP into response sections. Return JSON: "
+    '{"sections":[{"id":"rfp-1","title":"...","pageLimit":null,"requirements":["..."]}]}'
+)
+
+
 async def _map_rfp_sections(rfp_context: str) -> list[RfpSectionMap]:
     raw, _ = await llm.chat_json(
         [
             {
                 "role": "system",
                 "content": (
-                    "Map the RFP into response sections. Return JSON: "
-                    '{"sections":[{"id":"rfp-1","title":"...","pageLimit":null,"requirements":["..."]}]}'
+                    get_prompt("proposal_generator.map_rfp_sections", _PROMPT_MAP_RFP_SECTIONS)
                 ),
             },
             {"role": "user", "content": rfp_context[:12000]},
@@ -474,6 +480,14 @@ async def _map_rfp_sections(rfp_context: str) -> list[RfpSectionMap]:
     return result
 
 
+_PROMPT_BUILD_RESEARCH_QUESTIONS = (
+    "Generate token-efficient research questions for proposal writing. "
+    'Return JSON: {"questions":[{"id":"q1","topic":"compliance","question":"..."}]}'
+    " Cover: scope, evaluation criteria, page limits, required roles, certifications, "
+    "deliverables, timeline, sector context. Max 10 questions."
+)
+
+
 async def _build_research_questions(
     rfp: RfpRecord,
     rfp_sections: list[RfpSectionMap],
@@ -483,10 +497,7 @@ async def _build_research_questions(
             {
                 "role": "system",
                 "content": (
-                    "Generate token-efficient research questions for proposal writing. "
-                    'Return JSON: {"questions":[{"id":"q1","topic":"compliance","question":"..."}]}'
-                    " Cover: scope, evaluation criteria, page limits, required roles, certifications, "
-                    "deliverables, timeline, sector context. Max 10 questions."
+                    get_prompt("proposal_generator.build_research_questions", _PROMPT_BUILD_RESEARCH_QUESTIONS)
                 ),
             },
             {
@@ -512,6 +523,12 @@ async def _build_research_questions(
                     )
                 )
     return result
+
+
+_PROMPT_FILL_STATIC_SECTION = (
+    "Pick team bio layout and named bios from KB. Return JSON: "
+    '{"layout":"full-page|multi|overview","bios":[],"designerNote":"..."}'
+)
 
 
 async def _fill_static_section(
@@ -569,8 +586,7 @@ async def _fill_static_section(
                 {
                     "role": "system",
                     "content": (
-                        "Pick team bio layout and named bios from KB. Return JSON: "
-                        '{"layout":"full-page|multi|overview","bios":[],"designerNote":"..."}'
+                        get_prompt("proposal_generator.fill_static_section", _PROMPT_FILL_STATIC_SECTION)
                     ),
                 },
                 {

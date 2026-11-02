@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalSection
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +332,19 @@ def build_place_preview(draft: ProposalDraft, plan: dict[str, Any]) -> dict[str,
     }
 
 
+_PROMPT_PLAN_PACKET_REDISTRIBUTION = (
+    "Plan MOVE ops only. JSON only. Never rewrite prose.\n"
+    'Ops: move_block{fromSectionId,toSectionId,match:{type:"heading",text}}, '
+    "move_tab{sectionId,afterSectionId}, leave{sectionId}.\n"
+    "move_block when a heading sits under the wrong tab. "
+    "Skip isStaticCompany unless clearly required. "
+    "match.text must be an existing heading. "
+    "stubFillIds = hollow stubs after moves. "
+    "humanGaps = short human notes.\n"
+    'Schema: {"ops":[],"stubFillIds":[],"humanGaps":[]}'
+)
+
+
 async def plan_packet_redistribution(
     *,
     draft: ProposalDraft,
@@ -348,15 +362,7 @@ async def plan_packet_redistribution(
     digest = _section_digest(draft)
     targets = rfp_specs if rfp_specs is not None else _outline_targets_from_draft(draft)
     system = (
-        "Plan MOVE ops only. JSON only. Never rewrite prose.\n"
-        'Ops: move_block{fromSectionId,toSectionId,match:{type:"heading",text}}, '
-        "move_tab{sectionId,afterSectionId}, leave{sectionId}.\n"
-        "move_block when a heading sits under the wrong tab. "
-        "Skip isStaticCompany unless clearly required. "
-        "match.text must be an existing heading. "
-        "stubFillIds = hollow stubs after moves. "
-        "humanGaps = short human notes.\n"
-        'Schema: {"ops":[],"stubFillIds":[],"humanGaps":[]}'
+        get_prompt("proposal_packet_redistribute.plan_packet_redistribution", _PROMPT_PLAN_PACKET_REDISTRIBUTION)
     )
     user = (
         f"RFP: {(rfp_title or '')[:120]}\n"

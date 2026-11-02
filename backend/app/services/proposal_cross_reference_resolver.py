@@ -29,6 +29,7 @@ from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_manual_flags import MANUAL_FILL_TAG_RE, VERIFY_TAG_RE
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ async def resolve_tags_from_manuscript(
     # is worth caching even though it isn't guaranteed byte-identical overall.
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _RESOLVE_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_cross_reference_resolver.resolve", _RESOLVE_SYSTEM)},
             {
                 "role": "user",
                 "content": f"Open tags to check:\n{tags_block}",

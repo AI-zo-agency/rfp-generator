@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Literal
 
@@ -20,6 +20,7 @@ from app.services.proposal_langchain import (
     get_chat_model,
     run_tool_agent_loop,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -516,7 +517,11 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
 
 
 def get_profile(role: AgentRole) -> AgentProfile:
-    return AGENT_PROFILES[role]
+    profile = AGENT_PROFILES[role]
+    return replace(
+        profile,
+        system_prompt=get_prompt(f"proposal_langchain_agents.{role.value}", profile.system_prompt),
+    )
 
 
 _CONTENT_KEY_RE = re.compile(
@@ -577,6 +582,12 @@ def content_from_agent_payload(parsed: dict[str, Any], raw_text: str = "") -> st
     return ""
 
 
+_PROMPT_PARSE_JSON_FROM_AGENT_TEXT = (
+    "Extract JSON object from agent output. Return only JSON "
+    'with a non-empty "content" string when prose is present.'
+)
+
+
 async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
     """Parse agent output to a dict. Never call salvage LLM with empty messages.
 
@@ -620,8 +631,7 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
                 {
                     "role": "system",
                     "content": (
-                        "Extract JSON object from agent output. Return only JSON "
-                        'with a non-empty "content" string when prose is present.'
+                        get_prompt("proposal_langchain_agents.parse_json_from_agent_text", _PROMPT_PARSE_JSON_FROM_AGENT_TEXT)
                     ),
                 },
                 {"role": "user", "content": stripped[:12000]},

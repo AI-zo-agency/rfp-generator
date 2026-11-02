@@ -26,6 +26,7 @@ from app.services.proposal_verify_optional_scrub import (
     strip_placeholder_tags_not_required_by_rfp,
 )
 from app.services.proposal_voice_enforcement import enforce_narrative_voice
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,22 @@ def _canonical_company_excerpt(sections: list[ProposalSection]) -> str:
     return ""
 
 
+_PROMPT_PLAN_QUERIES_FOR_SECTION = (
+    "You are zö agency's Complete-Scan query planner.\n"
+    "Read the proposal section and plan Supermemory search queries that will "
+    "confirm or refute the FACTUAL claims in it (people, tools delivered, "
+    "certs, clients, metrics, insurance, contacts).\n"
+    "Rules:\n"
+    "- Max 4 queries. Prefer 01_companyfacts / 03_CS / 04_Bio / Pricing Book "
+    "style phrasing as zö materials are written.\n"
+    "- Do NOT invent client- or person-specific anchors that are not already "
+    "named in the section.\n"
+    "- Do NOT use the RFP buyer's name as the search subject.\n"
+    "- Skip pure logistics fluff; focus on checkable facts.\n"
+    "Return JSON only: {\"queries\":[\"…\",\"…\"]}"
+)
+
+
 async def _plan_queries_for_section(
     section: ProposalSection,
     *,
@@ -77,18 +94,7 @@ async def _plan_queries_for_section(
         return [f"zö agency {title}"[:200]] if title else []
 
     system = (
-        "You are zö agency's Complete-Scan query planner.\n"
-        "Read the proposal section and plan Supermemory search queries that will "
-        "confirm or refute the FACTUAL claims in it (people, tools delivered, "
-        "certs, clients, metrics, insurance, contacts).\n"
-        "Rules:\n"
-        "- Max 4 queries. Prefer 01_companyfacts / 03_CS / 04_Bio / Pricing Book "
-        "style phrasing as zö materials are written.\n"
-        "- Do NOT invent client- or person-specific anchors that are not already "
-        "named in the section.\n"
-        "- Do NOT use the RFP buyer's name as the search subject.\n"
-        "- Skip pure logistics fluff; focus on checkable facts.\n"
-        "Return JSON only: {\"queries\":[\"…\",\"…\"]}"
+        get_prompt("proposal_scan_line_grounding.plan_queries_for_section", _PROMPT_PLAN_QUERIES_FOR_SECTION)
     )
     user = (
         f"RFP client (context only, not a search subject): {rfp.client or 'n/a'}\n"
@@ -164,6 +170,45 @@ async def _retrieve_kb(queries: list[str]) -> tuple[str, list[str]]:
     return blob, sources
 
 
+_PROMPT_GROUND_SECTION_BODY = (
+    "You are zö agency's Complete-Scan line-grounding editor.\n"
+    "Verify this proposal SECTION against KB evidence. You do NOT generate a "
+    "new section and you do NOT invent facts.\n"
+    "HARD RULES:\n"
+    "1. NEVER invent names, phones, emails, dollars, certs, clients, wins, "
+    "tools delivered, or bio years. If KB lacks evidence, DELETE the claim or "
+    "keep a short [MANUAL FILL: Sonja — field] ONLY when the RFP explicitly "
+    "requires that field for DQ/scoring; otherwise delete.\n"
+    "2. Prefer DELETE / shorten over rewrite. Do not expand word count. No "
+    "AI-slop (delve, leverage synergies, robust end-to-end, passionate about).\n"
+    "3. If company legal name / FEIN / address / contact dump already appears "
+    "in the CANONICAL company tab excerpt, replace restated dumps here with a "
+    "one-line cross-ref to that tab (e.g. 'See Who We Are / Business "
+    "Information for legal entity details.') — do not repeat the table.\n"
+    "4. Fill a [VERIFY]/[MANUAL FILL] ONLY with a verbatim fact from KB "
+    "evidence. If KB is silent and RFP does not require it → remove the tag "
+    "and clean the sentence.\n"
+    "5. CHARACTERIZATION MUST MATCH THE SOURCE. Inventing a client is not the "
+    "only way to be wrong — describing a REAL engagement as something it was "
+    "not is just as damaging, and harder to catch because every proper noun "
+    "checks out. For every past project named here, compare how this section "
+    "FRAMES the work against what the KB evidence actually says the work WAS: "
+    "its scope, what was delivered, and whether it was a small piece of a "
+    "larger engagement. If the framing conflicts with the source — e.g. the "
+    "section presents a project as a narrow optimization of something "
+    "existing when the evidence shows a full rebuild or rebrand, or presents "
+    "a component as if it were the whole engagement — rewrite the sentence to "
+    "what the evidence supports, or drop that example. Do NOT keep a "
+    "conflicting framing because it fits the proposal's argument better; an "
+    "evaluator who asks one follow-up question about that project will find "
+    "the discrepancy. When the evidence does not describe the engagement "
+    "clearly enough to confirm the framing, state the capability without the "
+    "example rather than guessing.\n"
+    "6. Keep zö voice: concrete, human, short. Preserve tables/structure.\n"
+    "7. Return JSON only."
+)
+
+
 async def _ground_section_body(
     section: ProposalSection,
     *,
@@ -179,41 +224,7 @@ async def _ground_section_body(
 
     rfp_excerpt = build_priority_rfp_excerpt(rfp_text or "", max_chars=8_000)
     system = (
-        "You are zö agency's Complete-Scan line-grounding editor.\n"
-        "Verify this proposal SECTION against KB evidence. You do NOT generate a "
-        "new section and you do NOT invent facts.\n"
-        "HARD RULES:\n"
-        "1. NEVER invent names, phones, emails, dollars, certs, clients, wins, "
-        "tools delivered, or bio years. If KB lacks evidence, DELETE the claim or "
-        "keep a short [MANUAL FILL: Sonja — field] ONLY when the RFP explicitly "
-        "requires that field for DQ/scoring; otherwise delete.\n"
-        "2. Prefer DELETE / shorten over rewrite. Do not expand word count. No "
-        "AI-slop (delve, leverage synergies, robust end-to-end, passionate about).\n"
-        "3. If company legal name / FEIN / address / contact dump already appears "
-        "in the CANONICAL company tab excerpt, replace restated dumps here with a "
-        "one-line cross-ref to that tab (e.g. 'See Who We Are / Business "
-        "Information for legal entity details.') — do not repeat the table.\n"
-        "4. Fill a [VERIFY]/[MANUAL FILL] ONLY with a verbatim fact from KB "
-        "evidence. If KB is silent and RFP does not require it → remove the tag "
-        "and clean the sentence.\n"
-        "5. CHARACTERIZATION MUST MATCH THE SOURCE. Inventing a client is not the "
-        "only way to be wrong — describing a REAL engagement as something it was "
-        "not is just as damaging, and harder to catch because every proper noun "
-        "checks out. For every past project named here, compare how this section "
-        "FRAMES the work against what the KB evidence actually says the work WAS: "
-        "its scope, what was delivered, and whether it was a small piece of a "
-        "larger engagement. If the framing conflicts with the source — e.g. the "
-        "section presents a project as a narrow optimization of something "
-        "existing when the evidence shows a full rebuild or rebrand, or presents "
-        "a component as if it were the whole engagement — rewrite the sentence to "
-        "what the evidence supports, or drop that example. Do NOT keep a "
-        "conflicting framing because it fits the proposal's argument better; an "
-        "evaluator who asks one follow-up question about that project will find "
-        "the discrepancy. When the evidence does not describe the engagement "
-        "clearly enough to confirm the framing, state the capability without the "
-        "example rather than guessing.\n"
-        "6. Keep zö voice: concrete, human, short. Preserve tables/structure.\n"
-        "7. Return JSON only."
+        get_prompt("proposal_scan_line_grounding.ground_section_body", _PROMPT_GROUND_SECTION_BODY)
     )
     user = (
         f"Section title: {section.title or ''}\n\n"

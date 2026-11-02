@@ -17,6 +17,7 @@ from app.services.proposal_intelligence.schemas import (
     OpportunityUnderstanding,
     ProposalExecutionPlan,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ async def run_rfp_understanding(
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": _SYSTEM},
+                {"role": "system", "content": get_prompt("rfp_understanding.system", _SYSTEM)},
                 {
                     "role": "user",
                     "content": (

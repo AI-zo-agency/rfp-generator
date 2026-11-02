@@ -11,6 +11,7 @@ from app.services.proposal_evaluation_coverage import (
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
 from app.services.proposal_intelligence.schemas import EvaluationAnalysis, ProposalExecutionPlan
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "evaluation_criteria"
@@ -70,7 +71,7 @@ async def run_evaluation_criteria(
 ) -> ProposalExecutionPlan:
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("evaluation_criteria.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

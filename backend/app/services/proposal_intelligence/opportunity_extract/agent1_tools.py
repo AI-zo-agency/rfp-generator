@@ -36,6 +36,7 @@ from app.services.proposal_intelligence.schemas import (
     OpportunityUnderstanding,
     ProposalExecutionPlan,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger("proposal.opportunity_extract.tools")
 
@@ -1447,7 +1448,7 @@ async def _qa_patch_pass(
             limit=20,
         )
         messages = [
-            {"role": "system", "content": _QA_PROMPT},
+            {"role": "system", "content": get_prompt("agent1_tools.qa", _QA_PROMPT)},
             {
                 "role": "user",
                 "content": (

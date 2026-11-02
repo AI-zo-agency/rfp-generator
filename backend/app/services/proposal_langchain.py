@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.services import proposal_knowledge_base_tools
 from app.services.llm import LlmError, LlmTier, _fireworks_key, _openrouter_key, chat_json, resolve_llm_model
 from app.services.llm_routing import is_quality_critical_node
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -473,6 +474,9 @@ def _pricing_guide_topic_is_about_fees(topic: str) -> bool:
     return False
 
 
+_PROMPT_RUN_TOOL_RESEARCH_AGENT = "Convert the research into JSON answers array only."
+
+
 async def run_tool_research_agent(
     *,
     rfp_id: str,
@@ -519,7 +523,7 @@ Research questions:
 
     structured, _ = await chat_json(
         [
-            {"role": "system", "content": "Convert the research into JSON answers array only."},
+            {"role": "system", "content": get_prompt("proposal_langchain.run_tool_research_agent", _PROMPT_RUN_TOOL_RESEARCH_AGENT)},
             {
                 "role": "user",
                 "content": f"Questions: {json.dumps(questions)}\n\nResearch:\n{final_text[:15000]}",

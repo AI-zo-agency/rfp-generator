@@ -18,6 +18,7 @@ from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_section_health import is_dead_section
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,23 @@ def _cache_key(rfp_text: str) -> str:
     return hashlib.sha256((rfp_text or "")[:24_000].encode("utf-8", "ignore")).hexdigest()
 
 
+_PROMPT_EXTRACT_COMPULSORY_CONTENT_ASKS = (
+    "Read ONE RFP. Return only compulsory QUANTITY rules the proposer "
+    "must submit with the proposal (pass/fail / non-responsive if short).\n"
+    "Examples of meaning — not a checklist to invent: 'provide three "
+    "case studies', 'minimum of two similar projects', 'three client "
+    "references with contact information', 'resumes for all key personnel'.\n"
+    "Do NOT invent a default cover-letter / methodology / three-study stack. "
+    "If this RFP does not state a number, omit that kind.\n"
+    "kind must be one of: case_studies, references, key_personnel, sample_work.\n"
+    "minimum is an integer >= 1. rfpQuote is a short verbatim clause.\n"
+    "passFail true when missing the count can disqualify or render "
+    "non-responsive; false if merely scored/preferred.\n"
+    'Return JSON: {"requirements":[{"kind":"case_studies","minimum":3,'
+    '"rfpQuote":"...","passFail":true}]}'
+)
+
+
 async def extract_compulsory_content_asks(rfp_text: str) -> list[CompulsoryContentAsk]:
     """LLM: numeric submission minima THIS RFP actually states. Empty if silent."""
     text = (rfp_text or "").strip()
@@ -81,19 +99,7 @@ async def extract_compulsory_content_asks(rfp_text: str) -> list[CompulsoryConte
                 {
                     "role": "system",
                     "content": (
-                        "Read ONE RFP. Return only compulsory QUANTITY rules the proposer "
-                        "must submit with the proposal (pass/fail / non-responsive if short).\n"
-                        "Examples of meaning — not a checklist to invent: 'provide three "
-                        "case studies', 'minimum of two similar projects', 'three client "
-                        "references with contact information', 'resumes for all key personnel'.\n"
-                        "Do NOT invent a default cover-letter / methodology / three-study stack. "
-                        "If this RFP does not state a number, omit that kind.\n"
-                        "kind must be one of: case_studies, references, key_personnel, sample_work.\n"
-                        "minimum is an integer >= 1. rfpQuote is a short verbatim clause.\n"
-                        "passFail true when missing the count can disqualify or render "
-                        "non-responsive; false if merely scored/preferred.\n"
-                        'Return JSON: {"requirements":[{"kind":"case_studies","minimum":3,'
-                        '"rfpQuote":"...","passFail":true}]}'
+                        get_prompt("proposal_rfp_compulsory_content.extract_compulsory_content_asks", _PROMPT_EXTRACT_COMPULSORY_CONTENT_ASKS)
                     ),
                 },
                 {

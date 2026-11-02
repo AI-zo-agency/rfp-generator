@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from app.services.llm import chat_json, is_configured
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ async def enrich_company(domain: str, sample_email: str) -> dict[str, Any]:
 
     payload, _model = await chat_json(
         [
-            {"role": "system", "content": ENRICH_SYSTEM},
+            {"role": "system", "content": get_prompt("ai.enrich", ENRICH_SYSTEM)},
             {
                 "role": "user",
                 "content": f"Email domain: {domain}\nExample address at this domain: {sample_email}",
@@ -137,7 +138,7 @@ async def synthesize_brief(brief: dict[str, Any], enrichment: dict[str, Any] | N
 
     payload, _model = await chat_json(
         [
-            {"role": "system", "content": BRIEF_SYSTEM},
+            {"role": "system", "content": get_prompt("ai.brief", BRIEF_SYSTEM)},
             {"role": "user", "content": _render(facts)},
         ],
         tier="heavy",

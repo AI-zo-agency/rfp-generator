@@ -7,6 +7,7 @@ import logging
 from app.services import llm
 from app.services.company_qualification.schemas import ProposalContext
 from app.services.llm import LlmError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,25 @@ def _fallback_context(
     )
 
 
+_PROMPT_RUN_PROPOSAL_CONTEXT_AGENT = (
+    "You are the Proposal Context Agent. Classify THIS RFP for downstream "
+    "capability prioritization and Section 1 composition.\n"
+    "Read ONLY the RFP excerpt — do NOT retrieve knowledge base content.\n"
+    "Do NOT write proposal prose. Return compact JSON only (no markdown fences).\n"
+    "Finish every string and brace — output must be valid JSON end-to-end.\n\n"
+    "{\n"
+    '  "industry": "string",\n'
+    '  "servicesRequested": ["short phrase", "..."],\n'
+    '  "buyerType": "Government|Nonprofit|Corporate|Other",\n'
+    '  "evaluationPriorities": ["short phrase"],\n'
+    '  "projectComplexity": "low|medium|high",\n'
+    '  "proposalType": "website_redesign|branding|campaign|other",\n'
+    '  "summary": "1-2 sentences only"\n'
+    "}\n"
+    "Keep lists ≤8 items. Keep summary under 40 words."
+)
+
+
 async def run_proposal_context_agent(
     *,
     rfp_title: str,
@@ -61,21 +81,7 @@ async def run_proposal_context_agent(
                 {
                     "role": "system",
                     "content": (
-                        "You are the Proposal Context Agent. Classify THIS RFP for downstream "
-                        "capability prioritization and Section 1 composition.\n"
-                        "Read ONLY the RFP excerpt — do NOT retrieve knowledge base content.\n"
-                        "Do NOT write proposal prose. Return compact JSON only (no markdown fences).\n"
-                        "Finish every string and brace — output must be valid JSON end-to-end.\n\n"
-                        "{\n"
-                        '  "industry": "string",\n'
-                        '  "servicesRequested": ["short phrase", "..."],\n'
-                        '  "buyerType": "Government|Nonprofit|Corporate|Other",\n'
-                        '  "evaluationPriorities": ["short phrase"],\n'
-                        '  "projectComplexity": "low|medium|high",\n'
-                        '  "proposalType": "website_redesign|branding|campaign|other",\n'
-                        '  "summary": "1-2 sentences only"\n'
-                        "}\n"
-                        "Keep lists ≤8 items. Keep summary under 40 words."
+                        get_prompt("proposal_context.run_proposal_context_agent", _PROMPT_RUN_PROPOSAL_CONTEXT_AGENT)
                     ),
                 },
                 {

@@ -7,6 +7,7 @@ import logging
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan, ScopeAnalysis
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "scope_analysis"
@@ -32,7 +33,7 @@ async def run_scope_analysis(
 ) -> ProposalExecutionPlan:
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("scope_analysis.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

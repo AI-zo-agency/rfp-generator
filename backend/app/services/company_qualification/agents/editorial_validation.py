@@ -17,6 +17,7 @@ from app.services.company_qualification.schemas import (
     TeamSelectionResult,
     EvidenceSelectionResult,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,36 @@ def _format_sections_for_review(sections: list[dict[str, Any]]) -> str:
         word_count = len(content.split())
         lines.append(f"### {title} ({sid})\nWord count: {word_count}\n{content}")
     return "\n\n".join(lines)
+
+
+_PROMPT_RUN_EDITORIAL_VALIDATION_AGENT = (
+    "You are the Editorial Validation Agent (Rachel review) for zö agency "
+    "Sections 1–3.\n"
+    "REVIEW ONLY — do NOT rewrite or return replacement section content as final.\n"
+    "Flag issues across ALL subsections:\n"
+    "- Irrelevant content, duplicates, wrong person/case study/cert\n"
+    "- Length violations, weak evidence, too generic, missing proof\n"
+    "- Omit-tier capabilities appearing, narrative in business info\n"
+    "- Wrong team members vs RFP, too many bios or case studies\n\n"
+    "Return at MOST the 8 highest-impact recommendations. Keep each 'issue' and "
+    "'recommendation' under 200 characters. Set 'suggestedReplacement' to null. "
+    "This keeps the JSON small enough to return complete.\n\n"
+    "Return JSON:\n"
+    "{\n"
+    '  "recommendations": [\n'
+    "    {\n"
+    '      "sectionId": "string",\n'
+    '      "sectionTitle": "string",\n'
+    '      "issueType": "redundant_content|length|irrelevant|missing_verify|wrong_person|wrong_evidence|other",\n'
+    '      "issue": "what is wrong",\n'
+    '      "recommendation": "rewrite|delete|replace|trim — specific guidance",\n'
+    '      "confidence": 0.0,\n'
+    '      "suggestedReplacement": null,\n'
+    '      "status": "pending"\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
 
 
 async def run_editorial_validation_agent(
@@ -58,32 +89,7 @@ async def run_editorial_validation_agent(
         {
             "role": "system",
             "content": (
-                "You are the Editorial Validation Agent (Rachel review) for zö agency "
-                "Sections 1–3.\n"
-                "REVIEW ONLY — do NOT rewrite or return replacement section content as final.\n"
-                "Flag issues across ALL subsections:\n"
-                "- Irrelevant content, duplicates, wrong person/case study/cert\n"
-                "- Length violations, weak evidence, too generic, missing proof\n"
-                "- Omit-tier capabilities appearing, narrative in business info\n"
-                "- Wrong team members vs RFP, too many bios or case studies\n\n"
-                "Return at MOST the 8 highest-impact recommendations. Keep each 'issue' and "
-                "'recommendation' under 200 characters. Set 'suggestedReplacement' to null. "
-                "This keeps the JSON small enough to return complete.\n\n"
-                "Return JSON:\n"
-                "{\n"
-                '  "recommendations": [\n'
-                "    {\n"
-                '      "sectionId": "string",\n'
-                '      "sectionTitle": "string",\n'
-                '      "issueType": "redundant_content|length|irrelevant|missing_verify|wrong_person|wrong_evidence|other",\n'
-                '      "issue": "what is wrong",\n'
-                '      "recommendation": "rewrite|delete|replace|trim — specific guidance",\n'
-                '      "confidence": 0.0,\n'
-                '      "suggestedReplacement": null,\n'
-                '      "status": "pending"\n'
-                "    }\n"
-                "  ]\n"
-                "}"
+                get_prompt("editorial_validation.run_editorial_validation_agent", _PROMPT_RUN_EDITORIAL_VALIDATION_AGENT)
             ),
         },
         {

@@ -35,6 +35,7 @@ from app.models.pricing_instrument import (
 )
 from app.services.proposal_intelligence.agent_base import safe_chat_json
 from app.services.proposal_rfp_excerpt import closing_package_excerpt
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1135,7 +1136,7 @@ async def extract_pricing_and_delivery_constraints(
     opp_blob = _compact_opportunity_for_prompt(opportunity)
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("pricing_instrument_extract.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

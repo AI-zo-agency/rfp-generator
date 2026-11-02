@@ -7,6 +7,7 @@ import logging
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
 from app.services.proposal_intelligence.schemas import ComplianceMatrix, ProposalExecutionPlan
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "compliance_mapping"
@@ -43,7 +44,7 @@ async def run_compliance_mapping(
     understanding = plan.opportunity.understanding.model_dump(by_alias=True)
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("compliance_mapping.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

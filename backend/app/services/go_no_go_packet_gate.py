@@ -25,6 +25,7 @@ from app.models.go_no_go import (
     RfpPacketRead,
     UnresolvedReference,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -459,7 +460,7 @@ async def classify_rfp_packet(
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": _PACKET_CLASSIFIER_PROMPT},
+                {"role": "system", "content": get_prompt("go_no_go_packet_gate.packet_classifier", _PACKET_CLASSIFIER_PROMPT)},
                 {
                     "role": "user",
                     "content": (

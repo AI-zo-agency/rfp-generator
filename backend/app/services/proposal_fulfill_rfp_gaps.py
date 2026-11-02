@@ -51,6 +51,7 @@ from app.services.proposal_repository import (
     asave_proposal_draft,
     asave_research_cache,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,37 @@ def _closing_uses_template_stub(component: ClosingComponent) -> bool:
     return kind in {"form", "attachment", "signature"}
 
 
+_PROMPT_DRAFT_CLOSING_SECTION = (
+    "You draft ONE closing / submission section for a zö agency public-sector proposal.\n"
+    "GOAL: help this bid WIN — be complete, compliant, and persuasive without inventing facts.\n"
+    "Use ONLY what THIS RFP demands — never invent client-specific facts, "
+    "phones, emails, policy numbers, or signatures.\n"
+    "When a field needs a human/file, use [MANUAL FILL: …].\n"
+    "NEVER certify vendor registration complete, procurement documents "
+    "downloaded, or promise registration attachments — use [MANUAL FILL: Sonja "
+    "confirm registration] unless registration confirmation is on file.\n"
+    "When insurance/pricing numbers are stated in the RFP excerpt, copy them exactly.\n"
+    "NEVER cite HTA strategic-plan / agency four KPIs (Resident Sentiment, Visitor "
+    "Satisfaction, Average Daily Visitor Spending as an agency set). If KPIs appear, "
+    "use ONLY contractor Section 2.3 KPIs from the excerpt: Total Visitor Arrivals, "
+    "Total Visitor Expenditures, Average Islands Visited Per Person (+ growth targets).\n"
+    "Signature/certification blocks: do not certify wrong KPIs — omit KPI lists or "
+    "use contractor KPIs only.\n"
+    "References: quote the RFP's required count and institution type when stated; "
+    "never claim the RFP is silent on references if the excerpt specifies them.\n"
+    "Never claim the RFP is silent on insurance minimums if the excerpt states limits.\n"
+    "Pricing form: if the RFP forbids altering the quotation form, list only "
+    "official field labels — no Section A/B/C/D rewrites or extra clauses on the form.\n"
+    "Acknowledgement of Addenda / required forms: treat as pass/fail — follow RFP "
+    "wording tightly so evaluators can check the box.\n"
+    "Closing/commitment sections: this is the COMPULSORY end of the proposal — "
+    "clear offer to perform, fit to buyer goals, capacity/timeline, validity "
+    "period if stated, invite next steps. Do not repeat full case studies. "
+    "Still no invented proof.\n"
+    "Return JSON: {\"content\": \"markdown with ## headings\"}"
+)
+
+
 async def _draft_closing_section(
     *,
     component: ClosingComponent,
@@ -247,33 +279,7 @@ async def _draft_closing_section(
                 {
                     "role": "system",
                     "content": (
-                        "You draft ONE closing / submission section for a zö agency public-sector proposal.\n"
-                        "GOAL: help this bid WIN — be complete, compliant, and persuasive without inventing facts.\n"
-                        "Use ONLY what THIS RFP demands — never invent client-specific facts, "
-                        "phones, emails, policy numbers, or signatures.\n"
-                        "When a field needs a human/file, use [MANUAL FILL: …].\n"
-                        "NEVER certify vendor registration complete, procurement documents "
-                        "downloaded, or promise registration attachments — use [MANUAL FILL: Sonja "
-                        "confirm registration] unless registration confirmation is on file.\n"
-                        "When insurance/pricing numbers are stated in the RFP excerpt, copy them exactly.\n"
-                        "NEVER cite HTA strategic-plan / agency four KPIs (Resident Sentiment, Visitor "
-                        "Satisfaction, Average Daily Visitor Spending as an agency set). If KPIs appear, "
-                        "use ONLY contractor Section 2.3 KPIs from the excerpt: Total Visitor Arrivals, "
-                        "Total Visitor Expenditures, Average Islands Visited Per Person (+ growth targets).\n"
-                        "Signature/certification blocks: do not certify wrong KPIs — omit KPI lists or "
-                        "use contractor KPIs only.\n"
-                        "References: quote the RFP's required count and institution type when stated; "
-                        "never claim the RFP is silent on references if the excerpt specifies them.\n"
-                        "Never claim the RFP is silent on insurance minimums if the excerpt states limits.\n"
-                        "Pricing form: if the RFP forbids altering the quotation form, list only "
-                        "official field labels — no Section A/B/C/D rewrites or extra clauses on the form.\n"
-                        "Acknowledgement of Addenda / required forms: treat as pass/fail — follow RFP "
-                        "wording tightly so evaluators can check the box.\n"
-                        "Closing/commitment sections: this is the COMPULSORY end of the proposal — "
-                        "clear offer to perform, fit to buyer goals, capacity/timeline, validity "
-                        "period if stated, invite next steps. Do not repeat full case studies. "
-                        "Still no invented proof.\n"
-                        "Return JSON: {\"content\": \"markdown with ## headings\"}"
+                        get_prompt("proposal_fulfill_rfp_gaps.draft_closing_section", _PROMPT_DRAFT_CLOSING_SECTION)
                     ),
                 },
                 {

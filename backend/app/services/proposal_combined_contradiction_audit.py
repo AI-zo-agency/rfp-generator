@@ -19,6 +19,7 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_scan_rfp_contradictions import _manuscript_digest
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ async def detect_all_contradictions(
     try:
         raw, _ = await llm.chat_json(
             [
-                {"role": "system", "content": _COMBINED_SYSTEM},
+                {"role": "system", "content": get_prompt("proposal_combined_contradiction_audit.combined", _COMBINED_SYSTEM)},
                 {"role": "user", "content": user},
             ],
             max_tokens=4096,

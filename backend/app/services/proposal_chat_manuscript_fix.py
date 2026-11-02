@@ -21,6 +21,7 @@ from app.services.proposal_chat_structure import (
     _proposal_manuscript_for_chat,
     apply_chat_structure_plan,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,58 @@ def _deterministic_intent_classify(
     return None
 
 
+_PROMPT_CLASSIFY_CHAT_EDIT_INTENT_ONCE = (
+    "Classify the user's chat message for a proposal editor.\n\n"
+    "FIRST restate the ask in `reason` (one clause) — including typos "
+    "and missing punctuation. Classify that restatement, not keywords.\n"
+    "Classify ONLY the user's ask. Ignore any Evidence policy / "
+    "prompt scaffolding if it appears in the message.\n\n"
+    '- "advisory" — user asks what is wrong / for a review / analysis / '
+    "gaps / missing items / compliance / whole-proposal audit WITHOUT "
+    "asking you to change the draft yet. Reviews of the full proposal "
+    "are ALWAYS advisory (never single_edit on the open tab).\n"
+    '- "single_edit" — user wants ONE named or pinned section changed now '
+    "(add/insert/include a table, awards block, paragraph, or fix content "
+    "in the open tab → single_edit, NOT advisory).\n"
+    '- "multi_patch" — user wants you to APPLY fixes now across several '
+    "sections (or the whole proposal), including 'apply these fixes', "
+    "'patch-wise', 'rebuild cost and clean leftovers', etc.\n"
+    '- "structure" — user wants to ADD, DELETE, or RENAME sidebar '
+    "sections/tabs (new H2, new bio tab, new case study tab, split content "
+    "into its own section, delete a tab). Any phrasing counts — e.g. "
+    "'add section new name Planning and methodology', 'create a case study "
+    "for Bend', 'add another team bio', 'remove section 2.1'.\n"
+    '- "none" — unrelated / cannot act.\n'
+    "CRITICAL: add/create/delete sidebar section/tab/H2/bio/case study → "
+    "structure (never single_edit on the open tab).\n"
+    "CRITICAL: revise/patch/fix/improve THIS or THAT section/tab/part/"
+    "paragraph → ALWAYS single_edit (never multi_patch). multi_patch ONLY "
+    "when they clearly ask to change multiple sections or the whole "
+    "proposal (across the proposal / every section / apply these fixes).\n"
+    "If the user lists problems and says to apply/fix/patch them across "
+    "the proposal → multi_patch. Never single_edit for that.\n"
+    "If the user pastes a multi-item CONTENT ISSUES / content-risk audit "
+    "(references incomplete, unsubstantiated claims, fabricated tagline, "
+    "exec summary criteria restatement, thin case studies) and asks to "
+    "fix/change/solve/address it → multi_patch (never advisory-only).\n"
+    "Never choose single_edit merely because a tab is open/focused when "
+    "the ask is about the whole proposal, missing sections, or gaps.\n"
+    "For multi_patch and whole-proposal advisory, primarySectionId may "
+    "be null.\n"
+    "primarySectionId rules (meaning, not keywords):\n"
+    "- If Pinned/focus is set and the ask is about that tab's prose "
+    "(voice, tone, descriptive rewrite, tighten, expand) keep that id.\n"
+    "- Never switch to Cost/Pricing just because the open tab mentions "
+    "dollar amounts, sponsorship tiers, or the word budget.\n"
+    "- Only set a different outline id when the user clearly names or "
+    "describes another sidebar tab as the thing to change.\n"
+    "- Prefer the focused id when unsure.\n\n"
+    "Return JSON:\n"
+    '{"intent":"advisory|single_edit|multi_patch|structure|none",'
+    '"primarySectionId":"id or null","reason":"short"}'
+)
+
+
 async def _classify_chat_edit_intent_once(
     *,
     user_message: str,
@@ -207,54 +260,7 @@ async def _classify_chat_edit_intent_once(
                 {
                     "role": "system",
                     "content": (
-                        "Classify the user's chat message for a proposal editor.\n\n"
-                        "FIRST restate the ask in `reason` (one clause) — including typos "
-                        "and missing punctuation. Classify that restatement, not keywords.\n"
-                        "Classify ONLY the user's ask. Ignore any Evidence policy / "
-                        "prompt scaffolding if it appears in the message.\n\n"
-                        '- "advisory" — user asks what is wrong / for a review / analysis / '
-                        "gaps / missing items / compliance / whole-proposal audit WITHOUT "
-                        "asking you to change the draft yet. Reviews of the full proposal "
-                        "are ALWAYS advisory (never single_edit on the open tab).\n"
-                        '- "single_edit" — user wants ONE named or pinned section changed now '
-                        "(add/insert/include a table, awards block, paragraph, or fix content "
-                        "in the open tab → single_edit, NOT advisory).\n"
-                        '- "multi_patch" — user wants you to APPLY fixes now across several '
-                        "sections (or the whole proposal), including 'apply these fixes', "
-                        "'patch-wise', 'rebuild cost and clean leftovers', etc.\n"
-                        '- "structure" — user wants to ADD, DELETE, or RENAME sidebar '
-                        "sections/tabs (new H2, new bio tab, new case study tab, split content "
-                        "into its own section, delete a tab). Any phrasing counts — e.g. "
-                        "'add section new name Planning and methodology', 'create a case study "
-                        "for Bend', 'add another team bio', 'remove section 2.1'.\n"
-                        '- "none" — unrelated / cannot act.\n'
-                        "CRITICAL: add/create/delete sidebar section/tab/H2/bio/case study → "
-                        "structure (never single_edit on the open tab).\n"
-                        "CRITICAL: revise/patch/fix/improve THIS or THAT section/tab/part/"
-                        "paragraph → ALWAYS single_edit (never multi_patch). multi_patch ONLY "
-                        "when they clearly ask to change multiple sections or the whole "
-                        "proposal (across the proposal / every section / apply these fixes).\n"
-                        "If the user lists problems and says to apply/fix/patch them across "
-                        "the proposal → multi_patch. Never single_edit for that.\n"
-                        "If the user pastes a multi-item CONTENT ISSUES / content-risk audit "
-                        "(references incomplete, unsubstantiated claims, fabricated tagline, "
-                        "exec summary criteria restatement, thin case studies) and asks to "
-                        "fix/change/solve/address it → multi_patch (never advisory-only).\n"
-                        "Never choose single_edit merely because a tab is open/focused when "
-                        "the ask is about the whole proposal, missing sections, or gaps.\n"
-                        "For multi_patch and whole-proposal advisory, primarySectionId may "
-                        "be null.\n"
-                        "primarySectionId rules (meaning, not keywords):\n"
-                        "- If Pinned/focus is set and the ask is about that tab's prose "
-                        "(voice, tone, descriptive rewrite, tighten, expand) keep that id.\n"
-                        "- Never switch to Cost/Pricing just because the open tab mentions "
-                        "dollar amounts, sponsorship tiers, or the word budget.\n"
-                        "- Only set a different outline id when the user clearly names or "
-                        "describes another sidebar tab as the thing to change.\n"
-                        "- Prefer the focused id when unsure.\n\n"
-                        "Return JSON:\n"
-                        '{"intent":"advisory|single_edit|multi_patch|structure|none",'
-                        '"primarySectionId":"id or null","reason":"short"}'
+                        get_prompt("proposal_chat_manuscript_fix.classify_chat_edit_intent_once", _PROMPT_CLASSIFY_CHAT_EDIT_INTENT_ONCE)
                     ),
                 },
                 {
@@ -343,6 +349,53 @@ async def classify_chat_edit_intent(
         await asyncio.sleep(_INTENT_CLASSIFY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
 
 
+_PROMPT_PLAN_MANUSCRIPT_FIXES = (
+    "You read the user's APPLY request, recent chat, and the FULL proposal.\n"
+    "Understand what they want changed. Build a PATCH PLAN for THIS RFP only.\n"
+    "Do NOT use keyword matching — infer from meaning.\n\n"
+    "Rules:\n"
+    "- Put each distinct change into fixes[] with the correct sectionId "
+    "from the outline and a surgical brief (exactly what to change).\n"
+    "- Prefer patching EXISTING sections. Technical Ability / Past "
+    "Performance / Cost usually already cover understanding, references, "
+    "compliance, and timeline.\n"
+    "- addSections[] ONLY if the user clearly wants a new tab/section "
+    "added. If they say no new sections, outline already covers it, or "
+    "delete unnecessary sections → addSections must be [].\n"
+    "- runBudgetAgent defaults to FALSE. Set true ONLY when the user "
+    "clearly asks to rebuild or regenerate the cost/fee/budget/pricing "
+    "TABLE or Cost of base proposal (new/changed line items). "
+    "If they only want summary paragraphs recalculated from the "
+    "existing fee table (agency fee vs pass-through vs total must be "
+    "distinct numbers), runBudgetAgent MUST be false — do not touch "
+    "pricing lines. Case studies, past performance, bios, flags, "
+    "leftovers, references → runBudgetAgent MUST be false.\n"
+    "- needsKbExcerpts=true on a fix ONLY when that brief needs new "
+    "case-study / reference material from the zö knowledge base. "
+    "Cleaning leftover flags or wrong-RFP notes does NOT need KB.\n"
+    "- Never invent dollars, phones, emails, or contacts. Use [VERIFY: …] "
+    "when unknown.\n"
+    "- Budget briefs (when runBudgetAgent): RFP thresholds + guide tiers "
+    "only — no invented client-specific rates.\n"
+    "- Wrong-RFP leftovers (other universities, GSU, health-coalition "
+    "flags like Recovery Network of Oregon on a non-health RFP): strip "
+    "or rewrite for THIS client only.\n"
+    "- Thin higher-ed references: if named schools have no delivered "
+    "outcomes, either substantiate from KB (needsKbExcerpts) or mark "
+    "[VERIFY] / remove unverified claims — do not leave empty name-drops.\n"
+    "- Max 10 fixes + 4 addSections.\n"
+    "- If nothing should change, return empty arrays and runBudgetAgent "
+    "false.\n\n"
+    "Return JSON:\n"
+    "{"
+    '"fixes":[{"sectionId":"...","brief":"...","needsKbExcerpts":false}],'
+    '"addSections":[{"title":"...","brief":"..."}],'
+    '"runBudgetAgent":false,'
+    '"summary":"short user-facing recap"'
+    "}"
+)
+
+
 async def _plan_manuscript_fixes(
     *,
     draft: ProposalDraft,
@@ -360,49 +413,7 @@ async def _plan_manuscript_fixes(
                 {
                     "role": "system",
                     "content": (
-                        "You read the user's APPLY request, recent chat, and the FULL proposal.\n"
-                        "Understand what they want changed. Build a PATCH PLAN for THIS RFP only.\n"
-                        "Do NOT use keyword matching — infer from meaning.\n\n"
-                        "Rules:\n"
-                        "- Put each distinct change into fixes[] with the correct sectionId "
-                        "from the outline and a surgical brief (exactly what to change).\n"
-                        "- Prefer patching EXISTING sections. Technical Ability / Past "
-                        "Performance / Cost usually already cover understanding, references, "
-                        "compliance, and timeline.\n"
-                        "- addSections[] ONLY if the user clearly wants a new tab/section "
-                        "added. If they say no new sections, outline already covers it, or "
-                        "delete unnecessary sections → addSections must be [].\n"
-                        "- runBudgetAgent defaults to FALSE. Set true ONLY when the user "
-                        "clearly asks to rebuild or regenerate the cost/fee/budget/pricing "
-                        "TABLE or Cost of base proposal (new/changed line items). "
-                        "If they only want summary paragraphs recalculated from the "
-                        "existing fee table (agency fee vs pass-through vs total must be "
-                        "distinct numbers), runBudgetAgent MUST be false — do not touch "
-                        "pricing lines. Case studies, past performance, bios, flags, "
-                        "leftovers, references → runBudgetAgent MUST be false.\n"
-                        "- needsKbExcerpts=true on a fix ONLY when that brief needs new "
-                        "case-study / reference material from the zö knowledge base. "
-                        "Cleaning leftover flags or wrong-RFP notes does NOT need KB.\n"
-                        "- Never invent dollars, phones, emails, or contacts. Use [VERIFY: …] "
-                        "when unknown.\n"
-                        "- Budget briefs (when runBudgetAgent): RFP thresholds + guide tiers "
-                        "only — no invented client-specific rates.\n"
-                        "- Wrong-RFP leftovers (other universities, GSU, health-coalition "
-                        "flags like Recovery Network of Oregon on a non-health RFP): strip "
-                        "or rewrite for THIS client only.\n"
-                        "- Thin higher-ed references: if named schools have no delivered "
-                        "outcomes, either substantiate from KB (needsKbExcerpts) or mark "
-                        "[VERIFY] / remove unverified claims — do not leave empty name-drops.\n"
-                        "- Max 10 fixes + 4 addSections.\n"
-                        "- If nothing should change, return empty arrays and runBudgetAgent "
-                        "false.\n\n"
-                        "Return JSON:\n"
-                        "{"
-                        '"fixes":[{"sectionId":"...","brief":"...","needsKbExcerpts":false}],'
-                        '"addSections":[{"title":"...","brief":"..."}],'
-                        '"runBudgetAgent":false,'
-                        '"summary":"short user-facing recap"'
-                        "}"
+                        get_prompt("proposal_chat_manuscript_fix.plan_manuscript_fixes", _PROMPT_PLAN_MANUSCRIPT_FIXES)
                     ),
                 },
                 {
@@ -575,7 +586,7 @@ async def _apply_surgical_section_fix(
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": _CHAT_PATCH_SYSTEM},
+                {"role": "system", "content": get_prompt("proposal_chat_manuscript_fix.chat_patch", _CHAT_PATCH_SYSTEM)},
                 {"role": "user", "content": user_content},
             ],
             max_tokens=16000,

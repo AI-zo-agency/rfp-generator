@@ -12,6 +12,7 @@ from app.services.company_qualification.schemas import (
     SubsectionBudget,
 )
 from app.services.llm import LlmError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,22 @@ def _normalize_budget_ids(budget: Section1ContentBudget) -> Section1ContentBudge
     return Section1ContentBudget(budgets=fixed)
 
 
+_PROMPT_RUN_CONTENT_BUDGET_AGENT = (
+    "You are the Content Budget Agent for zö agency Section 1.\n"
+    "Assign word/format budgets per subsection. Do NOT write proposal content.\n"
+    "Use EXACT sectionId values below. Keep notes ≤6 words or null.\n"
+    "Compact JSON only — no markdown fences.\n"
+    "Defaults (tweak only if RFP clearly needs it):\n"
+    "- section-1-who-we-are: narrative 120-200 (designer-ready, no padding)\n"
+    "- section-1-org-structure: list 400-900\n"
+    "- section-1-business-info: table, wordMin/wordMax null\n"
+    "- section-1-certifications: list 75-150\n"
+    "- section-1-insurance: facts 50-100\n"
+    'Return: {"budgets":[{"sectionId":"…","title":"…","format":"narrative|table|list|facts",'
+    '"wordMin":int|null,"wordMax":int|null,"notes":null}]}'
+)
+
+
 async def run_content_budget_agent(
     *,
     proposal_context: ProposalContext,
@@ -111,18 +128,7 @@ async def run_content_budget_agent(
                 {
                     "role": "system",
                     "content": (
-                        "You are the Content Budget Agent for zö agency Section 1.\n"
-                        "Assign word/format budgets per subsection. Do NOT write proposal content.\n"
-                        "Use EXACT sectionId values below. Keep notes ≤6 words or null.\n"
-                        "Compact JSON only — no markdown fences.\n"
-                        "Defaults (tweak only if RFP clearly needs it):\n"
-                        "- section-1-who-we-are: narrative 120-200 (designer-ready, no padding)\n"
-                        "- section-1-org-structure: list 400-900\n"
-                        "- section-1-business-info: table, wordMin/wordMax null\n"
-                        "- section-1-certifications: list 75-150\n"
-                        "- section-1-insurance: facts 50-100\n"
-                        'Return: {"budgets":[{"sectionId":"…","title":"…","format":"narrative|table|list|facts",'
-                        '"wordMin":int|null,"wordMax":int|null,"notes":null}]}'
+                        get_prompt("content_budget.run_content_budget_agent", _PROMPT_RUN_CONTENT_BUDGET_AGENT)
                     ),
                 },
                 {

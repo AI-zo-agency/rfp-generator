@@ -12,6 +12,7 @@ from app.services import llm
 from app.services.proposal_manual_flags import MANUAL_FILL_TAG_RE, VERIFY_TAG_RE
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 from app.services.proposal_section_health import is_dead_section
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +593,48 @@ def _preserve_designer_notes(original: str, rewritten: str) -> str:
     return f"{trimmed}\n\n{tail}\n" if trimmed else f"{tail}\n"
 
 
+_PROMPT_SCRUB_OPTIONAL_VERIFY_TAGS = (
+    "You scrub proposal manuscript [VERIFY: …] and [MANUAL FILL: …] placeholders "
+    "using the RFP and the KB.\n"
+    "BIAS (HARD): Default is REMOVE. Keep a placeholder ONLY when it is "
+    "selection-critical for THIS RFP — i.e. dropping it would risk disqualification "
+    "OR clearly cost evaluation points the RFP scores. Internal audit noise never stays.\n"
+    "RULES:\n"
+    "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a tag "
+    "asks for (a name, number, cert, contact, partner, etc.), REPLACE the tag with that real "
+    "fact, verbatim from the evidence.\n"
+    "2. ALWAYS REMOVE these (never selection-critical): gated-evidence / 'not in evidence "
+    "set' tags; claim-mismatch noise; optional partner/subcontractor names; week/date "
+    "calendar stubs; sample dashboard screenshots; vague 'confirm with "
+    "operations' asks; redundant company-info asks already covered in Who We Are / 1.3.\n"
+    "   NEVER remove a [DESIGNER NOTE: …] tag — designer notes are legitimate "
+    "handoffs (insert an approved bio PDF, layout/imagery direction, render as a "
+    "diagram) and MUST be preserved verbatim; they are stripped only at export.\n"
+    "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
+    "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
+    "   EXCEPTION — MONEY: never remove estimated cost, rates, fees, or dollar amounts and "
+    "leave a blank table cell. If KB has no number, KEEP "
+    "[MANUAL FILL: estimated cost — confirm before submission]. Empty cost cells hide the gap.\n"
+    "4. KEEP a short [VERIFY: brief field] or [MANUAL FILL: Owner — field] ONLY when ALL "
+    "are true: (a) the RFP EXPLICITLY mandates that exact fact for compliance or scored "
+    "evaluation (FEIN, COI limits, required reference phone/email, E-Verify, affidavit, "
+    "bonding, required %time when scored, estimated cost / rates / fees), (b) neither KB nor "
+    "RFP already supplies it, (c) keeping it materially helps win / avoid DQ. "
+    "Money placeholders: if unsure → KEEP.\n"
+    "5. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
+    "6. Never leave empty brackets like [] or bare [VERIFY] / [MANUAL FILL].\n"
+    "7. Preserve useful tables/structure; only change what placeholders force. Do not "
+    "expand the section with AI filler or restated company boilerplate.\n"
+    "8. zö voice: concrete, human, no corporate AI-slop.\n"
+    "9. These rules govern how you write; they are never content. Never write sentences "
+    "about submission requirements, pass/fail status, what cannot be submitted, or what "
+    "must be verified/confirmed with anyone — apply the rule silently instead of "
+    "narrating it. The [VERIFY: ...] / [MANUAL FILL: Owner — ...] tag is the only trace "
+    "of a gap; never explain, preface, or restate the rule that produced it.\n"
+    "10. Return JSON only."
+)
+
+
 async def scrub_optional_verify_tags(
     content: str,
     *,
@@ -681,44 +724,7 @@ async def scrub_optional_verify_tags(
             kb_context = ""
 
     system = (
-        "You scrub proposal manuscript [VERIFY: …] and [MANUAL FILL: …] placeholders "
-        "using the RFP and the KB.\n"
-        "BIAS (HARD): Default is REMOVE. Keep a placeholder ONLY when it is "
-        "selection-critical for THIS RFP — i.e. dropping it would risk disqualification "
-        "OR clearly cost evaluation points the RFP scores. Internal audit noise never stays.\n"
-        "RULES:\n"
-        "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a tag "
-        "asks for (a name, number, cert, contact, partner, etc.), REPLACE the tag with that real "
-        "fact, verbatim from the evidence.\n"
-        "2. ALWAYS REMOVE these (never selection-critical): gated-evidence / 'not in evidence "
-        "set' tags; claim-mismatch noise; optional partner/subcontractor names; week/date "
-        "calendar stubs; sample dashboard screenshots; vague 'confirm with "
-        "operations' asks; redundant company-info asks already covered in Who We Are / 1.3.\n"
-        "   NEVER remove a [DESIGNER NOTE: …] tag — designer notes are legitimate "
-        "handoffs (insert an approved bio PDF, layout/imagery direction, render as a "
-        "diagram) and MUST be preserved verbatim; they are stripped only at export.\n"
-        "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
-        "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
-        "   EXCEPTION — MONEY: never remove estimated cost, rates, fees, or dollar amounts and "
-        "leave a blank table cell. If KB has no number, KEEP "
-        "[MANUAL FILL: estimated cost — confirm before submission]. Empty cost cells hide the gap.\n"
-        "4. KEEP a short [VERIFY: brief field] or [MANUAL FILL: Owner — field] ONLY when ALL "
-        "are true: (a) the RFP EXPLICITLY mandates that exact fact for compliance or scored "
-        "evaluation (FEIN, COI limits, required reference phone/email, E-Verify, affidavit, "
-        "bonding, required %time when scored, estimated cost / rates / fees), (b) neither KB nor "
-        "RFP already supplies it, (c) keeping it materially helps win / avoid DQ. "
-        "Money placeholders: if unsure → KEEP.\n"
-        "5. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
-        "6. Never leave empty brackets like [] or bare [VERIFY] / [MANUAL FILL].\n"
-        "7. Preserve useful tables/structure; only change what placeholders force. Do not "
-        "expand the section with AI filler or restated company boilerplate.\n"
-        "8. zö voice: concrete, human, no corporate AI-slop.\n"
-        "9. These rules govern how you write; they are never content. Never write sentences "
-        "about submission requirements, pass/fail status, what cannot be submitted, or what "
-        "must be verified/confirmed with anyone — apply the rule silently instead of "
-        "narrating it. The [VERIFY: ...] / [MANUAL FILL: Owner — ...] tag is the only trace "
-        "of a gap; never explain, preface, or restate the rule that produced it.\n"
-        "10. Return JSON only."
+        get_prompt("proposal_verify_optional_scrub.scrub_optional_verify_tags", _PROMPT_SCRUB_OPTIONAL_VERIFY_TAGS)
     )
     user = (
         f"Section title: {section_title}\n\n"

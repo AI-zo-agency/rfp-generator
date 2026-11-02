@@ -17,6 +17,7 @@ from app.services.proposal_intelligence.schemas import (
     SectionPlans,
     WinningPattern,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "winning_pattern_intelligence"
@@ -132,7 +133,7 @@ async def _extract_patterns(
     outline_sections = plan.writing.proposal_outline.sections
     return await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("winning_pattern_intelligence.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

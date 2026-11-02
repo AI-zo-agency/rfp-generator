@@ -74,6 +74,7 @@ from app.services.go_no_go_packet_gate import (
     classify_rfp_packet,
 )
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
+from app.services.prompt_store import get_prompt
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
     (
@@ -1201,7 +1202,7 @@ async def _plan_rfp_requirements(
             max_chars=8_000,
         )
     messages = [
-        {"role": "system", "content": REQUIREMENT_PLANNER_PROMPT},
+        {"role": "system", "content": get_prompt("go_no_go_requirements.requirement_planner", REQUIREMENT_PLANNER_PROMPT)},
         {
             "role": "user",
             "content": (
@@ -2456,7 +2457,7 @@ async def _adjudicate_capabilities(
         try:
             raw, provider = await llm.chat_json(
                 [
-                    {"role": "system", "content": ADJUDICATOR_PROMPT},
+                    {"role": "system", "content": get_prompt("go_no_go_adjudicator.adjudicator", ADJUDICATOR_PROMPT)},
                     {"role": "user", "content": body[:60_000]},
                 ],
                 max_tokens=16000,
@@ -2521,7 +2522,7 @@ async def _adjudicate_capabilities(
             try:
                 raw2, provider2 = await llm.chat_json(
                     [
-                        {"role": "system", "content": GAP_RECOVER_PROMPT},
+                        {"role": "system", "content": get_prompt("go_no_go_adjudicator.gap_recover", GAP_RECOVER_PROMPT)},
                         {"role": "user", "content": recover_body[:40_000]},
                     ],
                     max_tokens=16000,
@@ -2994,7 +2995,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 """
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": get_prompt("go_no_go_service.system", SYSTEM_PROMPT)},
         {"role": "user", "content": user_prompt},
     ]
 

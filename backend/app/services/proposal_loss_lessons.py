@@ -9,6 +9,7 @@ from app.models.proposal import LossLesson
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
 from app.services.proposal_knowledge_base_tools import search_knowledge_base
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ async def build_loss_lessons_for_rfp(
 
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": LOSS_SYNTHESIS_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_loss_lessons.loss_synthesis", LOSS_SYNTHESIS_PROMPT)},
             {
                 "role": "user",
                 "content": (

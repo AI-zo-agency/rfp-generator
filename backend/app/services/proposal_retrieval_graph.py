@@ -13,6 +13,7 @@ from app.models.proposal import EvidenceItem, RfpSectionMap
 from app.services import llm, supermemory
 from app.services.llm import LlmError
 from app.services.proposal_langchain import _provider_name
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": RFP_ANALYSIS_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_retrieval_graph.rfp_analysis", RFP_ANALYSIS_PROMPT)},
                 {
                     "role": "user",
                     "content": (
@@ -377,7 +378,7 @@ async def _plan_queries_for_sections(
         async with state["llm_semaphore"]:
             raw, _ = await llm.chat_json(
                 [
-                    {"role": "system", "content": BATCH_QUERY_PLANNER_PROMPT},
+                    {"role": "system", "content": get_prompt("proposal_retrieval_graph.batch_query_planner", BATCH_QUERY_PLANNER_PROMPT)},
                     {
                         "role": "user",
                         "content": (
@@ -582,7 +583,7 @@ async def _evaluate_coverage_batch(
             async with llm_semaphore:
                 raw, _ = await llm.chat_json(
                     [
-                        {"role": "system", "content": BATCH_COVERAGE_EVAL_PROMPT},
+                        {"role": "system", "content": get_prompt("proposal_retrieval_graph.batch_coverage_eval", BATCH_COVERAGE_EVAL_PROMPT)},
                         {
                             "role": "user",
                             "content": json.dumps(batch_input, indent=2),

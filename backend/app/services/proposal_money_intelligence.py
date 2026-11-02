@@ -25,6 +25,7 @@ from app.services.proposal_consistency import (
     _is_non_bid_currency_context,
     allowed_budget_amounts,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ async def run_currency_triage_pass_a(
     try:
         raw, _provider = await llm.chat_json(
             [
-                {"role": "system", "content": _PASS_A_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_money_intelligence.pass_a", _PASS_A_PROMPT)},
                 {
                     "role": "user",
                     "content": (
@@ -293,7 +294,7 @@ async def run_budget_integrity_pass_b(
         for s in sections[:6]
     ]
     messages = [
-        {"role": "system", "content": _PASS_B_PROMPT},
+        {"role": "system", "content": get_prompt("proposal_money_intelligence.pass_b", _PASS_B_PROMPT)},
         {
             "role": "user",
             "content": (

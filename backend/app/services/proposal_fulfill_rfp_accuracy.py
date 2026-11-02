@@ -13,6 +13,7 @@ from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_rfp_excerpt import evaluation_and_kpi_excerpt
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,27 @@ def parse_scoring_facts_from_rfp(rfp_text: str) -> RfpScoringFacts:
     return facts
 
 
+_PROMPT_EXTRACT_RFP_SCORING_FACTS_LLM = (
+    "Extract scoring facts from THIS RFP only. Distinguish:\n"
+    "- KPIs the CONTRACTOR must hit\n"
+    "- KPIs that belong to the AGENCY/buyer (not contract scorecard)\n"
+    "- Cost scoring: inverse (lowest price = max points) vs other\n"
+    "- Criteria point weights for cost/price\n"
+    "- Required budget FILE format (Attachment Excel, etc.)\n"
+    "Return JSON:\n"
+    "{\n"
+    '  "contractorKpiCount": number|null,\n'
+    '  "contractorKpiSummary": "string",\n'
+    '  "agencyKpiNote": "string",\n'
+    '  "costScoringInverse": boolean,\n'
+    '  "costScoringSummary": "string",\n'
+    '  "costPointsCriteria4": number|null,\n'
+    '  "costPointsCriteria5": number|null,\n'
+    '  "budgetSubmissionFormat": "string"\n'
+    "}"
+)
+
+
 async def extract_rfp_scoring_facts_llm(rfp_excerpt: str) -> RfpScoringFacts:
     base = parse_scoring_facts_from_rfp(rfp_excerpt)
     if not llm.is_configured() or len(rfp_excerpt.strip()) < 200:
@@ -169,23 +191,7 @@ async def extract_rfp_scoring_facts_llm(rfp_excerpt: str) -> RfpScoringFacts:
                 {
                     "role": "system",
                     "content": (
-                        "Extract scoring facts from THIS RFP only. Distinguish:\n"
-                        "- KPIs the CONTRACTOR must hit\n"
-                        "- KPIs that belong to the AGENCY/buyer (not contract scorecard)\n"
-                        "- Cost scoring: inverse (lowest price = max points) vs other\n"
-                        "- Criteria point weights for cost/price\n"
-                        "- Required budget FILE format (Attachment Excel, etc.)\n"
-                        "Return JSON:\n"
-                        "{\n"
-                        '  "contractorKpiCount": number|null,\n'
-                        '  "contractorKpiSummary": "string",\n'
-                        '  "agencyKpiNote": "string",\n'
-                        '  "costScoringInverse": boolean,\n'
-                        '  "costScoringSummary": "string",\n'
-                        '  "costPointsCriteria4": number|null,\n'
-                        '  "costPointsCriteria5": number|null,\n'
-                        '  "budgetSubmissionFormat": "string"\n'
-                        "}"
+                        get_prompt("proposal_fulfill_rfp_accuracy.extract_rfp_scoring_facts_llm", _PROMPT_EXTRACT_RFP_SCORING_FACTS_LLM)
                     ),
                 },
                 {"role": "user", "content": ""},
@@ -347,6 +353,25 @@ def scan_draft_accuracy_findings(
     return findings
 
 
+_PROMPT_REDRAFT_SECTION_FOR_ACCURACY = (
+    "Rewrite ONE proposal section to match THIS RFP scoring structure.\n"
+    "- CONTRACTOR KPIs only — not buyer agency strategic-plan KPIs.\n"
+    "- If draft says four HTA/agency KPIs (Resident Sentiment, Visitor "
+    "Satisfaction, Average Daily Visitor Spending, Total Visitor Expenditures "
+    "as agency scorecard), replace with RFP Section 2.3 contractor KPIs only: "
+    "Total Visitor Arrivals (+3.0%/yr), Total Visitor Expenditures (+4.6%/yr), "
+    "Average Islands Visited Per Person (+0.8%/yr).\n"
+    "- Do NOT rewrite team bios or unrelated company facts.\n"
+    "- Inverse cost scoring: never claim ceiling price earns max cost points.\n"
+    "- Use correct cost/price point weights from RFP.\n"
+    "- Budget: reference Attachment/Excel; narrative is cover only.\n"
+    "- These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently.\n"
+    "Return JSON: {\"content\": \"markdown\"}"
+)
+
+
 async def _redraft_section_for_accuracy(
     *,
     section: ProposalSection,
@@ -380,21 +405,7 @@ async def _redraft_section_for_accuracy(
                 {
                     "role": "system",
                     "content": (
-                        "Rewrite ONE proposal section to match THIS RFP scoring structure.\n"
-                        "- CONTRACTOR KPIs only — not buyer agency strategic-plan KPIs.\n"
-                        "- If draft says four HTA/agency KPIs (Resident Sentiment, Visitor "
-                        "Satisfaction, Average Daily Visitor Spending, Total Visitor Expenditures "
-                        "as agency scorecard), replace with RFP Section 2.3 contractor KPIs only: "
-                        "Total Visitor Arrivals (+3.0%/yr), Total Visitor Expenditures (+4.6%/yr), "
-                        "Average Islands Visited Per Person (+0.8%/yr).\n"
-                        "- Do NOT rewrite team bios or unrelated company facts.\n"
-                        "- Inverse cost scoring: never claim ceiling price earns max cost points.\n"
-                        "- Use correct cost/price point weights from RFP.\n"
-                        "- Budget: reference Attachment/Excel; narrative is cover only.\n"
-                        "- These rules govern how you write; they are never content. Never write "
-                        "sentences about verification requirements or your own constraints — apply "
-                        "the rule silently.\n"
-                        "Return JSON: {\"content\": \"markdown\"}"
+                        get_prompt("proposal_fulfill_rfp_accuracy.redraft_section_for_accuracy", _PROMPT_REDRAFT_SECTION_FOR_ACCURACY)
                     ),
                 },
                 {

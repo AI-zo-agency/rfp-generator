@@ -21,6 +21,7 @@ from app.models.proposal import (
 )
 from app.services.proposal_intelligence.agent_base import safe_chat_json
 from app.services.pricing_delivery_context import format_pricing_delivery_constraints_block
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ async def gate_delivery_section(
     )
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("delivery_constraints_gate.system", _SYSTEM)},
             {"role": "user", "content": user},
         ],
         max_tokens=2048,

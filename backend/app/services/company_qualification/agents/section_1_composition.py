@@ -16,6 +16,7 @@ from app.services.company_qualification.schemas import (
     Section1ContentBudget,
     SubsectionPlan,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,30 @@ def _budget_for(budgets: Section1ContentBudget, section_id: str) -> dict[str, An
     return {}
 
 
+_PROMPT_RUN_SECTION_1_COMPOSITION_AGENT = (
+    "You are the Section 1 Composition Agent for zö agency.\n"
+    "You are the ONLY agent that writes human-readable proposal content for Section 1.\n"
+    "Use ONLY facts from CompanyTruth JSON. Do NOT invent facts.\n"
+    "Apply content budgets strictly. Respect capability tiers — omit-tier must not appear.\n"
+    "Write in first person (we/our/us). Never use 'The Vendor'.\n\n"
+    "Return JSON:\n"
+    "{\n"
+    '  "sectionPlan": {\n'
+    '    "section-1-who-we-are": {\n'
+    '      "includedCapabilities": ["..."],\n'
+    '      "omittedCapabilities": ["..."],\n'
+    '      "targetWords": {"min": 120, "max": 200}\n'
+    "    }\n"
+    "  },\n"
+    '  "generatedSections": [\n'
+    '    {"id": "section-1-who-we-are", "title": "1.1 — Who We Are", '
+    '"content": "markdown", "wordCount": 0}\n'
+    "  ]\n"
+    "}\n\n"
+    "Generate all 5 subsections in generatedSections."
+)
+
+
 async def run_section_1_composition_agent(
     *,
     company_truth: CompanyTruth,
@@ -92,26 +117,7 @@ async def run_section_1_composition_agent(
             {
                 "role": "system",
                 "content": (
-                    "You are the Section 1 Composition Agent for zö agency.\n"
-                    "You are the ONLY agent that writes human-readable proposal content for Section 1.\n"
-                    "Use ONLY facts from CompanyTruth JSON. Do NOT invent facts.\n"
-                    "Apply content budgets strictly. Respect capability tiers — omit-tier must not appear.\n"
-                    "Write in first person (we/our/us). Never use 'The Vendor'.\n\n"
-                    "Return JSON:\n"
-                    "{\n"
-                    '  "sectionPlan": {\n'
-                    '    "section-1-who-we-are": {\n'
-                    '      "includedCapabilities": ["..."],\n'
-                    '      "omittedCapabilities": ["..."],\n'
-                    '      "targetWords": {"min": 120, "max": 200}\n'
-                    "    }\n"
-                    "  },\n"
-                    '  "generatedSections": [\n'
-                    '    {"id": "section-1-who-we-are", "title": "1.1 — Who We Are", '
-                    '"content": "markdown", "wordCount": 0}\n'
-                    "  ]\n"
-                    "}\n\n"
-                    "Generate all 5 subsections in generatedSections."
+                    get_prompt("section_1_composition.run_section_1_composition_agent", _PROMPT_RUN_SECTION_1_COMPOSITION_AGENT)
                 ),
             },
             {

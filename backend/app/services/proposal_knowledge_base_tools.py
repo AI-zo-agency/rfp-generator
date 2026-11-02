@@ -8,6 +8,7 @@ from typing import Any
 from app.services import llm, supermemory
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
 from app.services.rfp_repository import get_rfp
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -549,7 +550,7 @@ async def _plan_proposal_kb_queries(
     rfp_excerpt: str,
 ) -> dict[str, list[str]]:
     messages = [
-        {"role": "system", "content": PROPOSAL_QUERY_PLANNER_PROMPT},
+        {"role": "system", "content": get_prompt("proposal_knowledge_base_tools.proposal_query_planner", PROPOSAL_QUERY_PLANNER_PROMPT)},
         {
             "role": "user",
             "content": (

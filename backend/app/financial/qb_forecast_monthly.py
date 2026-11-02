@@ -21,6 +21,7 @@ from app.financial import quickbooks as qbo
 from app.financial.ai_insights_repository import get_latest_insight, upsert_insight
 from app.financial.qb_panels_from_db import monthly_trend as monthly_trend_from_db
 from app.services.llm import chat_json_soft, resolve_llm_model
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ async def forecast_one_month(
         raise ValueError(f"history must be {LOOKBACK} months, got {len(history)}")
     payload, provider = await chat_json_soft(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("qb_forecast_monthly.system", _SYSTEM)},
             {"role": "user", "content": _user_prompt(history, target_label)},
         ],
         max_tokens=1024,

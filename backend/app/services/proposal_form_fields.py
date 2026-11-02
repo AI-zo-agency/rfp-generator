@@ -19,6 +19,7 @@ from app.services.proposal_submission_authority import (
     _fold_for_grounding,
     instrument_is_checklist,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ async def extract_form_field_labels_from_rfp(
 
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _LABEL_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_form_fields.label", _LABEL_SYSTEM)},
             {
                 "role": "user",
                 "content": f"FORM TITLE: {section_title}\n\nRFP PAGES:\n{pages}",
@@ -263,7 +264,7 @@ async def resolve_form_field_values_from_kb(
     )
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _FILL_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_form_fields.fill", _FILL_SYSTEM)},
             {"role": "user", "content": user},
         ],
         max_tokens=2_000,

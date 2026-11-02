@@ -17,6 +17,7 @@ from app.services.company_qualification.schemas import (
     TeamMemberSelection,
     TeamSelectionResult,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,25 @@ def _parse_required_roles(raw: dict[str, Any]) -> list[RequiredTeamRole]:
     return parsed[:MAX_TEAM_SIZE]
 
 
+_PROMPT_EXTRACT_RFP_STAFFING_NEEDS = (
+    "You are the RFP Staffing Needs Analyst for zö agency.\n"
+    "Extract ONLY the roles this solicitation needs for a winning proposal team.\n"
+    "Do NOT name any people. Do NOT invent roles the RFP does not imply.\n"
+    "Compact JSON only — no markdown fences. Finish every brace.\n\n"
+    "Rules:\n"
+    "- Derive roles from scope, evaluation criteria, deliverables, and required expertise.\n"
+    "- ALWAYS include Principal-in-Charge / Agency Owner as the FIRST role "
+    "(isLeadership=true) for formal client RFPs — the agency owner must be named.\n"
+    "- Then add 2–4 specialist roles the RFP actually needs.\n"
+    "- For each role, list must-have skills (required) and nice-to-have skills.\n"
+    "- Be specific (e.g. 'Paid Media / Media Buying Lead', not vague 'Marketer').\n"
+    "- Keep whyNeeded ≤12 words.\n\n"
+    "Return JSON:\n"
+    '{"requiredRoles":[{"role":"…","mustHaveSkills":[],"niceToHaveSkills":[],'
+    '"whyNeeded":"…","seniority":"senior","isLeadership":false}]}'
+)
+
+
 async def _extract_rfp_staffing_needs(
     *,
     proposal_context: ProposalContext,
@@ -358,21 +378,7 @@ async def _extract_rfp_staffing_needs(
                 {
                     "role": "system",
                     "content": (
-                        "You are the RFP Staffing Needs Analyst for zö agency.\n"
-                        "Extract ONLY the roles this solicitation needs for a winning proposal team.\n"
-                        "Do NOT name any people. Do NOT invent roles the RFP does not imply.\n"
-                        "Compact JSON only — no markdown fences. Finish every brace.\n\n"
-                        "Rules:\n"
-                        "- Derive roles from scope, evaluation criteria, deliverables, and required expertise.\n"
-                        "- ALWAYS include Principal-in-Charge / Agency Owner as the FIRST role "
-                        "(isLeadership=true) for formal client RFPs — the agency owner must be named.\n"
-                        "- Then add 2–4 specialist roles the RFP actually needs.\n"
-                        "- For each role, list must-have skills (required) and nice-to-have skills.\n"
-                        "- Be specific (e.g. 'Paid Media / Media Buying Lead', not vague 'Marketer').\n"
-                        "- Keep whyNeeded ≤12 words.\n\n"
-                        "Return JSON:\n"
-                        '{"requiredRoles":[{"role":"…","mustHaveSkills":[],"niceToHaveSkills":[],'
-                        '"whyNeeded":"…","seniority":"senior","isLeadership":false}]}'
+                        get_prompt("team_selection.extract_rfp_staffing_needs", _PROMPT_EXTRACT_RFP_STAFFING_NEEDS)
                     ),
                 },
                 {

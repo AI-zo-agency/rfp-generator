@@ -7,6 +7,7 @@ import logging
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan, RetrievalPlan
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "retrieval_planner"
@@ -49,7 +50,7 @@ async def run_retrieval_planner(
 ) -> ProposalExecutionPlan:
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("retrieval_planner.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

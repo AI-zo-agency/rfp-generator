@@ -25,6 +25,7 @@ from app.services.proposal_draft_structure_stubs import (
 from app.services.proposal_edge_case_guards import collect_bio_person_names
 from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
 from app.services.proposal_rfp_excerpt import submission_documents_excerpt
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,40 @@ def build_exhibit_status_digest(draft: ProposalDraft) -> str:
     return "\n".join(rows[:40]) if rows else "(no exhibit/closing tabs found)"
 
 
+_PROMPT_AGENT_REWRITE_SECTION = (
+    "You are a senior proposal QC editor for zö agency.\n"
+    "Rewrite ONE manuscript section to fix the listed QC defects.\n"
+    "Rules:\n"
+    "1. Resume / key-personnel pointer tabs: replace VERIFY / "
+    "'incorrectly substituted' placeholders with real cross-refs "
+    "to the LIVE bio TOC (e.g. See §2.1 — Sonja Anderson). "
+    "Never leave the VERIFY flag as readable content. Never invent "
+    "people not in the bio TOC.\n"
+    "2. Never claim an exhibit/form is completed, signed, or dated "
+    "when the exhibit status digest says MANUAL FILL / unsigned. "
+    "Rewrite to cross-ref + [MANUAL FILL] / [DESIGNER NOTE: Attach "
+    "signed PDF] instead.\n"
+    "3. Repair truncated or merged sentence fragments into grammatical "
+    "prose. Do not invent certifications (e.g. complete "
+    "'Disabled Veteran Business Enterprise' only if that is clearly "
+    "what the checkbox was saying — otherwise MANUAL FILL).\n"
+    "4. Citations: use THIS RFP's document section / exhibit labels "
+    "from the RFP excerpt — do not conflate evaluation-criteria "
+    "numbers with document section numbers (e.g. do not cite Price "
+    "Exhibit L as Accessibility §9).\n"
+    "5. Exhibit / Vendor Supplied Proposal Status tables: NEVER leave "
+    "Status cells blank. For each empty Status, fill from the exhibit "
+    "status digest — e.g. 'Included — see Exhibit D tab; "
+    "[MANUAL FILL: attach signed PDF]' or 'Submitted as separate "
+    "electronic file' when that is true. NEVER invent 'Signed' / "
+    "'Completed' when the digest says MANUAL FILL / unsigned.\n"
+    "6. Keep grounded facts. No invented phones, rates, carriers, "
+    "or signatures.\n"
+    "7. Return JSON: {\"content\": \"full revised markdown\", "
+    "\"notes\": \"short\"}"
+)
+
+
 async def _agent_rewrite_section(
     *,
     section: ProposalSection,
@@ -230,36 +265,7 @@ async def _agent_rewrite_section(
                 {
                     "role": "system",
                     "content": (
-                        "You are a senior proposal QC editor for zö agency.\n"
-                        "Rewrite ONE manuscript section to fix the listed QC defects.\n"
-                        "Rules:\n"
-                        "1. Resume / key-personnel pointer tabs: replace VERIFY / "
-                        "'incorrectly substituted' placeholders with real cross-refs "
-                        "to the LIVE bio TOC (e.g. See §2.1 — Sonja Anderson). "
-                        "Never leave the VERIFY flag as readable content. Never invent "
-                        "people not in the bio TOC.\n"
-                        "2. Never claim an exhibit/form is completed, signed, or dated "
-                        "when the exhibit status digest says MANUAL FILL / unsigned. "
-                        "Rewrite to cross-ref + [MANUAL FILL] / [DESIGNER NOTE: Attach "
-                        "signed PDF] instead.\n"
-                        "3. Repair truncated or merged sentence fragments into grammatical "
-                        "prose. Do not invent certifications (e.g. complete "
-                        "'Disabled Veteran Business Enterprise' only if that is clearly "
-                        "what the checkbox was saying — otherwise MANUAL FILL).\n"
-                        "4. Citations: use THIS RFP's document section / exhibit labels "
-                        "from the RFP excerpt — do not conflate evaluation-criteria "
-                        "numbers with document section numbers (e.g. do not cite Price "
-                        "Exhibit L as Accessibility §9).\n"
-                        "5. Exhibit / Vendor Supplied Proposal Status tables: NEVER leave "
-                        "Status cells blank. For each empty Status, fill from the exhibit "
-                        "status digest — e.g. 'Included — see Exhibit D tab; "
-                        "[MANUAL FILL: attach signed PDF]' or 'Submitted as separate "
-                        "electronic file' when that is true. NEVER invent 'Signed' / "
-                        "'Completed' when the digest says MANUAL FILL / unsigned.\n"
-                        "6. Keep grounded facts. No invented phones, rates, carriers, "
-                        "or signatures.\n"
-                        "7. Return JSON: {\"content\": \"full revised markdown\", "
-                        "\"notes\": \"short\"}"
+                        get_prompt("proposal_agentic_qc_repair.agent_rewrite_section", _PROMPT_AGENT_REWRITE_SECTION)
                     ),
                 },
                 {

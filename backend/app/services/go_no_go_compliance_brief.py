@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from app.models.go_no_go import GoNoGoCapabilityRow
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ async def fetch_compliance_brief(
     cap_block = "\n".join(cap_lines) or "(none)"
 
     messages = [
-        {"role": "system", "content": _COMPLIANCE_BRIEF_PROMPT},
+        {"role": "system", "content": get_prompt("go_no_go_compliance_brief.compliance_brief", _COMPLIANCE_BRIEF_PROMPT)},
         {
             "role": "user",
             "content": (

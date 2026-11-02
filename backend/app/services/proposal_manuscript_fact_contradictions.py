@@ -20,6 +20,7 @@ from app.services.proposal_section_patch import (
     apply_targeted_edits as _apply_targeted_edits,
     parse_targeted_edits as _parse_targeted_edits,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +407,7 @@ async def run_manuscript_fact_contradiction_pass(
         )
         try:
             raw, _ = await llm.chat_json(
-                [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+                [{"role": "system", "content": get_prompt("proposal_manuscript_fact_contradictions.system", _SYSTEM)}, {"role": "user", "content": user}],
                 max_tokens=16000,
                 temperature=0.0,
                 node_name="manuscript_fact_contradiction_audit",

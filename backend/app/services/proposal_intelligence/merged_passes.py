@@ -62,6 +62,7 @@ from app.services.proposal_intelligence.schemas import (
     TrainingPlan,
     WorkBreakdown,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ async def run_opportunity_extract(
     try:
         opportunity, tool_trace, _provenance = await extract_opportunity_with_tools(
             doc=doc,
-            system_prompt=_OPPORTUNITY_SYSTEM,
+            system_prompt=get_prompt("merged_passes.opportunity", _OPPORTUNITY_SYSTEM),
             rfp_meta=rfp_meta,
             node_name="opportunity_extract",
         )
@@ -366,7 +367,7 @@ async def run_strategy_delivery(
     ]
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _STRATEGY_DELIVERY_SYSTEM},
+            {"role": "system", "content": get_prompt("merged_passes.strategy_delivery", _STRATEGY_DELIVERY_SYSTEM)},
             {
                 "role": "user",
                 "content": (
@@ -515,7 +516,7 @@ async def run_execution_plan(
     _ = rfp_meta
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _EXECUTION_SYSTEM},
+            {"role": "system", "content": get_prompt("merged_passes.execution", _EXECUTION_SYSTEM)},
             {
                 "role": "user",
                 "content": (
@@ -599,7 +600,7 @@ async def run_writing_briefs(
     )
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _WRITING_SYSTEM},
+            {"role": "system", "content": get_prompt("merged_passes.writing", _WRITING_SYSTEM)},
             {
                 "role": "user",
                 "content": (

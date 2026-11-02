@@ -12,6 +12,7 @@ from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_knowledge_base_tools import search_knowledge_base
 from app.services.proposal_langchain import _provider_name
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ async def build_proof_points_for_rfp(
     try:
         raw, _provider = await llm.chat_json(
             [
-                {"role": "system", "content": PROOF_POINT_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_proof_points.proof_point", PROOF_POINT_PROMPT)},
                 {
                     "role": "user",
                     "content": (

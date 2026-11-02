@@ -4,6 +4,28 @@ This document provides a comprehensive inventory of all files containing **promp
 
 ---
 
+## Editing prompts
+
+Agent prompts are stored in the Supabase `agent_prompts` table and edited on the **Prompts** page. Call sites read them with `get_prompt(key, DEFAULT)` from [`prompt_store.py`](../backend/app/services/prompt_store.py). The text in code is the default, used for Reset and whenever Supabase cannot answer.
+
+* **Add a prompt:** wrap its use in `get_prompt("<key>", CONSTANT)` and add a line to [`prompt_catalog.py`](../backend/app/services/prompt_catalog.py). Backend startup inserts the row.
+* **Change a default in code:** deploy it. Startup updates unedited prompts. An edited prompt keeps its text, and Reset then restores the new default.
+* **Composed prompts:** `DRAFT_BATCH_PROMPT`, `EDIT_PROMPT`, `SURGICAL_FIX_PROMPT` and `SYSTEM_PROMPT` are stored with their shared blocks already included. Editing `AUTHOR_PROMPT` does not change `EDIT_PROMPT`, for example.
+
+**Not on the page yet.** These build their system prompt from runtime values, so a saved copy would lose them:
+
+* `financial/router.py`: `generate_ai_financial_insights`
+* `company_qualification/agents`: `case_study_builder`, `company_truth`, `section_1_builder`, `team_selection._map_roles_to_best_people`
+* `proposal_chat_structure._build_case_study_section`, `proposal_generator._write_custom_section`, `proposal_hollow_kb_fill._plan_fills`
+* `proposal_kb_fact_checker`: `_repair_bio_subsection_block`, `_run_requirement_aligned_fact_check_agent`
+* `proposal_manuscript_locks.build_manuscript_locks`, `proposal_rfp_submission_requirements._draft_narrative_submission_section`
+* `proposal_sections_graph`: `_extract_member_bio_facts`, `_build_section_1`
+* `proposal_manuscript_fact_contradictions._rewrite_section_for_fact_contradiction`, `proposal_scan_rfp_contradictions._rewrite_section_for_contradiction`
+
+Shared rule blocks such as `ANTI_HALLUCINATION_RULES` and `GLOBAL_AGENT_PROMPT_RULES` are also not listed on their own, and user-role message templates stay in code.
+
+---
+
 ## 1. Prompts & LLM Instructions
 
 ### **Backend Generation & Drafting Prompts**

@@ -15,6 +15,7 @@ from app.services.proposal_fulfill_guard import (
     is_case_study_section,
     is_team_bio_section,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,19 @@ def _closing_template_for_section(section: ProposalSection) -> str | None:
     return None
 
 
+_PROMPT_LLM_COMPLETE_TRUNCATED_SECTION = (
+    "Complete ONE truncated proposal section. Finish cut-off sentences and lists only.\n"
+    "Rules:\n"
+    "- Do NOT invent clients, case studies, metrics, or reference contacts.\n"
+    "- Do NOT add new Case Study blocks.\n"
+    "- Keep existing facts; append the minimum text needed for a complete section.\n"
+    "- These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently.\n"
+    'Return JSON: {"content": "full markdown section"}'
+)
+
+
 async def _llm_complete_truncated_section(
     *,
     section: ProposalSection,
@@ -116,15 +130,7 @@ async def _llm_complete_truncated_section(
         return None
     body = section.content or ""
     system = (
-        "Complete ONE truncated proposal section. Finish cut-off sentences and lists only.\n"
-        "Rules:\n"
-        "- Do NOT invent clients, case studies, metrics, or reference contacts.\n"
-        "- Do NOT add new Case Study blocks.\n"
-        "- Keep existing facts; append the minimum text needed for a complete section.\n"
-        "- These rules govern how you write; they are never content. Never write "
-        "sentences about verification requirements or your own constraints — apply "
-        "the rule silently.\n"
-        'Return JSON: {"content": "full markdown section"}'
+        get_prompt("proposal_fulfill_truncation_repair.llm_complete_truncated_section", _PROMPT_LLM_COMPLETE_TRUNCATED_SECTION)
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\nSection: {section.title}\n\n"
@@ -331,6 +337,34 @@ def _truncation_repair_kb_query(section: ProposalSection) -> str:
     return f"zö agency 01_companyfacts {anchor}"[:220]
 
 
+_PROMPT_COMPLETE_ONE_TRUNCATED_SECTION_FROM_KB = (
+    "You repair ONE proposal section that was cut off mid-sentence, mid-list, or "
+    "mid-table by an earlier generation pass. You are completing it, not rewriting "
+    "it.\n"
+    "RULES:\n"
+    "1. Reproduce the section VERBATIM up to the point it was cut off. Do not "
+    "paraphrase, reorder, shorten, or otherwise touch any sentence that already "
+    "reads as complete.\n"
+    "2. Finish ONLY the trailing cut-off sentence, clause, list item, or table row.\n"
+    "3. Use a fact from the KB EVIDENCE below to complete it ONLY if the evidence "
+    "actually contains that fact.\n"
+    "4. If the missing fact is not in the KB evidence and not already stated "
+    "earlier in the section, insert a narrow [VERIFY: short field name] in its "
+    "place and still close the sentence properly — never invent a name, number, "
+    "date, certification, or client.\n"
+    "5. Do not add new paragraphs, sections, bullet points, or case studies beyond "
+    "what is needed to close the existing cut-off.\n"
+    "6. ANTI-RFP-ECHO: when completing the cut-off, write proposal substance only. "
+    "Do not finish a sentence by paraphrasing the RFP excerpt or listing the buyer's "
+    "scope asks back at them.\n"
+    "7. These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently. The [VERIFY: ...] tag is the only trace of a gap; never "
+    "explain or preface it.\n"
+    '8. Return JSON only: {"content": "full corrected section markdown"}'
+)
+
+
 async def _complete_one_truncated_section_from_kb(
     *,
     section: ProposalSection,
@@ -362,30 +396,7 @@ async def _complete_one_truncated_section_from_kb(
     evidence_block = _format_evidence(evidence) if evidence else "(no relevant KB evidence found)"
 
     system = (
-        "You repair ONE proposal section that was cut off mid-sentence, mid-list, or "
-        "mid-table by an earlier generation pass. You are completing it, not rewriting "
-        "it.\n"
-        "RULES:\n"
-        "1. Reproduce the section VERBATIM up to the point it was cut off. Do not "
-        "paraphrase, reorder, shorten, or otherwise touch any sentence that already "
-        "reads as complete.\n"
-        "2. Finish ONLY the trailing cut-off sentence, clause, list item, or table row.\n"
-        "3. Use a fact from the KB EVIDENCE below to complete it ONLY if the evidence "
-        "actually contains that fact.\n"
-        "4. If the missing fact is not in the KB evidence and not already stated "
-        "earlier in the section, insert a narrow [VERIFY: short field name] in its "
-        "place and still close the sentence properly — never invent a name, number, "
-        "date, certification, or client.\n"
-        "5. Do not add new paragraphs, sections, bullet points, or case studies beyond "
-        "what is needed to close the existing cut-off.\n"
-        "6. ANTI-RFP-ECHO: when completing the cut-off, write proposal substance only. "
-        "Do not finish a sentence by paraphrasing the RFP excerpt or listing the buyer's "
-        "scope asks back at them.\n"
-        "7. These rules govern how you write; they are never content. Never write "
-        "sentences about verification requirements or your own constraints — apply "
-        "the rule silently. The [VERIFY: ...] tag is the only trace of a gap; never "
-        "explain or preface it.\n"
-        '8. Return JSON only: {"content": "full corrected section markdown"}'
+        get_prompt("proposal_fulfill_truncation_repair.complete_one_truncated_section_from_kb", _PROMPT_COMPLETE_ONE_TRUNCATED_SECTION_FROM_KB)
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\nSection: {section.title}\n\n"

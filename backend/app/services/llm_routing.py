@@ -34,6 +34,8 @@ DEFAULT_REQUESTED_MAX_TOKENS = 4096
 # not judge whether a factual claim is supported.
 _MECHANICAL_EXACT = frozenset(
     {
+        # Prompts page: a plain-English summary of what a prompt does.
+        "prompt_guide",
         # Sections 1-3 graph planners / selectors.
         "plan_section_1",
         "prioritize_capabilities",
@@ -71,6 +73,8 @@ _MECHANICAL_EXACT = frozenset(
 # Quality: prose a client reads, or a correctness judgment about that prose.
 _QUALITY_EXACT = frozenset(
     {
+        # Prompts page: rewrites the instructions every agent runs on.
+        "prompt_assist",
         "fetch_company_truth",
         "build_case_studies",
         "build_section_1_cq",

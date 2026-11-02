@@ -29,6 +29,7 @@ from app.services.pricing_plan_engine import (
     verify_plan,
 )
 from app.services.proposal_common import ProposalError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -235,11 +236,11 @@ async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
     user = pricing_asks_user_message(ctx, quotes)
     # Low reasoning: medium thinking was consuming the JSON budget and
     # returning a cut-off object for long RFPs.
-    asks = await _call(ASKS_PROMPT, user, ASKS_MAX_TOKENS, reasoning_effort="low")
+    asks = await _call(get_prompt("pricing_plan_service.asks", ASKS_PROMPT), user, ASKS_MAX_TOKENS, reasoning_effort="low")
     errs = verify_asks(asks, rfp_text)
     if errs:
         asks = await _call(
-            ASKS_PROMPT,
+            get_prompt("pricing_plan_service.asks", ASKS_PROMPT),
             f"{user}\n\n"
             f"=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
             "=== FIX THESE (quote exactly or drop the item) ===\n" + "\n".join(errs),
@@ -337,9 +338,9 @@ async def author_pricing_plan(
 ) -> tuple[dict, list[dict]]:
     budgets = budgets_from_asks(asks, target_budget_usd)
     ctx = _context(rfp_text, asks, book, budgets)
-    plan = await _call(AUTHOR_PROMPT, ctx)
+    plan = await _call(get_prompt("pricing_plan_service.author", AUTHOR_PROMPT), ctx)
     plan, rounds = await _check_and_repair(
-        plan, asks, book, system=AUTHOR_PROMPT, ctx=ctx, budgets=budgets, rfp_text=rfp_text
+        plan, asks, book, system=get_prompt("pricing_plan_service.author", AUTHOR_PROMPT), ctx=ctx, budgets=budgets, rfp_text=rfp_text
     )
     return _stamp(plan, book), rounds
 
@@ -457,14 +458,14 @@ async def edit_pricing_plan_from_chat(
     ctx = _context(rfp_text, asks, book, budgets)
     current = {k: v for k, v in saved.items() if k not in {"kb_snapshot", "internal_summary", "pricing", "pricing_version"}}
     raw = await _call(
-        EDIT_PROMPT,
+        get_prompt("pricing_plan_service.edit", EDIT_PROMPT),
         ctx + f"\n\n=== CURRENT PLAN ===\n{json.dumps(current)}\n\n=== USER INSTRUCTION ===\n{instruction}",
     )
     if not isinstance(raw, dict):
         raise ProposalError("Pricing plan LLM returned no plan", status_code=502)
     reply = str(raw.pop("reply", "") or "Updated the pricing plan.")
     plan, rounds = await _check_and_repair(
-        raw, asks, book, system=EDIT_PROMPT, ctx=ctx, budgets=budgets, rfp_text=rfp_text
+        raw, asks, book, system=get_prompt("pricing_plan_service.edit", EDIT_PROMPT), ctx=ctx, budgets=budgets, rfp_text=rfp_text
     )
     flags = [f"[PRICING FLAG: {e}]" for e in rounds[-1]["errors"]]
     return _budget_from_plan(budget.rfp_id, asks, _stamp(plan, book), flags, book), reply

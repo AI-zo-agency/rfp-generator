@@ -14,6 +14,7 @@ from typing import Any
 from app.models.proposal import ProposalBudget, ProposalDraft, ProposalResearchCache, ProposalSection
 from app.services import llm
 from app.services.proposal_budget_content import find_budget_section_index
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +223,7 @@ async def audit_and_repair_forms_attachments(
     try:
         raw, _provider = await llm.chat_json_soft(
             [
-                {"role": "system", "content": _SYSTEM},
+                {"role": "system", "content": get_prompt("proposal_forms_attachments_integrity.system", _SYSTEM)},
                 {"role": "user", "content": user[:24_000]},
             ],
             max_tokens=16000,

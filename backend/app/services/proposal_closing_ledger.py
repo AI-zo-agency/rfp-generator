@@ -19,6 +19,7 @@ from app.services.proposal_rfp_excerpt import (
     closing_package_excerpt,
     submission_documents_excerpt,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ async def extract_closing_requirement_ledger(
     # entire thing rather than re-extracting fresh (and re-billing) every time.
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _EXTRACT_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_closing_ledger.extract", _EXTRACT_SYSTEM)},
             {"role": "user", "content": ""},
         ],
         max_tokens=3072,

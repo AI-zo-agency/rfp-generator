@@ -35,6 +35,7 @@ from app.financial.qb_position import position
 from app.financial.qb_signals import derive_signals, derived_figures
 from app.financial.qb_trend import margin_rows
 from app.services.llm import chat_json_soft, resolve_llm_model
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         'Reply with JSON shaped exactly: {"brief": "...", "notes": {"<id>": "..."}}'
     )
     return [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": get_prompt("qb_insights.system", _SYSTEM)},
         {"role": "user", "content": user},
     ]
 

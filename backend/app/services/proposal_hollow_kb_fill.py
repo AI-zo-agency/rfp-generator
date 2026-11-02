@@ -22,6 +22,7 @@ from app.services.proposal_manual_flags import (
     sanitize_bare_bracket_tag_words,
     sanitize_nested_brackets_in_handoff_tags,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +424,49 @@ async def _retrieve_queries(queries: list[str]) -> tuple[str, list[str]]:
     return "\n\n".join(blocks), sources
 
 
+_PROMPT_LLM_FILL_SECTION = (
+    "Fill MISSING answers in ONE proposal section using ONLY the evidence pack.\n"
+    "Rules:\n"
+    "- Cover empty labeled fields, MANUAL FILL stubs, TBD lines, and empty table "
+    "cells listed in the gap list — VERIFY tags are not required to act.\n"
+    "- Keep substantive prose that is already good.\n"
+    "- Prefer 06_WON past WON proposals, then 04_Bio / 03_CS / draft roster. "
+    "Never invent clients, metrics, degrees, or contacts.\n"
+    "- A block marked [FINALIST BID — NOT DELIVERED WORK] is a bid zö did "
+    "NOT win. Borrow its wording or structure if useful, but NEVER present "
+    "its project as delivered work, a client engagement, or past "
+    "performance — that is a fabricated claim in a submitted proposal.\n"
+    "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
+    "- Never write a checklist, numbered to-do list, or description of what "
+    "someone else should do instead (\"confirm whether...\", \"select three "
+    "references...\", \"obtain contact info...\") — that is process narration, "
+    "not content, and this section ships to the client as-is. Commit to real "
+    "structure using the named facts you DO have (e.g. specific client / "
+    "case-study names already in the draft context) and mark only the "
+    "individual missing facts inline as [VERIFY: field] on that same entry — "
+    "a reference entry naming the real client with [VERIFY: contact name], "
+    "[VERIFY: phone], [VERIFY: email] beats a generic instructions list "
+    "every time.\n"
+    "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
+    "- ANTI-RFP-ECHO: write the proposal answer for THIS section only — never "
+    "paraphrase RFP requirement lists or evaluation criteria into the body.\n"
+    "- A judgement is not a gap. Which past project fits this RFP, why it is "
+    "relevant, how to frame it — you have the case studies and the RFP, so "
+    "decide and write it. Never emit a tag asking a human to confirm "
+    "relevance, framing or fit; that is the work, not a missing fact.\n"
+    "- Defer only facts that live outside the evidence — a phone number, a "
+    "signature, a file — and name the exact field and whose it is: "
+    "[VERIFY: phone for Chantal Strobel, Deschutes Public Library], never "
+    "'provide reference contacts before submission'. Commit to every part "
+    "you DO have and tag only the hole.\n"
+    "- These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently. The tag is the only trace of a gap; never explain or "
+    "preface it.\n"
+    'Return JSON: {"content": "full markdown"}'
+)
+
+
 async def _llm_fill_section(
     *,
     section: ProposalSection,
@@ -436,45 +480,7 @@ async def _llm_fill_section(
         return None
     body = (section.content or "").strip()
     system = (
-        "Fill MISSING answers in ONE proposal section using ONLY the evidence pack.\n"
-        "Rules:\n"
-        "- Cover empty labeled fields, MANUAL FILL stubs, TBD lines, and empty table "
-        "cells listed in the gap list — VERIFY tags are not required to act.\n"
-        "- Keep substantive prose that is already good.\n"
-        "- Prefer 06_WON past WON proposals, then 04_Bio / 03_CS / draft roster. "
-        "Never invent clients, metrics, degrees, or contacts.\n"
-        "- A block marked [FINALIST BID — NOT DELIVERED WORK] is a bid zö did "
-        "NOT win. Borrow its wording or structure if useful, but NEVER present "
-        "its project as delivered work, a client engagement, or past "
-        "performance — that is a fabricated claim in a submitted proposal.\n"
-        "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
-        "- Never write a checklist, numbered to-do list, or description of what "
-        "someone else should do instead (\"confirm whether...\", \"select three "
-        "references...\", \"obtain contact info...\") — that is process narration, "
-        "not content, and this section ships to the client as-is. Commit to real "
-        "structure using the named facts you DO have (e.g. specific client / "
-        "case-study names already in the draft context) and mark only the "
-        "individual missing facts inline as [VERIFY: field] on that same entry — "
-        "a reference entry naming the real client with [VERIFY: contact name], "
-        "[VERIFY: phone], [VERIFY: email] beats a generic instructions list "
-        "every time.\n"
-        "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
-        "- ANTI-RFP-ECHO: write the proposal answer for THIS section only — never "
-        "paraphrase RFP requirement lists or evaluation criteria into the body.\n"
-        "- A judgement is not a gap. Which past project fits this RFP, why it is "
-        "relevant, how to frame it — you have the case studies and the RFP, so "
-        "decide and write it. Never emit a tag asking a human to confirm "
-        "relevance, framing or fit; that is the work, not a missing fact.\n"
-        "- Defer only facts that live outside the evidence — a phone number, a "
-        "signature, a file — and name the exact field and whose it is: "
-        "[VERIFY: phone for Chantal Strobel, Deschutes Public Library], never "
-        "'provide reference contacts before submission'. Commit to every part "
-        "you DO have and tag only the hole.\n"
-        "- These rules govern how you write; they are never content. Never write "
-        "sentences about verification requirements or your own constraints — apply "
-        "the rule silently. The tag is the only trace of a gap; never explain or "
-        "preface it.\n"
-        'Return JSON: {"content": "full markdown"}'
+        get_prompt("proposal_hollow_kb_fill.llm_fill_section", _PROMPT_LLM_FILL_SECTION)
     )
     user = (
         f"RFP: {rfp_title}\nClient: {rfp_client}\n"

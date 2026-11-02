@@ -27,6 +27,7 @@ from app.financial.figure_guard import (
 from app.financial.insight_prose import CHAT_FORMAT
 from app.financial.qb_insights import _SYSTEM, build_evidence
 from app.services.llm import LlmError, chat_text
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ def build_chat_messages(
     a long thread does not re-send the whole position on every question.
     """
     system = (
-        f"{_SYSTEM}{_CHAT_RULES}\n\n"
+        f"{get_prompt('qb_insights.system', _SYSTEM)}{_CHAT_RULES}\n\n"
         "Here is the current QuickBooks position:\n\n"
         f"{json.dumps(evidence, indent=2)}"
     )

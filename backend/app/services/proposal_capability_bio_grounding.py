@@ -22,6 +22,7 @@ from app.services.proposal_draft_structure_stubs import (
     content_looks_like_instructional_checklist,
 )
 from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -799,7 +800,7 @@ async def scrub_ungrounded_past_capability_claims(
         user = f"SECTION TO FIX: {section.title} (id={sid})\n\n{body[:12_000]}"
         updated, did, notes = await _llm_rewrite(
             section,
-            system=_CAPABILITY_SYSTEM,
+            system=get_prompt("proposal_capability_bio_grounding.capability", _CAPABILITY_SYSTEM),
             user=user,
             node_name=f"capability_past_proven_scrub:{sid}",
             rfp_id=rfp_id,

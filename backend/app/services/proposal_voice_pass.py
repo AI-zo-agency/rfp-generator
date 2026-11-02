@@ -16,6 +16,7 @@ from app.services import llm
 from app.services import proposal_voice_llm as voice_llm
 from app.services.proposal_brand_voice import voice_standards_for
 from app.services.proposal_voice_enforcement import apply_writing_standards_mechanics
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ async def check_section(content: str, standards: str, *, rfp_id: str | None) -> 
     """One check of the whole section. None means the call failed."""
     raw = await _voice_json(
         [
-            {"role": "system", "content": _CHECK_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_voice_pass.check", _CHECK_SYSTEM)},
             {"role": "user", "content": f"STANDARDS:\n{standards}\n\nSECTION:\n{content}"},
         ],
         node_name="proposal_voice_gate_check",
@@ -124,7 +125,7 @@ async def repair_section(
     listed = "\n".join(f"- {quote}" for quote, _rule in quotes)
     raw = await _voice_json(
         [
-            {"role": "system", "content": _REPAIR_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_voice_pass.repair", _REPAIR_SYSTEM)},
             {
                 "role": "user",
                 "content": f"STANDARDS:\n{standards}\n\nQUOTES TO REPAIR:\n{listed}\n\nSECTION:\n{content}",

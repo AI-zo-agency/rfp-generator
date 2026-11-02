@@ -17,6 +17,7 @@ from app.services.evidence_trust.rfp_hard_facts import (
     _MONEY_RE,
     money_to_number,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,7 @@ async def llm_extract_hard_fee_nte(rfp_text: str) -> RfpMoneyConstraint | None:
         raw, _ = await asyncio.wait_for(
             llm.chat_json(
                 [
-                    {"role": "system", "content": _NTE_FALLBACK_PROMPT},
+                    {"role": "system", "content": get_prompt("rfp_money_constraints.nte_fallback", _NTE_FALLBACK_PROMPT)},
                     {"role": "user", "content": f"RFP text:\n{body[:60_000]}"},
                 ],
                 max_tokens=512,

@@ -9,6 +9,7 @@ from app.services.proposal_intelligence.agent_base import clamp_confidence, safe
 from app.services.proposal_intelligence.plan_ops import append_decision, merge_memory, set_provider
 from app.services.proposal_intelligence.retrieval import retrieve_intelligence
 from app.services.proposal_intelligence.schemas import BudgetPlan, ProposalExecutionPlan
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "budget_planner"
@@ -44,7 +45,7 @@ async def run_budget_planner(
     )
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("budget_planner.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

@@ -14,6 +14,7 @@ from app.financial.client_map import parse_job_key
 from app.financial.client_map_normalize import normalize_name
 from app.financial.teamwork.teamwork_sync import overview_from_cache
 from app.services.llm import LlmError, chat_json
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +380,16 @@ def _used_teamwork_names(clients: list[dict[str, Any]]) -> set[str]:
     }
 
 
+_PROMPT_RUN_LINK = (
+    'Return JSON only: {"matches":[{"client_map_id":"...",'
+    '"qb_customer_id":"...","qb_customer_name":"...",'
+    '"teamwork_company_id":null,"reason":"..."}]}. '
+    "Use only IDs supplied below. Never invent IDs. Skip uncertain, "
+    "many-to-many, or ambiguous matches. Confirmed clients may already "
+    "have one side — only attach the missing QuickBooks or Teamwork side."
+)
+
+
 async def run_link(*, include_ai: bool = True) -> dict[str, int]:
     """Run exact linking, tag-based Teamwork attach, then light-model suggestions."""
     clients = repo.list_client_map()
@@ -467,12 +478,7 @@ async def run_link(*, include_ai: bool = True) -> dict[str, int]:
         {
             "role": "system",
             "content": (
-                'Return JSON only: {"matches":[{"client_map_id":"...",'
-                '"qb_customer_id":"...","qb_customer_name":"...",'
-                '"teamwork_company_id":null,"reason":"..."}]}. '
-                "Use only IDs supplied below. Never invent IDs. Skip uncertain, "
-                "many-to-many, or ambiguous matches. Confirmed clients may already "
-                "have one side — only attach the missing QuickBooks or Teamwork side."
+                get_prompt("client_map_link.run_link", _PROMPT_RUN_LINK)
             ),
         },
         {

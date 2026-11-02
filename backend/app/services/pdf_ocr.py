@@ -18,6 +18,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ async def ocr_pdf_via_vision(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": _OCR_PROMPT},
+                {"type": "text", "text": get_prompt("pdf_ocr.ocr", _OCR_PROMPT)},
                 {
                     "type": "file",
                     "file": {

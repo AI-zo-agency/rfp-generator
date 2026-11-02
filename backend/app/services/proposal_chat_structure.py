@@ -14,6 +14,7 @@ from app.models.proposal import ProposalDraft, ProposalSection
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_common import ProposalError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1981,7 +1982,7 @@ async def _structure_plan_llm_once(
     )
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": STRUCTURE_PLAN_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_chat_structure.structure_plan", STRUCTURE_PLAN_PROMPT)},
             {"role": "user", "content": prompt},
         ],
         max_tokens=1200,
@@ -2573,7 +2574,7 @@ async def _split_section_content(
     try:
         raw, _ = await llm.chat_json(
             [
-                {"role": "system", "content": EXTRACT_SPLIT_PROMPT},
+                {"role": "system", "content": get_prompt("proposal_chat_structure.extract_split", EXTRACT_SPLIT_PROMPT)},
                 {
                     "role": "user",
                     "content": (

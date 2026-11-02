@@ -48,6 +48,7 @@ from app.services.proposal_retrieval_graph import (
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +528,7 @@ Evidence corpus:
         user_block += f"\n{avoidance_block}\n"
 
     system_prompt = (
-        PROCUREMENT_FIX_PROMPT if register == "procurement" else SURGICAL_FIX_PROMPT
+        get_prompt("proposal_presubmit_autofix.procurement_fix", PROCUREMENT_FIX_PROMPT) if register == "procurement" else get_prompt("proposal_presubmit_autofix.surgical_fix", SURGICAL_FIX_PROMPT)
     )
     if register == "procurement":
         user_block = f"""Target client: {rfp.client}

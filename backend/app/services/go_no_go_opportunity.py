@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ async def classify_opportunity_llm(
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": _OPPORTUNITY_CLASSIFIER_PROMPT},
+                {"role": "system", "content": get_prompt("go_no_go_opportunity.opportunity_classifier", _OPPORTUNITY_CLASSIFIER_PROMPT)},
                 {
                     "role": "user",
                     "content": (

@@ -79,6 +79,7 @@ from app.services.proposal_budget_playbook import (
     user_points_at_open_section,
 )
 from app.services.proposal_budget_content import budget_section_score
+from app.services.prompt_store import get_prompt
 
 _MANUAL_FILL_PRESERVE_CONSTRAINT = (
     "CRITICAL HARD CONSTRAINT — PROTECTED MANUAL FILL PLACEHOLDERS:\n"
@@ -877,6 +878,12 @@ def _existing_sidebar_titles(draft: ProposalDraft, *, exclude_id: str) -> list[s
     ]
 
 
+_PROMPT_PICK_AND_DRAFT_REPLACEMENT_RFP_SECTION = (
+    "You replace one proposal sidebar section with a different RFP need. "
+    "Never keep the old topic. Never invent company facts."
+)
+
+
 async def _pick_and_draft_replacement_rfp_section(
     *,
     section: ProposalSection,
@@ -932,8 +939,7 @@ async def _pick_and_draft_replacement_rfp_section(
             {
                 "role": "system",
                 "content": (
-                    "You replace one proposal sidebar section with a different RFP need. "
-                    "Never keep the old topic. Never invent company facts."
+                    get_prompt("proposal_section_editor.pick_and_draft_replacement_rfp_section", _PROMPT_PICK_AND_DRAFT_REPLACEMENT_RFP_SECTION)
                 ),
             },
             {"role": "user", "content": prompt},
@@ -1260,7 +1266,7 @@ async def _apply_suggested_fix_to_section(
     from app.services.proposal_brand_voice import voice_standards_for
 
     standards, _ = voice_standards_for(rfp_id)
-    system_prompt = f"{standards}\n\n{APPLY_FIX_REDRAFT_PROMPT}"
+    system_prompt = f"{standards}\n\n{get_prompt('proposal_section_editor.apply_fix_redraft', APPLY_FIX_REDRAFT_PROMPT)}"
     if mfill_originals:
         system_prompt = f"{system_prompt}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
@@ -1351,6 +1357,16 @@ def _improve_outcome(
     return section, draft, research, provider, message, changed, suggested_fix
 
 
+_PROMPT_MAYBE_RENAME_SIDEBAR_TITLE = (
+    "The user may want the proposal sidebar/tab title cleaned up.\n"
+    "Return JSON: "
+    '{"shouldRename": true|false, "newTitle": "short label or null", '
+    '"message": "one sentence"}\n'
+    "newTitle must be a short clean deliverable name "
+    "(e.g. Cost Proposal — not File #5 / [Required] / [PDF] / Upload…)."
+)
+
+
 async def _maybe_rename_sidebar_title(
     *,
     rfp_id: str,
@@ -1416,12 +1432,7 @@ async def _maybe_rename_sidebar_title(
                 {
                     "role": "system",
                     "content": (
-                        "The user may want the proposal sidebar/tab title cleaned up.\n"
-                        "Return JSON: "
-                        '{"shouldRename": true|false, "newTitle": "short label or null", '
-                        '"message": "one sentence"}\n'
-                        "newTitle must be a short clean deliverable name "
-                        "(e.g. Cost Proposal — not File #5 / [Required] / [PDF] / Upload…)."
+                        get_prompt("proposal_section_editor.maybe_rename_sidebar_title", _PROMPT_MAYBE_RENAME_SIDEBAR_TITLE)
                     ),
                 },
                 {
@@ -3353,7 +3364,7 @@ async def _plan_edit_scope(
     )
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": EDIT_SCOPE_PLAN_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_section_editor.edit_scope_plan", EDIT_SCOPE_PLAN_PROMPT)},
             {
                 "role": "user",
                 "content": (
@@ -3901,7 +3912,7 @@ async def _section_chat_advisory_reply(
             f"{kb_block}"
             f"{history_block}"
         )
-    system_prompt = SECTION_CHAT_ADVISORY_PROMPT
+    system_prompt = get_prompt("proposal_section_editor.section_chat_advisory", SECTION_CHAT_ADVISORY_PROMPT)
     if should_apply_budget_playbook(section, user_message):
         full_detail = user_asks_budget_explanation(user_message)
         system_prompt = (
@@ -5083,7 +5094,7 @@ async def _plan_selection_edit(
         user_content += f"\n\nWhat the RFP requires here:\n{requirements}"
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": SELECTION_KB_PLAN_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_section_editor.selection_kb_plan", SELECTION_KB_PLAN_PROMPT)},
             {"role": "user", "content": user_content},
         ],
         max_tokens=16000,
@@ -5183,7 +5194,7 @@ async def _plan_section_improve(
         )
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": SECTION_IMPROVE_PLAN_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_section_editor.section_improve_plan", SECTION_IMPROVE_PLAN_PROMPT)},
             {
                 "role": "user",
                 "content": (
@@ -5987,6 +5998,17 @@ def _heal_selection_join_deterministic(content: str, *, splice_at: int) -> str:
     return re.sub(r"\n{3,}", "\n\n", merged)
 
 
+_PROMPT_HEAL_SELECTION_JOIN_LLM = (
+    "A user deleted a highlighted span from a proposal section. "
+    "The remaining text may be ungrammatical at the join "
+    "(e.g. a sentence starts mid-phrase with a lowercase word).\n"
+    "Fix ONLY grammar/capitalization/whitespace near the join so the "
+    "section reads correctly. Do NOT add new claims, sections, or "
+    "facts. Do NOT rewrite unrelated paragraphs.\n"
+    "Return JSON: {\"content\": \"full healed section text\"}"
+)
+
+
 async def _heal_selection_join_llm(
     *,
     section_title: str,
@@ -6001,13 +6023,7 @@ async def _heal_selection_join_llm(
                 {
                     "role": "system",
                     "content": (
-                        "A user deleted a highlighted span from a proposal section. "
-                        "The remaining text may be ungrammatical at the join "
-                        "(e.g. a sentence starts mid-phrase with a lowercase word).\n"
-                        "Fix ONLY grammar/capitalization/whitespace near the join so the "
-                        "section reads correctly. Do NOT add new claims, sections, or "
-                        "facts. Do NOT rewrite unrelated paragraphs.\n"
-                        "Return JSON: {\"content\": \"full healed section text\"}"
+                        get_prompt("proposal_section_editor.heal_selection_join_llm", _PROMPT_HEAL_SELECTION_JOIN_LLM)
                     ),
                 },
                 {
@@ -6104,9 +6120,9 @@ async def _improve_section_selection(
     masked_content, content_mfill = _mask_manual_fill_for_rewrite(content)
     if content_mfill and not mfill_originals:
         mfill_originals = []
-    system_prompt = SELECTION_EDIT_PROMPT
+    system_prompt = get_prompt("proposal_section_editor.selection_edit", SELECTION_EDIT_PROMPT)
     if mfill_originals or content_mfill:
-        system_prompt = f"{SELECTION_EDIT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
+        system_prompt = f"{get_prompt('proposal_section_editor.selection_edit', SELECTION_EDIT_PROMPT)}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
     ask_for_compliance = compliance_user_message.strip() or user_message.strip()
     allow_remove = _selection_asks_to_remove(user_message) or _selection_asks_to_remove(
@@ -6530,7 +6546,7 @@ async def _plan_refined_queries(
 
     raw, _ = await llm.chat_json(
         [
-            {"role": "system", "content": REFINE_QUERIES_PROMPT},
+            {"role": "system", "content": get_prompt("proposal_section_editor.refine_queries", REFINE_QUERIES_PROMPT)},
             {
                 "role": "user",
                 "content": (
@@ -6711,9 +6727,9 @@ async def _redraft_rfp_section(
         prior_for_agent, _ = prior_content_for_redraft(
             section.model_copy(update={"content": masked_prior})
         )
-    redraft_system = SECTION_REDRAFT_PROMPT
+    redraft_system = get_prompt("proposal_section_editor.section_redraft", SECTION_REDRAFT_PROMPT)
     if mfill_originals:
-        redraft_system = f"{SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
+        redraft_system = f"{get_prompt('proposal_section_editor.section_redraft', SECTION_REDRAFT_PROMPT)}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
     max_tokens = 16000
     content = ""
@@ -7088,9 +7104,9 @@ async def _improve_static_section(
 
     rewrite_body = prior_content_for_rewrite(section.id, prior)
     masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(rewrite_body)
-    system_prompt = STATIC_SECTION_REDRAFT_PROMPT
+    system_prompt = get_prompt("proposal_section_editor.static_section_redraft", STATIC_SECTION_REDRAFT_PROMPT)
     if mfill_originals:
-        system_prompt = f"{STATIC_SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
+        system_prompt = f"{get_prompt('proposal_section_editor.static_section_redraft', STATIC_SECTION_REDRAFT_PROMPT)}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
     content = ""
     provider = _provider_name()

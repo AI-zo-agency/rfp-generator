@@ -25,6 +25,7 @@ from app.services.proposal_intelligence.schemas import (
     ProposalExecutionPlan,
     ProposalOutline,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "dynamic_section_planner"
@@ -250,8 +251,8 @@ _STRICT_RFP_OUTLINE_RULES = """- STRICT RFP outline mode: there is NO Zo Agency 
 def _planner_system_prompt(outline_mode: str) -> str:
     mode = (outline_mode or "zo_template").strip().lower()
     if mode == "strict_rfp":
-        return _SYSTEM.replace(_ZO_FIRST_OUTLINE_RULES, _STRICT_RFP_OUTLINE_RULES)
-    return _SYSTEM
+        return get_prompt("dynamic_section_planner.system", _SYSTEM).replace(_ZO_FIRST_OUTLINE_RULES, _STRICT_RFP_OUTLINE_RULES)
+    return get_prompt("dynamic_section_planner.system", _SYSTEM)
 
 
 def _parse_page_limit(rfp_meta: dict[str, str] | None) -> int | None:

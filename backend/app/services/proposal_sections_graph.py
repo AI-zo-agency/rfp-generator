@@ -9,6 +9,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, TypedDict
+from app.services.prompt_store import get_prompt
 
 
 def _last_str(left: str | None, right: str | None) -> str:
@@ -1380,6 +1381,18 @@ def _merge_bio_extractions(primary: dict[str, Any], secondary: dict[str, Any]) -
     return merged
 
 
+_PROMPT_EXTRACT_KEY_ACCOUNTS_VIA_RAG_LLM = (
+    "Extract key account / client names from this KEY ACCOUNTS bio section only.\n"
+    "Include brand names from logo captions (e.g. SCHOTT, University of Idaho, Hampton Lumber).\n"
+    "Do NOT invent names. Do NOT include employers from Work History.\n"
+    "Do NOT include taglines or founding years (e.g. 'SINCE 1884').\n"
+    "Do NOT duplicate the same client under different wording "
+    "('the University of Idaho' and 'University of Idaho' = one entry; "
+    "'Sayfe' and 'Sayfe Families' = one entry — keep the fuller name).\n"
+    'Return JSON: {"keyAccounts": ["Name 1", "Name 2"]}'
+)
+
+
 async def _extract_key_accounts_via_rag_llm(accounts_section: str) -> list[str]:
     """LLM extract client names from KEY ACCOUNTS section text only (no work history)."""
     if not accounts_section.strip():
@@ -1390,14 +1403,7 @@ async def _extract_key_accounts_via_rag_llm(accounts_section: str) -> list[str]:
                 {
                     "role": "system",
                     "content": (
-                        "Extract key account / client names from this KEY ACCOUNTS bio section only.\n"
-                        "Include brand names from logo captions (e.g. SCHOTT, University of Idaho, Hampton Lumber).\n"
-                        "Do NOT invent names. Do NOT include employers from Work History.\n"
-                        "Do NOT include taglines or founding years (e.g. 'SINCE 1884').\n"
-                        "Do NOT duplicate the same client under different wording "
-                        "('the University of Idaho' and 'University of Idaho' = one entry; "
-                        "'Sayfe' and 'Sayfe Families' = one entry — keep the fuller name).\n"
-                        'Return JSON: {"keyAccounts": ["Name 1", "Name 2"]}'
+                        get_prompt("proposal_sections_graph.extract_key_accounts_via_rag_llm", _PROMPT_EXTRACT_KEY_ACCOUNTS_VIA_RAG_LLM)
                     ),
                 },
                 {"role": "user", "content": accounts_section[:40_000]},
@@ -1715,6 +1721,32 @@ async def _fetch_knowledge_base(state: SectionsGraphState) -> dict[str, Any]:
     }
 
 
+_PROMPT_SYNTHESIZE_PROPOSAL_VOICE = (
+    "You define how zö agency should write THIS proposal.\n\n"
+    "Two layers (both required):\n"
+    "1. zö core voice — from the knowledge-base brand voice excerpt (identity, "
+    "personality, how zö always sounds). zö narrative proposals use FIRST PERSON "
+    "(we/our/us), active voice, outcome-focused proof — never third-person "
+    "'The Vendor' procurement language.\n"
+    "2. RFP adaptation — how tone/formality/terminology should shift for THIS "
+    "client, sector, and solicitation (read the RFP closely).\n\n"
+    "CRITICAL: Government RFPs often say 'Vendor' in instructions. That register "
+    "is for attachments/forms only. Narrative sections (cover letter, company "
+    "overview, team, case studies, approach) must sound like zö speaking directly "
+    "to the client — not a legal brief about a vendor.\n\n"
+    "Different RFPs MUST produce different adaptations. Never generic one-size-fits-all.\n"
+    "Never contradict verified zö KB facts or invent zö positioning not in KB.\n\n"
+    "Return JSON only:\n"
+    '{"zoCoreVoice":"1-2 sentences from KB",'
+    '"tone":"combined label for this proposal",'
+    '"formality":"formal|semi-formal|conversational",'
+    '"voiceGuidelines":["specific writing rules for this RFP"],'
+    '"keyTerms":["terms to mirror from RFP"],'
+    '"clientExpectations":"what evaluators want to hear",'
+    '"rfpAdaptationNotes":"how this RFP voice differs from a generic zö proposal"}'
+)
+
+
 async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any]:
     """Merge zö KB brand voice with RFP-specific tone adaptation."""
     zo_kb = state.get("kb_zo_voice") or ""
@@ -1731,28 +1763,7 @@ async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any
                 {
                     "role": "system",
                     "content": (
-                        "You define how zö agency should write THIS proposal.\n\n"
-                        "Two layers (both required):\n"
-                        "1. zö core voice — from the knowledge-base brand voice excerpt (identity, "
-                        "personality, how zö always sounds). zö narrative proposals use FIRST PERSON "
-                        "(we/our/us), active voice, outcome-focused proof — never third-person "
-                        "'The Vendor' procurement language.\n"
-                        "2. RFP adaptation — how tone/formality/terminology should shift for THIS "
-                        "client, sector, and solicitation (read the RFP closely).\n\n"
-                        "CRITICAL: Government RFPs often say 'Vendor' in instructions. That register "
-                        "is for attachments/forms only. Narrative sections (cover letter, company "
-                        "overview, team, case studies, approach) must sound like zö speaking directly "
-                        "to the client — not a legal brief about a vendor.\n\n"
-                        "Different RFPs MUST produce different adaptations. Never generic one-size-fits-all.\n"
-                        "Never contradict verified zö KB facts or invent zö positioning not in KB.\n\n"
-                        "Return JSON only:\n"
-                        '{"zoCoreVoice":"1-2 sentences from KB",'
-                        '"tone":"combined label for this proposal",'
-                        '"formality":"formal|semi-formal|conversational",'
-                        '"voiceGuidelines":["specific writing rules for this RFP"],'
-                        '"keyTerms":["terms to mirror from RFP"],'
-                        '"clientExpectations":"what evaluators want to hear",'
-                        '"rfpAdaptationNotes":"how this RFP voice differs from a generic zö proposal"}'
+                        get_prompt("proposal_sections_graph.synthesize_proposal_voice", _PROMPT_SYNTHESIZE_PROPOSAL_VOICE)
                     ),
                 },
                 {
@@ -2833,6 +2844,21 @@ def _normalize_selected_bio_members(raw_members: list[Any]) -> list[str]:
     return normalize_selected_members(raw_members, max_members=5)
 
 
+_PROMPT_BUILD_SECTION_2 = (
+    "You are the Team Selection Agent for zö agency Section 2.\n"
+    "Determine required roles from the RFP, then select EXACTLY 5 team members "
+    "from the Master Team Roster whose skills match this solicitation.\n"
+    "Compact JSON only — no markdown fences.\n\n"
+    "STRICT RULES:\n"
+    "- Skill-based selection only — NO mandatory names.\n"
+    "- ONLY select people named in the Master Team Roster.\n"
+    "- Maximum 5 people. Each must have a DISTINCT role.\n"
+    "- Do NOT select the same person twice under different spellings.\n"
+    'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
+    '"requiredRoles": ["role 1", "role 2"]}'
+)
+
+
 async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
     """Skill-based team selection + JIT bio fetch per selected member."""
     if state.get("skip_section_2"):
@@ -2870,17 +2896,7 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
                     {
                         "role": "system",
                         "content": (
-                            "You are the Team Selection Agent for zö agency Section 2.\n"
-                            "Determine required roles from the RFP, then select EXACTLY 5 team members "
-                            "from the Master Team Roster whose skills match this solicitation.\n"
-                            "Compact JSON only — no markdown fences.\n\n"
-                            "STRICT RULES:\n"
-                            "- Skill-based selection only — NO mandatory names.\n"
-                            "- ONLY select people named in the Master Team Roster.\n"
-                            "- Maximum 5 people. Each must have a DISTINCT role.\n"
-                            "- Do NOT select the same person twice under different spellings.\n"
-                            'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
-                            '"requiredRoles": ["role 1", "role 2"]}'
+                            get_prompt("proposal_sections_graph.build_section_2", _PROMPT_BUILD_SECTION_2)
                         )
                     },
                     {

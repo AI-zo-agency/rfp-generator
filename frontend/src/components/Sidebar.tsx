@@ -8,6 +8,7 @@ import {
   IconAnalytics,
   IconDashboard,
   IconKnowledge,
+  IconPrompts,
   IconProposal,
   IconRfp,
   IconSync,
@@ -20,6 +21,7 @@ const workspaceNav = [
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
   { href: "/brand-voice", label: "Brand Voice", Icon: IconKnowledge },
+  { href: "/prompts", label: "Prompts", Icon: IconPrompts, prefetch: false },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics, prefetch: false },
   { href: "/activity", label: "Activity", Icon: IconSync, prefetch: false },
 ];

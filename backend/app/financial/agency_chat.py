@@ -13,6 +13,7 @@ from app.financial.agency_insights import _SYSTEM, build_evidence
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
 from app.financial.insight_prose import CHAT_FORMAT
 from app.services.llm import LlmError, chat_text
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def build_chat_messages(
 ) -> list[dict[str, str]]:
     messages = [{
         "role": "system",
-        "content": f"{_SYSTEM}{_CHAT_RULES}\n\nCurrent Agency evidence:\n\n{json.dumps(evidence, indent=2)}",
+        "content": f"{get_prompt('agency_insights.system', _SYSTEM)}{_CHAT_RULES}\n\nCurrent Agency evidence:\n\n{json.dumps(evidence, indent=2)}",
     }]
     messages.extend(_trim_history(history))
     focus = _focus_signal(evidence, focus_id)

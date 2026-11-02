@@ -32,6 +32,7 @@ from app.services.proposal_outline_dedup import (
     outline_title_tokens,
     outline_titles_near_duplicate,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -994,7 +995,7 @@ async def _find_missing_submittals_once(
     )
     raw, _provider = await safe_chat_json(
         [
-            {"role": "system", "content": _MISSING_SUBMITTALS_SYSTEM},
+            {"role": "system", "content": get_prompt("proposal_evaluation_coverage.missing_submittals", _MISSING_SUBMITTALS_SYSTEM)},
             {"role": "user", "content": ""},
         ],
         max_tokens=2048,

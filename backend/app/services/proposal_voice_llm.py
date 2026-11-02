@@ -26,6 +26,7 @@ from typing import Literal
 from app.services import llm
 from app.services.proposal_brand_voice import load_writing_standards
 from app.services.proposal_voice_enforcement import hard_voice_ban_hits
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +347,7 @@ async def _verify(
     async with _get_sem():
         raw, _ = await llm.chat_json(
             [
-                {"role": "system", "content": _VERIFY_INSTRUCTIONS},
+                {"role": "system", "content": get_prompt("proposal_voice_llm.verify", _VERIFY_INSTRUCTIONS)},
                 {"role": "user", "content": listing},
             ],
             max_tokens=4000,
@@ -385,7 +386,7 @@ async def rewrite_for_voice(
     if not llm.is_configured():
         return VoiceResult(text=text, skipped="llm not configured")
 
-    instructions = _INSTRUCTIONS
+    instructions = get_prompt("proposal_voice_llm.instructions", _INSTRUCTIONS)
     if register == "cover_letter":
         instructions += _COVER_LETTER_EXTRA
     elif register == "procurement":

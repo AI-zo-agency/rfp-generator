@@ -14,6 +14,7 @@ from app.services.proposal_fulfill_kpi_fix import (
     _CONTRACTOR_KPI_SENTENCE,
 )
 from app.services.proposal_rfp_excerpt import evaluation_and_kpi_excerpt
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,30 @@ def run_kpi_detail_deterministic_pass(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+_PROMPT_LLM_REWRITE_KPI_DETAIL_SECTION = (
+    "Rewrite ONE proposal section so contractor KPI **detail** matches RFP Section 2.3.\n"
+    "Top-level KPI names are already correct — fix **measurement instruments**, "
+    "**Activity Measure table rows**, and **BMP tactic-to-KPI linkages**.\n\n"
+    "Rules:\n"
+    "- Total Visitor Arrivals: count-based — airline PAX / HTA arrival statistics. "
+    "NEVER describe as a resident sentiment or 'favorable rating toward tourism' survey.\n"
+    "- Total Visitor Expenditures: spend / PPPD / HTA expenditure tracking — not satisfaction.\n"
+    "- Average Islands Visited Per Person: multi-island visit rate / itinerary share — "
+    "NOT 'trip satisfaction rating'.\n"
+    "- Remove contradictory duplicate rows for the same KPI (keep one measurement story).\n"
+    "- BMP KPI Linkage lines must be logically causal (e.g. brand/creative → expenditures; "
+    "itinerary/island content → islands visited; demand media → arrivals).\n"
+    "- Do NOT reintroduce agency four-KPI language (Resident Sentiment, Visitor Satisfaction, "
+    "Average Daily Visitor Spending as a set).\n"
+    "- Do NOT rewrite team bios, FEIN, insurance, or budget tables.\n"
+    "- Keep markdown tables valid.\n"
+    "- These rules govern how you write; they are never content. Never write "
+    "sentences about verification requirements or your own constraints — apply "
+    "the rule silently.\n"
+    "Return JSON: {\"content\": \"full section markdown\"}"
+)
+
+
 async def _llm_rewrite_kpi_detail_section(
     *,
     section: ProposalSection,
@@ -244,26 +269,7 @@ async def _llm_rewrite_kpi_detail_section(
         return stub
 
     system = (
-        "Rewrite ONE proposal section so contractor KPI **detail** matches RFP Section 2.3.\n"
-        "Top-level KPI names are already correct — fix **measurement instruments**, "
-        "**Activity Measure table rows**, and **BMP tactic-to-KPI linkages**.\n\n"
-        "Rules:\n"
-        "- Total Visitor Arrivals: count-based — airline PAX / HTA arrival statistics. "
-        "NEVER describe as a resident sentiment or 'favorable rating toward tourism' survey.\n"
-        "- Total Visitor Expenditures: spend / PPPD / HTA expenditure tracking — not satisfaction.\n"
-        "- Average Islands Visited Per Person: multi-island visit rate / itinerary share — "
-        "NOT 'trip satisfaction rating'.\n"
-        "- Remove contradictory duplicate rows for the same KPI (keep one measurement story).\n"
-        "- BMP KPI Linkage lines must be logically causal (e.g. brand/creative → expenditures; "
-        "itinerary/island content → islands visited; demand media → arrivals).\n"
-        "- Do NOT reintroduce agency four-KPI language (Resident Sentiment, Visitor Satisfaction, "
-        "Average Daily Visitor Spending as a set).\n"
-        "- Do NOT rewrite team bios, FEIN, insurance, or budget tables.\n"
-        "- Keep markdown tables valid.\n"
-        "- These rules govern how you write; they are never content. Never write "
-        "sentences about verification requirements or your own constraints — apply "
-        "the rule silently.\n"
-        "Return JSON: {\"content\": \"full section markdown\"}"
+        get_prompt("proposal_fulfill_kpi_detail.llm_rewrite_kpi_detail_section", _PROMPT_LLM_REWRITE_KPI_DETAIL_SECTION)
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"

@@ -13,6 +13,7 @@ from app.services.proposal_intelligence.schemas import (
     DeliveryPattern,
     ProposalExecutionPlan,
 )
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 AGENT = "delivery_pattern"
@@ -57,7 +58,7 @@ async def run_delivery_pattern(
     ]
     raw, provider = await safe_chat_json(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": get_prompt("delivery_pattern.system", _SYSTEM)},
             {
                 "role": "user",
                 "content": (

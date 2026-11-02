@@ -14,6 +14,7 @@ from app.services.company_qualification.schemas import (
     SubsectionPlan,
 )
 from app.services.llm import LlmError
+from app.services.prompt_store import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,26 @@ def _fallback_section_plan(
     return plan
 
 
+_PROMPT_RUN_SECTION_1_AGENT = (
+    "You are the Section 1 Agent for zö agency.\n"
+    "DECIDE what belongs in each Section 1 subsection — do NOT write prose.\n"
+    "Compact JSON only — no markdown fences.\n"
+    "Rules:\n"
+    "- Who We Are: primary caps only; never omit-tier\n"
+    "- Org Structure: full roster by department (plan only — no names here)\n"
+    "- Business Info / Insurance: facts from CompanyTruth\n"
+    "- Certifications: only RFP-relevant cert names from the list\n"
+    "Return:\n"
+    '{"sectionPlan":{'
+    '"section-1-who-we-are":{"includedCapabilities":[],"omittedCapabilities":[],'
+    '"targetWords":{"min":180,"max":250}},'
+    '"section-1-org-structure":{…},'
+    '"section-1-business-info":{…},'
+    '"section-1-certifications":{…},'
+    '"section-1-insurance":{…}}}'
+)
+
+
 async def run_section_1_agent(
     *,
     company_truth: CompanyTruth,
@@ -82,22 +103,7 @@ async def run_section_1_agent(
                 {
                     "role": "system",
                     "content": (
-                        "You are the Section 1 Agent for zö agency.\n"
-                        "DECIDE what belongs in each Section 1 subsection — do NOT write prose.\n"
-                        "Compact JSON only — no markdown fences.\n"
-                        "Rules:\n"
-                        "- Who We Are: primary caps only; never omit-tier\n"
-                        "- Org Structure: full roster by department (plan only — no names here)\n"
-                        "- Business Info / Insurance: facts from CompanyTruth\n"
-                        "- Certifications: only RFP-relevant cert names from the list\n"
-                        "Return:\n"
-                        '{"sectionPlan":{'
-                        '"section-1-who-we-are":{"includedCapabilities":[],"omittedCapabilities":[],'
-                        '"targetWords":{"min":180,"max":250}},'
-                        '"section-1-org-structure":{…},'
-                        '"section-1-business-info":{…},'
-                        '"section-1-certifications":{…},'
-                        '"section-1-insurance":{…}}}'
+                        get_prompt("section_1_agent.run_section_1_agent", _PROMPT_RUN_SECTION_1_AGENT)
                     ),
                 },
                 {
