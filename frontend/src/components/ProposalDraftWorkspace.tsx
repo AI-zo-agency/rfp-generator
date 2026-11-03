@@ -1382,7 +1382,9 @@ function ProposalDraftWorkspaceInner({
               prepared.sections[0]?.id ??
               null
           );
-          setActiveTab("outline");
+          // Generated manuscript → whole-proposal read view first.
+          setReviewFocusMode(true);
+          setActiveTab("content");
           setPipelineStatus(
             buildPipelineStatus(prepared, research, status)
           );
@@ -1399,7 +1401,9 @@ function ProposalDraftWorkspaceInner({
         const prepared = prepareOutline(draft);
         setOutline(prepared);
         setSelectedSectionId(prepared.sections[0]?.id ?? null);
-        setActiveTab("outline");
+        // Generated manuscript → whole-proposal read view first; Back to editing → tabs.
+        setReviewFocusMode(true);
+        setActiveTab("content");
         const lastScan =
           prepared.lastFulfillReport ?? draft.lastFulfillReport ?? null;
         if (lastScan && typeof lastScan === "object") {
@@ -1486,7 +1490,8 @@ function ProposalDraftWorkspaceInner({
                 null
             );
             if (countSectionsWithContent(prepared) > 0) {
-              setActiveTab("outline");
+              setReviewFocusMode(true);
+              setActiveTab("content");
             }
           }
         });
@@ -3618,7 +3623,8 @@ function ProposalDraftWorkspaceInner({
         }
       }
       await saveProposalDraft(rfp.id, draft);
-      setActiveTab("outline");
+      setReviewFocusMode(true);
+      setActiveTab("content");
       setSelectedSectionId(
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
@@ -3824,7 +3830,8 @@ function ProposalDraftWorkspaceInner({
       setPresubmitReview(reviewedResearch.presubmitReview ?? null);
       await saveProposalDraft(rfp.id, finalDraft);
       setGenerateNotice("Manuscript re-drafted from cached KB research.");
-      setActiveTab("outline");
+      setReviewFocusMode(true);
+      setActiveTab("content");
     } catch (error) {
       setGenerateError(
         error instanceof Error ? error.message : "Manuscript recovery failed"
@@ -3930,6 +3937,10 @@ function ProposalDraftWorkspaceInner({
       return "Review & fix…";
     }
     if (canResumePipeline) return "Continue build";
+    // Idle: first build vs re-run once a draft already exists.
+    if (fullProposalDone || manuscriptProgress.complete > 0) {
+      return "Rebuild proposal";
+    }
     return "Build my proposal";
   }, [
     isFullProposalRunning,
@@ -3941,6 +3952,8 @@ function ProposalDraftWorkspaceInner({
     rfpTabProgress,
     manualFillCount,
     useZoTemplate,
+    fullProposalDone,
+    manuscriptProgress.complete,
   ]);
 
   const updateSection = (id: string, patch: Partial<OutlineSection>) => {
@@ -4373,7 +4386,10 @@ function ProposalDraftWorkspaceInner({
         {sectionChatBusy && activeTab !== "outline" ? (
           <button
             type="button"
-            onClick={() => setActiveTab("outline")}
+            onClick={() => {
+              setReviewFocusMode(false);
+              setActiveTab("outline");
+            }}
             className="flex w-full items-center gap-2 border-b border-blue-200/80 bg-blue-50 px-3 py-2 text-left text-xs font-semibold text-blue-900 transition-smooth hover:bg-blue-100 md:px-4"
           >
             <span className="relative flex h-2 w-2 shrink-0">
@@ -4449,9 +4465,13 @@ function ProposalDraftWorkspaceInner({
           <div className="proposal-workspace-back">
             <button
               type="button"
-              onClick={() => setActiveTab("outline")}
+              className="proposal-workspace-back-btn"
+              onClick={() => {
+                setReviewFocusMode(false);
+                setActiveTab("outline");
+              }}
             >
-              ← Back to editing
+              Want to Edit something?
             </button>
             <span>
               {activeTab === "content"

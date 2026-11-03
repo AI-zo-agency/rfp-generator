@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { isSectionDrafted } from "@/lib/proposal-section-health";
 import { trackClick } from "@/lib/zo-analytics";
 
 interface GenerateProposalButtonProps {
@@ -24,11 +25,32 @@ export function GenerateProposalButton({
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasProposal, setHasProposal] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch(`/api/rfps/${encodeURIComponent(rfpId)}/proposal`, {
+      cache: "no-store",
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { draft?: { sections?: Array<{ content?: string | null }> } } | null) => {
+        if (cancelled || !data?.draft?.sections) return;
+        setHasProposal(
+          data.draft.sections.some((section) => isSectionDrafted(section.content))
+        );
+      })
+      .catch(() => {
+        // Keep Generate label if status can't be loaded.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rfpId]);
 
   async function handleGenerate() {
     setLoading(true);
     setError(null);
-    trackClick("rfp.generate_proposal", {
+    trackClick(hasProposal ? "rfp.view_proposal" : "rfp.generate_proposal", {
       path: `/rfps/${rfpId}`,
       entity_type: "rfp",
       entity_id: rfpId,
@@ -49,6 +71,8 @@ export function GenerateProposalButton({
     }
   }
 
+  const label = hasProposal ? "View proposal" : "Generate proposal";
+
   return (
     <div className="flex items-center gap-2">
       <button
@@ -59,12 +83,14 @@ export function GenerateProposalButton({
         title={
           disabled && disabledReason
             ? disabledReason
-            : isGo
+            : hasProposal
               ? "Open this RFP's proposal"
-              : "Mark this RFP as Go and open its proposal"
+              : isGo
+                ? "Open this RFP's proposal"
+                : "Mark this RFP as Go and open its proposal"
         }
       >
-        {loading ? "Opening…" : "Generate proposal"}
+        {loading ? "Opening…" : label}
       </button>
       {error && <p className="text-xs text-zo-error">{error}</p>}
     </div>
