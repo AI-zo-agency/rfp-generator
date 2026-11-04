@@ -103,6 +103,11 @@ async def retrieve_for_section(
     if not supermemory.is_configured():
         return []
 
+    from app.services.proposal_intelligence.agents.retrieval_planner import (
+        section_wants_client_references,
+    )
+
+    wants_contacts = section_wants_client_references(section_title)
     question = build_retrieval_question_from_entry(
         section_id=entry.section_id or "",
         section_title=section_title,
@@ -111,6 +116,11 @@ async def retrieve_for_section(
         why_needed=entry.why_needed or "",
         rfp_client=rfp_client,
     )
+    planner_queries = [str(q).strip() for q in (entry.queries or []) if str(q).strip()]
+    if wants_contacts and planner_queries:
+        # The case-study and KPI wording in the full question pulls contact rows
+        # out of the results, so a References tab searches with the query alone.
+        question = planner_queries[0]
     logger.info(
         "JIT RAG retrieve section=%s question=%r",
         entry.section_id,
@@ -177,6 +187,16 @@ async def retrieve_for_section(
 
     items: list[EvidenceItem] = []
     counter = start_index
+    if wants_contacts:
+        from app.services.proposal_reference_contacts import reference_contact_evidence_item
+
+        contact_item = await reference_contact_evidence_item(
+            entry.section_id or "",
+            evidence_id=f"E{counter}",
+        )
+        if contact_item:
+            items.append(contact_item)
+            counter += 1
     for hit in gated_hits[:12]:
         label = _hit_label(hit)
         key = str(hit.get("id") or hit.get("customId") or label)

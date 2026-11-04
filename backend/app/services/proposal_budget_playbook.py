@@ -310,6 +310,29 @@ def user_asks_budget_rebuild(text: str) -> bool:
     )
 
 
+_BUDGET_ORDER_VERBS = frozenset({"generate", "regenerate", "rebuild", "redo", "create"})
+_BUDGET_ORDER_NOUNS = frozenset({"budget", "pricing", "fee", "fees"})
+_NOT_A_BUDGET_ORDER = frozenset(
+    {"why", "how", "what", "when", "summary", "paragraph", "narrative", "explain"}
+)
+_BUDGET_ORDER_MAX_WORDS = 12
+
+
+def user_orders_budget_generation(text: str) -> bool:
+    """True for a short direct order to run the budget step ("generate budget").
+
+    Narrower than user_asks_budget_rebuild, which also matches "fix the cost
+    proposal wording": this one replaces the fee tab, so it must be unmistakable.
+    """
+    raw = _normalize_budget_ask_typos(text or "").casefold()
+    if "?" in raw:
+        return False
+    words = "".join(c if c.isalnum() else " " for c in raw).split()
+    if len(words) > _BUDGET_ORDER_MAX_WORDS or _NOT_A_BUDGET_ORDER.intersection(words):
+        return False
+    return bool(_BUDGET_ORDER_VERBS.intersection(words) and _BUDGET_ORDER_NOUNS.intersection(words))
+
+
 def user_points_at_open_section(text: str) -> bool:
     """True when the ask is scoped to the open tab ('here', 'this section', 'in this')."""
     return bool(

@@ -771,6 +771,74 @@ def ensure_budget_section_present(
     return restored, True
 
 
+# "Budget Management Approach" asks how we run a client's money, not what we charge.
+_BUDGET_TITLE_NOT_A_FEE_ASK = (
+    "management",
+    "control",
+    "adherence",
+    "tracking",
+    "oversight",
+    "monitoring",
+    "experience",
+    "history",
+    "compliance",
+)
+_BUDGET_STUB_MAX_WRITTEN_WORDS = 80
+
+
+def title_is_budget_ask(title: str) -> bool:
+    """True for a title asking for our fees ("Evaluation Criteria 3 — Project Budget")."""
+    lowered = (title or "").casefold()
+    if any(word in lowered for word in _BUDGET_TITLE_NOT_A_FEE_ASK):
+        return False
+    return budget_section_score(title or "") >= 4
+
+
+def budget_tab_is_drafted(sections: list[ProposalSection]) -> bool:
+    """True when a fee tab already holds real content, so the budget ask is answered."""
+    from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+
+    return any(
+        (title_is_budget_ask(s.title or "") or is_pricing_outline_title(s.title or ""))
+        and not section_is_rfp_draft_stub(s)
+        and len((s.content or "").strip()) >= _DRAFTED_PRICING_MIN_CHARS
+        for s in sections
+    )
+
+
+def remove_redundant_budget_stubs(
+    sections: list[ProposalSection],
+) -> tuple[list[ProposalSection], list[str]]:
+    """Drop empty budget placeholders beside a drafted fee tab.
+
+    Nothing can fill them: find_budget_section_index writes the budget to the
+    fee tab, and section_needs_presubmit_fill skips protected budget titles so
+    a second set of prices can never be invented.
+    """
+    from app.services.proposal_draft_structure_stubs import (
+        section_is_rfp_draft_stub,
+        strip_section_draft_stub_manual_fills,
+    )
+    from app.services.proposal_section_quality import word_count
+
+    if not budget_tab_is_drafted(sections):
+        return sections, []
+    kept: list[ProposalSection] = []
+    removed: list[str] = []
+    for section in sections:
+        written = word_count(strip_section_draft_stub_manual_fills(section.content or ""))
+        if (
+            title_is_budget_ask(section.title or "")
+            and section_is_rfp_draft_stub(section)
+            and written < _BUDGET_STUB_MAX_WRITTEN_WORDS
+        ):
+            removed.append(section.title or section.id)
+            continue
+        kept.append(section)
+    return kept, removed
+
+
 def section_is_budgetish(section: ProposalSection) -> bool:
     return budget_section_score(section.title or "") > 0
 

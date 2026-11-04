@@ -36,7 +36,7 @@ _COUNTY_CITY_MANAGER_RE = re.compile(
 
 _HOLLOW_REF_FILL = (
     "[MANUAL FILL: Sonja — supply verified client references from "
-    "ClientList / KB only (name, title, org, phone, email). Do not invent.]"
+    "past won proposals (06_WON) only (name, title, org, phone, email). Do not invent.]"
 )
 
 # Evaluator-facing apology / process narration — never proposal-ready.
@@ -373,7 +373,7 @@ def apply_edge_case_guards_to_section(
 
 
 _REF_CONTACT_FILL = (
-    "[MANUAL FILL: Sonja — verified contact from ClientList/KB "
+    "[MANUAL FILL: Sonja — verified contact from a past won proposal (06_WON) "
     "(name, title, phone, email)]"
 )
 
@@ -453,7 +453,7 @@ def _build_row_per_reference_table(engagements: list[str]) -> str:
     ]
     if not rows:
         rows = [
-            f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+            f"| [MANUAL FILL: Sonja — client / engagement from a past won proposal (06_WON)] | "
             f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
             f"{_REF_CONTACT_FILL} |"
             for _ in range(3)
@@ -466,7 +466,7 @@ def _build_column_per_reference_table(engagements: list[str], *, columns: int = 
     n = max(2, min(columns, 6))
     refs = list(engagements[:n])
     while len(refs) < n:
-        refs.append("[MANUAL FILL: Sonja — client / engagement from ClientList/KB]")
+        refs.append("[MANUAL FILL: Sonja — client / engagement from a past won proposal (06_WON)]")
     header = "| Field | " + " | ".join(f"Reference {i + 1}" for i in range(n)) + " |"
     sep = "|---|" + "|".join(["---"] * n) + "|"
     client = "| Client / Engagement | " + " | ".join(refs) + " |"
@@ -556,6 +556,27 @@ def _engagement_rows_from_case_studies(draft: ProposalDraft) -> list[str]:
 def _engagement_names_from_case_studies(draft: ProposalDraft) -> list[str]:
     return _case_study_engagement_names(draft)
 
+def _client_names_from_drafted_tabs(draft: ProposalDraft) -> list[str]:
+    """Client names from a drafted tab's table, such as "Examples of relevant projects"."""
+    names: list[str] = []
+    for section in draft.sections:
+        title_cf = (section.title or "").casefold()
+        if "reference" in title_cf or "past performance" in title_cf:
+            continue
+        table = _extract_markdown_table_block(section.content or "")
+        if not table:
+            continue
+        rows = [line.strip().strip("|").split("|") for line in table.splitlines()]
+        if "client" not in rows[0][0].casefold():
+            continue
+        for row in rows[2:]:
+            name = row[0].strip()
+            if not name or name.isdigit() or name.startswith("[") or name in names:
+                continue
+            names.append(name[:140])
+    return names[:5]
+
+
 def _references_tab_needs_table(content: str) -> bool:
     """True when References lacks a usable contact/engagement markdown table."""
     body = _strip_reference_layout_instructions(content or "")
@@ -638,19 +659,28 @@ def ensure_references_tabs_have_tables(
                 table = _DEFAULT_REF_TABLE_HEADER + "\n".join(case_rows)
                 source = "Section 3 engagements"
         if not table:
+            drafted_names = _client_names_from_drafted_tabs(draft)
+            if drafted_names:
+                table = (
+                    _build_column_per_reference_table(drafted_names)
+                    if column_layout
+                    else _build_row_per_reference_table(drafted_names)
+                )
+                source = "client names from drafted tabs"
+        if not table:
             if column_layout:
                 table = _build_column_per_reference_table([])
                 source = "blank MANUAL FILL columns"
             else:
                 table = (
                     _DEFAULT_REF_TABLE_HEADER
-                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    + f"| [MANUAL FILL: Sonja — client / engagement from a past won proposal (06_WON)] | "
                     f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
                     f"{_REF_CONTACT_FILL} |\n"
-                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    + f"| [MANUAL FILL: Sonja — client / engagement from a past won proposal (06_WON)] | "
                     f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
                     f"{_REF_CONTACT_FILL} |\n"
-                    + f"| [MANUAL FILL: Sonja — client / engagement from ClientList] | "
+                    + f"| [MANUAL FILL: Sonja — client / engagement from a past won proposal (06_WON)] | "
                     f"Relevant past performance for this RFP | {_REF_CONTACT_FILL} | "
                     f"{_REF_CONTACT_FILL} |"
                 )

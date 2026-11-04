@@ -312,6 +312,8 @@ def phase35_budget_gate(
                 break
         return "skip", detail
     if status == "absent":
+        if any(s.submission_instrument == "cost" for s in plan.writing.proposal_outline.sections):
+            return "proceed", "cost status absent, but the outline has a cost submittal tab"
         return "skip", "No confirmed cost/pricing submittal in RFP submission authority."
     return "skip", None
 
@@ -728,6 +730,15 @@ async def apply_submission_authority_pass(
         return plan
 
     plan = apply_authority_from_raw(plan, raw)
+    if plan.writing.cost_requirement_status == "absent" and cost_quotes:
+        # The model's verdict varies between runs on the same RFP. Sentences copied
+        # verbatim from it are not a judgement, and a missed budget costs the bid.
+        logger.warning(
+            "%s said cost absent but %d cost-submittal quote(s) are in the RFP — confirmed",
+            AGENT,
+            len(cost_quotes),
+        )
+        plan.writing.cost_requirement_status = "confirmed"
     counts: dict[str, int] = {}
     for sec in plan.writing.proposal_outline.sections:
         key = sec.submission_instrument or "unset"

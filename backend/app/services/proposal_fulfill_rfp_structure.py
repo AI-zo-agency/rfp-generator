@@ -2917,15 +2917,29 @@ def ensure_missing_scored_section_stubs(
     Structure Scan historically only reframed existing tabs — missing TOC/scored
     sections never appeared. Stubs make the gap visible and draftable.
     """
+    from app.services.proposal_budget_content import (
+        budget_tab_is_drafted,
+        remove_redundant_budget_stubs,
+        title_is_budget_ask,
+    )
     from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
     skip = skip_section_ids or set()
     logs: list[str] = []
-    sections = list(draft.sections)
+    sections, removed_budget_stubs = remove_redundant_budget_stubs(list(draft.sections))
     existing_ids = {s.id for s in sections}
-    changed = False
+    changed = bool(removed_budget_stubs)
+    logs.extend(
+        f"RFP structure: removed empty “{title}” — the drafted fee tab answers it"
+        for title in removed_budget_stubs
+    )
 
     for spec in specs:
+        if title_is_budget_ask(spec.rfp_title or "") and budget_tab_is_drafted(sections):
+            logs.append(
+                f"RFP structure: “{spec.rfp_title}” answered by the drafted fee tab — no stub added"
+            )
+            continue
         if _spec_is_non_deliverable(spec):
             coerced = _coerce_non_deliverable_spec_to_deliverable(spec)
             if coerced is None:

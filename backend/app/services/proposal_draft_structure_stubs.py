@@ -294,6 +294,26 @@ def content_looks_like_instructional_checklist(content: str) -> bool:
 _TABLE_SEPARATOR_ROW_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 _BARE_ROW_LABEL_RE = re.compile(r"^\d+[.)]?$")
 _PROSE_ROW_WORD_THRESHOLD = 45
+_ROW_NAME_MAX_WORDS = 8
+
+
+def _row_holds_client_contact(row: str) -> bool:
+    from app.services.proposal_integrity_guards import _REAL_EMAIL_RE, _REAL_PHONE_RE
+
+    if _REAL_PHONE_RE.search(row):
+        return True
+    return any("zo.agency" not in m.group(0).casefold() for m in _REAL_EMAIL_RE.finditer(row))
+
+
+def _row_names_a_client(cells: list[str]) -> bool:
+    """First cell is a short name and at least two other cells hold content."""
+    first = cells[0] if cells else ""
+    return (
+        bool(first)
+        and not _BARE_ROW_LABEL_RE.match(first)
+        and len(first.split()) <= _ROW_NAME_MAX_WORDS
+        and sum(1 for cell in cells[1:] if cell) >= 2
+    )
 
 
 def repair_prose_disguised_as_table_rows(content: str) -> str:
@@ -311,7 +331,9 @@ def repair_prose_disguised_as_table_rows(content: str) -> str:
     A real table row's cells are short, dense facts — a name, a date, a
     one-line scope. A row whose combined cell text runs to multiple
     sentences is a paragraph wearing pipe delimiters, not data, regardless
-    of which exact table this is or what its columns mean.
+    of which exact table this is or what its columns mean. The exception is
+    a row holding a client's email or phone: that is a reference record with
+    a long scope cell, and pulling it apart loses the contact's place.
     """
     lines = (content or "").splitlines()
     out: list[str] = []
@@ -331,7 +353,11 @@ def repair_prose_disguised_as_table_rows(content: str) -> str:
             while i < n and lines[i].strip().startswith("|"):
                 row = lines[i]
                 cells = [c.strip() for c in row.strip().strip("|").split("|")]
-                if sum(len(c.split()) for c in cells) > _PROSE_ROW_WORD_THRESHOLD:
+                if sum(
+                    len(c.split()) for c in cells
+                ) > _PROSE_ROW_WORD_THRESHOLD and not (
+                    _row_holds_client_contact(row) or _row_names_a_client(cells)
+                ):
                     prose = " ".join(
                         c for c in cells if c and not _BARE_ROW_LABEL_RE.match(c)
                     ).strip()
@@ -620,7 +646,17 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
         from app.services.proposal_integrity_guards import (
             references_section_has_preservable_content,
         )
+        from app.services.proposal_intelligence.agents.retrieval_planner import (
+            section_wants_client_references,
+        )
+        from app.services.proposal_reference_contacts import (
+            reference_table_is_only_placeholders,
+        )
 
+        if section_wants_client_references(
+            section.title or ""
+        ) and reference_table_is_only_placeholders(section.content or ""):
+            return True
         if references_section_has_preservable_content(section.content or ""):
             return False
     try:

@@ -100,7 +100,7 @@ _REFERENCE_CONTACT_LINE_RE = re.compile(
 
 _MANUAL_FILL_REFERENCES = (
     "[MANUAL FILL: Sonja — supply verified client references from "
-    "ClientList / KB only (name, title, org, phone, email). "
+    "past won proposals (06_WON) only (name, title, org, phone, email). "
     "Do not list agency staff as client references.]"
 )
 
@@ -194,7 +194,7 @@ def _reference_narrative_word_count(content: str) -> int:
 def _reference_contact_gap_note() -> str:
     return (
         "[MANUAL FILL: Sonja — supply verified client references from "
-        "ClientList / KB only (name, title, org, phone, email). Do not invent.]"
+        "past won proposals (06_WON) only (name, title, org, phone, email). Do not invent.]"
     )
 
 
@@ -301,7 +301,7 @@ def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
     )
     gap = (
         "[MANUAL FILL: Sonja — remaining references must come from verified "
-        "ClientList / KB contacts only (name, title, org, phone, email). "
+        "past won proposal (06_WON) contacts only (name, title, org, phone, email). "
         "Do not invent or leave [VERIFY] shells.]"
     )
     if not kept:
@@ -741,6 +741,10 @@ def apply_reference_contact_evidence_guard(
     evidence = _research_evidence_blob(research)
     if not evidence.strip():
         return draft, []
+
+    from app.services.proposal_reference_contacts import cached_reference_contacts_text
+
+    evidence = f"{evidence}\n{cached_reference_contacts_text()}"
 
     logs: list[str] = []
     sections: list[Any] = []

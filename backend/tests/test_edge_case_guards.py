@@ -295,7 +295,7 @@ class EdgeCaseGuardTests(unittest.TestCase):
         self.assertNotIn("Responsibility Inquiry", bodies)
         self.assertTrue(any("rebuilt References" in log for log in logs))
         refs = next(s for s in out.sections if "reference" in (s.title or "").casefold())
-        self.assertIn("[MANUAL FILL: Sonja — client / engagement from ClientList]", refs.content or "")
+        self.assertIn("[MANUAL FILL: Sonja — client / engagement from", refs.content or "")
         self.assertNotIn("Past municipal / public-sector delivery", refs.content or "")
 
 

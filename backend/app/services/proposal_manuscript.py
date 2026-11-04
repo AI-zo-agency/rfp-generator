@@ -638,12 +638,43 @@ def _fill_empty_reference_table_cells(line: str, width: int, manual: str) -> str
     return "| " + " | ".join(cells) + " |"
 
 
+def _starts_markdown_table(lines: list[str], index: int) -> bool:
+    """A table starts at a pipe row with a separator under it.
+
+    Words alone cannot identify a header: a data row whose placeholder says
+    "confirm phone" reads like one, and text below it was turned into rows.
+    """
+    return (
+        lines[index].strip().startswith("|")
+        and index + 1 < len(lines)
+        and lines[index + 1].strip().startswith("|")
+        and _is_markdown_table_separator_line(lines[index + 1].strip())
+    )
+
+
+def _numbered_placeholder_row_text(row: str, header: str) -> str | None:
+    """Text of a stray "| 1 | fill | fill | sentence | fill |" row, "" if it holds none.
+
+    None for anything else, including a table whose first column is really a number.
+    """
+    first_header = header.strip().strip("|").split("|")[0].strip()
+    if first_header in {"#", "No.", "No"}:
+        return None
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    if not cells[0].isdigit():
+        return None
+    written = [c for c in cells[1:] if c and "[manual fill" not in c.casefold()]
+    if len(written) > 1 or len(cells) - 1 - len(written) < 2:
+        return None
+    return written[0] if written else ""
+
+
 def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
     """Repair hollow / orphan reference-table rows so markdown tables stay intact."""
     if not text or "|" not in text:
         return text, []
     logs: list[str] = []
-    manual = "[MANUAL FILL: Sonja — verified contact from ClientList/KB]"
+    manual = "[MANUAL FILL: Sonja — verified contact from a past won proposal (06_WON)]"
     lines = text.split("\n")
     out: list[str] = []
     repaired = 0
@@ -652,16 +683,37 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
-        if stripped.startswith("|") and _is_reference_table_header_line(stripped):
-            width = len(stripped.strip("|").split("|"))
-            out.append(line)
-            i += 1
-            if i < len(lines) and _is_markdown_table_separator_line(lines[i].strip()):
+        if _starts_markdown_table(lines, i) and not _is_reference_table_header_line(stripped):
+            # Another table on the tab, such as Client | Work | Relevance.
+            out.extend(lines[i:i + 2])
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                if _starts_markdown_table(lines, i):
+                    break
                 out.append(lines[i])
                 i += 1
-            while i < len(lines) and lines[i].strip().startswith("|"):
+            continue
+        if _starts_markdown_table(lines, i):
+            width = len(stripped.strip("|").split("|"))
+            header_line = stripped
+            out.append(line)
+            out.append(lines[i + 1])
+            i += 2
+            pulled_out: list[str] = []
+            while (
+                i < len(lines)
+                and lines[i].strip().startswith("|")
+                and not _starts_markdown_table(lines, i)
+            ):
                 row = lines[i].strip()
                 if _is_all_empty_pipe_row(row):
+                    i += 1
+                    continue
+                stray_text = _numbered_placeholder_row_text(row, header_line)
+                if stray_text is not None:
+                    repaired += 1
+                    if stray_text:
+                        pulled_out.append(f"- {stray_text}")
                     i += 1
                     continue
                 if _is_hollow_reference_table_row(row):
@@ -674,12 +726,15 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
                     out.append(filled_row)
                 i += 1
             # Re-attach orphan pipe rows that landed after a blank line break.
+            skipped_blank = False
             while i < len(lines):
                 peek = lines[i].strip()
                 if not peek:
+                    skipped_blank = True
                     i += 1
                     continue
-                if peek.startswith("|") and not _is_reference_table_header_line(peek):
+                if peek.startswith("|") and not _starts_markdown_table(lines, i):
+                    skipped_blank = False
                     if _is_all_empty_pipe_row(peek):
                         i += 1
                         continue
@@ -688,6 +743,10 @@ def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
                     i += 1
                     continue
                 break
+            if pulled_out:
+                out.extend(["", *pulled_out])
+            if skipped_blank and i < len(lines):
+                out.append("")
             continue
         if stripped.startswith("|") and (
             _is_hollow_reference_table_row(stripped) or _looks_like_orphan_reference_row(stripped)
@@ -782,10 +841,10 @@ def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:
     logs: list[str] = []
     rebuilt = 0
     i = 0
-    manual = "[MANUAL FILL: Sonja — verified contact from ClientList/KB]"
+    manual = "[MANUAL FILL: Sonja — verified contact from a past won proposal (06_WON)]"
     while i < len(lines):
         stripped_line = lines[i].strip()
-        if stripped_line.startswith("|") and _is_reference_table_header_line(stripped_line):
+        if _starts_markdown_table(lines, i) and _is_reference_table_header_line(stripped_line):
             header_line = lines[i]
             width = len(stripped_line.strip("|").split("|"))
             j = i + 1
@@ -806,7 +865,7 @@ def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:
                 if not row:
                     k += 1
                     continue
-                if row.startswith("-") or row.startswith("*") or row.startswith("[MANUAL FILL"):
+                if row.startswith("-") or row.startswith("*"):
                     bullet_rows.append(row)
                     k += 1
                     continue
@@ -822,11 +881,15 @@ def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:
                         org = org.split("—")[0].split(" - ")[0].strip()
                         org = re.sub(r"\*+", "", org).strip()
                     cells = [manual] * width
-                    if width > 0:
-                        cells[0] = str(idx)
-                    org_col = 3 if width >= 4 else max(0, width - 1)
-                    if org_col < width:
-                        cells[org_col] = org
+                    first_header = stripped_line.strip("|").split("|")[0].casefold()
+                    if "client" in first_header or "engagement" in first_header:
+                        cells[0] = org
+                    else:
+                        if width > 0:
+                            cells[0] = str(idx)
+                        org_col = 3 if width >= 4 else max(0, width - 1)
+                        if org_col < width:
+                            cells[org_col] = org
                     out.append("| " + " | ".join(cells) + " |")
                     rebuilt += 1
                 i = k

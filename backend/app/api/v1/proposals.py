@@ -1248,6 +1248,14 @@ def _improve_activity_for_turn(
     )
 
 
+def _chat_runs_as_preview(preview_requested: bool | None, message: str) -> bool:
+    """A budget order is never a preview: the budget step saves as it runs, so
+    cancelling an Original vs Revised modal could not undo it."""
+    from app.services.proposal_budget_playbook import user_orders_budget_generation
+
+    return bool(preview_requested) and not user_orders_budget_generation(message)
+
+
 @router.post(
     "/{rfp_id}/proposal/sections/{section_id}/improve",
     response_model=ProposalSectionImproveResponse,
@@ -1330,7 +1338,7 @@ async def _improve_section(
     chat_run_id = str(uuid.uuid4())
     # Preview-first: compute the revision but do not save until the user confirms
     # in the Original vs Revised modal (unless they force applyFix without preview).
-    preview_only = bool(body.preview_only)
+    preview_only = _chat_runs_as_preview(body.preview_only, body.message)
     try:
         with llm_call_context(rfp_id=rfp_id, run_id=chat_run_id, node_name="section_chat"):
             (

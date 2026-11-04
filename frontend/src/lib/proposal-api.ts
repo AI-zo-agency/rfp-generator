@@ -2750,7 +2750,17 @@ export async function improveProposalSection(
   try {
     data = text.trim() ? JSON.parse(text) : {};
   } catch {
-    throw new Error("Invalid response from server (section improve may have timed out).");
+    // Non-JSON is usually an HTML 404/502 from Next (stale route) or a proxy
+    // cut-off — not always a long LLM timeout.
+    const hint =
+      res.status === 404
+        ? "Section improve route not found (try refreshing the page)."
+        : res.status >= 500
+          ? "Section improve proxy failed."
+          : "section improve may have timed out";
+    throw new Error(
+      `Invalid response from server (${hint}; HTTP ${res.status || "unknown"}).`,
+    );
   }
   if (!res.ok) {
     throw new Error(formatApiDetail(data.detail, "Section improve failed"));

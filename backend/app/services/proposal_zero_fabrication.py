@@ -115,11 +115,17 @@ def apply_zero_fabrication_guards(
         report.logs.append(f"{label}: reference phone — {line}")
 
     from app.services.proposal_client_table_guard import collapse_incomplete_client_tables
+    from app.services.proposal_intelligence.agents.retrieval_planner import (
+        section_wants_client_references,
+    )
 
     collapsed_sections = []
     collapsed_n = 0
     for section in draft.sections:
-        body, did = collapse_incomplete_client_tables(section.content or "")
+        body, did = collapse_incomplete_client_tables(
+            section.content or "",
+            keep_named_clients=section_wants_client_references(section.title or ""),
+        )
         if did:
             collapsed_n += 1
             collapsed_sections.append(section.model_copy(update={"content": body}))

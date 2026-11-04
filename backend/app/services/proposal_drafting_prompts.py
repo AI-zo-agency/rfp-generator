@@ -109,7 +109,7 @@ GLOBAL_AGENT_PROMPT_RULES = """
 5. USE [VERIFY] FOR GAPS: If you genuinely lack facts to fulfill a requirement, insert an inline `[VERIFY: missing fact description]` tag to hold the space instead of fabricating or omitting it.
 6. ANTI-RFP-ECHO: NEVER restate the RFP. Address requirements with proposal substance only. NEVER paraphrase, quote, or summarize the RFP / Opportunity Understanding / requirement checklist as section content. Write what zö will do and prove — not what the buyer already asked.
 7. NO META / APOLOGY PROSE: NEVER write buyer-facing paragraphs about what the knowledge base lacks, what "we can't complete," what a call would confirm, or what we'll supply later. Missing facts → only `[MANUAL FILL: …]` or `[VERIFY: …]`. Designers paste these tabs — flags only, never disclaimer essays.
-8. REFERENCES / PAST PERFORMANCE: Always use a markdown table (Client/Engagement | Scope/Relevance | Contact | Phone/Email). List real engagements from KB/case studies. Put `[MANUAL FILL: Sonja — verified contact from ClientList/KB]` in contact cells when the name/phone/email is not verified — NEVER leave the tab as a lone MANUAL FILL sentence with no table.
+8. REFERENCES / PAST PERFORMANCE: Always use a markdown table (Client/Engagement | Scope/Relevance | Contact | Phone/Email). List real engagements from KB/case studies. Put `[MANUAL FILL: Sonja — verified contact from a past won proposal (06_WON)]` in contact cells when the name/phone/email is not verified — NEVER leave the tab as a lone MANUAL FILL sentence with no table.
 """
 
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)

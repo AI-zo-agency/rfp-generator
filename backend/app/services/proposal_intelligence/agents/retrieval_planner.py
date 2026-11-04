@@ -83,7 +83,8 @@ def section_wants_client_references(title: str) -> bool:
     performance / qualifications would attach contact-record queries to
     narrative experience tabs that do not want them.
     """
-    lowered = (title or "").casefold()
+    # "Preferences" (local vendor preference forms) only spells the word.
+    lowered = (title or "").casefold().replace("preference", "")
     if _REFERENCE_TITLE_HINT not in lowered:
         return False
     # "Reference" also appears in cross-reference / referenced-document tabs,

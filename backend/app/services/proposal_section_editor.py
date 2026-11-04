@@ -90,7 +90,32 @@ _MANUAL_FILL_PRESERVE_CONSTRAINT = (
 )
 
 
-def _mask_manual_fill_for_rewrite(text: str) -> tuple[str, list[str]]:
+def _drop_reference_placeholders_once_contacts_exist(text: str, section_title: str) -> str:
+    """A placeholder reference table is what the verified contacts replace.
+
+    Protected, its tags come back at the end of the tab under the finished table.
+    With no contacts to write from, they stay: they are Sonja's hand-off.
+    """
+    from app.services.proposal_intelligence.agents.retrieval_planner import (
+        section_wants_client_references,
+    )
+    from app.services.proposal_reference_contacts import (
+        cached_reference_contacts_text,
+        reference_table_is_only_placeholders,
+    )
+
+    if (
+        not section_wants_client_references(section_title)
+        or not cached_reference_contacts_text()
+        or not reference_table_is_only_placeholders(text)
+    ):
+        return text
+    for tag in reversed(extract_manual_fill_tags(text)):
+        text = text[: tag.start] + text[tag.end :]
+    return text
+
+
+def _mask_manual_fill_for_rewrite(text: str, *, section_title: str = "") -> tuple[str, list[str]]:
     """Mask MANUAL FILL tags before an incidental LLM rewrite.
 
     Whole-section structure stubs (``Draft this RFP-required section — …``) are
@@ -102,6 +127,7 @@ def _mask_manual_fill_for_rewrite(text: str) -> tuple[str, list[str]]:
     from app.services.proposal_manuscript_locks import strip_kpi_lock_manual_fills
 
     cleaned, _ = strip_kpi_lock_manual_fills(cleaned)
+    cleaned = _drop_reference_placeholders_once_contacts_exist(cleaned, section_title)
     if not extract_manual_fill_tags(cleaned):
         return cleaned, []
     return mask_manual_fill_tags(cleaned)
@@ -5556,6 +5582,24 @@ async def _merge_bio_kb_into_blobs(
         )
         return merged_kb, merged_fact
 
+    from app.services.proposal_intelligence.agents.retrieval_planner import (
+        section_wants_client_references,
+    )
+
+    if section_wants_client_references(section.title or ""):
+        from app.services.proposal_reference_contacts import (
+            format_reference_contacts,
+            load_won_reference_contacts,
+        )
+
+        contacts_text = format_reference_contacts(await load_won_reference_contacts())
+        if contacts_text:
+            merged_kb = (
+                f"=== 06_WON client references ===\n{contacts_text}\n\n{kb_block}".strip()
+            )
+            merged_fact = f"{contacts_text}\n\n{fact_blob}".strip()
+            return merged_kb, merged_fact
+
     return kb_block, fact_blob
 
 
@@ -6721,7 +6765,9 @@ async def _redraft_rfp_section(
     kpi_block = kpi_weave_instruction(
         research.manuscript_locks if research else None
     )
-    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(source_for_tags)
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(
+        source_for_tags, section_title=section.title or ""
+    )
     # Keep prior_for_agent length behavior but on masked text when tags exist.
     if mfill_originals:
         prior_for_agent, _ = prior_content_for_redraft(
@@ -8445,6 +8491,45 @@ async def _try_draft_empty_section(
     )
 
 
+async def _generate_budget_from_chat(
+    *,
+    rfp_id: str,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool, Any]:
+    """The budget step itself, for the "generate budget" the fee guard tells people to say.
+
+    The section editor must not price anything, so this order cannot go through it.
+    """
+    from app.services.proposal_budget_content import find_budget_section_index
+    from app.services.proposal_chat_manuscript_fix import _run_full_budget_agent
+
+    new_draft, new_research, ran, detail = await _run_full_budget_agent(
+        rfp_id=rfp_id, draft=draft, research=research
+    )
+    provider = _provider_name()
+    if new_research is None:
+        new_research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    before = {s.id: s.content for s in draft.sections}
+    wrote_fees = ran and any(before.get(s.id) != s.content for s in new_draft.sections)
+    if wrote_fees:
+        index = find_budget_section_index(new_draft.sections)
+        target = new_draft.sections[index].title if index is not None else "the fee tab"
+        reply = f"Generated the budget from the pricing docs and wrote it to “{target}”."
+    elif ran:
+        notes = new_research.budget.pricing_flags[:3] if new_research.budget else []
+        reply = " ".join(["The budget step ran but produced no fee table.", *map(str, notes)])
+    else:
+        reply = f"I could not generate the budget: {detail}"
+    focus = _find_draft_section(new_draft, section_id) or new_draft.sections[0]
+    return focus, new_draft, new_research, provider, reply, wrote_fees, None
+
+
 async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
@@ -8529,6 +8614,16 @@ async def improve_proposal_section(
     )
     if title_early is not None:
         return title_early
+
+    from app.services.proposal_budget_playbook import user_orders_budget_generation
+
+    if persist and not apply_fix and user_orders_budget_generation(raw_user_message):
+        return await _generate_budget_from_chat(
+            rfp_id=rfp_id,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+        )
 
     from app.services.proposal_chat_improve_pin import user_asks_thorough_section_repair
 
@@ -11571,6 +11666,9 @@ async def improve_proposal_section(
 
         prior_corpus_len = len(prior_corpus)
         corpus = _merge_hits_into_corpus(prior_corpus, all_hits, section_id)
+        from app.services.proposal_reference_contacts import add_reference_contacts_to_corpus
+
+        corpus = await add_reference_contacts_to_corpus(corpus, section_id, section.title or "")
         evidence_added = len(corpus) - prior_corpus_len
         section_evidence = _evidence_for_section(section_id, corpus)
         print(

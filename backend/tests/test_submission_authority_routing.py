@@ -15,6 +15,7 @@ from app.services.proposal_intelligence.schemas import (
 )
 from app.services.proposal_submission_authority import (
     apply_authority_from_raw,
+    apply_submission_authority_pass,
     instrument_supports_budget_build,
     phase35_budget_gate,
     unresolved_reference_block,
@@ -324,3 +325,68 @@ class Phase3PartitionRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CostEvidenceOverridesAbsentTests(unittest.IsolatedAsyncioTestCase):
+    """OCTA: the model said "absent" while quoting the cost section and stamping a cost tab."""
+
+    def _plan(self, instrument: str | None, status: str = "absent") -> ProposalExecutionPlan:
+        return ProposalExecutionPlan(
+            writing=WritingIntelligence(
+                cost_requirement_status=status,
+                proposal_outline=ProposalOutline(
+                    sections=[
+                        OutlineSection(
+                            id="rfp-sec-6",
+                            title="Cost and Price Proposal",
+                            submission_instrument=instrument,
+                        ),
+                        OutlineSection(id="rfp-sec-1", title="Approach"),
+                    ]
+                ),
+            )
+        )
+
+    def test_saved_plan_with_a_stamped_cost_tab_builds_the_budget(self) -> None:
+        self.assertEqual(phase35_budget_gate(self._plan("cost"))[0], "proceed")
+
+    def test_absent_with_no_cost_tab_still_skips(self) -> None:
+        self.assertEqual(phase35_budget_gate(self._plan("narrative"))[0], "skip")
+
+    def test_ambiguous_with_a_cost_tab_still_skips(self) -> None:
+        plan = self._plan("cost", status="ambiguous")
+        self.assertEqual(phase35_budget_gate(plan)[0], "skip")
+
+    async def _run_pass(self, model_status: str, quotes: list[str]) -> str:
+        plan = self._plan(None)
+        raw = {"costRequirementStatus": model_status, "sectionUpdates": [], "confidence": 0.8}
+        with (
+            patch(
+                "app.services.proposal_submission_authority.collect_cost_submittal_quotes",
+                new=AsyncMock(return_value=quotes),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agent_base.safe_chat_json",
+                new=AsyncMock(return_value=(raw, "test")),
+            ),
+            patch(
+                "app.services.proposal_submission_authority._load_unresolved_references",
+                return_value=[],
+            ),
+            patch(
+                "app.services.proposal_submission_authority.load_rfp_body_for_quotes",
+                return_value="rfp body",
+            ),
+        ):
+            out = await apply_submission_authority_pass(plan, "rfp body")
+        return out.writing.cost_requirement_status
+
+    async def test_copied_cost_quotes_overrule_an_absent_answer(self) -> None:
+        quote = "The Offeror shall complete the Price Summary Sheet form included with this RFP."
+        self.assertEqual(await self._run_pass("absent", [quote]), "confirmed")
+
+    async def test_absent_answer_stands_with_no_quotes(self) -> None:
+        self.assertEqual(await self._run_pass("absent", []), "absent")
+
+    async def test_copied_quotes_do_not_overrule_a_contradiction(self) -> None:
+        self.assertEqual(await self._run_pass("ambiguous", ["Submit a cost proposal."]), "ambiguous")

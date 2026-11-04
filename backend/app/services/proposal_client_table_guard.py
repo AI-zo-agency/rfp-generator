@@ -42,7 +42,12 @@ def _cell_incomplete(cell: str) -> bool:
     return bool(_MANUAL.search(text))
 
 
-def _collapse_table(block: str) -> tuple[str, bool]:
+def _names_a_client(row: list[str]) -> bool:
+    first_cell = row[0] if row else ""
+    return not _cell_incomplete(first_cell) and not first_cell.strip().isdigit()
+
+
+def _collapse_table(block: str, *, keep_named_clients: bool = False) -> tuple[str, bool]:
     lines = [ln for ln in block.splitlines() if ln.strip()]
     if len(lines) < 3:
         return block, False
@@ -60,7 +65,10 @@ def _collapse_table(block: str) -> tuple[str, bool]:
     # row was unfinished. Collapse when more than half the rows have a gap.
     if dirty_rows * 2 <= len(cells):
         return block, False
-    kept = [row for row, parsed in zip(data, cells) if parsed and not any(_cell_incomplete(c) for c in parsed)]
+    if keep_named_clients:
+        kept = [row for row, parsed in zip(data, cells) if _names_a_client(parsed)]
+    else:
+        kept = [row for row, parsed in zip(data, cells) if parsed and not any(_cell_incomplete(c) for c in parsed)]
     header_line = lines[0]
     sep_line = lines[1]
     if kept:
@@ -69,8 +77,16 @@ def _collapse_table(block: str) -> tuple[str, bool]:
     return _GAP_SENTENCE, True
 
 
-def collapse_incomplete_client_tables(content: str) -> tuple[str, bool]:
-    """Return ``(text, changed)``. Non-client tables are left as written."""
+def collapse_incomplete_client_tables(
+    content: str,
+    *,
+    keep_named_clients: bool = False,
+) -> tuple[str, bool]:
+    """Return ``(text, changed)``. Non-client tables are left as written.
+
+    ``keep_named_clients`` is for References tabs, where a client we did work
+    for is still worth listing while its contact details are being confirmed.
+    """
     if not content or "|" not in content:
         return content, False
     lines = content.splitlines()
@@ -83,7 +99,7 @@ def collapse_incomplete_client_tables(content: str) -> tuple[str, bool]:
             while i < len(lines) and lines[i].lstrip().startswith("|"):
                 i += 1
             block = "\n".join(lines[start:i])
-            replacement, did = _collapse_table(block)
+            replacement, did = _collapse_table(block, keep_named_clients=keep_named_clients)
             changed = changed or did
             out.append(replacement)
             continue
