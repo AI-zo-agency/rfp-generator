@@ -1,14 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { isSectionDrafted } from "@/lib/proposal-section-health";
+import { useState } from "react";
 import { trackClick } from "@/lib/zo-analytics";
 
 interface GenerateProposalButtonProps {
   rfpId: string;
   /** Already marked Go — nothing to record, just open the proposal. */
   isGo: boolean;
+  /** Server-seeded: at least one drafted section exists for this RFP. */
+  hasProposal: boolean;
   /** Blocks the button; `disabledReason` is shown as its tooltip. */
   disabled?: boolean;
   disabledReason?: string;
@@ -19,33 +20,13 @@ interface GenerateProposalButtonProps {
 export function GenerateProposalButton({
   rfpId,
   isGo,
+  hasProposal,
   disabled = false,
   disabledReason,
 }: GenerateProposalButtonProps) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasProposal, setHasProposal] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetch(`/api/rfps/${encodeURIComponent(rfpId)}/proposal`, {
-      cache: "no-store",
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { draft?: { sections?: Array<{ content?: string | null }> } } | null) => {
-        if (cancelled || !data?.draft?.sections) return;
-        setHasProposal(
-          data.draft.sections.some((section) => isSectionDrafted(section.content))
-        );
-      })
-      .catch(() => {
-        // Keep Generate label if status can't be loaded.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [rfpId]);
 
   async function handleGenerate() {
     setLoading(true);

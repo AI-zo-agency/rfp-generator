@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { RfpGoNoGoControls } from "@/components/RfpGoNoGoControls";
 import { daysUntil, formatDate } from "@/lib/format";
+import { rfpHasDraftedProposal } from "@/lib/proposal-supabase-read";
 import { describeRfpIntake } from "@/lib/rfp-intake";
 import { STAGE_LABELS } from "@/lib/rfp-process";
 import { hasRfpPdf } from "@/lib/rfp-pdf";
@@ -12,7 +13,10 @@ interface RfpDetailContentProps {
 }
 
 export async function RfpDetailContent({ id }: RfpDetailContentProps) {
-  const rfp = await getRfpById(id);
+  const [rfp, hasProposal] = await Promise.all([
+    getRfpById(id),
+    rfpHasDraftedProposal(id),
+  ]);
 
   if (!rfp) {
     notFound();
@@ -57,6 +61,7 @@ export async function RfpDetailContent({ id }: RfpDetailContentProps) {
         lastActivityNote={rfp.lastActivityNote}
         selectedTracks={rfp.selectedTracks}
         bidScopeLockedAt={rfp.bidScopeLockedAt}
+        hasProposal={hasProposal}
       />
     </>
   );
