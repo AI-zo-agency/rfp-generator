@@ -29,6 +29,8 @@ interface RfpGoNoGoControlsProps {
   lastActivityNote?: string | null;
   selectedTracks?: string[];
   bidScopeLockedAt?: string | null;
+  /** Server-seeded so the CTA paints correctly on first render. */
+  hasProposal?: boolean;
 }
 
 export function RfpGoNoGoControls({
@@ -48,6 +50,7 @@ export function RfpGoNoGoControls({
   lastActivityNote,
   selectedTracks: selectedTracksProp = [],
   bidScopeLockedAt: bidScopeLockedAtProp = null,
+  hasProposal = false,
 }: RfpGoNoGoControlsProps) {
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedTracks, setSelectedTracks] = useState(selectedTracksProp);
@@ -82,6 +85,7 @@ export function RfpGoNoGoControls({
         <GenerateProposalButton
           rfpId={rfpId}
           isGo={isGoRfp}
+          hasProposal={hasProposal}
           disabled={!goNoGoAnalysis || analyzing}
           disabledReason={
             analyzing
