@@ -24,6 +24,8 @@ in `proposal_zero_fabrication.py` — canonical order:
    roster scrub (org chart + bios must match MasterTemplate / 04_Bio — org-chart-only
    names are NOT self-verifying)
 8. Forms & Attachments integrity (LLM audit + verbatim replace only) on persist
+9. Active brand voice (Rev 7) scrub on persist — if prose is not zö, change it
+   (fee/ledger tabs: mechanics only; no LLM rewrite of dollar rows)
 
 ## Where it MUST run
 

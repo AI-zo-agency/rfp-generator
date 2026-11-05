@@ -472,15 +472,32 @@ def _apply_mechanics_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", 
     return draft.model_copy(update={"sections": sections}), logs
 
 
-async def apply_rev6_voice_scrub_to_draft(draft: "ProposalDraft") -> tuple["ProposalDraft", list[str]]:
-    """Manuscript-wide voice pass (LLM) plus mechanics, for Complete Scan and Review."""
+async def apply_rev6_voice_scrub_to_draft(
+    draft: "ProposalDraft",
+    *,
+    exclude_section_ids: set[str] | frozenset[str] | None = None,
+) -> tuple["ProposalDraft", list[str]]:
+    """Manuscript-wide voice pass (LLM) plus mechanics, for Complete Scan and Review.
+
+    Loads the **active** brand-voice revision (Rev 7 today) via ``voice_standards_for``.
+    ``exclude_section_ids`` skips the LLM repair on fee/ledger tabs so dollar
+    rows are not rewritten — mechanics still run on those tabs.
+    """
     from app.models.proposal import ProposalDraft as _Draft
     from app.services.proposal_voice_pass import apply_voice_pass
 
     if not isinstance(draft, _Draft):
         return draft, []
     draft, mech_logs = _apply_mechanics_to_draft(draft)
-    draft, logs = await apply_voice_pass(draft)
+    exclude = {str(x) for x in (exclude_section_ids or set()) if str(x).strip()}
+    section_ids: set[str] | None = None
+    if exclude:
+        section_ids = {
+            s.id
+            for s in draft.sections
+            if (s.id or "") and s.id not in exclude and (s.content or "").strip()
+        }
+    draft, logs = await apply_voice_pass(draft, section_ids=section_ids)
     return draft, mech_logs + logs
 
 

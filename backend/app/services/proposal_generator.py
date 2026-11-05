@@ -3160,9 +3160,13 @@ async def _finish_phase3_5_pricing_plan(
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
     await _assert_proposal_not_reset(rfp_id)
 
-    from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+    from app.services.proposal_zero_fabrication import (
+        apply_zero_fabrication_guards_before_persist,
+    )
 
-    draft, zf_report = apply_zero_fabrication_guards(
+    # Persist stack: ZF + active brand voice (Rev 7) on narrative tabs. Cost
+    # ledger stays plan-owned (excluded from the LLM voice rewrite).
+    draft, zf_report = await apply_zero_fabrication_guards_before_persist(
         draft,
         research=research,
         budget=budget,

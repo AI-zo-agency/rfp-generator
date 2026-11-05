@@ -414,6 +414,28 @@ async def apply_zero_fabrication_guards_before_persist(
     )
 
     if not skip_llm_repairs:
+        # Hard gate: active brand voice (Rev 7). If prose is not zö, change it.
+        # Fee/ledger tabs get mechanics only — LLM must not rewrite dollar rows.
+        try:
+            from app.services.proposal_budget_content import find_budget_section_index
+            from app.services.proposal_voice_enforcement import (
+                apply_rev6_voice_scrub_to_draft,
+            )
+
+            cost_idx = find_budget_section_index(draft.sections)
+            exclude: set[str] = set()
+            if cost_idx is not None:
+                sid = draft.sections[cost_idx].id or ""
+                if sid:
+                    exclude.add(sid)
+            draft, voice_logs = await apply_rev6_voice_scrub_to_draft(
+                draft, exclude_section_ids=exclude or None
+            )
+            for line in voice_logs:
+                report.logs.append(f"{label}: brand voice — {line}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s brand voice scrub skipped: %s", label, exc)
+
         try:
             from app.services.proposal_forms_attachments_integrity import (
                 audit_and_repair_forms_attachments,
