@@ -8,6 +8,8 @@ interface GenerateProposalButtonProps {
   rfpId: string;
   /** Already marked Go — nothing to record, just open the proposal. */
   isGo: boolean;
+  /** Server-seeded: at least one drafted section exists for this RFP. */
+  hasProposal: boolean;
   /** Blocks the button; `disabledReason` is shown as its tooltip. */
   disabled?: boolean;
   disabledReason?: string;
@@ -18,6 +20,7 @@ interface GenerateProposalButtonProps {
 export function GenerateProposalButton({
   rfpId,
   isGo,
+  hasProposal,
   disabled = false,
   disabledReason,
 }: GenerateProposalButtonProps) {
@@ -28,7 +31,7 @@ export function GenerateProposalButton({
   async function handleGenerate() {
     setLoading(true);
     setError(null);
-    trackClick("rfp.generate_proposal", {
+    trackClick(hasProposal ? "rfp.view_proposal" : "rfp.generate_proposal", {
       path: `/rfps/${rfpId}`,
       entity_type: "rfp",
       entity_id: rfpId,
@@ -49,6 +52,8 @@ export function GenerateProposalButton({
     }
   }
 
+  const label = hasProposal ? "View proposal" : "Generate proposal";
+
   return (
     <div className="flex items-center gap-2">
       <button
@@ -59,12 +64,14 @@ export function GenerateProposalButton({
         title={
           disabled && disabledReason
             ? disabledReason
-            : isGo
+            : hasProposal
               ? "Open this RFP's proposal"
-              : "Mark this RFP as Go and open its proposal"
+              : isGo
+                ? "Open this RFP's proposal"
+                : "Mark this RFP as Go and open its proposal"
         }
       >
-        {loading ? "Opening…" : "Generate proposal"}
+        {loading ? "Opening…" : label}
       </button>
       {error && <p className="text-xs text-zo-error">{error}</p>}
     </div>

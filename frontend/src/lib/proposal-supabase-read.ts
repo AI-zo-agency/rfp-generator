@@ -4,6 +4,7 @@ import {
   normalizeCheckpointForDisplay,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-pipeline-checkpoint";
+import { isSectionDrafted } from "@/lib/proposal-section-health";
 import type { ProposalOutline, ProposalResearch } from "@/types/proposal";
 import { apiDraftToOutline, type ApiProposalDraft } from "@/lib/proposal-api";
 
@@ -72,6 +73,28 @@ export type ProposalBundleResponse = {
   research: ProposalResearch | null;
   pipelineStatus: ProposalPipelineStatus;
 };
+
+/** True when this RFP has at least one genuinely drafted proposal section. */
+export async function rfpHasDraftedProposal(rfpId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("proposal_drafts")
+    .select("payload")
+    .eq("rfp_id", rfpId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[proposal-supabase-read] hasDraftedProposal failed", {
+      rfpId,
+      error: error.message,
+    });
+    return false;
+  }
+
+  const sections = (data?.payload as ApiProposalDraft | null | undefined)?.sections;
+  if (!Array.isArray(sections)) return false;
+  return sections.some((section) => isSectionDrafted(section.content));
+}
 
 /** Same shape as FastAPI GET /rfps/{id}/proposal — reads Supabase only (shared across users). */
 export async function loadProposalBundleFromSupabase(

@@ -333,14 +333,27 @@
   padding: 0.35rem 1rem 0.75rem;
 }
 
-.proposal-workspace-back button {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  font-size: 0.8rem;
+.proposal-workspace-back-btn {
+  border: 1px solid #ef5018;
+  border-radius: var(--zo-radius-md, 0.5rem);
+  background: #ef5018;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8125rem;
   font-weight: 700;
-  color: #c2410c;
+  line-height: 1.2;
+  color: #fff;
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.proposal-workspace-back-btn:hover {
+  background: #d94612;
+  border-color: #d94612;
+}
+
+.proposal-workspace-back-btn:focus-visible {
+  outline: 2px solid #ef5018;
+  outline-offset: 2px;
 }
 
 .proposal-workspace-back span {
