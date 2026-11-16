@@ -37,11 +37,10 @@ def run_validate_plan(plan: ProposalExecutionPlan) -> ProposalExecutionPlan:
     for amb in plan.writing.ambiguities:
         if amb.status == "resolved":
             continue
+        # Drafting ambiguities never hard-stop Generate. Affected tabs use
+        # clarify / MANUAL FILL; write every other demanded submittal.
         msg = f"RFP ambiguity: {amb.topic} — {amb.recommended_action or 'needs review'}"
-        if amb.blocks_drafting:
-            blockers.append(msg)
-        else:
-            warnings.append(msg)
+        warnings.append(msg)
 
     if plan.writing.cost_requirement_status == "ambiguous":
         warnings.append(

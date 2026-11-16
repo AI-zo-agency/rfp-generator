@@ -101,6 +101,59 @@ class SubmissionAuthorityApplyTests(unittest.TestCase):
         self.assertEqual(gate, "skip")
         self.assertIn("OregonBuys", detail or "")
 
+    def test_drafting_ambiguity_does_not_block_readiness(self) -> None:
+        """Missing sample agreement / Attachment A must not block Phase 2."""
+        plan = ProposalExecutionPlan(
+            writing=WritingIntelligence(
+                proposal_outline=ProposalOutline(
+                    sections=[
+                        OutlineSection(
+                            id="ins",
+                            title="Insurance",
+                            order=1,
+                            required=True,
+                        )
+                    ]
+                )
+            )
+        )
+        raw = {
+            "removeSectionIds": [],
+            "sectionUpdates": [
+                {
+                    "id": "ins",
+                    "submissionInstrument": "clarify",
+                    "required": False,
+                    "conditionalReason": "Attachment A body not in upload",
+                }
+            ],
+            "submissionConstraints": [],
+            "ambiguities": [
+                {
+                    "topic": "Insurance requirements and contract terms",
+                    "status": "unresolved",
+                    "recommendedAction": (
+                        "Obtain Attachment A and Exhibit A from SCTA before "
+                        "drafting the insurance and contract-terms responses."
+                    ),
+                    "blocksDrafting": True,
+                }
+            ],
+            "costRequirementStatus": "absent",
+            "confidence": 0.7,
+        }
+        updated = apply_authority_from_raw(plan, raw)
+        self.assertNotEqual(updated.validation.readiness_status, "blocked")
+        self.assertFalse(updated.validation.blockers)
+        self.assertTrue(
+            any("Attachment A" in w for w in updated.validation.warnings)
+        )
+        self.assertFalse(updated.writing.ambiguities[0].blocks_drafting)
+        self.assertEqual(
+            updated.writing.proposal_outline.sections[0].submission_instrument,
+            "clarify",
+        )
+
     def test_confirmed_cost_proceeds(self) -> None:
         plan = ProposalExecutionPlan(
             writing=WritingIntelligence(cost_requirement_status="confirmed")

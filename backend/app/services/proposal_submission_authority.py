@@ -188,7 +188,9 @@ Rules (judge by meaning, not keyword lists):
   cites that part, and its body is not in the file. Do not rediscover them and
   do not drop them. Any tab that cannot be answered without one of those bodies
   gets submissionInstrument "clarify" and conditionalReason set to that entry's
-  quote. Do not treat that tab as a confirmed deliverable.
+  quote. Do not treat that tab as a confirmed deliverable. Never set
+  blocksDrafting true — missing attachments must not halt the whole proposal;
+  stamp clarify on the dependent tab(s) and leave every other demanded tab alone.
 - Scored evaluation narrative tabs: submissionInstrument "narrative" (with evaluationWeight).
 - Signed offer / interest / cover / transmittal letter the buyer wants with the packet:
   submissionInstrument "letter" — judge by MEANING (whatever the buyer named it), not
@@ -551,7 +553,10 @@ def apply_authority_from_raw(
         topic = str(row.get("topic") or "").strip()
         if not topic:
             continue
-        ambiguities.append(PlanAmbiguity.model_validate(row))
+        # Coerce: LLM may set blocksDrafting true; that must never halt Generate.
+        coerced = dict(row)
+        coerced["blocksDrafting"] = False
+        ambiguities.append(PlanAmbiguity.model_validate(coerced))
     plan.writing.ambiguities = ambiguities
     plan.writing.cost_requirement_status = _normalize_cost_status(
         raw.get("costRequirementStatus") or raw.get("cost_requirement_status")
@@ -567,13 +572,12 @@ def _sync_validation_from_routing(plan: ProposalExecutionPlan) -> None:
     for amb in plan.writing.ambiguities:
         if amb.status == "resolved":
             continue
+        # Never promote drafting/budget ambiguities into readiness blockers —
+        # Generate must continue for every demanded tab; clarify/MANUAL FILL
+        # covers the unresolved ones (budget gate still skips inventing fees).
         msg = f"RFP ambiguity ({amb.topic}): {amb.recommended_action or 'needs human review'}"
-        if amb.blocks_drafting:
-            if msg not in blockers:
-                blockers.append(msg)
-        elif amb.blocks_budget:
-            if msg not in warnings:
-                warnings.append(msg)
+        if msg not in warnings:
+            warnings.append(msg)
     plan.validation.blockers = blockers
     plan.validation.warnings = warnings
     if blockers:

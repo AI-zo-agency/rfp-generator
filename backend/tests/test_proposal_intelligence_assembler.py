@@ -4,6 +4,7 @@ from app.services.proposal_intelligence.assembler import derive_legacy_fields, r
 from app.services.proposal_intelligence.agents.validation import run_validate_plan
 from app.services.proposal_intelligence.schemas import (
     OutlineSection,
+    PlanAmbiguity,
     ProposalExecutionPlan,
     ProposalOutline,
     RetrievalEntry,
@@ -76,6 +77,27 @@ class AssemblerTests(unittest.TestCase):
             any("budget" in x.lower() for x in plan.validation.low_confidence_artifacts)
         )
         self.assertEqual(plan.validation.readiness_status, "ready")
+
+    def test_drafting_ambiguity_warns_does_not_block_generate(self) -> None:
+        """Missing Attachment A etc. must not hard-stop Phase 2 / Generate."""
+        plan = _sample_ready_plan()
+        plan.writing.ambiguities = [
+            PlanAmbiguity(
+                topic="Insurance requirements and contract terms",
+                status="unresolved",
+                recommendedAction=(
+                    "Obtain Attachment A and Exhibit A from SCTA before drafting "
+                    "the insurance and contract-terms responses."
+                ),
+                blocksDrafting=True,
+            )
+        ]
+        plan = run_validate_plan(plan)
+        self.assertEqual(plan.validation.readiness_status, "ready")
+        self.assertFalse(plan.validation.blockers)
+        self.assertTrue(
+            any("Attachment A" in w for w in plan.validation.warnings)
+        )
 
     def test_refresh_memory(self) -> None:
         plan = _sample_ready_plan()
