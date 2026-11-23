@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, History, RotateCcw, Sparkles } from "lucide-react";
+import { ChevronDown, GitBranch, History, RotateCcw, Sparkles } from "lucide-react";
 import { ConfirmDialogProvider, useConfirmDialog } from "@/components/ConfirmDialog";
 import { PromptDiff, changeSummary } from "@/components/PromptDiff";
 import { errorMessage, formatAdded } from "@/lib/brand-voice";
@@ -26,6 +26,96 @@ type Version = { id: number; body: string; note: string; updatedBy: string | nul
 type Notice = { tone: "ok" | "error"; text: string };
 type Guide = { key: string; what: string; when: string } | { key: string; loading: true };
 type Suggestion = { revised: string; summary: string[] };
+type PageView = "edit" | "pipeline";
+
+/** Catalog groups ordered as the RFP → proposal pipeline runs (plus side lanes). */
+const PIPELINE_STAGES: {
+  id: string;
+  title: string;
+  blurb: string;
+  groups: string[];
+  lane: "main" | "side";
+  defaultOpen?: boolean;
+}[] = [
+  {
+    id: "leads",
+    title: "Lead Finder",
+    blurb: "Before an RFP lands — enrich and brief inbound leads.",
+    groups: ["Lead Finder"],
+    lane: "side",
+  },
+  {
+    id: "fit",
+    title: "Go / No-Go (Fit)",
+    blurb: "Packet gate, requirements vs KB, Stage 1 scores and recommendation.",
+    groups: ["Go / No-Go"],
+    lane: "main",
+    defaultOpen: true,
+  },
+  {
+    id: "read",
+    title: "RFP Reading",
+    blurb: "OCR, compulsory asks, submission inventory from the solicitation text.",
+    groups: ["RFP Reading"],
+    lane: "main",
+  },
+  {
+    id: "plan",
+    title: "Proposal Planning",
+    blurb: "Opportunity, strategy, outline, retrieval, case studies — Phase 2.",
+    groups: ["Proposal Planning"],
+    lane: "main",
+  },
+  {
+    id: "qualify",
+    title: "Company Qualification",
+    blurb: "Sections 1–2 shell: staffing, capabilities, composition.",
+    groups: ["Company Qualification"],
+    lane: "main",
+  },
+  {
+    id: "draft",
+    title: "Proposal Drafting",
+    blurb: "Write manuscript tabs from evidence — Phase 3 drafting.",
+    groups: ["Proposal Drafting"],
+    lane: "main",
+  },
+  {
+    id: "price",
+    title: "Pricing / Budget",
+    blurb: "Instrument extract, fee plan, money integrity passes.",
+    groups: ["Pricing"],
+    lane: "main",
+  },
+  {
+    id: "voice",
+    title: "Brand Voice",
+    blurb: "Voice check and rewrite so prose stays on-brand (zö).",
+    groups: ["Brand Voice"],
+    lane: "main",
+  },
+  {
+    id: "review",
+    title: "Review & Repair",
+    blurb: "Complete Scan, QC, contradictions, forms integrity, autofix.",
+    groups: ["Review & Repair"],
+    lane: "main",
+  },
+  {
+    id: "chat",
+    title: "Section Editor & Chat",
+    blurb: "Ask Ralph / improve a tab after the draft exists.",
+    groups: ["Section Editor & Chat"],
+    lane: "main",
+  },
+  {
+    id: "finance",
+    title: "Financial Insights",
+    blurb: "QuickBooks / Teamwork briefs — not on the RFP Generate path.",
+    groups: ["Financial Insights"],
+    lane: "side",
+  },
+];
 
 const focusRing =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ef5018]";
@@ -71,6 +161,209 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
       </h3>
       {children}
     </section>
+  );
+}
+
+function PipelineMap({
+  prompts,
+  onOpen,
+}: {
+  prompts: PromptSummary[];
+  onOpen: (prompt: PromptSummary) => void;
+}) {
+  const byGroup = useMemo(() => {
+    const map = new Map<string, PromptSummary[]>();
+    for (const p of prompts) {
+      map.set(p.group, [...(map.get(p.group) ?? []), p]);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return map;
+  }, [prompts]);
+
+  const stagedGroups = new Set(PIPELINE_STAGES.flatMap((s) => s.groups));
+  const orphanGroups = [...byGroup.keys()]
+    .filter((g) => !stagedGroups.has(g))
+    .sort((a, b) => a.localeCompare(b));
+
+  const stages = [
+    ...PIPELINE_STAGES,
+    ...orphanGroups.map((g) => ({
+      id: `other-${g}`,
+      title: g,
+      blurb: "Catalog group not yet placed on the main pipeline map.",
+      groups: [g],
+      lane: "side" as const,
+      defaultOpen: false,
+    })),
+  ].filter((stage) => stage.groups.some((g) => (byGroup.get(g) ?? []).length > 0));
+
+  const [openIds, setOpenIds] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    for (const s of PIPELINE_STAGES) {
+      if (s.defaultOpen) initial.add(s.id);
+    }
+    return initial;
+  });
+
+  const mainCount = stages.filter((s) => s.lane === "main").length;
+  const totalPrompts = prompts.length;
+  const totalEdited = prompts.filter((p) => p.isEdited).length;
+
+  function toggle(id: string) {
+    setOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  let mainStep = 0;
+
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="max-w-xl space-y-2">
+          <div className="flex items-center gap-2 text-[#ef5018]">
+            <GitBranch className="size-5" aria-hidden strokeWidth={2} />
+            <h2 className="font-heading text-xl text-foreground">RFP Generate path</h2>
+          </div>
+          <p className="text-[15px] leading-6 text-zo-text-secondary">
+            Top to bottom is how an RFP moves through Generate. Open a stage, then click a
+            prompt to edit it. Side lanes sit off the main path.
+          </p>
+        </div>
+        <dl className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-zo-text-muted">
+          <div>
+            <dt className="inline">Main stages </dt>
+            <dd className="inline font-semibold text-foreground">{mainCount}</dd>
+          </div>
+          <div>
+            <dt className="inline">Prompts </dt>
+            <dd className="inline font-semibold text-foreground">{totalPrompts}</dd>
+          </div>
+          <div>
+            <dt className="inline">Changed </dt>
+            <dd className="inline font-semibold text-[#b8360e]">{totalEdited}</dd>
+          </div>
+        </dl>
+      </div>
+
+      <ol className="relative m-0 list-none space-y-0 p-0">
+        {stages.map((stage, index) => {
+          const items = stage.groups.flatMap((g) => byGroup.get(g) ?? []);
+          const edited = items.filter((p) => p.isEdited).length;
+          const isMain = stage.lane === "main";
+          if (isMain) mainStep += 1;
+          const stepLabel = isMain ? String(mainStep) : "·";
+          const open = openIds.has(stage.id);
+          const isLast = index === stages.length - 1;
+
+          return (
+            <li key={stage.id} className="relative flex gap-4 sm:gap-5">
+              {/* Spine */}
+              <div className="relative flex w-9 shrink-0 flex-col items-center">
+                {!isLast ? (
+                  <span
+                    aria-hidden
+                    className={`absolute top-9 bottom-0 w-px ${
+                      isMain ? "bg-[#ef5018]/35" : "bg-zo-border"
+                    }`}
+                  />
+                ) : null}
+                <span
+                  aria-hidden
+                  className={`relative z-[1] grid size-9 place-items-center rounded-full text-sm font-bold tabular-nums transition-colors ${
+                    isMain
+                      ? "bg-[#ef5018] text-white shadow-[0_2px_8px_rgba(239,80,24,0.35)]"
+                      : "border border-dashed border-zo-border bg-[#f6f7f9] text-zo-text-muted"
+                  }`}
+                >
+                  {stepLabel}
+                </span>
+              </div>
+
+              <div
+                className={`mb-4 min-w-0 flex-1 overflow-hidden rounded-[var(--zo-radius-md)] border transition-[box-shadow,border-color] duration-200 ${
+                  isMain
+                    ? open
+                      ? "border-[#ef5018]/40 bg-white shadow-[0_4px_20px_rgba(15,23,42,0.06)]"
+                      : "border-zo-border bg-white hover:border-[#ef5018]/30"
+                    : "border-dashed border-zo-border bg-[#fafbfc]"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => toggle(stage.id)}
+                  aria-expanded={open}
+                  className={`flex w-full items-start gap-3 px-4 py-3.5 text-left sm:px-5 ${focusRing}`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {!isMain ? (
+                        <span className="rounded-full bg-[#eef0f2] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                          Side
+                        </span>
+                      ) : null}
+                      <h3 className="font-heading text-base text-foreground sm:text-lg">
+                        {stage.title}
+                      </h3>
+                    </div>
+                    <p className="mt-1 text-sm leading-5 text-zo-text-secondary">
+                      {stage.blurb}
+                    </p>
+                    <p className="mt-2 text-xs text-zo-text-muted">
+                      {items.length} prompt{items.length === 1 ? "" : "s"}
+                      {edited > 0 ? (
+                        <span className="text-[#b8360e]"> · {edited} changed</span>
+                      ) : null}
+                    </p>
+                  </div>
+                  <ChevronDown
+                    className={`mt-1 size-5 shrink-0 text-zo-text-muted transition-transform duration-200 ${
+                      open ? "rotate-180" : ""
+                    }`}
+                    aria-hidden
+                  />
+                </button>
+
+                <div
+                  className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+                    open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                  }`}
+                >
+                  <div className="overflow-hidden">
+                    <ul className="flex flex-wrap gap-2 border-t border-zo-border/70 bg-[#fbfbfc] px-4 py-3.5 sm:px-5">
+                      {items.map((prompt) => (
+                        <li key={prompt.key}>
+                          <button
+                            type="button"
+                            onClick={() => onOpen(prompt)}
+                            className={`group inline-flex max-w-full items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-left text-xs font-medium transition-[border-color,background-color,color,transform] duration-150 hover:-translate-y-px hover:border-[#ef5018] hover:bg-white hover:text-[#b8360e] ${focusRing} ${
+                              prompt.isEdited
+                                ? "border-[rgba(239,80,24,0.4)] bg-[rgba(239,80,24,0.07)] text-foreground"
+                                : "border-zo-border/90 bg-white text-zo-text-secondary"
+                            }`}
+                            title={`${prompt.key} — open in editor`}
+                          >
+                            <span className="truncate">{prompt.name}</span>
+                            {prompt.isEdited ? (
+                              <span className="size-1.5 shrink-0 rounded-full bg-[#ef5018]" aria-label="Changed" />
+                            ) : null}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -136,6 +429,7 @@ function PromptsInner() {
   const [historyError, setHistoryError] = useState("");
   const [comparing, setComparing] = useState<number | null>(null);
   const [pendingNote, setPendingNote] = useState("");
+  const [pageView, setPageView] = useState<PageView>("edit");
   const openSeq = useRef(0);
   const changesRef = useRef<HTMLDivElement>(null);
 
@@ -367,14 +661,57 @@ function PromptsInner() {
       ? { dot: "bg-zo-text-muted/40", text: "This is the original version" }
       : { dot: "bg-[#ef5018]", text: "Changed from the original and saved" };
 
+  async function openFromPipeline(prompt: PromptSummary) {
+    setPageView("edit");
+    setGroup(prompt.group);
+    await pickPrompt(prompt.key);
+  }
+
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-6 px-6 py-8">
+    <div
+      className={`mx-auto w-full space-y-6 px-6 py-8 transition-[max-width] duration-300 ${
+        pageView === "pipeline" ? "max-w-4xl" : "max-w-3xl"
+      }`}
+    >
       <header className="border-l-[5px] border-[#ef5018] pl-8">
         <h1 className="font-heading text-3xl text-foreground">Prompts</h1>
         <p className="mt-2 max-w-xl text-base leading-7 text-zo-text-muted">
           These are the instructions the AI helpers follow. Choose one, tell the assistant what you
-          would like changed, and check the result before you save.
+          would like changed, and check the result before you save — or browse how they line up on
+          the RFP pipeline.
         </p>
+        <div
+          className="mt-5 inline-flex rounded-lg border border-zo-border bg-[#f6f7f9] p-1"
+          role="tablist"
+          aria-label="Prompts views"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={pageView === "edit"}
+            className={`rounded-md px-3.5 py-1.5 text-sm font-semibold transition-colors ${focusRing} ${
+              pageView === "edit"
+                ? "bg-white text-foreground shadow-sm"
+                : "text-zo-text-muted hover:text-foreground"
+            }`}
+            onClick={() => setPageView("edit")}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={pageView === "pipeline"}
+            className={`rounded-md px-3.5 py-1.5 text-sm font-semibold transition-colors ${focusRing} ${
+              pageView === "pipeline"
+                ? "bg-white text-foreground shadow-sm"
+                : "text-zo-text-muted hover:text-foreground"
+            }`}
+            onClick={() => setPageView("pipeline")}
+          >
+            Pipeline map
+          </button>
+        </div>
       </header>
 
       {loadError ? (
@@ -398,6 +735,17 @@ function PromptsInner() {
         </div>
       ) : null}
 
+      {pageView === "pipeline" ? (
+        <div className="zo-card p-6 sm:p-8">
+          {!prompts ? (
+            <p className="text-sm text-zo-text-muted">Loading prompts…</p>
+          ) : (
+            <PipelineMap prompts={prompts} onOpen={(p) => void openFromPipeline(p)} />
+          )}
+        </div>
+      ) : null}
+
+      {pageView === "edit" ? (
       <div className="zo-card space-y-8 p-6 sm:p-8">
         <Step n={1} title="Choose what to change">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -709,6 +1057,7 @@ function PromptsInner() {
           </>
         )}
       </div>
+      ) : null}
     </div>
   );
 }
