@@ -49,6 +49,10 @@ def rfp_object_key(rfp_id: str) -> str:
     return f"{rfp_id}/rfp.pdf"
 
 
+def rfp_packet_object_key(rfp_id: str, file_id: str) -> str:
+    return f"{rfp_id}/packet/{file_id}.pdf"
+
+
 def rfp_ocr_cache_object_key(rfp_id: str) -> str:
     return f"{rfp_id}/rfp.ocr.txt"
 
@@ -102,6 +106,46 @@ def save_rfp_pdf(rfp_id: str, content: bytes) -> str:
     _pdf_bytes_cache_invalidate(rfp_id)
     delete_rfp_ocr_cache(rfp_id)
     return str(target)
+
+
+def save_rfp_packet_pdf(rfp_id: str, file_id: str, content: bytes) -> str:
+    """Store a cite-linked supplemental PDF beside the primary solicitation."""
+    if len(content) < 500 or not content.startswith(b"%PDF"):
+        raise ValueError("Uploaded file is not a valid PDF")
+    fid = (file_id or "").strip()
+    if not fid:
+        raise ValueError("file_id is required")
+
+    if use_supabase():
+        key = rfp_packet_object_key(rfp_id, fid)
+        supabase_storage.upload_pdf(object_key=key, content=content)
+        _pdf_bytes_cache_invalidate(rfp_id)
+        return to_supabase_path(key)
+
+    packet_dir = settings.pdf_storage_path / rfp_id / "packet"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    target = packet_dir / f"{fid}.pdf"
+    target.write_bytes(content)
+    _pdf_bytes_cache_invalidate(rfp_id)
+    return str(target)
+
+
+def delete_rfp_packet_pdf(rfp_id: str, storage_path: str | None) -> None:
+    """Remove a supplemental packet PDF from disk or Supabase."""
+    if not storage_path:
+        return
+    if is_supabase_path(storage_path):
+        if use_supabase():
+            try:
+                supabase_storage.delete_pdf(supabase_object_key_from_path(storage_path))
+            except supabase_storage.SupabaseStorageError:
+                pass
+        _pdf_bytes_cache_invalidate(rfp_id)
+        return
+    path = Path(storage_path)
+    if path.is_file():
+        path.unlink(missing_ok=True)
+    _pdf_bytes_cache_invalidate(rfp_id)
 
 
 def load_rfp_ocr_cache_bytes(rfp_id: str) -> bytes | None:

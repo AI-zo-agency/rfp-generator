@@ -41,6 +41,10 @@ import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import { QueuedJobBanner } from "@/components/QueuedJobBanner";
 import { ZoAmuletLoader } from "@/components/ZoAmuletLoader";
 import {
+  listRfpPacketFiles,
+  maybeApplyPacketExhibitAfterFit,
+} from "@/lib/rfp-packet-files";
+import {
   buildPipelineStatus,
   fetchProposalDraft,
   generateFullProposalStaged,
@@ -1993,6 +1997,104 @@ function ProposalDraftWorkspaceInner({
     research?.pipelineCheckpoint?.inProgressPhase,
   ]);
 
+  const [fitUpdatingWithExhibit, setFitUpdatingWithExhibit] = useState(false);
+  const [packetNewerThanDraft, setPacketNewerThanDraft] = useState(false);
+  const [applyingPacketExhibit, setApplyingPacketExhibit] = useState(false);
+  const [packetApplyNote, setPacketApplyNote] = useState<string | null>(null);
+  const packetApplyStartedFor = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const [statusRes, files] = await Promise.all([
+          fetch(`/api/rfps/${encodeURIComponent(rfp.id)}/analyze/status`, {
+            cache: "no-store",
+          }).then(async (res) => {
+            const data = (await res.json()) as { status?: string };
+            return data;
+          }),
+          listRfpPacketFiles(rfp.id).catch(() => []),
+        ]);
+        if (cancelled) return;
+        setFitUpdatingWithExhibit(statusRes.status === "running");
+        const draftAt = Date.parse(outline.updatedAt || "") || 0;
+        const hasDraftContent = outline.sections.some((s) =>
+          Boolean(s.content?.trim())
+        );
+        const latestFile = files.reduce<(typeof files)[number] | null>(
+          (best, f) => {
+            const t = Date.parse(f.uploadedAt || "") || 0;
+            const bestT = best ? Date.parse(best.uploadedAt || "") || 0 : 0;
+            return t > bestT ? f : best;
+          },
+          null
+        );
+        const latestPacket = latestFile
+          ? Date.parse(latestFile.uploadedAt || "") || 0
+          : 0;
+        const newer =
+          hasDraftContent &&
+          latestPacket > 0 &&
+          draftAt > 0 &&
+          latestPacket > draftAt;
+        setPacketNewerThanDraft(newer);
+
+        // Fit idle + packet newer than draft → surgically refresh cite-dependent tabs.
+        if (
+          newer &&
+          statusRes.status !== "running" &&
+          latestFile &&
+          !applyingPacketExhibit &&
+          packetApplyStartedFor.current !== latestFile.id
+        ) {
+          packetApplyStartedFor.current = latestFile.id;
+          setApplyingPacketExhibit(true);
+          setPacketApplyNote(
+            `Refreshing sections that depend on “${latestFile.citeTarget}” (this RFP only)…`
+          );
+          const outcome = await maybeApplyPacketExhibitAfterFit(
+            rfp.id,
+            latestFile.citeTarget
+          );
+          if (cancelled) return;
+          if (outcome === "started" || outcome === "already_running") {
+            const snap = await fetchProposalDraft(rfp.id).catch(() => null);
+            if (snap?.draft) {
+              applyOutlineFromServer(snap.draft);
+            }
+            setPacketApplyNote(
+              `Updated tabs that depend on “${latestFile.citeTarget}”. Other sections were left alone.`
+            );
+          } else if (outcome === "skipped_no_draft") {
+            setPacketApplyNote(null);
+          } else {
+            setPacketApplyNote(
+              "Could not auto-refresh sections. Re-Build from the right phase if scope still looks stale."
+            );
+          }
+          setApplyingPacketExhibit(false);
+          setPacketNewerThanDraft(false);
+        }
+      } catch {
+        // Soft gate only — ignore transient failures.
+      }
+    }
+    void tick();
+    // Light poll — enough to soft-gate Build without fighting draft autosave.
+    const id = window.setInterval(() => void tick(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [
+    rfp.id,
+    outline.updatedAt,
+    outline.sections,
+    applyingPacketExhibit,
+    applyOutlineFromServer,
+  ]);
+
   const anyPipelineRunning =
     isFullProposalRunning ||
     isPricingRunning ||
@@ -2002,7 +2104,9 @@ function ProposalDraftWorkspaceInner({
     isFulfillingRfpGaps ||
     isAligningRfpOutline ||
     isPlacingPacketContent ||
-    serverPipelineActive;
+    serverPipelineActive ||
+    fitUpdatingWithExhibit ||
+    applyingPacketExhibit;
 
   const handleFinalizeGaps = useCallback(
     async (options?: { stayOnTab?: boolean }) => {
@@ -4500,6 +4604,37 @@ function ProposalDraftWorkspaceInner({
       {(isFullProposalRunning || isFulfillingRfpGaps) && (
         <QueuedJobBanner rfpId={rfp.id} />
       )}
+      {fitUpdatingWithExhibit ? (
+        <div
+          className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 px-4 py-3 text-sm text-zo-text-secondary"
+          role="status"
+        >
+          Fit is refreshing from the new attachment only (not a full RFP
+          re-score). Build is paused until that finishes.
+        </div>
+      ) : null}
+      {applyingPacketExhibit || packetApplyNote ? (
+        <div
+          className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 px-4 py-3 text-sm text-zo-text-secondary"
+          role="status"
+        >
+          {packetApplyNote ??
+            "Refreshing only the proposal tabs that depend on the new attachment…"}
+        </div>
+      ) : null}
+      {packetNewerThanDraft &&
+      !fitUpdatingWithExhibit &&
+      !applyingPacketExhibit &&
+      !packetApplyNote ? (
+        <div
+          className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 px-4 py-3 text-sm text-zo-text-secondary"
+          role="status"
+        >
+          A packet exhibit was added after this draft. Affected sections will
+          refresh automatically for this RFP only — or Re-Build from the right
+          phase if you want a full rewrite.
+        </div>
+      ) : null}
 
       {/* The live scan/generation workflow now lives in the right-hand RFP
           Workflow rail (status, activity, and every step). The old full-width

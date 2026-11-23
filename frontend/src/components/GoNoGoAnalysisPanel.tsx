@@ -2,7 +2,6 @@ import type {
   GoNoGoAnalysis,
   RfpBuyerDemand,
   RfpPacketRead,
-  UnresolvedReference,
 } from "@/types/rfp";
 import {
   alignGoNoGoRecommendation,
@@ -12,6 +11,8 @@ import {
 } from "@/lib/format";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 import { GoNoGoBadge } from "./StatusBadge";
+import type { PacketAnalyzeMeta } from "@/lib/rfp-packet-files";
+import { UnresolvedReferenceBanner } from "./UnresolvedReferenceBanner";
 
 interface GoNoGoAnalysisPanelProps {
   analysis: GoNoGoAnalysis;
@@ -19,6 +20,8 @@ interface GoNoGoAnalysisPanelProps {
   fitScore: number | null;
   worthScore: number | null;
   recommendation: GoNoGoAnalysis["recommendation"] | null;
+  rfpId: string;
+  onPacketAnalyzeStarted?: (meta: PacketAnalyzeMeta) => void;
 }
 
 /** Reasons to surface when Overall Go Score is below 3 (matrix average). */
@@ -301,36 +304,6 @@ function BuyerDemandList({ demands }: { demands: RfpBuyerDemand[] }) {
   );
 }
 
-function UnresolvedReferenceBanner({
-  references,
-}: {
-  references: UnresolvedReference[];
-}) {
-  if (!references.length) return null;
-  return (
-    <div className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 p-5">
-      <h3 className="font-heading text-sm font-bold uppercase tracking-wide text-zo-orange">
-        Cited in this RFP, not included in the file
-      </h3>
-      <p className="mt-2 text-sm text-zo-text-secondary">
-        The upload points at these parts of itself. Their text is not in the
-        file, so a tab that depends on one is left for a person to fill.
-      </p>
-      <ul className="mt-3 space-y-2">
-        {references.map((item) => (
-          <li
-            key={`${item.target}-${item.quote}`}
-            className="rounded-lg border border-zo-orange/30 bg-white/70 px-3 py-2 text-sm text-zo-text-secondary"
-          >
-            <p className="font-medium text-foreground">{item.target}</p>
-            <p className="mt-1">{item.quote}</p>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function BuyerDemandBanner({ demands }: { demands: RfpBuyerDemand[] }) {
   if (!demands.length) return null;
   return (
@@ -374,11 +347,20 @@ function PacketDeadline({
   );
 }
 
-function IncompletePacketPanel({ analysis }: { analysis: GoNoGoAnalysis }) {
+function IncompletePacketPanel({
+  analysis,
+  rfpId,
+  onPacketAnalyzeStarted,
+}: {
+  analysis: GoNoGoAnalysis;
+  rfpId: string;
+  onPacketAnalyzeStarted?: (meta: PacketAnalyzeMeta) => void;
+}) {
   const packet = analysis.packetRead;
   if (!packet) return null;
   const missing = packet.missing ?? [];
   const demands = packet.buyerDemands ?? [];
+  const unresolved = packet.unresolvedReferences ?? [];
   const kindLabel = PACKET_KIND_LABEL[packet.documentKind] ?? "Not a complete RFP";
 
   return (
@@ -394,6 +376,14 @@ function IncompletePacketPanel({ analysis }: { analysis: GoNoGoAnalysis }) {
           {kindLabel} — Go/No-Go was not run
         </p>
       </div>
+
+      {unresolved.length > 0 ? (
+        <UnresolvedReferenceBanner
+          rfpId={rfpId}
+          references={unresolved}
+          onAnalyzeStarted={onPacketAnalyzeStarted}
+        />
+      ) : null}
 
       <div className="rounded-xl border border-zo-orange/40 bg-zo-orange/5 p-5">
         <p className="text-sm leading-relaxed text-zo-text-secondary">
@@ -459,6 +449,8 @@ export function GoNoGoAnalysisPanel({
   fitScore,
   worthScore,
   recommendation,
+  rfpId,
+  onPacketAnalyzeStarted,
 }: GoNoGoAnalysisPanelProps) {
   const needsInput = detectNeedsInput(analysis);
   const overallGoScore = computeOverallGoScore(
@@ -486,14 +478,24 @@ export function GoNoGoAnalysisPanel({
       : "Go With Conditions";
 
   if (analysis.packetRead?.blocksScoring) {
-    return <IncompletePacketPanel analysis={analysis} />;
+    return (
+      <IncompletePacketPanel
+        analysis={analysis}
+        rfpId={rfpId}
+        onPacketAnalyzeStarted={onPacketAnalyzeStarted}
+      />
+    );
   }
 
   return (
     <section className="zo-card space-y-6 p-8">
       {buyerDemands.length > 0 && <BuyerDemandBanner demands={buyerDemands} />}
       {unresolvedReferences.length > 0 && (
-        <UnresolvedReferenceBanner references={unresolvedReferences} />
+        <UnresolvedReferenceBanner
+          rfpId={rfpId}
+          references={unresolvedReferences}
+          onAnalyzeStarted={onPacketAnalyzeStarted}
+        />
       )}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>

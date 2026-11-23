@@ -114,6 +114,9 @@ def init_db() -> None:
         _ensure_column(conn, "rfps", "go_no_go_analysis", "TEXT")
         _ensure_column(conn, "rfps", "selected_tracks", "TEXT")
         _ensure_column(conn, "rfps", "bid_scope_locked_at", "TEXT")
+        from app.services.rfp_packet_files import ensure_packet_files_table
+
+        ensure_packet_files_table(conn)
 
 
 def _ensure_column(

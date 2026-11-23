@@ -315,6 +315,164 @@ def run_go_no_go_task(
         raise
 
 
+async def _dispatch_apply_packet_exhibit(
+    rfp_id: str,
+    cite_target: str,
+    *,
+    user_email: str = "",
+    ledger_run_id: str = "",
+) -> dict:
+    import uuid
+
+    from app.services.activity_runs import ledger_run_scope, new_ledger_run_id
+    from app.services.llm_call_context import llm_call_context, normalize_user_email
+    from app.services.proposal_packet_exhibit_apply import apply_packet_exhibit_to_draft
+
+    owner = normalize_user_email(user_email)
+    llm_run_id = str(uuid.uuid4())
+    with ledger_run_scope(
+        ledger_run_id=ledger_run_id or new_ledger_run_id(),
+        owner_email=owner,
+        llm_run_id=llm_run_id,
+    ):
+        with llm_call_context(
+            rfp_id=rfp_id,
+            run_id=llm_run_id,
+            node_name="apply_packet_exhibit",
+            user_email=owner,
+        ):
+            result = await apply_packet_exhibit_to_draft(rfp_id, cite_target)
+            return result.to_dict()
+
+
+@celery_app.task(bind=True, name="proposal.apply_packet_exhibit")
+def run_apply_packet_exhibit_task(
+    self,
+    rfp_id: str,
+    cite_target: str,
+    user_email: str = "",
+    ledger_run_id: str = "",
+) -> dict:
+    try:
+        return asyncio.run(
+            _dispatch_apply_packet_exhibit(
+                rfp_id,
+                cite_target,
+                user_email=user_email,
+                ledger_run_id=ledger_run_id,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Celery apply-packet-exhibit failed for %s cite=%s", rfp_id, cite_target
+        )
+        raise
+
+
+async def _dispatch_attachment_fit_refresh(
+    rfp_id: str,
+    cite_target: str,
+    action: str = "upload",
+    cite_quote: str = "",
+    *,
+    user_email: str = "",
+    ledger_run_id: str = "",
+) -> None:
+    import uuid
+
+    from app.services.activity_runs import emit_gonogo_outcome, ledger_run_scope, new_ledger_run_id
+    from app.services.go_no_go_attachment_refresh import refresh_go_no_go_for_attachment
+    from app.services.go_no_go_service import GoNoGoError, analysis_activity_note
+    from app.services.llm_call_context import llm_call_context, normalize_user_email
+    from app.services.rfp_repository import get_rfp, save_go_no_go_analysis
+    from app.services import supabase_db as sb
+    from datetime import datetime, timezone
+
+    current = get_rfp(rfp_id)
+    if not current:
+        raise GoNoGoError("RFP not found", status_code=404)
+    owner = normalize_user_email(user_email)
+    llm_run_id = str(uuid.uuid4())
+    title = current.title or rfp_id
+    act = "delete" if action == "delete" else "upload"
+    with ledger_run_scope(
+        ledger_run_id=ledger_run_id or new_ledger_run_id(),
+        owner_email=owner,
+        llm_run_id=llm_run_id,
+    ):
+        try:
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=llm_run_id,
+                node_name="go_no_go_attachment_refresh",
+                user_email=owner,
+            ):
+                analysis = await refresh_go_no_go_for_attachment(
+                    current,
+                    cite_target=cite_target,
+                    action=act,  # type: ignore[arg-type]
+                    cite_quote=cite_quote,
+                )
+            updated = save_go_no_go_analysis(rfp_id, analysis)
+            if not updated:
+                raise GoNoGoError("RFP not found after save", status_code=404)
+            try:
+                note = analysis_activity_note(analysis)
+                if sb.use_supabase_db():
+                    now = datetime.now(timezone.utc).isoformat()
+                    client = sb._get_client()  # noqa: SLF001
+                    client.table("rfps").update(
+                        {
+                            "last_activity": now,
+                            "last_activity_note": (
+                                f"{note} (attachment refresh: {cite_target[:60]})"
+                            )[:500],
+                        }
+                    ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as exc:
+            emit_gonogo_outcome(rfp_id, title=title, ok=False, error=str(exc))
+            raise
+        emit_gonogo_outcome(
+            rfp_id,
+            title=title,
+            ok=True,
+            recommendation=getattr(analysis, "recommendation", None),
+        )
+
+
+@celery_app.task(bind=True, name="proposal.refresh_go_no_go_attachment")
+def run_attachment_fit_refresh_task(
+    self,
+    rfp_id: str,
+    cite_target: str,
+    action: str = "upload",
+    cite_quote: str = "",
+    user_email: str = "",
+    ledger_run_id: str = "",
+) -> None:
+    try:
+        asyncio.run(
+            _dispatch_attachment_fit_refresh(
+                rfp_id,
+                cite_target,
+                action,
+                cite_quote,
+                user_email=user_email,
+                ledger_run_id=ledger_run_id,
+            )
+        )
+    except Exception as exc:
+        logger.exception(
+            "Celery attachment Fit refresh failed for %s cite=%s", rfp_id, cite_target
+        )
+        from app.api.v1.rfps import _mark_analyze_failed
+
+        _mark_analyze_failed(rfp_id, f"Attachment Fit refresh failed: {exc}")
+        raise
+
+
 @celery_app.task(bind=True, name="justwin.run_sync")
 def run_justwin_sync_task(
     self, job_id: str, target_date: str = "", tab: str = "all"

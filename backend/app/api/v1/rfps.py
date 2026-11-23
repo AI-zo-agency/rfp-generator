@@ -726,6 +726,333 @@ async def upload_rfp_pdf(rfp_id: str, request: Request) -> dict[str, str]:
     return {"ok": "true", "pdfPath": pdf_path}
 
 
+async def _require_go_no_go_idle(rfp_id: str) -> None:
+    """Cite-linked packet changes must not stack a second Fit job.
+
+    Uses the same stale-lock window as GET /analyze/status so a dead worker's
+    lock does not block uploads while the UI shows Fit as complete.
+    """
+    from app.services.proposal_job_runner import (
+        _iso_age_sec,
+        cancel_proposal_job,
+        get_proposal_job,
+    )
+
+    lock_key = _go_no_go_lock_key(rfp_id)
+    existing = await get_proposal_job(rfp_id, lock_key=lock_key)
+    if not existing or existing.status not in ("queued", "running"):
+        return
+
+    age = _iso_age_sec(existing.started_at)
+    if age is not None and age >= _GO_NO_GO_STALE_RUNNING_SEC:
+        try:
+            await cancel_proposal_job(rfp_id, lock_key=lock_key)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not clear stale Go/No-Go lock before packet upload %s", rfp_id)
+        return
+
+    raise HTTPException(
+        status_code=409,
+        detail="Go/No-Go analysis already running — wait for it to finish, then retry",
+    )
+
+
+async def start_attachment_fit_refresh(
+    rfp_id: str,
+    *,
+    cite_target: str,
+    action: str = "upload",
+    cite_quote: str = "",
+) -> dict[str, object]:
+    """Light Fit refresh from one attachment — does not re-judge the whole RFP.
+
+    Reuses the Go/No-Go job lock so the existing analyze/status poll works.
+    Keeps prior scores on screen (does not clear analysis) until the refresh saves.
+    """
+    from app.services.activity_runs import emit_gonogo_outcome, ledger_run_scope, new_ledger_run_id
+    from app.services.go_no_go_attachment_refresh import refresh_go_no_go_for_attachment
+    from app.services.go_no_go_service import analysis_activity_note
+    from app.services.llm_call_context import get_llm_user_email, llm_call_context
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_job_runner import get_proposal_job, start_proposal_job
+
+    raise_http_if_monthly_budget_blocked()
+
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    lock_key = _go_no_go_lock_key(rfp_id)
+    existing = await get_proposal_job(rfp_id, lock_key=lock_key)
+    if existing and existing.status == "running":
+        return {
+            "ok": True,
+            "status": "running",
+            "rfpId": rfp_id,
+            "mode": "attachment",
+            "message": "Fit refresh already running",
+        }
+
+    user_email = get_llm_user_email()
+    ledger_run_id = new_ledger_run_id()
+    cite = (cite_target or "").strip()
+    act = "delete" if action == "delete" else "upload"
+    quote = (cite_quote or "").strip()
+
+    # Mark in-progress without wiping prior Fit (unlike full analyze).
+    try:
+        if sb.use_supabase_db():
+            now = datetime.now(timezone.utc).isoformat()
+            client = sb._get_client()  # noqa: SLF001
+            client.table("rfps").update(
+                {
+                    "last_activity": now,
+                    "last_activity_note": (
+                        f"Attachment Fit refresh in progress ({cite[:80]})…"
+                    )[:500],
+                }
+            ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not stamp attachment Fit refresh note for %s", rfp_id)
+
+    async def _run_inner(llm_run_id: str) -> None:
+        from app.services.go_no_go_service import GoNoGoError
+
+        try:
+            current = get_rfp(rfp_id)
+            if not current:
+                raise GoNoGoError("RFP not found", status_code=404)
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=llm_run_id,
+                node_name="go_no_go_attachment_refresh",
+                user_email=user_email or None,
+            ):
+                analysis = await refresh_go_no_go_for_attachment(
+                    current,
+                    cite_target=cite,
+                    action=act,  # type: ignore[arg-type]
+                    cite_quote=quote,
+                )
+            updated = save_go_no_go_analysis(rfp_id, analysis)
+            if not updated:
+                raise GoNoGoError("RFP not found after save", status_code=404)
+            logger.info(
+                "Attachment Fit refresh completed for %s cite=%s",
+                rfp_id,
+                cite,
+            )
+            emit_gonogo_outcome(
+                rfp_id,
+                title=current.title or rfp_id,
+                ok=True,
+                recommendation=getattr(analysis, "recommendation", None),
+            )
+            # Stamp a short note that this was attachment-scoped.
+            try:
+                note = analysis_activity_note(analysis)
+                if sb.use_supabase_db():
+                    now = datetime.now(timezone.utc).isoformat()
+                    client = sb._get_client()  # noqa: SLF001
+                    client.table("rfps").update(
+                        {
+                            "last_activity": now,
+                            "last_activity_note": (
+                                f"{note} (attachment refresh: {cite[:60]})"
+                            )[:500],
+                        }
+                    ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+            except Exception:  # noqa: BLE001
+                pass
+        except GoNoGoError as exc:
+            logger.error("Attachment Fit refresh failed for %s: %s", rfp_id, exc)
+            _mark_analyze_failed(rfp_id, str(exc))
+            emit_gonogo_outcome(
+                rfp_id, title=rfp.title or rfp_id, ok=False, error=str(exc)
+            )
+            raise
+        except Exception as exc:
+            logger.exception("Attachment Fit refresh unexpected failure for %s", rfp_id)
+            _mark_analyze_failed(rfp_id, f"Attachment Fit refresh failed: {exc}")
+            emit_gonogo_outcome(
+                rfp_id, title=rfp.title or rfp_id, ok=False, error=str(exc)
+            )
+            raise
+
+    async def _run() -> None:
+        import uuid
+
+        llm_run_id = str(uuid.uuid4())
+        with ledger_run_scope(
+            ledger_run_id=ledger_run_id, owner_email=user_email or "", llm_run_id=llm_run_id
+        ):
+            await _run_inner(llm_run_id)
+
+    def _celery_dispatch() -> object:
+        from app.celery_app import run_attachment_fit_refresh_task
+
+        return run_attachment_fit_refresh_task.delay(
+            rfp_id, cite, act, quote, user_email or "", ledger_run_id
+        )
+
+    await start_proposal_job(
+        rfp_id,
+        "go-no-go-attachment",
+        _run,
+        celery_dispatch=_celery_dispatch,
+        lock_key=lock_key,
+    )
+    return {
+        "ok": True,
+        "status": "running",
+        "rfpId": rfp_id,
+        "mode": "attachment",
+        "citeTarget": cite,
+        "message": "Attachment Fit refresh started",
+    }
+
+
+@router.get("/{rfp_id}/packet-files")
+async def list_rfp_packet_files(rfp_id: str) -> dict[str, object]:
+    """List cite-linked supplemental PDFs beside the primary solicitation."""
+    from app.services.rfp_packet_files import list_packet_files
+
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    files = list_packet_files(rfp_id)
+    return {
+        "files": [f.model_dump(by_alias=True) for f in files],
+    }
+
+
+@router.post("/{rfp_id}/packet-files")
+async def upload_rfp_packet_file(rfp_id: str, request: Request) -> dict[str, object]:
+    """Attach a cite-linked exhibit PDF, then refresh Fit from that attachment only."""
+    from app.services.llm_call_context import get_llm_user_email
+    from app.services.rfp_packet_files import upsert_packet_file
+    from app.services.user_activity import emit_activity
+
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    await _require_go_no_go_idle(rfp_id)
+
+    form = await request.form()
+    cite_target = str(form.get("citeTarget") or form.get("cite_target") or "").strip()
+    cite_quote = str(form.get("citeQuote") or form.get("cite_quote") or "").strip()
+    pdf_file = form.get("pdf")
+    if not cite_target:
+        raise HTTPException(status_code=400, detail="citeTarget is required")
+    if not pdf_file or not hasattr(pdf_file, "read"):
+        raise HTTPException(status_code=400, detail="PDF file is required")
+
+    content = await pdf_file.read()
+    filename = str(getattr(pdf_file, "filename", None) or "exhibit.pdf")
+    try:
+        saved = upsert_packet_file(
+            rfp_id,
+            cite_target=cite_target,
+            cite_quote=cite_quote,
+            filename=filename,
+            content=content,
+            uploaded_by=get_llm_user_email() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        emit_activity(
+            workspace="rfp",
+            action="rfp.packet_file_uploaded",
+            summary=(
+                f"Uploaded packet file “{cite_target}” for "
+                f"“{(rfp.title or rfp_id)[:80]}”"
+            ),
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            metadata={
+                "citeTarget": cite_target[:200],
+                "fileId": saved.id,
+                "filename": filename[:200],
+            },
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    analyze = await start_attachment_fit_refresh(
+        rfp_id,
+        cite_target=cite_target,
+        action="upload",
+        cite_quote=cite_quote,
+    )
+    return {
+        "ok": True,
+        "file": saved.model_dump(by_alias=True),
+        "analyzeStarted": True,
+        "analyzeMode": "attachment",
+        "analyze": analyze,
+    }
+
+
+@router.delete("/{rfp_id}/packet-files/{file_id}")
+async def delete_rfp_packet_file_endpoint(
+    rfp_id: str, file_id: str
+) -> dict[str, object]:
+    """Remove a cite-linked exhibit and refresh Fit from that change only."""
+    from app.services.rfp_packet_files import delete_packet_file, get_packet_file
+    from app.services.user_activity import emit_activity
+
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    await _require_go_no_go_idle(rfp_id)
+
+    existing = get_packet_file(rfp_id, file_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Packet file not found")
+    cite_target = existing.cite_target
+    cite_quote = existing.cite_quote or ""
+
+    removed = delete_packet_file(rfp_id, file_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Packet file not found")
+
+    try:
+        emit_activity(
+            workspace="rfp",
+            action="rfp.packet_file_deleted",
+            summary=f"Removed packet file for “{(rfp.title or rfp_id)[:80]}”",
+            entity_type="rfp",
+            entity_id=rfp_id,
+            entity_label=(rfp.title or rfp_id)[:300],
+            metadata={"fileId": file_id, "citeTarget": cite_target[:200]},
+            outcome="completed",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    analyze = await start_attachment_fit_refresh(
+        rfp_id,
+        cite_target=cite_target,
+        action="delete",
+        cite_quote=cite_quote,
+    )
+    return {
+        "ok": True,
+        "deleted": True,
+        "analyzeStarted": True,
+        "analyzeMode": "attachment",
+        "analyze": analyze,
+    }
+
+
 @router.api_route("/{rfp_id}/pdf", methods=["GET", "HEAD"])
 def get_rfp_pdf(rfp_id: str, request: Request):
     from fastapi.responses import FileResponse, RedirectResponse, Response

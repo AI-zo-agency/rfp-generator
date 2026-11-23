@@ -889,6 +889,107 @@ async def clear_proposal_stop_flag_endpoint(rfp_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+class ApplyPacketExhibitRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    cite_target: str = Field(alias="citeTarget", min_length=1, max_length=400)
+
+
+@router.post("/{rfp_id}/proposal/apply-packet-exhibit")
+async def apply_packet_exhibit_endpoint(
+    rfp_id: str, body: ApplyPacketExhibitRequest
+) -> JSONResponse:
+    """After Fit finishes with a new exhibit: rewrite only cite-dependent draft tabs.
+
+    No-op (200) when there is no manuscript. Exhibit must belong to this rfp_id.
+    """
+    from app.services.llm_call_context import get_llm_user_email, llm_call_context
+    from app.services.monthly_llm_budget import raise_http_if_monthly_budget_blocked
+    from app.services.proposal_packet_exhibit_apply import (
+        APPLY_PACKET_EXHIBIT_JOB,
+        apply_packet_exhibit_lock_key,
+        apply_packet_exhibit_to_draft,
+    )
+    from app.services.activity_runs import ledger_run_scope, new_ledger_run_id
+
+    raise_http_if_monthly_budget_blocked()
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    cite_target = body.cite_target.strip()
+    lock_key = apply_packet_exhibit_lock_key(rfp_id)
+    existing = await get_proposal_job(rfp_id, lock_key=lock_key)
+    if existing and existing.status in ("queued", "running"):
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "started": False,
+                "alreadyRunning": True,
+                "citeTarget": cite_target,
+                "job": proposal_job_to_dict(existing),
+            },
+        )
+
+    user_email = get_llm_user_email()
+    ledger_run_id = new_ledger_run_id()
+
+    async def _run() -> dict[str, Any]:
+        import uuid
+
+        llm_run_id = str(uuid.uuid4())
+        with ledger_run_scope(
+            ledger_run_id=ledger_run_id,
+            owner_email=user_email or "",
+            llm_run_id=llm_run_id,
+        ):
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=llm_run_id,
+                node_name="apply_packet_exhibit",
+                user_email=user_email or None,
+            ):
+                result = await apply_packet_exhibit_to_draft(rfp_id, cite_target)
+                return result.to_dict()
+
+    def _celery_dispatch() -> object:
+        from app.celery_app import run_apply_packet_exhibit_task
+
+        return run_apply_packet_exhibit_task.delay(
+            rfp_id, cite_target, user_email or "", ledger_run_id
+        )
+
+    record = await start_proposal_job(
+        rfp_id,
+        APPLY_PACKET_EXHIBIT_JOB,
+        _run,
+        celery_dispatch=_celery_dispatch,
+        lock_key=lock_key,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "ok": True,
+            "started": True,
+            "alreadyRunning": False,
+            "citeTarget": cite_target,
+            "job": proposal_job_to_dict(record),
+        },
+    )
+
+
+@router.get("/{rfp_id}/proposal/apply-packet-exhibit/status")
+async def apply_packet_exhibit_status(rfp_id: str) -> dict[str, object]:
+    from app.services.proposal_packet_exhibit_apply import apply_packet_exhibit_lock_key
+
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    job = await get_proposal_job(
+        rfp_id, lock_key=apply_packet_exhibit_lock_key(rfp_id)
+    )
+    return {"job": proposal_job_to_dict(job)}
+
+
 @router.post("/{rfp_id}/proposal/generate", response_model=ProposalGenerateResponse)
 async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate full proposal: static Sections 1–3 + RFP-mapped sections from evidence."""

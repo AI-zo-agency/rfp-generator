@@ -584,7 +584,11 @@ async function startProposalPhaseJob(
   try {
     data = text.trim() ? JSON.parse(text) : {};
   } catch {
-    throw new Error("Invalid response from server when starting proposal phase.");
+    const snippet = text.replace(/\s+/g, " ").trim().slice(0, 160);
+    throw new Error(
+      `Invalid response from server when starting proposal phase ` +
+        `(HTTP ${res.status}${snippet ? `: ${snippet}` : ""}).`
+    );
   }
 
   // Legacy sync backend still returns 200 with a full payload.
@@ -1820,7 +1824,8 @@ export async function generateProposalSections1to3(
   const result = await runProposalPhaseAsync(
     rfpId,
     "sections-1-3",
-    `/api/rfps/${rfpId}/proposal/generate/sections-1-3?${qs.toString()}`,
+    // Sibling of phase-2-retrieval — avoid nesting under generate/route.ts (Next 404s).
+    `/api/rfps/${encodeURIComponent(rfpId)}/proposal/sections-1-3?${qs.toString()}`,
     signal,
     {
       body,

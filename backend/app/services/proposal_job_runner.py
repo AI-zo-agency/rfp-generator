@@ -65,6 +65,16 @@ _REDIS_LOCK_TTL_SEC = 3600  # matches celery_app.py's task_time_limit
 # hard task_time_limit (+ margin) it cannot still be running, so a "STARTED"
 # task older than this is a zombie whose lock must be freed, not a live job.
 _ZOMBIE_STARTED_SEC = 3600 + 300
+# Short jobs (attachment Fit refresh, section apply) must not hold STARTED/PENDING
+# locks for the full pipeline hour after a worker restart discarded the task.
+_ZOMBIE_SHORT_JOB_SEC = 20 * 60
+_SHORT_JOB_TYPES = frozenset(
+    {
+        "apply-packet-exhibit",
+        "go-no-go-attachment",
+        "go-no-go",
+    }
+)
 # Celery AsyncResult.state is a sync broker round-trip — cap it so GET proposal
 # and job-status never block the event loop for tens of seconds when Redis is slow.
 _CELERY_STATE_TIMEOUT_SEC = 2.0
@@ -162,16 +172,28 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
         # Broker slow/unreachable — assume still running so we don't free a live lock.
         record.status = "running"
         return record
+    age = _iso_age_sec(record.started_at)
+    zombie_sec = (
+        _ZOMBIE_SHORT_JOB_SEC
+        if record.job_type in _SHORT_JOB_TYPES
+        else _ZOMBIE_STARTED_SEC
+    )
     if state == "PENDING":
-        # Dispatched but no worker slot free yet (task_track_started=True in
+        # Dispatched but no free worker slot yet (task_track_started=True in
         # celery_app.py means a picked-up task moves to STARTED, not PENDING).
-        record.status = "queued"
+        # Unregistered/discarded tasks also stay PENDING forever — free them.
+        if age is not None and age > zombie_sec:
+            record.status = "failed"
+            record.error = (
+                "Job never started on a worker — stale lock cleared. "
+                "Start it again to resume."
+            )
+        else:
+            record.status = "queued"
     elif state in ("STARTED", "RETRY"):
-        age = _iso_age_sec(record.started_at)
-        if state == "STARTED" and age is not None and age > _ZOMBIE_STARTED_SEC:
-            # Zombie: STARTED but older than the hard time limit — the worker was
-            # killed mid-run and never finished it. Report failed so the caller
-            # frees the lock and a new run for this RFP is not blocked forever.
+        if state == "STARTED" and age is not None and age > zombie_sec:
+            # Zombie: STARTED but older than the limit — worker was killed mid-run
+            # (or task discarded) and never finished. Free the lock.
             record.status = "failed"
             record.error = (
                 "Worker stopped before the job finished — stale lock cleared. "
