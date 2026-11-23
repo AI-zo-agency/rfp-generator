@@ -38,13 +38,6 @@ const PIPELINE_STAGES: {
   defaultOpen?: boolean;
 }[] = [
   {
-    id: "leads",
-    title: "Lead Finder",
-    blurb: "Before an RFP lands — enrich and brief inbound leads.",
-    groups: ["Lead Finder"],
-    lane: "side",
-  },
-  {
     id: "fit",
     title: "Go / No-Go (Fit)",
     blurb: "Packet gate, requirements vs KB, Stage 1 scores and recommendation.",
@@ -110,8 +103,8 @@ const PIPELINE_STAGES: {
   },
 ];
 
-/** Hidden from the Prompts admin UI (still live in the financial product path). */
-const HIDDEN_PROMPT_GROUPS = new Set(["Financial Insights"]);
+/** Hidden from the Prompts admin UI (still live in their product paths). */
+const HIDDEN_PROMPT_GROUPS = new Set(["Financial Insights", "Lead Finder"]);
 
 const focusRing =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ef5018]";
