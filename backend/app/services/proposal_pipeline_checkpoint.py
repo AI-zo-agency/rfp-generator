@@ -39,6 +39,8 @@ PHASE_LABELS: dict[str, str] = {
     "align-rfp-outline": "Align to RFP outline",
     "complete": "Complete",
     "go-no-go": "Go/No-Go analysis",
+    "go-no-go-attachment": "Fit refresh (attachment)",
+    "apply-packet-exhibit": "Update proposal from exhibit",
 }
 
 

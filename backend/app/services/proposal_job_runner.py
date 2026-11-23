@@ -396,30 +396,49 @@ async def cancel_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> bo
     return True
 
 
+def rfp_id_from_lock_key(lock_key: str) -> str:
+    """Map a job lock key back to the RFP id it belongs to.
+
+    Pipeline locks are bare ``{rfp_id}``. Go/No-Go uses ``{rfp_id}:go-no-go``.
+    Packet exhibit apply uses ``apply-packet-exhibit:{rfp_id}``.
+    """
+    key = (lock_key or "").strip()
+    if key.startswith("apply-packet-exhibit:"):
+        return key[len("apply-packet-exhibit:") :]
+    if key.endswith(":go-no-go"):
+        return key[: -len(":go-no-go")]
+    return key
+
+
 async def list_active_proposal_jobs() -> list[ProposalJobRecord]:
     """Every in-flight (queued or running) job across all RFPs — lets the UI
     show "these are ahead of you" when a new job queues behind a full worker.
     """
     if settings.celery_enabled:
-        import json
-
         from app.services.redis_client import get_redis
 
         redis = get_redis()
         records: list[ProposalJobRecord] = []
         async for raw_key in redis.scan_iter(match=f"{_REDIS_KEY_PREFIX}*"):
-            lock_key = raw_key[len(_REDIS_KEY_PREFIX):]
-            raw = await redis.get(raw_key)
-            if not raw:
-                continue
-            data = json.loads(raw)
-            # lock_key is "{rfp_id}" for proposal-pipeline jobs or
-            # "{rfp_id}:go-no-go" for Go/No-Go (see rfps.py's lock_key) —
-            # strip a trailing ":go-no-go" back to the real rfp_id.
-            rfp_id = lock_key.split(":go-no-go", 1)[0]
+            lock_key = (
+                raw_key.decode() if isinstance(raw_key, (bytes, bytearray)) else str(raw_key)
+            )
+            if lock_key.startswith(_REDIS_KEY_PREFIX):
+                lock_key = lock_key[len(_REDIS_KEY_PREFIX) :]
+            # Touch Celery state via the real rfp_id — wrong id used to leak
+            # lock keys like "apply-packet-exhibit:rfp-…" into the job widget.
+            rfp_id = rfp_id_from_lock_key(lock_key)
             record = await _redis_get_job(rfp_id, lock_key)
-            if record is not None and record.status in _IN_FLIGHT:
+            if record is None:
+                continue
+            if record.status in _IN_FLIGHT:
+                # Always stamp the true RFP id (overrides any bad stored value).
+                record.rfp_id = rfp_id
                 records.append(record)
+            else:
+                # Finished / failed / zombie — drop the lock so the UI flips
+                # to "finished" on the next poll instead of lingering forever.
+                await _redis_clear_job(lock_key)
         return records
     async with _lock:
         return [r for r in _jobs.values() if r.status in _IN_FLIGHT]

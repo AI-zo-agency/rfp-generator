@@ -46,9 +46,22 @@ function dismissKey(job: TrackedJob): string {
 // pipeline phase, which does belong in the workspace.
 function jobHref(job: ActiveProposalJob): string {
   if (job.jobType === JUSTWIN_JOB_TYPE) return "/rfps";
-  return job.jobType === "go-no-go"
-    ? `/rfps/${encodeURIComponent(job.rfpId)}`
-    : `/proposals?rfp=${encodeURIComponent(job.rfpId)}`;
+  if (
+    job.jobType === "go-no-go" ||
+    job.jobType === "go-no-go-attachment"
+  ) {
+    return `/rfps/${encodeURIComponent(job.rfpId)}`;
+  }
+  return `/proposals?rfp=${encodeURIComponent(job.rfpId)}`;
+}
+
+/** Jobs whose completion should refresh the open page so Fit / draft update. */
+function shouldRefreshOnFinish(jobType: string): boolean {
+  return (
+    jobType === "go-no-go" ||
+    jobType === "go-no-go-attachment" ||
+    jobType === "apply-packet-exhibit"
+  );
 }
 
 // A JustWin sync belongs to no single RFP, so it is shown as one job of its
@@ -158,6 +171,7 @@ export function GlobalJobStatusWidget() {
       }
       if (cancelled) return;
       const active = justWinJob ? [...proposalJobs, justWinJob] : proposalJobs;
+      let finishedNeedsRefresh = false;
       startTransition(() => {
         setTracked((prev) => {
           const activeKeys = new Set(active.map(jobKey));
@@ -167,6 +181,9 @@ export function GlobalJobStatusWidget() {
           for (const [key, job] of prev) {
             if (job.state === "running" && !activeKeys.has(key)) {
               next.set(key, { ...job, state: "finished" });
+              if (shouldRefreshOnFinish(job.jobType)) {
+                finishedNeedsRefresh = true;
+              }
             }
           }
           // Fresh data always wins for whatever's running right now.
@@ -176,6 +193,9 @@ export function GlobalJobStatusWidget() {
           return next;
         });
       });
+      if (finishedNeedsRefresh) {
+        router.refresh();
+      }
     };
     void poll();
 
@@ -210,7 +230,7 @@ export function GlobalJobStatusWidget() {
       stop();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, []);
+  }, [router]);
 
   const visibleJobs = Array.from(tracked.values())
     .filter((j) => !dismissedKeys.has(dismissKey(j)))
