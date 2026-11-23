@@ -108,14 +108,10 @@ const PIPELINE_STAGES: {
     groups: ["Section Editor & Chat"],
     lane: "main",
   },
-  {
-    id: "finance",
-    title: "Financial Insights",
-    blurb: "QuickBooks / Teamwork briefs — not on the RFP Generate path.",
-    groups: ["Financial Insights"],
-    lane: "side",
-  },
 ];
+
+/** Hidden from the Prompts admin UI (still live in the financial product path). */
+const HIDDEN_PROMPT_GROUPS = new Set(["Financial Insights"]);
 
 const focusRing =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ef5018]";
@@ -174,6 +170,7 @@ function PipelineMap({
   const byGroup = useMemo(() => {
     const map = new Map<string, PromptSummary[]>();
     for (const p of prompts) {
+      if (HIDDEN_PROMPT_GROUPS.has(p.group)) continue;
       map.set(p.group, [...(map.get(p.group) ?? []), p]);
     }
     for (const list of map.values()) {
@@ -184,7 +181,7 @@ function PipelineMap({
 
   const stagedGroups = new Set(PIPELINE_STAGES.flatMap((s) => s.groups));
   const orphanGroups = [...byGroup.keys()]
-    .filter((g) => !stagedGroups.has(g))
+    .filter((g) => !stagedGroups.has(g) && !HIDDEN_PROMPT_GROUPS.has(g))
     .sort((a, b) => a.localeCompare(b));
 
   const stages = [
@@ -207,9 +204,10 @@ function PipelineMap({
     return initial;
   });
 
+  const visiblePrompts = prompts.filter((p) => !HIDDEN_PROMPT_GROUPS.has(p.group));
   const mainCount = stages.filter((s) => s.lane === "main").length;
-  const totalPrompts = prompts.length;
-  const totalEdited = prompts.filter((p) => p.isEdited).length;
+  const totalPrompts = visiblePrompts.length;
+  const totalEdited = visiblePrompts.filter((p) => p.isEdited).length;
 
   function toggle(id: string) {
     setOpenIds((prev) => {
@@ -464,7 +462,10 @@ function PromptsInner() {
 
   const groups = useMemo(() => {
     const out = new Map<string, PromptSummary[]>();
-    for (const prompt of prompts ?? []) out.set(prompt.group, [...(out.get(prompt.group) ?? []), prompt]);
+    for (const prompt of prompts ?? []) {
+      if (HIDDEN_PROMPT_GROUPS.has(prompt.group)) continue;
+      out.set(prompt.group, [...(out.get(prompt.group) ?? []), prompt]);
+    }
     return [...out.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [prompts]);
 
