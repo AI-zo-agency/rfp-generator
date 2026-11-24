@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, patch
 
 from app.services.go_no_go_opportunity import (
     OpportunityClassification,
+    apply_budget_band_deal_breaker,
     apply_opportunity_score_caps,
+    assess_budget_band,
     parse_opportunity_classification,
 )
 from app.services.go_no_go_service import _apply_hard_rules, _extract_rfp_hard_facts
@@ -210,6 +212,98 @@ class OpportunityScoreCapTests(unittest.TestCase):
         by_dim = {r["dimension"]: r["score"] for r in raw["decisionMatrix"]}
         self.assertEqual(by_dim["Financial Viability"], 3)
         self.assertNotEqual(raw["recommendation"], "no_go")
+
+
+class BudgetBandDealBreakerTests(unittest.TestCase):
+    def test_annual_below_100k_is_below(self) -> None:
+        result = assess_budget_band(
+            ["$75,000 — context: The annual contracted amount shall not exceed $75,000."]
+        )
+        self.assertEqual(result.status, "below")
+        self.assertTrue(result.used_annual)
+        self.assertEqual(result.amount, 75_000.0)
+
+    def test_annual_above_1m_is_above(self) -> None:
+        result = assess_budget_band(
+            ["$1,500,000 — context: Year 1 budget shall not exceed $1,500,000."]
+        )
+        self.assertEqual(result.status, "above")
+        self.assertEqual(result.amount, 1_500_000.0)
+
+    def test_mid_band_annual_is_in_band(self) -> None:
+        result = assess_budget_band(
+            ["$450,000 — context: Compensation shall not exceed $450,000 annual."]
+        )
+        self.assertEqual(result.status, "in_band")
+
+    def test_endpoints_inclusive(self) -> None:
+        low = assess_budget_band(
+            ["$100,000 — context: annual contracted amount $100,000"]
+        )
+        high = assess_budget_band(
+            ["$1,000,000 — context: annual contract value $1,000,000"]
+        )
+        self.assertEqual(low.status, "in_band")
+        self.assertEqual(high.status, "in_band")
+
+    def test_mixed_totals_without_annual_stay_unknown(self) -> None:
+        result = assess_budget_band(
+            [
+                "$50,000 — context: optional task ceiling $50,000",
+                "$250,000 — context: total contract value $250,000",
+            ]
+        )
+        self.assertEqual(result.status, "unknown")
+
+    def test_all_totals_below_band_force_below(self) -> None:
+        result = assess_budget_band(
+            ["$40,000 — context: shall not exceed $40,000"]
+        )
+        self.assertEqual(result.status, "below")
+        self.assertFalse(result.used_annual)
+
+    def test_apply_hard_rules_forces_no_go_for_below_band(self) -> None:
+        facts = {
+            "opportunity_class": "professional_services",
+            "compensation_signal": "confirmed_fee",
+            "contract_value_lines": [
+                "$60,000 — context: The annual contracted amount shall not exceed $60,000."
+            ],
+        }
+        raw = _optimistic_matrix_raw()
+        raw["recommendation"] = "go"
+        raw["worthScore"] = 4
+        raw["compliance"] = {"summary": "", "scoreImpact": "", "flags": []}
+        cleaned = _apply_hard_rules(
+            raw,
+            evaluation_points_found=False,
+            hard_facts=facts,
+        )
+        self.assertEqual(cleaned["recommendation"], "no_go")
+        self.assertLessEqual(cleaned["worthScore"], 1)
+        by_dim = {r["dimension"]: r["score"] for r in cleaned["decisionMatrix"]}
+        self.assertLessEqual(by_dim["Financial Viability"], 1)
+        flags = cleaned["compliance"]["flags"]
+        self.assertTrue(
+            any(
+                isinstance(f, dict)
+                and f.get("category") == "deal_breaker"
+                and "pursuit band" in str(f.get("message") or "").casefold()
+                for f in flags
+            ),
+            flags,
+        )
+
+    def test_apply_budget_band_skips_when_in_band(self) -> None:
+        raw = _optimistic_matrix_raw()
+        raw["recommendation"] = "go"
+        apply_budget_band_deal_breaker(
+            raw,
+            contract_value_lines=[
+                "$450,000 — context: annual compensation shall not exceed $450,000"
+            ],
+        )
+        self.assertEqual(raw["recommendation"], "go")
 
 
 class ClassifyOpportunityLlmTests(unittest.IsolatedAsyncioTestCase):

@@ -77,6 +77,15 @@ BUDGET_PLAYBOOK_CANONICAL = """=== ZÖ PRICING PLAYBOOK (mandatory for budget/fe
    - [PRICING FLAG: description — below the floor or outside the pricing docs, Sonja review required]
 
 9. Never reverse-engineer a line to hit a total
+
+10. Pursuit band (Go/No-Go)
+   - Target RFPs whose annual budget / annual contract value is $100,000–$1,000,000 per year.
+   - Below $100k/year or above $1M/year is a deal-breaker unless leadership overrides.
+
+11. No printed budget
+   - When the RFP prints no budget, code prices custom work near cost / 0.40 (~2.5×).
+   - Always surface that path as a pricing flag — never silent. Sonja/Britton confirm the
+     multiplier until unified hours/rates are locked.
 """
 
 OPTION_C_CHAT_POLICY = """=== OPTION C — CHAT / REVISE ENFORCEMENT ===

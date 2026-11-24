@@ -65,6 +65,7 @@ from app.services.evidence_trust.rfp_hard_facts import (
     extract_rfp_hard_facts,
 )
 from app.services.go_no_go_opportunity import (
+    apply_budget_band_deal_breaker,
     apply_opportunity_score_caps,
     classify_opportunity_llm,
     format_opportunity_facts_lines,
@@ -180,6 +181,8 @@ decisionMatrix — exactly 5 rows; each score is independent (they will often di
      name a tool/platform ARE verified for that skill when present in the excerpts.
   2. Resource Availability — team bandwidth, geography, live-demo/on-site needs
   3. Financial Viability — agency revenue vs cost (use commission math when budget is mostly media spend).
+     Pursuit band: annual budget/contract value $100,000–$1,000,000/year is the target.
+     Below $100k/year or above $1M/year → deal-breaker (score ≤1; prefer no_go) unless leadership overrides.
      open_competition / unpaid / prize_only without confirmed fee → 0 (do not invent payout)
      funding_program with undisclosed award → typically 2 (uncertain economics), NEVER 0 solely
      because award size is applicant-defined or not stated
@@ -333,8 +336,10 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
    4. Does it require full-time dedicated staff zö can't assign?
    5. Does the work conflict with an existing client? Check 01_ClientList excerpts, including
       clients inside the same buyer system (another campus or agency of the same state system).
-   6. Is the contract value below $100,000 or above $1,000,000? Say whether you read the annual
-      or the total value; when the two land on different sides, answer Unknown.
+   6. Is the disclosed annual contract value / annual budget below $100,000 or above
+      $1,000,000? zö's pursuit band is $100,000–$1,000,000 per year (inclusive). Prefer the
+      annual or Year-1 figure. Say whether you read annual vs total; when those land on
+      different sides of the band, answer Unknown.
    7. Must zö front costs (media, production, travel) and wait for reimbursement?
    Each Yes is a compliance flag, category "deal_breaker", severity "critical", and the
    recommendation is "no_go" unless leadership overrides (add that override as a condition).
@@ -2151,6 +2156,7 @@ def _apply_hard_rules(
     )
 
     facts = hard_facts or {}
+    contract_value_lines = list(facts.get("contract_value_lines") or [])
     opp_class = facts.get("opportunity_class")
     compensation = facts.get("compensation_signal")
     if opp_class and compensation:
@@ -2158,12 +2164,19 @@ def _apply_hard_rules(
             raw,
             opportunity_class=opp_class,
             compensation_signal=compensation,
-            contract_value_lines=list(facts.get("contract_value_lines") or []),
+            contract_value_lines=contract_value_lines,
         )
         raw["decisionMatrix"] = _normalize_decision_matrix(
             raw.get("decisionMatrix"),
             fallback_score=_matrix_fallback_score(raw),
         )
+
+    # Pursuit band: $100k–$1M / year (mechanical on HARD FACTS dollars).
+    apply_budget_band_deal_breaker(raw, contract_value_lines=contract_value_lines)
+    raw["decisionMatrix"] = _normalize_decision_matrix(
+        raw.get("decisionMatrix"),
+        fallback_score=_matrix_fallback_score(raw),
+    )
 
     if deadline is not None:
         raw["deadline"] = deadline

@@ -2,11 +2,15 @@
 
 Classification is LLM-judged with a verbatim RFP quote — no regex synonym tables.
 Score caps apply only after classification; they never invent evidence.
+
+Budget-band deal-breaker ($100k–$1M / year) is mechanical math on already-extracted
+contract-value lines — not capability synonym matching.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 from app.services.prompt_store import get_prompt
@@ -26,9 +30,25 @@ CompensationSignal = Literal[
     "undisclosed",
 ]
 
+# zö pursuit band (Todd / leadership, Nov 2025 assessment): annual only.
+BUDGET_BAND_MIN_ANNUAL = 100_000.0
+BUDGET_BAND_MAX_ANNUAL = 1_000_000.0
+
 _DIM_FINANCIAL = "financial viability"
 _DIM_STRATEGIC = "strategic value"
 _DIM_WIN = "win probability"
+
+_ANNUAL_BUDGET_HINT_RE = re.compile(
+    r"(?i)\b(?:"
+    r"annual|per\s+year|/year|a\s+year|"
+    r"year\s*(?:1|one)|yr\.?\s*1\b|first\s+year|"
+    r"annually"
+    r")\b"
+)
+_LINE_MONEY_RE = re.compile(
+    r"\$\s*([\d,]+(?:\.\d+)?)\s*(million|billion|m|b|k|thousand)?",
+    re.IGNORECASE,
+)
 
 _VALID_OPPORTUNITY_CLASSES = frozenset(
     {"professional_services", "open_competition", "funding_program", "ambiguous"}
@@ -206,6 +226,141 @@ def has_confirmed_professional_fee(
     if compensation_signal == "confirmed_fee":
         return True
     return bool(contract_value_lines)
+
+
+@dataclass(frozen=True)
+class BudgetBandAssessment:
+    """Result of comparing extracted contract dollars to the pursuit band."""
+
+    status: Literal["in_band", "below", "above", "unknown"]
+    amount: float | None = None
+    used_annual: bool = False
+    evidence_line: str = ""
+
+
+def assess_budget_band(
+    contract_value_lines: list[str] | None,
+) -> BudgetBandAssessment:
+    """Compare HARD FACTS contract-value lines to the $100k–$1M / year band.
+
+    Prefer annual / Year-1 figures. When only undifferentiated totals exist, apply
+    the band only if every amount sits on the same side (all below or all above).
+    Mixed annual-vs-total disagreement → unknown (LLM + leadership).
+    """
+    from app.services.evidence_trust.rfp_hard_facts import money_to_number
+
+    lines = [str(x).strip() for x in (contract_value_lines or []) if str(x).strip()]
+    if not lines:
+        return BudgetBandAssessment(status="unknown")
+
+    annual: list[tuple[float, str]] = []
+    other: list[tuple[float, str]] = []
+    for line in lines:
+        for match in _LINE_MONEY_RE.finditer(line):
+            value = money_to_number(match.group(1), match.group(2))
+            if value is None or value <= 0:
+                continue
+            # Skip tiny form/bond dollars that sometimes share a ceiling window.
+            if value < 1_000:
+                continue
+            bucket = annual if _ANNUAL_BUDGET_HINT_RE.search(line) else other
+            bucket.append((value, line))
+
+    if annual:
+        amount, evidence = max(annual, key=lambda row: row[0])
+        used_annual = True
+    elif other:
+        values = [v for v, _ in other]
+        lo, hi = min(values), max(values)
+        # Only force when every extracted total is on the same side of the band.
+        if hi < BUDGET_BAND_MIN_ANNUAL:
+            amount, evidence = max(other, key=lambda row: row[0])
+            used_annual = False
+        elif lo > BUDGET_BAND_MAX_ANNUAL:
+            amount, evidence = max(other, key=lambda row: row[0])
+            used_annual = False
+        else:
+            return BudgetBandAssessment(status="unknown")
+    else:
+        return BudgetBandAssessment(status="unknown")
+
+    if amount < BUDGET_BAND_MIN_ANNUAL:
+        status: Literal["in_band", "below", "above", "unknown"] = "below"
+    elif amount > BUDGET_BAND_MAX_ANNUAL:
+        status = "above"
+    else:
+        status = "in_band"
+    return BudgetBandAssessment(
+        status=status,
+        amount=amount,
+        used_annual=used_annual,
+        evidence_line=evidence,
+    )
+
+
+def apply_budget_band_deal_breaker(
+    raw: dict[str, Any],
+    *,
+    contract_value_lines: list[str] | None = None,
+) -> dict[str, Any]:
+    """Force no_go when disclosed contract value is outside $100k–$1M / year."""
+    if raw.get("insufficientData"):
+        return raw
+
+    assessment = assess_budget_band(contract_value_lines)
+    if assessment.status not in {"below", "above"} or assessment.amount is None:
+        return raw
+
+    amount = assessment.amount
+    period = "annual" if assessment.used_annual else "disclosed"
+    if assessment.status == "below":
+        message = (
+            f"Contract value {period} ${amount:,.0f} is below zö's $100,000–$1,000,000 "
+            "per-year pursuit band — deal-breaker unless leadership overrides."
+        )
+    else:
+        message = (
+            f"Contract value {period} ${amount:,.0f} is above zö's $100,000–$1,000,000 "
+            "per-year pursuit band — deal-breaker unless leadership overrides."
+        )
+
+    _append_compliance_deal_breaker(raw, message)
+    _append_gap(raw, message)
+    _force_recommendation(raw, "no_go")
+    _cap_worth(raw, 1)
+    _cap_dimension(raw, _DIM_FINANCIAL, 1)
+    _append_clarifying_question(
+        raw,
+        "Leadership override: pursue outside the $100k–$1M / year band? "
+        f"(extracted {period} value ${amount:,.0f})",
+    )
+    return raw
+
+
+def _append_compliance_deal_breaker(raw: dict[str, Any], message: str) -> None:
+    compliance = raw.setdefault("compliance", {})
+    if not isinstance(compliance, dict):
+        compliance = {}
+        raw["compliance"] = compliance
+    flags = compliance.setdefault("flags", [])
+    if not isinstance(flags, list):
+        compliance["flags"] = []
+        flags = compliance["flags"]
+    needle = message[:64]
+    if any(
+        isinstance(f, dict)
+        and f.get("category") == "deal_breaker"
+        and needle in str(f.get("message") or "")
+        for f in flags
+    ):
+        return
+    flags.append(
+        {
+            "category": "deal_breaker",
+            "severity": "critical",
+            "message": message,
+        }
+    )
 
 
 def apply_opportunity_score_caps(

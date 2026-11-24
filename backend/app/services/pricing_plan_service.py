@@ -410,6 +410,15 @@ async def generate_pricing_plan_budget(
     asks, ask_errs = await extract_pricing_asks(rfp_text)
     plan, rounds = await author_pricing_plan(rfp_text, asks, book, target_budget_usd=target_budget_usd)
     flags = [f"[PRICING FLAG: {e}]" for e in (*ask_errs, *rounds[-1]["errors"])]
+    budgets = budgets_from_asks(asks, target_budget_usd)
+    if not budgets:
+        share = book.settings.no_budget_cost_share
+        multiple = round(1 / share, 2) if share else 2.5
+        flags.append(
+            "[PRICING FLAG: No RFP budget printed — custom work priced near "
+            f"cost÷{share:g} (~{multiple:g}×). Confirm multiplier with Sonja/Britton "
+            "before submit.]"
+        )
     logger.info(
         "pricing_plan rfp_id=%s version=%s rounds=%d unresolved=%d",
         rfp_id, book.version, len(rounds), len(rounds[-1]["errors"]),

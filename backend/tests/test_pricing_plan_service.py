@@ -41,7 +41,8 @@ def llm_returns(*plans: dict) -> AsyncMock:
 
 
 async def build_budget(plan: dict | None = None, asks: dict = ASKS, rfp: str = RFP):
-    calls = llm_returns(asks, plan or good_plan())
+    # asks extract may repair once when verify_asks complains, then author runs.
+    calls = llm_returns(asks, asks, plan or good_plan(), plan or good_plan())
     with patch.object(svc.llm, "chat_json", calls), patch.object(svc, "load_pricing_kb", AsyncMock(return_value=BOOK)):
         return await svc.generate_pricing_plan_budget("rfp-1", rfp)
 
@@ -137,12 +138,24 @@ class BudgetBuildTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_notes_and_summary_go_to_flags_not_render(self) -> None:
         budget = await build_budget()
         self.assertTrue(any("priced with Pricing v2" in f for f in budget.pricing_flags))
+        # No printed RFP budget → surface the cost÷0.40 (~2.5×) path explicitly.
+        self.assertTrue(
+            any("No RFP budget printed" in f and "0.4" in f for f in budget.pricing_flags),
+            budget.pricing_flags,
+        )
         # flags reach every user of the app: never margins, costs or hours
         flags = " ".join(budget.pricing_flags).lower()
         for leak in ("gross profit", "margin", "in-house", "all-in", "hours"):
             self.assertNotIn(leak, flags)
         self.assertNotIn("DO NOT PLACE", svc.render_pricing_plan_budget(budget))
         self.assertIn("INTERNAL — DO NOT PLACE", budget.pricing_plan["internal_summary"])
+
+    async def test_printed_budget_skips_no_budget_multiplier_flag(self) -> None:
+        budget = await build_budget(asks=ASKS_CAP, rfp=RFP_CAP)
+        self.assertFalse(
+            any("No RFP budget printed" in f for f in budget.pricing_flags),
+            budget.pricing_flags,
+        )
 
     async def test_client_text_has_no_internal_numbers(self) -> None:
         md = svc.render_pricing_plan_budget(await build_budget())
