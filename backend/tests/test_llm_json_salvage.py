@@ -146,6 +146,31 @@ Please clarify what improvements you would like:
         self.assertEqual(parsed["deliveryModel"]["type"], "Hybrid")
         self.assertNotIn("budgetFormat", parsed)  # must stay nested, not top-level wipe
 
+    def test_closes_truncated_asks_after_items_dangling_key(self) -> None:
+        """Westchester-style: model finishes compensation_outline.items then dies
+        mid next key — must not leave `,""` behind."""
+        raw = (
+            '{"compensation_outline": {"ref": "Schedule B: Fee Proposal / '
+            'Section II.B Budget Management", "items": ["II.B Proposed fee and '
+            'compensation structure", "Schedule B rates"], "'
+        )
+        parsed = _parse_json_response(raw)
+        outline = parsed["compensation_outline"]
+        self.assertIn("Schedule B", outline["ref"])
+        self.assertEqual(len(outline["items"]), 2)
+        self.assertNotIn("", outline["items"])
+
+    def test_closes_truncated_asks_mid_key_name(self) -> None:
+        raw = (
+            '{"compensation_outline":{"ref":"IV.C.6 Cost Proposal",'
+            '"items":[]},"ceilings":[],"implied_limits":[],"cl'
+        )
+        parsed = _parse_json_response(raw)
+        self.assertEqual(parsed["compensation_outline"]["ref"], "IV.C.6 Cost Proposal")
+        self.assertEqual(parsed["ceilings"], [])
+        self.assertEqual(parsed["implied_limits"], [])
+        self.assertNotIn("cl", parsed)
+
     def test_classification_salvage_skips_truncated_opportunity_json(self) -> None:
         """Truncated opportunity JSON mentions industry but must not become a
         classification stub — that wiped Agent 1 and caused missing client 502s."""

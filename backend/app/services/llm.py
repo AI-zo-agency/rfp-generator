@@ -2041,14 +2041,7 @@ def _close_truncated_json(text: str) -> str:
             stack.pop()
     if in_string:
         s += '"'
-    s = s.rstrip().rstrip(",")
-    # Drop trailing incomplete `"key":` with no value — common Claude stop mid-object.
-    # Do NOT strip complete `"key": 123` / null / true / false (those are valid).
-    while True:
-        cleaned = re.sub(r',?\s*"[^"\\]+"\s*:\s*$', "", s)
-        if cleaned == s:
-            break
-        s = cleaned.rstrip().rstrip(",")
+    s = _strip_trailing_incomplete_json_keys(s)
 
     # Re-scan stack after incomplete-key stripping
     in_string = False
@@ -2074,9 +2067,29 @@ def _close_truncated_json(text: str) -> str:
             stack.pop()
     if in_string:
         s += '"'
-    s = s.rstrip().rstrip(",")
+    s = _strip_trailing_incomplete_json_keys(s)
     for opener in reversed(stack):
         s += "}" if opener == "{" else "]"
+    return s
+
+
+def _strip_trailing_incomplete_json_keys(text: str) -> str:
+    """Drop a key Claude cut off before its value (or mid-key-name).
+
+    Handles both ``,"client":`` (colon, no value) and ``,"cl`` / ``,"`` (name
+    never finished — after the open-string closer these look like ``,"cl"`` /
+    ``,""``). Never strips a string *value* (those sit after ``:``).
+    """
+    s = text.rstrip().rstrip(",")
+    while True:
+        cleaned = re.sub(r',?\s*"[^"\\]*"\s*:\s*$', "", s)
+        # Dangling key name with no colon — only when preceded by `{` or `,`
+        # so a truncated value like ``{"a": "hel"`` is left alone.
+        cleaned = re.sub(r'(?<=[{,])\s*"[^"\\]*"\s*$', "", cleaned)
+        cleaned = cleaned.rstrip().rstrip(",")
+        if cleaned == s:
+            break
+        s = cleaned
     return s
 
 
@@ -2776,6 +2789,62 @@ def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
     return {"recommendations": items}
 
 
+def _salvage_pricing_asks_payload(text: str) -> dict[str, Any] | None:
+    """Recover pricing ASKS when the model truncates mid-object after compensation_outline.
+
+    Phase 3.5 dies hard on invalid ASKS JSON; keeping the outline (+ any complete
+    sibling keys we can close) lets the budget step continue.
+    """
+    if '"compensation_outline"' not in text and "'compensation_outline'" not in text:
+        return None
+    closed = _close_truncated_json(text)
+    parsed = None
+    for candidate in (closed, _repair_loose_json(closed), text):
+        try:
+            obj = json.loads(
+                _escape_raw_controls_in_json_strings(_repair_loose_json(candidate))
+            )
+        except json.JSONDecodeError:
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(obj, dict) and (
+            "compensation_outline" in obj or "priced_scope" in obj or "asks" in obj
+        ):
+            parsed = obj
+            break
+    if parsed is None:
+        # Last resort: pull just the compensation_outline object span.
+        m = re.search(r'"compensation_outline"\s*:\s*\{', text)
+        if not m:
+            return None
+        start = m.end() - 1
+        end = _find_balanced_json_end(text, start)
+        span = text[start:end] if end is not None else _close_truncated_json(text[start:])
+        try:
+            outline = json.loads(_escape_raw_controls_in_json_strings(_repair_loose_json(span)))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(outline, dict):
+            return None
+        parsed = {"compensation_outline": outline}
+    # Fill required ASKS keys so authoring can proceed.
+    parsed.setdefault("compensation_outline", {"ref": None, "items": []})
+    parsed.setdefault("ceilings", [])
+    parsed.setdefault("implied_limits", [])
+    parsed.setdefault("asks", [])
+    parsed.setdefault("priced_scope", [])
+    parsed.setdefault("exclusions", [])
+    parsed.setdefault(
+        "client", {"name": None, "kind": "government", "quote": None}
+    )
+    parsed.setdefault("contract_type_asked", {"value": None, "quote": None})
+    parsed.setdefault("all_inclusive_pricing", {"value": False, "quote": None})
+    parsed.setdefault("buyer_form", None)
+    return parsed
+
+
 def _parse_json_response(raw: str) -> dict[str, Any]:
     # First try to extract JSON from any surrounding text
     text = _extract_json_from_text(raw)
@@ -2794,6 +2863,7 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
             (_salvage_capability_tiers_payload, "capability tier(s)"),
             (_salvage_section1_budgets_payload, "section-1 budget(s)"),
             (_salvage_company_truth_payload, "company truth field(s)"),
+            (_salvage_pricing_asks_payload, "pricing asks field(s)"),
             (_salvage_sections_payload, "section(s)"),
             (_salvage_issues_payload, "forms-audit issue(s)"),
             (_salvage_recommendations_payload, "recommendation(s)"),

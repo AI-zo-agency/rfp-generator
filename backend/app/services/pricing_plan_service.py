@@ -228,6 +228,25 @@ def pricing_asks_user_message(excerpt: str, quotes: list[str]) -> str:
     )
 
 
+def _normalize_pricing_asks(asks: dict | None) -> dict:
+    """Fill ASKS keys when truncated JSON salvage recovered only a prefix."""
+    out = dict(asks or {})
+    out.setdefault("compensation_outline", {"ref": None, "items": []})
+    out.setdefault("ceilings", [])
+    out.setdefault("implied_limits", [])
+    out.setdefault("asks", [])
+    out.setdefault("priced_scope", [])
+    out.setdefault("exclusions", [])
+    out.setdefault("client", {"name": None, "kind": "government", "quote": None})
+    out.setdefault("contract_type_asked", {"value": None, "quote": None})
+    out.setdefault("all_inclusive_pricing", {"value": False, "quote": None})
+    out.setdefault("buyer_form", None)
+    client = out.get("client")
+    if not isinstance(client, dict):
+        out["client"] = {"name": None, "kind": "government", "quote": None}
+    return out
+
+
 async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
     from app.services.proposal_submission_authority import collect_cost_submittal_quotes
 
@@ -236,16 +255,25 @@ async def extract_pricing_asks(rfp_text: str) -> tuple[dict, list[str]]:
     user = pricing_asks_user_message(ctx, quotes)
     # Low reasoning: medium thinking was consuming the JSON budget and
     # returning a cut-off object for long RFPs.
-    asks = await _call(get_prompt("pricing_plan_service.asks", ASKS_PROMPT), user, ASKS_MAX_TOKENS, reasoning_effort="low")
-    errs = verify_asks(asks, rfp_text)
-    if errs:
-        asks = await _call(
+    asks = _normalize_pricing_asks(
+        await _call(
             get_prompt("pricing_plan_service.asks", ASKS_PROMPT),
-            f"{user}\n\n"
-            f"=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
-            "=== FIX THESE (quote exactly or drop the item) ===\n" + "\n".join(errs),
+            user,
             ASKS_MAX_TOKENS,
             reasoning_effort="low",
+        )
+    )
+    errs = verify_asks(asks, rfp_text)
+    if errs:
+        asks = _normalize_pricing_asks(
+            await _call(
+                get_prompt("pricing_plan_service.asks", ASKS_PROMPT),
+                f"{user}\n\n"
+                f"=== YOUR PREVIOUS JSON ===\n{json.dumps(asks)}\n\n"
+                "=== FIX THESE (quote exactly or drop the item) ===\n" + "\n".join(errs),
+                ASKS_MAX_TOKENS,
+                reasoning_effort="low",
+            )
         )
         errs = verify_asks(asks, rfp_text)
     return asks, errs
