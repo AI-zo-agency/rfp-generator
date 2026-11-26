@@ -36,7 +36,13 @@ def assemble_packet_pdf_text(
             continue
         cite = (cite_target or "exhibit").strip() or "exhibit"
         name = (filename or "packet.pdf").strip() or "packet.pdf"
-        labeled_blocks.append(f"--- PACKET FILE: {cite} ({name}) ---\n{body}")
+        # Avoid "name.pdf (name.pdf)" — that form was re-parsed into mangled
+        # unresolved targets that no longer matched the saved cite_target.
+        if cite.casefold() == name.casefold():
+            header = f"--- PACKET FILE: {cite} ---"
+        else:
+            header = f"--- PACKET FILE: {cite} ({name}) ---"
+        labeled_blocks.append(f"{header}\n{body}")
 
     supplements_blob = "\n\n".join(labeled_blocks)
     primary_text = (primary or "").strip()

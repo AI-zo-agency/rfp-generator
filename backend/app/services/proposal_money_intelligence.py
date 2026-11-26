@@ -37,10 +37,11 @@ def _plan_budget_facts(budget: ProposalBudget) -> str:
     plan = budget.pricing_plan or {}
     lines = [
         f"pricingVersion: {plan.get('pricing_version') or 'legacy band guide'}",
-        f"termValue (our bid: one-time fees + the term's monthly fees): {plan_term_value(plan):,.2f}",
+        f"termValue (our bid: one-time + monthly×months + quarterly×quarters + known-count events): "
+        f"{plan_term_value(plan):,.2f}",
         f"clientMediaPassthrough inside termValue (NOT agency fees): {plan_term_value(plan, None, True):,.2f}",
         f"lineItemSum (all table rows): {sum_line_items_extended(budget):,.2f}",
-        "Per-event and hourly fees are rates, never summed into termValue.",
+        "Rate-card per_event (quantity 1) is never summed into termValue; known-count events and quarterly fees are.",
     ]
     for ceil in (budget.pricing_asks or {}).get("ceilings") or []:
         pool = " (shared pool, not ours alone)" if ceil.get("shared_pool") else ""

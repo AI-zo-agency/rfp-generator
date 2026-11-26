@@ -173,6 +173,33 @@ class CatalogAndCustomPricing(unittest.TestCase):
         self.assertNotIn("A2", c["cost_term"])
         self.assertEqual(term_value(c), 4800)
 
+    def test_quarterly_fees_count_four_times_over_twelve_months(self) -> None:
+        plan = good_plan()
+        plan["tasks"] = [{
+            "task_id": "A1", "group": "Reviews", "deliverable": "Quarterly strategic review",
+            "scope_ids": ["S1", "S2"], "billing": "quarterly", "quantity": 1,
+            "catalog_code": "7c", "catalog_item": "SEO Basic",
+        }]
+        plan["overhead"] = {"hours": {"PM": 1, "AM": 1, "LD": 1}, "basis": "x"}
+        priced(plan)
+        c = compute(plan, BOOK)
+        self.assertEqual(c["amounts"]["A1"], 2100)
+        self.assertEqual(term_value(c), 8_400)  # 2100 × (12 // 3)
+
+    def test_known_count_per_event_is_included_in_term_value(self) -> None:
+        """Legacy/mis-authored: per_event with quantity>1 must still enter the bid total.
+
+        Amount already includes quantity via _build; span is 1 so we do not ×qty again.
+        """
+        plan = good_plan()
+        plan["tasks"][1]["billing"] = "per_event"
+        plan["tasks"][1]["quantity"] = 4
+        plan["tasks"][1]["quantity_basis"] = "assumption"
+        priced(plan)
+        c = compute(plan, BOOK)
+        self.assertIn("A2", c["cost_term"])
+        self.assertEqual(term_value(c), c["amounts"]["A1"] + c["amounts"]["A2"])
+
     def test_blended_rate_and_negotiated_client(self) -> None:
         self.assertEqual(blended_rate({"client_name": "Acme"}, BOOK), 275)
         self.assertEqual(blended_rate({"client_name": "City of Bend, Oregon"}, BOOK), 250)
@@ -375,6 +402,15 @@ class ClientSafeRender(unittest.TestCase):
     def test_shows_prices_and_a_total(self) -> None:
         self.assertIn("$4,800", self.out)
         self.assertIn("| | **Total** |", self.out)
+
+    def test_one_time_quantity_shows_unit_times_count(self) -> None:
+        plan = good_plan()
+        plan["tasks"][1]["quantity"] = 4
+        plan["tasks"][1]["quantity_basis"] = "assumption"
+        plan["tasks"][1]["deliverable"] = "Quarterly strategic review"
+        out = render(priced(plan)[0], ASKS, BOOK)
+        self.assertRegex(out, r"\$[\d,]+ × 4 = \$[\d,]+")
+        self.assertNotRegex(out, r"\| A2 \| Quarterly strategic review \| \$[\d,]+ \|")
 
     def test_never_shows_hours_costs_margins_or_roles(self) -> None:
         # the approved wording may say "$275 an hour" for change orders, so only internal terms are checked

@@ -356,7 +356,10 @@ class MoneyIntelligenceFactsTests(unittest.TestCase):
         budget = new_budget()
         facts = _canonical_budget_facts(budget)
         self.assertIn("pricingVersion: v2", facts)
-        self.assertIn("termValue (our bid: one-time fees + the term's monthly fees): 22,300.00", facts)
+        self.assertIn(
+            "termValue (our bid: one-time + monthly×months + quarterly×quarters + known-count events): 22,300.00",
+            facts,
+        )
         self.assertNotIn("ZERO", facts)
 
         legacy = ProposalBudget(rfpId="r-old", updatedAt="t")

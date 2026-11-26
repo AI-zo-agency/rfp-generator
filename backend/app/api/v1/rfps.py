@@ -928,7 +928,11 @@ async def list_rfp_packet_files(rfp_id: str) -> dict[str, object]:
 
 @router.post("/{rfp_id}/packet-files")
 async def upload_rfp_packet_file(rfp_id: str, request: Request) -> dict[str, object]:
-    """Attach a cite-linked exhibit PDF, then refresh Fit from that attachment only."""
+    """Attach a cite-linked exhibit PDF without starting Fit.
+
+    Operators add every missing file first, then confirm a Go/No-Go update
+    from the UI (full analyze) so Fit is not re-run after each upload.
+    """
     from app.services.llm_call_context import get_llm_user_email
     from app.services.rfp_packet_files import upsert_packet_file
     from app.services.user_activity import emit_activity
@@ -985,18 +989,10 @@ async def upload_rfp_packet_file(rfp_id: str, request: Request) -> dict[str, obj
     except Exception:  # noqa: BLE001
         pass
 
-    analyze = await start_attachment_fit_refresh(
-        rfp_id,
-        cite_target=cite_target,
-        action="upload",
-        cite_quote=cite_quote,
-    )
     return {
         "ok": True,
         "file": saved.model_dump(by_alias=True),
-        "analyzeStarted": True,
-        "analyzeMode": "attachment",
-        "analyze": analyze,
+        "analyzeStarted": False,
     }
 
 
@@ -1004,7 +1000,7 @@ async def upload_rfp_packet_file(rfp_id: str, request: Request) -> dict[str, obj
 async def delete_rfp_packet_file_endpoint(
     rfp_id: str, file_id: str
 ) -> dict[str, object]:
-    """Remove a cite-linked exhibit and refresh Fit from that change only."""
+    """Remove a cite-linked exhibit without starting Fit (confirm update in UI)."""
     from app.services.rfp_packet_files import delete_packet_file, get_packet_file
     from app.services.user_activity import emit_activity
 
@@ -1018,7 +1014,6 @@ async def delete_rfp_packet_file_endpoint(
     if not existing:
         raise HTTPException(status_code=404, detail="Packet file not found")
     cite_target = existing.cite_target
-    cite_quote = existing.cite_quote or ""
 
     removed = delete_packet_file(rfp_id, file_id)
     if not removed:
@@ -1038,18 +1033,10 @@ async def delete_rfp_packet_file_endpoint(
     except Exception:  # noqa: BLE001
         pass
 
-    analyze = await start_attachment_fit_refresh(
-        rfp_id,
-        cite_target=cite_target,
-        action="delete",
-        cite_quote=cite_quote,
-    )
     return {
         "ok": True,
         "deleted": True,
-        "analyzeStarted": True,
-        "analyzeMode": "attachment",
-        "analyze": analyze,
+        "analyzeStarted": False,
     }
 
 

@@ -79,6 +79,40 @@ export const STAGE_LABELS: Record<RfpStage, string> = {
   passed: "Passed",
 };
 
+/**
+ * Go/No-Go already ran, but scoring was blocked because the upload is not a
+ * complete RFP (packet gate). Distinct from never-run intake.
+ */
+export function isGoNoGoScoringBlocked(rfp: RfpRecord): boolean {
+  const analysis = rfp.goNoGoAnalysis;
+  if (!analysis) return false;
+  if (analysis.packetRead?.blocksScoring) return true;
+  if (analysis.provider === "packet-gate") return true;
+  return false;
+}
+
+/** Analysis exists but could not produce Fit/Worth scores (incomplete / thin packet). */
+export function isGoNoGoUnscored(rfp: RfpRecord): boolean {
+  const analysis = rfp.goNoGoAnalysis;
+  if (!analysis) return false;
+  if (isGoNoGoScoringBlocked(rfp)) return true;
+  return Boolean(analysis.insufficientData);
+}
+
+/** Score cell / header label when there is no numeric Overall Go Score. */
+export function formatGoNoGoScoreDisplay(rfp: RfpRecord): string {
+  if (isGoNoGoScoringBlocked(rfp)) return "Awaiting packet";
+  if (rfp.goNoGoAnalysis?.insufficientData) return "Needs content";
+  return "Pending";
+}
+
+/** Compact badge when Fit ran but could not score yet. */
+export function formatGoNoGoBadgeLabel(rfp: RfpRecord): string {
+  if (isGoNoGoScoringBlocked(rfp)) return "Awaiting packet";
+  if (rfp.goNoGoAnalysis?.insufficientData) return "Needs content";
+  return "—";
+}
+
 /** Plain-language workflow step for pipeline tables (not generic "Go / No-Go" for every row). */
 export function getWorkflowStepDisplay(rfp: RfpRecord): {
   label: string;
@@ -86,6 +120,18 @@ export function getWorkflowStepDisplay(rfp: RfpRecord): {
 } {
   if (rfp.goNoGo === "no_go" || rfp.stage === "passed") {
     return { label: "Not bidding", hint: "Marked pass — no proposal draft" };
+  }
+  if (isGoNoGoScoringBlocked(rfp)) {
+    return {
+      label: "Awaiting full RFP",
+      hint: "Add the complete packet when it arrives, then re-run Fit",
+    };
+  }
+  if (rfp.goNoGoAnalysis?.insufficientData) {
+    return {
+      label: "Needs RFP content",
+      hint: "Add more packet materials, then re-run Fit",
+    };
   }
   if (isNewIntake(rfp)) {
     return {
@@ -142,11 +188,29 @@ export function isProposalInProgress(rfp: RfpRecord): boolean {
   return rfp.goNoGo === "go" && PROPOSAL_STAGES.includes(rfp.stage);
 }
 
-/** Newly synced or manual intake — analysis not run yet. */
+/**
+ * True when a proposal draft was started or finished for this RFP.
+ * Used to spare overdue RFPs that already have manuscript work.
+ */
+export function hasGeneratedProposal(rfp: RfpRecord): boolean {
+  if (rfp.googleDocUrl) return true;
+  if (
+    rfp.stage === "submitted" ||
+    rfp.stage === "won" ||
+    rfp.stage === "lost" ||
+    rfp.stage === "export" ||
+    rfp.stage === "review"
+  ) {
+    return true;
+  }
+  return PROPOSAL_STAGES.includes(rfp.stage);
+}
+
+/** Newly synced or manual intake — Go/No-Go has never been run. */
 export function isNewIntake(rfp: RfpRecord): boolean {
   if (rfp.stage !== "intake" && rfp.stage !== "go_no_go") {
     return false;
   }
-  const analysis = rfp.goNoGoAnalysis;
-  return !analysis || Boolean(analysis.insufficientData);
+  // An incomplete-packet / insufficient-data result still means analysis ran.
+  return !rfp.goNoGoAnalysis;
 }

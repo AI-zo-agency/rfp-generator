@@ -20,7 +20,7 @@ ENGAGEMENT_TYPES = (
     "fixed_quote", "monthly_retainer", "time_materials", "time_deliverables", "not_to_exceed", "procurement",
 )
 CLIENT_KINDS = ("government", "nonprofit", "private")
-BILLING = ("one_time", "monthly", "per_event")
+BILLING = ("one_time", "monthly", "quarterly", "per_event")
 MEDIA_KINDS = ("traditional", "digital")
 PO_TOPICS = (*PO_COLUMNS, "Other POs")
 BLOCK_TOKENS = {"TASK_TABLE", "RATE_TABLE", "FORM", "MEDIA_SPLIT", "VERBATIM"}
@@ -75,6 +75,25 @@ def months(plan: dict) -> int:
     return int(m) if isinstance(m, (int, float)) and 1 <= m <= 120 else 12
 
 
+def billing_span(t: dict, term_months: int) -> int:
+    """How many times a task's unit amount counts toward the bid total.
+
+    - monthly → term_months
+    - quarterly → term_months // 3 (at least 1)
+    - one_time → 1 (quantity already folded into the unit amount by _build)
+    - per_event quantity 1 → 0 (rate card; never summed)
+    - per_event quantity > 1 → 1 (legacy known-count: amount already qty-scaled in _build)
+    """
+    billing = t.get("billing", "one_time")
+    if billing == "monthly":
+        return term_months
+    if billing == "quarterly":
+        return max(term_months // 3, 1)
+    if billing == "per_event":
+        return 1 if (_f(t.get("quantity")) or 1.0) > 1 else 0
+    return 1
+
+
 def blended_rate(plan: dict, book: PricingBook) -> float:
     """$275 for every role, or the negotiated rate when the client has one (City of Bend)."""
     name = _norm(plan.get("client_name") or "")
@@ -97,7 +116,7 @@ def media_fee(book: PricingBook, monthly_spend: float) -> float:
 
 
 def _round_price(price: float, floor: float, billing: str) -> float:
-    unit = 50 if billing in ("monthly", "per_event") else 100
+    unit = 50 if billing in ("monthly", "quarterly", "per_event") else 100
     return max(round(price / unit) * unit, math.ceil(floor / unit) * unit)
 
 
@@ -146,8 +165,8 @@ def compute(plan: dict, book: PricingBook) -> dict:
     n = months(plan)
     tasks = {t["task_id"]: t for t in plan.get("tasks", []) if t.get("task_id")}
     rows = {tid: r for tid, t in tasks.items() if (r := _build(t, book))}
-    span = {tid: (n if t.get("billing") == "monthly" else 1) for tid, t in tasks.items()}
-    summed = {tid for tid, t in tasks.items() if t.get("billing", "one_time") != "per_event"}
+    span = {tid: billing_span(t, n) for tid, t in tasks.items()}
+    summed = {tid for tid, sp in span.items() if sp > 0}
     oh_hours = {k: _f(v) for k, v in ((plan.get("overhead") or {}).get("hours") or {}).items()}
     oh_cost = sum(book.roles[k].loaded * h for k, h in oh_hours.items() if k in book.roles)
 
@@ -194,15 +213,35 @@ def compute(plan: dict, book: PricingBook) -> dict:
         fills[(f.get("row_id"), f.get("column"))] = (k, val)
     return {
         "amounts": amounts, "revenue": revenue, "cost_term": cost_term, "hours_term": hours_term,
-        "rows": rows, "tasks": tasks, "total": total, "fills": fills, "months": n, "rate": rate,
+        "rows": rows, "tasks": tasks, "span": span, "total": total, "fills": fills, "months": n,
+        "rate": rate,
         "overhead": {"cost": oh_cost, "hours": oh_hours, "unallocated": unallocated},
         "custom_cost_term": custom_term, "multiples": multiples,
     }
 
 
 def term_value(c: dict, track=None, media=None) -> float:
-    """One-time work plus the term's monthly fees. per_event fees are rates, never summed."""
-    return c["total"](track, "one_time", media) + c["months"] * c["total"](track, "monthly", media)
+    """Bid total over the term: unit amounts × billing_span.
+
+    Monthly and quarterly fees multiply by periods in the term. One-time (and
+    legacy per_event with quantity>1) amounts already include quantity from
+    _build, so their span is 1. Rate-card per_event (quantity 1) is excluded.
+    """
+    tasks, rows, amounts, spans = c["tasks"], c["rows"], c["amounts"], c["span"]
+    if track is not None and not any(t.get("track") == track for t in tasks.values()):
+        track = None
+    total = 0.0
+    for tid, amount in amounts.items():
+        t = tasks[tid]
+        sp = spans.get(tid, 0)
+        if sp <= 0:
+            continue
+        if track is not None and t.get("track") != track:
+            continue
+        if media is not None and media != rows[tid]["kind"].startswith("media_traditional"):
+            continue
+        total += amount * sp
+    return total
 
 
 def margins(c: dict) -> dict:
@@ -254,7 +293,7 @@ def price_plan(plan: dict, book: PricingBook, budgets: dict[str, float]) -> dict
         key = t.get("track") if t.get("track") in budgets else (TOTAL_KEY if TOTAL_KEY in budgets else None)
         sc = scopes.setdefault(key, {"fixed": 0.0, "custom": 0.0})
         if c["rows"][tid]["fixed"] is not None:
-            sc["fixed"] += c["amounts"][tid] * (c["months"] if t.get("billing") == "monthly" else 1)
+            sc["fixed"] += c["amounts"][tid] * c["span"].get(tid, 1)
         else:
             sc["custom"] += c["cost_term"][tid]
     multiples, no_fit = {}, {}
@@ -279,7 +318,7 @@ def cut_suggestions(plan: dict, book: PricingBook, over_by: float, track: str | 
     """Largest priced items first, until their term price covers `over_by` (for the go/no-go and internal notes)."""
     c = compute(plan, book)
     scope = [
-        (c["amounts"][tid] * (c["months"] if t.get("billing") == "monthly" else 1), tid, t)
+        (c["amounts"][tid] * c["span"].get(tid, 1), tid, t)
         for tid, t in c["tasks"].items()
         if tid in c["cost_term"] and (track in (None, TOTAL_KEY) or t.get("track") == track)
     ]
@@ -363,6 +402,13 @@ def _task_errors(plan: dict, book: PricingBook, rfp_text: str | None) -> list[st
             errs.append(f"{tid}: billing {t.get('billing')!r} invalid — zö never bills hourly; use {list(BILLING)}")
         if t.get("billing") == "monthly" and _f(t.get("quantity")) not in (0.0, 1.0):
             errs.append(f"{tid}: a monthly fee has quantity 1 (the term sets the months)")
+        if t.get("billing") == "quarterly" and _f(t.get("quantity")) not in (0.0, 1.0):
+            errs.append(f"{tid}: a quarterly fee has quantity 1 (the term sets the quarters)")
+        if t.get("billing") == "per_event" and _f(t.get("quantity")) not in (0.0, 1.0):
+            errs.append(
+                f"{tid}: per_event is a rate card (quantity 1, not in the bid total). "
+                "For N known events use one_time with quantity N; for a quarterly cadence use quarterly"
+            )
         code, b, kind = t.get("catalog_code"), t.get("build"), t.get("media_kind")
         if code:
             item = book.catalog.get(code)
@@ -549,7 +595,31 @@ def verify_plan(
 # ---------------------------------------------------------------- render (client-safe)
 
 
-SUFFIX = {"monthly": " / month", "per_event": " / event", "one_time": ""}
+SUFFIX = {
+    "monthly": " / month",
+    "quarterly": " / quarter",
+    "per_event": " / event",
+    "one_time": "",
+}
+
+
+def _format_task_investment(t: dict, amt: float | None) -> str:
+    """Client-facing cell: unit rate × occurrences when that avoids a misleading unit label.
+
+    one_time / per_event with quantity>1 already bake qty into `amt` via _build —
+    show the breakdown so reviewers do not multiply the total by quantity again.
+    """
+    if amt is None:
+        return ""
+    billing = t.get("billing", "one_time")
+    qty = _f(t.get("quantity")) or 1.0
+    if billing in ("one_time", "per_event") and qty > 1:
+        unit = amt / qty
+        # one_time: "$X × N = $total"; per_event: "$X / event × N = $total"
+        if billing == "per_event":
+            return f"{usd(unit)} / event × {int(qty)} = {usd(amt)}"
+        return f"{usd(unit)} × {int(qty)} = {usd(amt)}"
+    return f"{usd(amt)}{SUFFIX.get(billing, '')}"
 
 
 def render(plan: dict, asks: dict, book: PricingBook) -> str:
@@ -564,10 +634,17 @@ def render(plan: dict, asks: dict, book: PricingBook) -> str:
             rows.append(f"| | **{group}** | |")
             for t in (t for t in scoped if t.get("group") == group):
                 amt = c["amounts"].get(t["task_id"])
-                rows.append(f"| {t['task_id']} | {t['deliverable']} | {usd(amt)}{SUFFIX[t.get('billing', 'one_time')] if amt else ''} |")
+                rows.append(f"| {t['task_id']} | {t['deliverable']} | {_format_task_investment(t, amt)} |")
         billings = {t.get("billing", "one_time") for t in scoped}
-        if billings & {"one_time", "monthly"}:
-            label = "Total (term value)" if "monthly" in billings else "Total"
+        has_known_events = any(
+            t.get("billing") == "per_event" and (_f(t.get("quantity")) or 1) > 1 for t in scoped
+        )
+        if billings & {"one_time", "monthly", "quarterly"} or has_known_events:
+            label = (
+                "Total (term value)"
+                if billings & {"monthly", "quarterly"} or has_known_events
+                else "Total"
+            )
             rows.append(f"| | **{label}** | **{usd(term_value(c, track))}** |")
         return "\n".join(rows)
 

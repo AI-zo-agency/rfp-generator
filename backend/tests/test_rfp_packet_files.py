@@ -39,6 +39,16 @@ def test_assemble_keeps_supplements_when_truncating_primary():
     assert len(out) <= 80
 
 
+def test_assemble_skips_duplicate_cite_filename_in_header():
+    out = assemble_packet_pdf_text(
+        "primary",
+        [("Scope.pdf", "Scope.pdf", "BODY TEXT HERE")],
+        max_chars=500,
+    )
+    assert "--- PACKET FILE: Scope.pdf ---" in out
+    assert "Scope.pdf (Scope.pdf)" not in out
+
+
 def test_assemble_empty_supplements_is_primary_only():
     assert assemble_packet_pdf_text("hello", [], max_chars=10) == "hello"
 

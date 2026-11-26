@@ -14,7 +14,11 @@ import {
 import { expoOutEase } from "@/lib/motion";
 import { describeRfpIntake } from "@/lib/rfp-intake";
 import {
+  formatGoNoGoBadgeLabel,
   getWorkflowStepDisplay,
+  hasGeneratedProposal,
+  isGoNoGoScoringBlocked,
+  isGoNoGoUnscored,
   isNewIntake,
   isProposalInProgress,
   needsGoNoGoDecision,
@@ -32,6 +36,7 @@ type FilterTab =
   | "pending"
   | "in_progress"
   | "new"
+  | "awaiting_packet"
   | "overdue"
   | "score_gt_3";
 
@@ -41,6 +46,7 @@ const filterTabs: { id: FilterTab; label: string }[] = [
   { id: "pending", label: "Needs Decision" },
   { id: "in_progress", label: "Drafting" },
   { id: "new", label: "New Intake" },
+  { id: "awaiting_packet", label: "Awaiting packet" },
   { id: "overdue", label: "Overdue" },
   { id: "score_gt_3", label: "Score > 3" },
 ];
@@ -82,6 +88,8 @@ function filterRfps(rfps: RfpRecord[], tab: FilterTab): RfpRecord[] {
       return rfps.filter(isProposalInProgress);
     case "new":
       return rfps.filter(isNewIntake);
+    case "awaiting_packet":
+      return rfps.filter(isGoNoGoScoringBlocked);
     case "overdue":
       return rfps.filter(isOverdueRfp);
     case "score_gt_3":
@@ -89,6 +97,18 @@ function filterRfps(rfps: RfpRecord[], tab: FilterTab): RfpRecord[] {
     default:
       return rfps;
   }
+}
+
+/** Single status chip for Fit-blocked / unscored rows — keep score column free of the same phrase. */
+function AwaitingPacketBadge({ rfp }: { rfp: RfpRecord }) {
+  return (
+    <span
+      className="inline-flex items-center rounded-full border border-amber-200/80 bg-amber-50 px-2.5 py-1 text-[11px] font-bold tracking-wide text-amber-900"
+      title="Fit already checked this upload. Score appears after the full RFP is attached and Fit is re-run."
+    >
+      {formatGoNoGoBadgeLabel(rfp)}
+    </span>
+  );
 }
 
 function RfpIntakeLine({
@@ -178,7 +198,9 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
         </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 lg:hidden">
-        {displayGoNoGo === "go" ? (
+        {isGoNoGoUnscored(rfp) ? (
+          <AwaitingPacketBadge rfp={rfp} />
+        ) : displayGoNoGo === "go" ? (
           <GoSign />
         ) : (
           <GoNoGoBadge recommendation={displayGoNoGo} />
@@ -218,11 +240,24 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [bulkMode, setBulkMode] = useState<"selection" | "overdue_no_proposal">(
+    "selection"
+  );
 
   const filtered = useMemo(() => {
     const byTab = filterRfps(rfps, activeFilter);
     return byTab.filter((r) => matchesSearch(r, searchQuery));
   }, [rfps, activeFilter, searchQuery]);
+
+  const overdueRfps = useMemo(() => rfps.filter(isOverdueRfp), [rfps]);
+  const overdueWithProposal = useMemo(
+    () => overdueRfps.filter(hasGeneratedProposal),
+    [overdueRfps]
+  );
+  const overdueWithoutProposal = useMemo(
+    () => overdueRfps.filter((r) => !hasGeneratedProposal(r)),
+    [overdueRfps]
+  );
 
   const tabsWithCounts = filterTabs.map((tab) => ({
     ...tab,
@@ -234,6 +269,12 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
   const allFilteredSelected =
     filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id));
   const selectedInView = filtered.filter((r) => selectedIds.has(r.id));
+  const bulkTargets =
+    bulkMode === "overdue_no_proposal"
+      ? overdueWithoutProposal.filter((r) => selectedIds.has(r.id))
+      : selectedInView;
+  const deletingOverdueWithoutProposal =
+    bulkMode === "overdue_no_proposal" && bulkTargets.length > 0;
 
   function toggleOne(id: string) {
     setSelectedIds((prev) => {
@@ -256,14 +297,29 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
     });
   }
 
+  function openDeleteAllOverdue() {
+    if (overdueWithoutProposal.length === 0) return;
+    setBulkMode("overdue_no_proposal");
+    setSelectedIds(new Set(overdueWithoutProposal.map((r) => r.id)));
+    setBulkError(null);
+    setBulkConfirmOpen(true);
+  }
+
+  function openBulkDeleteSelection() {
+    if (selectedInView.length === 0) return;
+    setBulkMode("selection");
+    setBulkConfirmOpen(true);
+  }
+
   function changeFilter(id: FilterTab) {
     setActiveFilter(id);
     setSelectedIds(new Set());
     setBulkError(null);
+    setBulkMode("selection");
   }
 
   async function handleBulkDelete() {
-    const ids = selectedInView.map((r) => r.id);
+    const ids = bulkTargets.map((r) => r.id);
     if (ids.length === 0) return;
     setBulkDeleting(true);
     setBulkError(null);
@@ -280,6 +336,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
     }
     setBulkDeleting(false);
     setBulkConfirmOpen(false);
+    setBulkMode("selection");
     if (failed.length > 0) {
       setBulkError(
         `Deleted ${ids.length - failed.length} of ${ids.length}. ${failed.length} failed.`
@@ -304,34 +361,76 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
               type="button"
               className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px]"
               aria-label="Close bulk delete confirmation"
-              onClick={() => !bulkDeleting && setBulkConfirmOpen(false)}
+              onClick={() => {
+                if (bulkDeleting) return;
+                setBulkConfirmOpen(false);
+                setBulkMode("selection");
+              }}
             />
             <div className="relative z-10 w-full max-w-md rounded-2xl border border-zo-border bg-white p-6 shadow-[0_24px_64px_rgba(15,23,42,0.12)]">
               <h2
                 id="bulk-delete-rfp-title"
                 className="font-heading text-lg font-bold text-foreground"
               >
-                Delete {selectedInView.length} RFP
-                {selectedInView.length === 1 ? "" : "s"}?
+                {deletingOverdueWithoutProposal
+                  ? `Delete ${bulkTargets.length} overdue RFP${
+                      bulkTargets.length === 1 ? "" : "s"
+                    } without proposals?`
+                  : `Delete ${bulkTargets.length} RFP${
+                      bulkTargets.length === 1 ? "" : "s"
+                    }?`}
               </h2>
               <p className="mt-2 text-sm leading-relaxed text-zo-text-secondary">
-                Selected opportunities under the current filter will be removed
-                with their proposal drafts and PDFs. This cannot be undone.
+                {deletingOverdueWithoutProposal ? (
+                  <>
+                    Only past-due RFPs that never got a proposal draft will be
+                    removed (with their PDFs). This cannot be undone.
+                  </>
+                ) : (
+                  "Selected opportunities under the current filter will be removed with their proposal drafts and PDFs. This cannot be undone."
+                )}
               </p>
+              {deletingOverdueWithoutProposal &&
+              overdueWithProposal.length > 0 ? (
+                <div className="mt-3 rounded-lg border border-zo-border bg-zo-surface-muted/60 px-3 py-2.5 text-xs text-zo-text-secondary">
+                  <p className="font-semibold text-foreground">
+                    Keeping {overdueWithProposal.length} overdue with a
+                    proposal
+                  </p>
+                  <ul className="mt-1.5 list-disc pl-4">
+                    {overdueWithProposal.slice(0, 8).map((r) => (
+                      <li key={r.id} className="truncate">
+                        {r.title}
+                        <span className="text-zo-text-muted">
+                          {" "}
+                          · {r.stage.replace(/_/g, " ")}
+                          {r.dueDate ? ` · due ${formatDate(r.dueDate)}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                    {overdueWithProposal.length > 8 ? (
+                      <li>…and {overdueWithProposal.length - 8} more</li>
+                    ) : null}
+                  </ul>
+                </div>
+              ) : null}
               <ul className="mt-3 max-h-40 list-disc overflow-y-auto pl-5 text-xs text-zo-text-muted">
-                {selectedInView.slice(0, 12).map((r) => (
+                {bulkTargets.slice(0, 12).map((r) => (
                   <li key={r.id} className="truncate">
                     {r.title}
                   </li>
                 ))}
-                {selectedInView.length > 12 ? (
-                  <li>…and {selectedInView.length - 12} more</li>
+                {bulkTargets.length > 12 ? (
+                  <li>…and {bulkTargets.length - 12} more</li>
                 ) : null}
               </ul>
               <div className="mt-6 flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setBulkConfirmOpen(false)}
+                  onClick={() => {
+                    setBulkConfirmOpen(false);
+                    setBulkMode("selection");
+                  }}
                   disabled={bulkDeleting}
                   className="zo-btn secondary !py-2.5 disabled:opacity-50"
                 >
@@ -345,7 +444,9 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                 >
                   {bulkDeleting
                     ? "Deleting…"
-                    : `Delete ${selectedInView.length}`}
+                    : deletingOverdueWithoutProposal
+                      ? `Delete ${bulkTargets.length} without proposals`
+                      : `Delete ${bulkTargets.length}`}
                 </button>
               </div>
             </div>
@@ -369,20 +470,41 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                 : ""}
             </p>
           </div>
-          {selectedInView.length > 0 ? (
+          {overdueWithoutProposal.length > 0 || selectedInView.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold text-zo-text-secondary">
-                {selectedInView.length} selected
-              </span>
-              <button
-                type="button"
-                onClick={() => setBulkConfirmOpen(true)}
-                disabled={bulkDeleting}
-                className="zo-btn secondary inline-flex items-center gap-2 !border-zo-danger/40 !py-2 !text-xs text-zo-danger hover:!border-zo-danger hover:!bg-zo-danger/8 disabled:opacity-60"
-              >
-                <IconTrash className="h-3.5 w-3.5" />
-                Bulk delete
-              </button>
+              {overdueWithoutProposal.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={openDeleteAllOverdue}
+                  disabled={bulkDeleting}
+                  className="zo-btn secondary inline-flex items-center gap-2 !border-zo-danger/40 !py-2 !text-xs text-zo-danger hover:!border-zo-danger hover:!bg-zo-danger/8 disabled:opacity-60"
+                  title={
+                    overdueWithProposal.length > 0
+                      ? `Keeps ${overdueWithProposal.length} overdue with proposals`
+                      : undefined
+                  }
+                >
+                  <IconTrash className="h-3.5 w-3.5" />
+                  Delete overdue without proposals (
+                  {overdueWithoutProposal.length})
+                </button>
+              ) : null}
+              {selectedInView.length > 0 ? (
+                <>
+                  <span className="text-xs font-semibold text-zo-text-secondary">
+                    {selectedInView.length} selected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={openBulkDeleteSelection}
+                    disabled={bulkDeleting}
+                    className="zo-btn secondary inline-flex items-center gap-2 !border-zo-danger/40 !py-2 !text-xs text-zo-danger hover:!border-zo-danger hover:!bg-zo-danger/8 disabled:opacity-60"
+                  >
+                    <IconTrash className="h-3.5 w-3.5" />
+                    Bulk delete
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -424,7 +546,9 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
             activeTab={activeFilter}
             onChange={(id) => changeFilter(id as FilterTab)}
           />
-          {(activeFilter === "overdue" || activeFilter === "score_gt_3") &&
+          {(activeFilter === "overdue" ||
+            activeFilter === "score_gt_3" ||
+            activeFilter === "awaiting_packet") &&
           filtered.length > 0 ? (
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <button
@@ -438,8 +562,12 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
               </button>
               <span className="text-[11px] text-zo-text-muted">
                 {activeFilter === "overdue"
-                  ? "Past due date"
-                  : "Overall Go Score greater than 3"}
+                  ? overdueWithProposal.length > 0
+                    ? `Past due date · ${overdueWithProposal.length} with proposals kept by Delete overdue`
+                    : "Past due date"
+                  : activeFilter === "awaiting_packet"
+                    ? "Fit already ran — waiting on the complete RFP packet, then re-run Fit to score"
+                    : "Overall Go Score greater than 3"}
               </span>
             </div>
           ) : null}
@@ -637,11 +765,22 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                           {scale5 ? `${goScore}/5` : goScore}
                         </span>
                       ) : (
-                        <span className="text-zo-text-muted">—</span>
+                        <span
+                          className="text-zo-text-muted"
+                          title={
+                            isGoNoGoUnscored(rfp)
+                              ? "No score yet — attach the full RFP and re-run Fit"
+                              : undefined
+                          }
+                        >
+                          —
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-5 align-top">
-                      {displayGoNoGo === "go" ? (
+                      {isGoNoGoUnscored(rfp) ? (
+                        <AwaitingPacketBadge rfp={rfp} />
+                      ) : displayGoNoGo === "go" ? (
                         <GoSign />
                       ) : (
                         <GoNoGoBadge recommendation={displayGoNoGo} />

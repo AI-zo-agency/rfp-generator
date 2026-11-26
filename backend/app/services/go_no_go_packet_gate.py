@@ -76,7 +76,7 @@ blocksScoring=false when the upload already contains the scope, proposal content
 
 When the demand is "email us to receive the complete RFP" and the complete RFP is not in this upload, that is incomplete_packet with blocksScoring=true, and the email request is also a buyerDemand.
 
-An unresolved reference is different from a buyer demand. It is a sentence in this upload that points at another part of the same document — a section, exhibit, attachment, appendix, or packet section — and the body of that part is not in the upload. The text does not tell the offeror to email, call, download, or register. Cite the sentence verbatim as quote, and copy the name of the missing part into target from that sentence. One entry per missing body. Omit a reference only when that part's actual body appears in the upload (scope, agreement text, deliverables — by meaning). A labeled packet header alone (for example "--- PACKET FILE: Exhibit A ---") does NOT count as the body being present — if the attached pages are unrelated, blank, or a different document, keep the unresolved reference. A complete RFP can still have unresolved references; do not set blocksScoring just because one cited part is missing.
+An unresolved reference is different from a buyer demand. It is a sentence in this upload that points at another part of the same packet — a section, exhibit, attachment, appendix, schedule, or separately named file — and the body of that part is not in the upload. Works for any solicitation type (RFP, RFQ, RFI, ITB, etc.): judge by meaning, not by a fixed vocabulary. Cite the sentence verbatim as quote, and copy the name of the missing part into target from that sentence. One entry per missing body. Include every separately listed packet file (including rows that offer Download) even when the document also tells the offeror to fetch materials from a portal — those still need unresolvedReferences so the operator can attach each file here. Omit a reference only when that part's actual body appears in the upload (by meaning). A labeled packet header alone (for example "--- PACKET FILE: Exhibit A ---") does NOT count as the body being present — if the attached pages are unrelated, blank, or a different document, keep the unresolved reference. A complete scoreable packet can still have unresolved references; do not set blocksScoring just because one cited part is missing.
 
 Every email, phone, URL, and deadline you output must appear in the document. evidenceQuote and each demand quote must be copied from the document, not paraphrased. Do not invent a contact. Leave deadlineQuote empty when no deadline is stated.
 """
@@ -293,11 +293,166 @@ def _listed_missing_parts(
     return found
 
 
+# File names cited in the upload (any solicitation type — not RFP-specific vocabulary).
+# Stop at the first extension so "a.pdf (a.pdf" from PACKET FILE headers cannot match.
+_FILE_NAME_RE = re.compile(
+    r"(?i)\b([A-Za-z0-9][\w .()\-]{0,120}?\.(?:pdf|docx?|xlsx?|pptx?|csv|zip))\b"
+)
+_FILE_EXT_RE = re.compile(r"(?i)\.(?:pdf|docx?|xlsx?|pptx?|csv|zip)\b")
+_PACKET_FILE_HEADER_RE = re.compile(r"(?i)^---\s*PACKET FILE:")
+
+
+def _clean_file_target(text: str) -> str:
+    """Collapse mangled targets like 'Scope.pdf (Scope.pdf' to the first filename."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    ext = _FILE_EXT_RE.search(raw)
+    if ext:
+        return raw[: ext.end()].strip()
+    return _strip_missing_body_note(raw)
+
+
+def _strip_missing_body_note(text: str) -> str:
+    cleaned = re.sub(
+        r"(?i)\s*\((?:body of the document|not (?:in|included in) this upload)\)\s*$",
+        "",
+        (text or "").strip(),
+    )
+    return cleaned.strip(" .")
+
+
+def _strip_file_ext(text: str) -> str:
+    return re.sub(r"(?i)\.(?:pdf|docx?|xlsx?|pptx?|csv|zip)$", "", text).strip()
+
+
+def _find_attachment_cite_line(source: str, needle: str) -> str:
+    """Return a verbatim line from the upload that cites this packet file/part.
+
+    Grounding only — no domain synonym table. Prefer lines that name a file
+    (extension present); otherwise require strong token overlap with the needle.
+    """
+    stem = _strip_file_ext(_strip_missing_body_note(needle))
+    tokens = [t for t in re.split(r"[\s_\-]+", stem) if len(t) >= 4][:8]
+    if not tokens:
+        return ""
+    folded_tokens = [t.casefold() for t in tokens]
+    best = ""
+    best_hits = 0
+    for raw_line in (source or "").splitlines():
+        line = raw_line.strip()
+        if len(line) < 8 or len(line) > 240:
+            continue
+        folded = line.casefold()
+        hits = sum(1 for t in folded_tokens if t in folded)
+        need = 2 if len(folded_tokens) >= 2 else 1
+        if hits < need:
+            continue
+        if _FILE_EXT_RE.search(line):
+            return line
+        if hits > best_hits or (hits == best_hits and best and len(line) < len(best)):
+            best_hits = hits
+            best = line
+    # Generic gap labels ("evaluation criteria") often match weakly — require
+    # most of the needle's tokens before accepting a non-filename line.
+    if best and best_hits >= max(3, (len(folded_tokens) + 1) // 2):
+        return best
+    return ""
+
+
+def _reference_already_covers(already: list[UnresolvedReference], target: str) -> bool:
+    folded = _normalize(_strip_missing_body_note(target))
+    if not folded:
+        return True
+    for ref in already:
+        other = _normalize(ref.target)
+        if folded == other or folded in other or other in folded:
+            return True
+        a = _normalize(_strip_file_ext(_strip_missing_body_note(ref.target)))
+        b = _normalize(_strip_file_ext(folded))
+        if a and b and (a in b or b in a):
+            return True
+    return False
+
+
+def _references_from_named_missing(
+    missing: list[str], already: list[UnresolvedReference], source: str
+) -> list[UnresolvedReference]:
+    """Promote `missing` items that are grounded as separate files/parts in the upload.
+
+    Principle: if the upload itself cites a named file/part whose body is absent,
+    surface an Add-attachment row. No solicitation-type vocabulary tables — a
+    grounded cite line is the only gate (works for RFP, RFQ, RFI, ITB, etc.).
+    """
+    found: list[UnresolvedReference] = []
+    for item in missing:
+        target = _clip(_strip_missing_body_note(item), 200)
+        if len(_normalize(target)) < 8:
+            continue
+        if _reference_already_covers(already, target) or _reference_already_covers(found, target):
+            continue
+        quote = _find_attachment_cite_line(source, target)
+        if not quote or not _grounded(quote, source):
+            continue
+        if _body_follows_target(target, quote, source):
+            continue
+        # Prefer the filename from the cite when the missing label is a paraphrase.
+        file_match = _FILE_NAME_RE.search(quote)
+        display = (
+            _clean_file_target(file_match.group(1)) if file_match else target
+        )
+        display = _clip(display or target, 200)
+        if _reference_already_covers(already, display) or _reference_already_covers(found, display):
+            continue
+        found.append(UnresolvedReference(target=display, quote=_clip(quote, 500)))
+        if len(already) + len(found) >= _MAX_UNRESOLVED_REFERENCES:
+            break
+    return found
+
+
+def _references_from_file_names(
+    source: str, already: list[UnresolvedReference]
+) -> list[UnresolvedReference]:
+    """Lines that name a separate packet file whose body is not in this upload."""
+    found: list[UnresolvedReference] = []
+    seen_files: set[str] = set()
+    for raw_line in (source or "").splitlines():
+        line = raw_line.strip()
+        # Already-attached exhibits are labeled this way — do not re-list them.
+        if _PACKET_FILE_HEADER_RE.match(line) or len(line) > 240:
+            continue
+        for match in _FILE_NAME_RE.finditer(line):
+            filename = _clean_file_target(match.group(1))
+            if not filename:
+                continue
+            key = filename.casefold()
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            if _reference_already_covers(already, filename) or _reference_already_covers(
+                found, filename
+            ):
+                continue
+            if _body_follows_target(filename, line, source):
+                continue
+            found.append(
+                UnresolvedReference(target=_clip(filename, 200), quote=_clip(line, 500))
+            )
+            if len(already) + len(found) >= _MAX_UNRESOLVED_REFERENCES:
+                return found
+    return found
+
+
 # A full packet names 8+ attachments and exhibits (Minnesota Lottery: 9).
 _MAX_UNRESOLVED_REFERENCES = 16
 
 
-def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[UnresolvedReference]:
+def _parse_unresolved_references(
+    raw: dict[str, Any],
+    source: str,
+    *,
+    missing: list[str] | None = None,
+) -> list[UnresolvedReference]:
     rows = raw.get("unresolvedReferences") or raw.get("unresolved_references") or []
     if not isinstance(rows, list):
         rows = []
@@ -306,7 +461,7 @@ def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[Unres
         if not isinstance(item, dict):
             continue
         quote = str(item.get("quote") or "").strip()
-        target = _clip(str(item.get("target") or ""), 200)
+        target = _clip(_clean_file_target(str(item.get("target") or "")), 200)
         if not _grounded(quote, source) or len(_normalize(target)) < 8:
             logger.info(
                 "unresolved reference dropped ungrounded target=%s",
@@ -329,6 +484,9 @@ def _parse_unresolved_references(raw: dict[str, Any], source: str) -> list[Unres
         if len(kept) >= _MAX_UNRESOLVED_REFERENCES:
             break
     kept.extend(_listed_missing_parts(source, kept))
+    kept.extend(_references_from_file_names(source, kept))
+    if missing:
+        kept.extend(_references_from_named_missing(missing, kept, source))
     kept = kept[:_MAX_UNRESOLVED_REFERENCES]
     logger.info("unresolved references kept=%s", len(kept))
     return kept
@@ -404,8 +562,6 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
             if len(missing) >= 8:
                 break
 
-    references = _parse_unresolved_references(raw, rfp_text)
-
     demands: list[RfpBuyerDemand] = []
     raw_demands = raw.get("buyerDemands") or raw.get("buyer_demands") or []
     if isinstance(raw_demands, list):
@@ -422,6 +578,13 @@ def parse_packet_read(raw: dict[str, Any], *, rfp_text: str) -> RfpPacketRead:
         missing = []
         if kind != "complete_rfp":
             kind = "complete_rfp"
+
+    # Named packet files often land only in `missing` / buyerDemands; promote
+    # grounded cites into unresolvedReferences so Add-attachment covers every
+    # separately listed file, for any solicitation type.
+    references = _parse_unresolved_references(
+        raw, rfp_text, missing=missing if blocks else None
+    )
 
     return RfpPacketRead(
         document_kind=kind,  # type: ignore[arg-type]

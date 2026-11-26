@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 NODE = "pricing-plan-v2"
 MAX_REPAIRS = 2
-_UNIT = {"one_time": "project", "monthly": "month", "per_event": "event"}
+_UNIT = {"one_time": "project", "monthly": "month", "quarterly": "quarter", "per_event": "event"}
 _NOT_NOTES = ("implied limit", "RFP compensation outline")  # warnings the plan itself must raise or ignore
 
 # Sonnet 5 adaptive thinking shares the completion budget; ASKS JSON for Form A-3
@@ -85,7 +85,7 @@ Return JSON only:
  "client_name": "the buyer", "client_kind": "government|nonprofit|private", "term_months": 12,
  "tasks": [{"task_id": "A1", "group": "short group heading", "deliverable": "what the client gets",
             "scope_ids": ["S1"], "track": "exact ceiling/track label from ASKS or null",
-            "billing": "one_time|monthly|per_event", "quantity": 1,
+            "billing": "one_time|monthly|quarterly|per_event", "quantity": 1,
             "quantity_basis": "rfp|assumption  (only when quantity is not 1)",
             "quantity_quote": "verbatim from the RFP when quantity_basis is rfp",
             "catalog_code": "4g or null", "catalog_item": "the exact Pricing Book item name for that code",
@@ -118,7 +118,10 @@ PRICING RULES
   monthly work is monthly_retainer; swag and print runs are procurement. zö agency is value-based: price each item or phase.
   If the RFP requires time and materials or not-to-exceed, still build by item or phase, set the type, and say so in internal_notes.
 - billing: one_time = total over the term (quantity x item); monthly = a recurring monthly fee (quantity 1; term_months sets
-  the months); per_event = a price per occurrence. term_months is the contract term in months.
+  the months); quarterly = a recurring quarterly fee (quantity 1; term_months/3 sets the quarters — use for quarterly
+  reviews/reports that are part of the contract); per_event = optional/as-needed rate card ONLY (quantity must be 1;
+  NOT included in the bid total — e.g. extra shoot days). Never use per_event for a known count of required events:
+  use one_time with quantity N, or quarterly when the cadence is quarterly. term_months is the contract term in months.
 - Paid media: traditional media is a task with media_kind "traditional" and media_spend = the client's total media budget
   (code books the commission and the placement split; add a build for the placement hours). Digital media is a monthly task with
   media_kind "digital" and media_spend = monthly ad spend (code sets the management fee). Ad spend runs on the client's
@@ -374,7 +377,7 @@ async def author_pricing_plan(
 
 
 def plan_to_line_items(plan: dict, book: PricingBook) -> list[BudgetLineItem]:
-    """Legacy ledger view: extended sums to the engine's term value (one_time + months x monthly)."""
+    """Legacy ledger view: extended sums to the engine's term value."""
     c = compute(plan, book)
     items: list[BudgetLineItem] = []
     for t in plan.get("tasks", []):
@@ -386,9 +389,17 @@ def plan_to_line_items(plan: dict, book: PricingBook) -> list[BudgetLineItem]:
             rate, extended = None, None
         elif billing == "monthly":
             qty, rate, extended = float(c["months"]), amt, c["months"] * amt
-        elif billing == "per_event":  # a rate, never summed
-            qty, rate, extended = 1.0, amt, None
-            notes = notes or "per event"
+        elif billing == "quarterly":
+            quarters = max(int(c["months"]) // 3, 1)
+            qty, rate, extended = float(quarters), amt, quarters * amt
+        elif billing == "per_event":
+            if qty > 1 and amt is not None:
+                # Legacy known-count: amount already includes qty from _build.
+                rate, extended = round(amt / qty, 2), amt
+                notes = notes or f"{int(qty)} events"
+            else:
+                qty, rate, extended = 1.0, amt, None
+                notes = notes or "per event"
         else:
             rate, extended = round(amt / qty, 2), amt
         items.append(

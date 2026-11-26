@@ -2,6 +2,7 @@ import type {
   GoNoGoAnalysis,
   RfpBuyerDemand,
   RfpPacketRead,
+  UnresolvedReference,
 } from "@/types/rfp";
 import {
   alignGoNoGoRecommendation,
@@ -347,6 +348,66 @@ function PacketDeadline({
   );
 }
 
+/** File-like packet part (extension) — no solicitation-type synonym lists. */
+const PACKET_FILE_EXT = /\.(?:pdf|docx?|xlsx?|pptx?|csv|zip)\b/i;
+
+function stripMissingBodyNote(text: string): string {
+  return text
+    .replace(/\s*\((?:body of the document|not (?:in|included in) this upload)\)\s*$/i, "")
+    .trim()
+    .replace(/[.\s]+$/, "");
+}
+
+function stripFileExt(text: string): string {
+  return text.replace(/\.(?:pdf|docx?|xlsx?|pptx?|csv|zip)$/i, "").trim();
+}
+
+/**
+ * Specific packet part vs a short generic gap label.
+ * Uses structure (file extension, digits, length) — not solicitation synonyms.
+ */
+function looksLikeSpecificPacketPart(text: string): boolean {
+  const target = stripMissingBodyNote(text);
+  if (target.length < 12) return false;
+  if (PACKET_FILE_EXT.test(target)) return true;
+  const words = target.split(/\s+/).filter(Boolean);
+  if (words.length >= 4) return true;
+  return /\d/.test(target) || /_/.test(target);
+}
+
+/** Promote specific missing parts into Add-attachment rows for saved analyses. */
+function mergeUploadableReferences(
+  unresolved: UnresolvedReference[],
+  missing: string[]
+): UnresolvedReference[] {
+  const covered = (target: string) => {
+    const folded = stripFileExt(stripMissingBodyNote(target)).toLowerCase();
+    return unresolved.some((ref) => {
+      const other = stripFileExt(stripMissingBodyNote(ref.target)).toLowerCase();
+      return folded === other || folded.includes(other) || other.includes(folded);
+    });
+  };
+  const extras: UnresolvedReference[] = [];
+  for (const item of missing) {
+    if (!looksLikeSpecificPacketPart(item)) continue;
+    const target = stripMissingBodyNote(item);
+    if (covered(target)) continue;
+    if (
+      extras.some(
+        (e) =>
+          stripFileExt(e.target).toLowerCase() === stripFileExt(target).toLowerCase()
+      )
+    ) {
+      continue;
+    }
+    extras.push({
+      target,
+      quote: `${target} — listed as missing from this upload`,
+    });
+  }
+  return [...unresolved, ...extras];
+}
+
 function IncompletePacketPanel({
   analysis,
   rfpId,
@@ -360,7 +421,10 @@ function IncompletePacketPanel({
   if (!packet) return null;
   const missing = packet.missing ?? [];
   const demands = packet.buyerDemands ?? [];
-  const unresolved = packet.unresolvedReferences ?? [];
+  const unresolved = mergeUploadableReferences(
+    packet.unresolvedReferences ?? [],
+    missing
+  );
   const kindLabel = PACKET_KIND_LABEL[packet.documentKind] ?? "Not a complete RFP";
 
   return (
@@ -373,7 +437,7 @@ function IncompletePacketPanel({
           {packet.headline || "This upload is not a complete RFP"}
         </h2>
         <p className="mt-1 text-xs text-zo-text-muted">
-          {kindLabel} — Go/No-Go was not run
+          {kindLabel} — awaiting full packet before Fit scores
         </p>
       </div>
 

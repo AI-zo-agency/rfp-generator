@@ -80,7 +80,10 @@ export function RfpGoNoGoControls({
     [],
   );
 
-  /** After cite-linked upload/delete, API already started Fit — poll, then refresh draft tabs if needed. */
+  /**
+   * After the operator confirms packet changes (or syncs an already-running job),
+   * poll until Go/No-Go finishes. Uploads alone no longer start Fit.
+   */
   const onPacketAnalyzeStarted = useCallback(
     async (meta?: PacketAnalyzeMeta) => {
       setAnalyzing(true);
@@ -89,7 +92,6 @@ export function RfpGoNoGoControls({
       try {
         // Immediate status check so a 409 "already running" paints the loader
         // even when the job finishes before the first poll tick.
-        let sawRunning = false;
         while (Date.now() - started < PACKET_MAX_WAIT_MS) {
           const res = await fetch(`/api/rfps/${rfpId}/analyze/status`, {
             cache: "no-store",
@@ -99,26 +101,24 @@ export function RfpGoNoGoControls({
             throw new Error(data.error ?? "Status check failed");
           }
           if (data.status === "running" || data.status === "queued") {
-            sawRunning = true;
             await sleep(PACKET_POLL_MS);
             continue;
           }
           if (data.status === "failed") {
             throw new Error(data.error ?? "Analysis failed");
           }
-          // completed | idle — if we never saw running, Fit was already done
-          // (stale 409); still fall through to draft apply when uploading.
+          // completed | idle
           break;
         }
+        // Legacy single-cite upload path no longer auto-starts Fit; skip exhibit
+        // draft rewrite unless a cite was explicitly tied to a finished upload job.
         if (
           meta?.action === "upload" &&
           meta.citeTarget &&
           !meta.uploadBlocked
         ) {
           setSectionRefreshNote(
-            sawRunning
-              ? "Checking whether this RFP’s draft needs section updates…"
-              : "Fit was already finished — checking draft sections for this attachment…"
+            "Checking whether this RFP’s draft needs section updates…"
           );
           const outcome = await maybeApplyPacketExhibitAfterFit(
             rfpId,
@@ -132,7 +132,7 @@ export function RfpGoNoGoControls({
             setSectionRefreshNote(null);
           } else {
             setSectionRefreshNote(
-              "Fit updated. Open the proposal and use Update affected sections if tabs still wait on the exhibit."
+              "Go/No-Go updated. Open the proposal and use Update affected sections if tabs still wait on the exhibit."
             );
           }
         }
@@ -171,7 +171,7 @@ export function RfpGoNoGoControls({
           disabled={!goNoGoAnalysis || analyzing}
           disabledReason={
             analyzing
-              ? "Fit is updating with the new exhibit — wait for Go/No-Go to finish"
+              ? "Go/No-Go is updating — wait for it to finish"
               : "Run the Go/No-Go analysis first"
           }
         />
@@ -214,11 +214,16 @@ export function RfpGoNoGoControls({
                 <dd className="mt-1 font-semibold text-foreground">
                   {analyzing
                     ? "—"
-                    : formatOverallGoScore(
-                        displayFit,
-                        displayWorth,
-                        goNoGoAnalysis?.decisionMatrix
-                      )}
+                    : goNoGoAnalysis?.packetRead?.blocksScoring ||
+                        goNoGoAnalysis?.provider === "packet-gate"
+                      ? "Awaiting packet"
+                      : goNoGoAnalysis?.insufficientData
+                        ? "Needs content"
+                        : formatOverallGoScore(
+                            displayFit,
+                            displayWorth,
+                            goNoGoAnalysis?.decisionMatrix
+                          )}
                 </dd>
               </div>
             </dl>
@@ -253,14 +258,13 @@ export function RfpGoNoGoControls({
           aria-busy="true"
           aria-live="polite"
         >
-          <ZoAmuletLoader label="Updating Fit from attachment" />
+          <ZoAmuletLoader label="Updating Go/No-Go" />
           <div className="text-center">
             <p className="text-sm font-semibold text-foreground">
-              Updating Fit from the new attachment…
+              Updating Go/No-Go…
             </p>
             <p className="mt-1.5 text-xs text-zo-text-muted">
-              Judges the attached file only · refreshes scores · does not re-read
-              the whole RFP
+              Re-scoring with the current packet · refreshes Fit and Worth
             </p>
           </div>
         </section>

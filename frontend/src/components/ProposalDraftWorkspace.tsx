@@ -86,6 +86,17 @@ import {
 import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
+import { hasRfpPdf, rfpPdfProxyHref } from "@/lib/rfp-pdf";
+import {
+  alignGoNoGoRecommendation,
+  computeOverallGoScore,
+  formatOverallGoScore,
+} from "@/lib/format";
+import {
+  formatGoNoGoBadgeLabel,
+  isGoNoGoUnscored,
+} from "@/lib/rfp-process";
+import { GoNoGoBadge } from "@/components/StatusBadge";
 import {
   availableTracksFromAnalysis,
   bidScopeIsReady,
@@ -443,6 +454,80 @@ interface ProposalDraftWorkspaceProps {
   rfp: RfpRecord;
   goRfpCount?: number;
   onOpenGoRfpPicker?: () => void;
+}
+
+function WorkspaceRfpChromeActions({
+  rfp,
+  goRfpCount,
+  onOpenGoRfpPicker,
+}: {
+  rfp: RfpRecord;
+  goRfpCount?: number;
+  onOpenGoRfpPicker?: () => void;
+}) {
+  const pdfHref =
+    rfp.pdfUrl?.trim() ||
+    (hasRfpPdf(rfp) ? rfpPdfProxyHref(rfp.id) : null);
+  const overallScore = computeOverallGoScore(
+    rfp.fitScore,
+    rfp.worthScore,
+    rfp.goNoGoAnalysis?.decisionMatrix
+  );
+  const recommendation = alignGoNoGoRecommendation(rfp.goNoGo, overallScore);
+  const unscored = isGoNoGoUnscored(rfp);
+  const scoreLabel = formatOverallGoScore(
+    rfp.fitScore,
+    rfp.worthScore,
+    rfp.goNoGoAnalysis?.decisionMatrix
+  );
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <div
+        className="flex items-center gap-2 rounded-full border border-[rgba(17,24,39,0.14)] bg-white px-3 py-1.5"
+        title={
+          unscored
+            ? "Fit checked this upload — score when the full RFP arrives"
+            : "Go / No-Go from Fit analysis"
+        }
+      >
+        {unscored ? (
+          <span className="inline-flex items-center rounded-full border border-amber-200/80 bg-amber-50 px-2.5 py-1 text-[11px] font-bold tracking-wide text-amber-900">
+            {formatGoNoGoBadgeLabel(rfp)}
+          </span>
+        ) : (
+          <>
+            <GoNoGoBadge recommendation={recommendation} />
+            <span className="text-xs font-bold tabular-nums text-foreground">
+              {scoreLabel}
+            </span>
+          </>
+        )}
+      </div>
+      {pdfHref ? (
+        <a
+          href={pdfHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="proposal-go-picker-btn shrink-0 no-underline"
+          title="Open the RFP PDF"
+        >
+          View RFP
+        </a>
+      ) : null}
+      {onOpenGoRfpPicker && goRfpCount ? (
+        <button
+          type="button"
+          onClick={onOpenGoRfpPicker}
+          className="proposal-go-picker-btn shrink-0"
+          title="Switch to another Go RFP"
+        >
+          Switch RFP
+          <span className="proposal-go-picker-count">{goRfpCount}</span>
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 export function ProposalDraftWorkspace(props: ProposalDraftWorkspaceProps) {
@@ -4197,17 +4282,11 @@ function ProposalDraftWorkspaceInner({
             <h2 className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight text-foreground md:text-[0.95rem]">
               {rfp.title}
             </h2>
-            {onOpenGoRfpPicker && goRfpCount ? (
-              <button
-                type="button"
-                onClick={onOpenGoRfpPicker}
-                className="proposal-go-picker-btn shrink-0"
-                title="Switch to another Go RFP"
-              >
-                Switch RFP
-                <span className="proposal-go-picker-count">{goRfpCount}</span>
-              </button>
-            ) : null}
+            <WorkspaceRfpChromeActions
+              rfp={rfp}
+              goRfpCount={goRfpCount}
+              onOpenGoRfpPicker={onOpenGoRfpPicker}
+            />
           </div>
         </div>
         <div
@@ -4239,17 +4318,11 @@ function ProposalDraftWorkspaceInner({
             <h2 className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight text-foreground md:text-[0.95rem]">
               {rfp.title}
             </h2>
-            {onOpenGoRfpPicker && goRfpCount ? (
-              <button
-                type="button"
-                onClick={onOpenGoRfpPicker}
-                className="proposal-go-picker-btn shrink-0"
-                title="Switch to another Go RFP"
-              >
-                Switch RFP
-                <span className="proposal-go-picker-count">{goRfpCount}</span>
-              </button>
-            ) : null}
+            <WorkspaceRfpChromeActions
+              rfp={rfp}
+              goRfpCount={goRfpCount}
+              onOpenGoRfpPicker={onOpenGoRfpPicker}
+            />
           </div>
         </div>
         <div className="flex min-h-[min(28rem,70vh)] flex-col items-center justify-center gap-4 px-6 py-12 text-center">
@@ -4296,17 +4369,11 @@ function ProposalDraftWorkspaceInner({
               Read whole proposal
             </button>
           ) : null}
-          {onOpenGoRfpPicker && goRfpCount ? (
-            <button
-              type="button"
-              onClick={onOpenGoRfpPicker}
-              className="proposal-go-picker-btn shrink-0"
-              title="Switch to another Go RFP"
-            >
-              Switch RFP
-              <span className="proposal-go-picker-count">{goRfpCount}</span>
-            </button>
-          ) : null}
+          <WorkspaceRfpChromeActions
+            rfp={rfp}
+            goRfpCount={goRfpCount}
+            onOpenGoRfpPicker={onOpenGoRfpPicker}
+          />
         </div>
 
         <div className="proposal-status-strip">

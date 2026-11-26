@@ -261,6 +261,43 @@ class PacketGateParseTests(unittest.TestCase):
         )
         self.assertEqual(parsed.unresolved_references, [])
 
+    def test_packet_file_headers_are_not_relisted_as_unresolved(self) -> None:
+        """Attached exhibits labeled in the merge must not become new Add rows."""
+        body = (
+            "Scope of Work. The contractor shall deliver marketing services "
+            "including creative development, media planning, and reporting for "
+            "the full contract term with measurable outcomes for each campaign."
+        )
+        upload = (
+            "Refer to F2027060 - SCOPE OF WORK.pdf for details.\n\n"
+            f"--- PACKET FILE: F2027060 - SCOPE OF WORK.pdf ---\n{body}"
+        )
+        parsed = parse_packet_read(
+            {
+                "documentKind": "complete_rfp",
+                "blocksScoring": False,
+                "unresolvedReferences": [
+                    {
+                        "target": (
+                            "F2027060 - SCOPE OF WORK.pdf "
+                            "(F2027060 - SCOPE OF WORK.pdf"
+                        ),
+                        "quote": "Refer to F2027060 - SCOPE OF WORK.pdf for details.",
+                    }
+                ],
+            },
+            rfp_text=upload,
+        )
+        targets = [ref.target for ref in parsed.unresolved_references]
+        self.assertTrue(
+            all("SCOPE OF WORK.pdf (" not in t for t in targets),
+            targets,
+        )
+        self.assertTrue(
+            all(not t.startswith("---") for t in targets),
+            targets,
+        )
+
     def test_listed_attachments_without_bodies_are_reported(self) -> None:
         """Minnesota Lottery: the model listed 5 of 9 missing parts; the TOC names all."""
         upload = (
@@ -329,6 +366,55 @@ class PacketGateParseTests(unittest.TestCase):
             rfp_text=COMPLETE,
         )
         self.assertEqual(parsed.unresolved_references, [])
+
+    def test_named_missing_bid_attachments_become_upload_rows(self) -> None:
+        """Tarrant-style: SOW PDF only in `missing` must still get Add attachment."""
+        upload = (
+            "Tarrant County Request for Proposals for annual marketing services.\n"
+            "Bid Attachments\n"
+            "TC_Special_Terms_and_Conditions_Standard_Ver 3_051926.pdf Download\n"
+            "TC_General_Terms_and_Conditions091724.pdf Download\n"
+            "TC_HUB_Policy053123.pdf Download\n"
+            "F2027060 - SCOPE OF WORK.pdf Download\n"
+            "F2027060 - Attachment A - Creative Rights Agreement.pdf Download\n"
+            "Deficiencies and Deviations Form.pdf Download\n"
+            "Requested Attachments\n"
+            "Proposal Response: Response to Scope of Work.\n"
+        )
+        parsed = parse_packet_read(
+            {
+                "documentKind": "incomplete_packet",
+                "blocksScoring": True,
+                "headline": "Incomplete RFP packet",
+                "whatItIs": (
+                    "Tarrant County Request for Proposals for annual marketing services. "
+                    "Bid Attachments list a separate Scope of Work PDF that is not in this upload."
+                ),
+                "missing": [
+                    "F2027060 - SCOPE OF WORK (body of the document)",
+                    "F2027060 - Attachment A - Creative Rights Agreement (body of the document)",
+                    "TC_Special_Terms_and_Conditions_Standard_Ver 3_051926 (body of the document)",
+                ],
+                "nextStep": "Download the complete RFP packet from the portal.",
+                "evidenceQuote": (
+                    "Tarrant County Request for Proposals for annual marketing services."
+                ),
+                "unresolvedReferences": [
+                    {
+                        "target": "TC_Special_Terms_and_Conditions_Standard_Ver 3_051926.pdf",
+                        "quote": (
+                            "TC_Special_Terms_and_Conditions_Standard_Ver 3_051926.pdf Download"
+                        ),
+                    }
+                ],
+            },
+            rfp_text=upload,
+        )
+        self.assertTrue(parsed.blocks_scoring)
+        targets = " | ".join(r.target for r in parsed.unresolved_references).casefold()
+        self.assertIn("scope of work", targets)
+        self.assertIn("creative rights", targets)
+        self.assertIn("special_terms", targets)
 
 
 RFI = """

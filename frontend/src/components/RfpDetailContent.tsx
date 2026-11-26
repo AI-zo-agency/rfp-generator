@@ -4,7 +4,7 @@ import { RfpGoNoGoControls } from "@/components/RfpGoNoGoControls";
 import { daysUntil, formatDate } from "@/lib/format";
 import { rfpHasDraftedProposal } from "@/lib/proposal-supabase-read";
 import { describeRfpIntake } from "@/lib/rfp-intake";
-import { STAGE_LABELS } from "@/lib/rfp-process";
+import { getWorkflowStepDisplay } from "@/lib/rfp-process";
 import { hasRfpPdf } from "@/lib/rfp-pdf";
 import { getRfpById } from "@/lib/rfp-service";
 
@@ -24,6 +24,7 @@ export async function RfpDetailContent({ id }: RfpDetailContentProps) {
 
   const due = daysUntil(rfp.dueDate);
   const intake = describeRfpIntake(rfp);
+  const workflow = getWorkflowStepDisplay(rfp);
 
   return (
     <>
@@ -41,7 +42,7 @@ export async function RfpDetailContent({ id }: RfpDetailContentProps) {
         pdfUrl={rfp.pdfUrl}
         status={rfp.status}
         priority={rfp.priority}
-        stageLabel={STAGE_LABELS[rfp.stage]}
+        stageLabel={workflow.label}
         dueLabel={
           <>
             {formatDate(rfp.dueDate)}

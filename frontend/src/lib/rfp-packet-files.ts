@@ -14,8 +14,9 @@ export type RfpPacketFile = {
 
 export type PacketAnalyzeMeta = {
   citeTarget: string;
-  action: "upload" | "delete";
-  /** True when Fit was already running and the file was NOT saved this click. */
+  /** upload/delete = sync an already-running job; confirm_update = user asked to re-run Go/No-Go. */
+  action: "upload" | "delete" | "confirm_update";
+  /** True when Go/No-Go was already running and the file was NOT saved this click. */
   uploadBlocked?: boolean;
 };
 
@@ -93,11 +94,40 @@ export async function deleteRfpPacketFile(
   return { analyzeStarted: Boolean(data.analyzeStarted) };
 }
 
+/** First filename-looking token — strips mangled "a.pdf (a.pdf" suffixes. */
+export function cleanPacketCiteTarget(text: string): string {
+  const raw = (text || "").trim();
+  if (!raw) return "";
+  const withExt = raw.match(
+    /^(.+?\.(?:pdf|docx?|xlsx?|pptx?|csv|zip))/i
+  );
+  return (withExt?.[1] || raw).replace(/\s+/g, " ").trim();
+}
+
+export function normalizePacketCiteKey(text: string): string {
+  return cleanPacketCiteTarget(text).toLowerCase();
+}
+
 export function packetFileForCite(
   files: RfpPacketFile[],
   citeTarget: string
 ): RfpPacketFile | undefined {
-  return files.find((f) => f.citeTarget === citeTarget);
+  const exact = files.find((f) => f.citeTarget === citeTarget);
+  if (exact) return exact;
+  const needle = normalizePacketCiteKey(citeTarget);
+  if (!needle) return undefined;
+  return files.find((f) => {
+    const citeKey = normalizePacketCiteKey(f.citeTarget);
+    const nameKey = normalizePacketCiteKey(f.filename);
+    return (
+      citeKey === needle ||
+      nameKey === needle ||
+      (citeKey.length >= 12 &&
+        (needle.includes(citeKey) || citeKey.includes(needle))) ||
+      (nameKey.length >= 12 &&
+        (needle.includes(nameKey) || nameKey.includes(needle)))
+    );
+  });
 }
 
 /** Start surgical section refresh for an exhibit on this RFP only. */
