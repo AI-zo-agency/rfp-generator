@@ -128,6 +128,17 @@ class LocateSelectionSpanTests(unittest.TestCase):
         self.assertGreater(end, start)
         self.assertIn("ADDENDUM", body[start:end])
 
+    def test_recovers_dom_table_selection_with_empty_cells(self) -> None:
+        body = (
+            "| Field | Value |\n"
+            "| --- | --- |\n"
+            "| Workforce profile | | | W |\n"
+        )
+        span = _locate_selection_span(body, "Workforce profile | | | W")
+        self.assertIsNotNone(span)
+        start, end = span
+        self.assertIn("Workforce profile", body[start:end])
+
 
 def _section() -> ProposalSection:
     return ProposalSection(

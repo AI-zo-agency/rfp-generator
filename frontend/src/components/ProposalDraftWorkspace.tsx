@@ -1870,7 +1870,13 @@ function ProposalDraftWorkspaceInner({
     );
     const range = createMarkdownSourceMap(source).find(text);
     if (range) {
-      setReviewPreviewSelection({ ...range, text: text.trim(), anchor });
+      // Pin the markdown source slice (not DOM table chrome like "a | | | b")
+      // so Ask Ralph selection bounds stay valid on the backend.
+      setReviewPreviewSelection({
+        ...range,
+        text: source.slice(range.start, range.end),
+        anchor,
+      });
       return;
     }
     setReviewPreviewSelection({ start: 0, end: 0, text: text.trim(), anchor });
@@ -1911,20 +1917,56 @@ function ProposalDraftWorkspaceInner({
   };
 
   const handleReviewComment = useCallback(
-    (selectedText: string | null) => {
+    (
+      selectedText: string | null,
+      offsets?: { start: number; end: number }
+    ) => {
       if (!activeReviewSection) return;
       selectSection(activeReviewSection.id);
-      const excerpt = (selectedText || "").trim();
+      const full = activeReviewSection.content || "";
+      // Preview offsets are against title-stripped markdown; remap onto the
+      // stored section body so Ask Ralph bounds stay valid server-side.
+      let pinOffsets: { start: number; end: number } | undefined;
+      let excerpt = (selectedText || "").trim();
+      if (offsets && offsets.end > offsets.start) {
+        const fromStripped = activeReviewMarkdown.slice(
+          offsets.start,
+          offsets.end
+        );
+        excerpt = (fromStripped || excerpt).trim();
+        if (full === activeReviewMarkdown) {
+          pinOffsets = offsets;
+        } else if (excerpt) {
+          const at = full.indexOf(fromStripped);
+          if (at >= 0) {
+            pinOffsets = { start: at, end: at + fromStripped.length };
+          } else {
+            const strippedAt = full.indexOf(activeReviewMarkdown);
+            if (strippedAt >= 0) {
+              pinOffsets = {
+                start: strippedAt + offsets.start,
+                end: strippedAt + offsets.end,
+              };
+            }
+          }
+        }
+      }
       openSectionChat(
         excerpt
-          ? buildSelectionPinReference(activeReviewSection, excerpt)
-          : buildSectionPinReference(
+          ? buildSelectionPinReference(
               activeReviewSection,
-              activeReviewSection.content || ""
+              excerpt,
+              pinOffsets
             )
+          : buildSectionPinReference(activeReviewSection, full)
       );
     },
-    [activeReviewSection, selectSection, openSectionChat]
+    [
+      activeReviewSection,
+      activeReviewMarkdown,
+      selectSection,
+      openSectionChat,
+    ]
   );
 
   useEffect(() => {
@@ -5808,16 +5850,20 @@ function ProposalDraftWorkspaceInner({
               }}
               onAskToChange={() => {
                 if (!activeReviewSection) return;
+                const mapped =
+                  reviewPreviewSelection != null &&
+                  reviewPreviewSelection.end > reviewPreviewSelection.start
+                    ? {
+                        start: reviewPreviewSelection.start,
+                        end: reviewPreviewSelection.end,
+                      }
+                    : undefined;
                 const selected =
                   (reviewPreviewSelection?.text || "").trim() ||
-                  (reviewPreviewSelection != null &&
-                  reviewPreviewSelection.end > reviewPreviewSelection.start
-                    ? activeReviewMarkdown.slice(
-                        reviewPreviewSelection.start,
-                        reviewPreviewSelection.end
-                      )
+                  (mapped
+                    ? activeReviewMarkdown.slice(mapped.start, mapped.end)
                     : null);
-                handleReviewComment(selected);
+                handleReviewComment(selected, mapped);
                 setReviewPreviewSelection(null);
               }}
             />

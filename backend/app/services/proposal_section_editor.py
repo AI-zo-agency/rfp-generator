@@ -4802,6 +4802,12 @@ def _span_for_staff_block(content: str) -> tuple[int, int] | None:
     return start, end
 
 
+def _selection_match_key(text: str) -> str:
+    """Collapse DOM table chrome so preview excerpts can match markdown source."""
+    collapsed = re.sub(r"[|\t]+", " ", text or "")
+    return re.sub(r"\s+", " ", collapsed).strip().casefold()
+
+
 def _locate_selection_span(content: str, selection_text: str | None) -> tuple[int, int] | None:
     """Recover char offsets when the client sent excerpt text but lost start/end."""
     needle = (selection_text or "").strip()
@@ -4811,22 +4817,27 @@ def _locate_selection_span(content: str, selection_text: str | None) -> tuple[in
     idx = body.find(needle)
     if idx < 0:
         idx = body.lower().find(needle.lower())
-    if idx < 0:
-        # Preview/table selections often omit pipes — match distinctive endpoints.
-        tokens = [
-            t
-            for t in re.split(r"\s+", needle)
-            if len(t.strip()) >= 4
-        ]
-        if len(tokens) >= 2:
-            first, last = tokens[0], tokens[-1]
-            start = body.find(first)
-            if start >= 0:
-                end_at = body.find(last, start)
-                if end_at >= start:
-                    return start, end_at + len(last)
-        return None
-    return idx, idx + len(needle)
+    if idx >= 0:
+        return idx, idx + len(needle)
+
+    # Preview/table selections: "Workforce profile | | | W" vs markdown pipes.
+    tokens = [t for t in re.split(r"[\s|]+", needle) if t]
+    if tokens:
+        pattern = r"[\s|]*".join(re.escape(t) for t in tokens)
+        match = re.search(pattern, body, flags=re.IGNORECASE)
+        if match and match.end() > match.start():
+            return match.start(), match.end()
+
+    # Distinctive endpoints when the middle is empty table cells.
+    long_tokens = [t for t in tokens if len(t) >= 4]
+    if len(long_tokens) >= 2:
+        first, last = long_tokens[0], long_tokens[-1]
+        start = body.find(first)
+        if start >= 0:
+            end_at = body.find(last, start)
+            if end_at >= start:
+                return start, end_at + len(last)
+    return None
 
 
 def _selection_asks_to_fill_verify(user_message: str) -> bool:
@@ -5939,9 +5950,40 @@ def _selection_bounds_valid(
 ) -> bool:
     if start < 0 or end > len(content) or start >= end:
         return False
-    if selection_text is not None and content[start:end] != selection_text:
-        return False
-    return True
+    if selection_text is None:
+        return True
+    slice_text = content[start:end]
+    if slice_text == selection_text:
+        return True
+    # DOM table selections keep pipes/tabs the markdown source does not.
+    return _selection_match_key(slice_text) == _selection_match_key(selection_text)
+
+
+def _recover_selection_bounds(
+    content: str,
+    *,
+    start: int | None,
+    end: int | None,
+    selection_text: str | None,
+) -> tuple[int, int, str] | None:
+    """Return (start, end, text) that actually exist in content, or None."""
+    body = content or ""
+    sel_text = (selection_text or "").strip()
+    if (
+        start is not None
+        and end is not None
+        and _selection_bounds_valid(
+            body, start=start, end=end, selection_text=selection_text
+        )
+    ):
+        return start, end, body[start:end]
+    recovered = _locate_selection_span(body, sel_text or None)
+    if recovered is None:
+        return None
+    r0, r1 = recovered
+    if not _selection_bounds_valid(body, start=r0, end=r1, selection_text=None):
+        return None
+    return r0, r1, body[r0:r1]
 
 
 def _trim_replacement_boundary_overlap(
@@ -6132,16 +6174,19 @@ async def _improve_section_selection(
     revision or the Brand Voice default, plus RFP context and OTHER SECTIONS.
     """
     content = section.content or ""
-    if not _selection_bounds_valid(
+    recovered = _recover_selection_bounds(
         content,
         start=selection_start,
         end=selection_end,
         selection_text=selection_text,
-    ):
+    )
+    if recovered is None:
         raise ProposalError(
             "Selection no longer matches section text — re-highlight the excerpt and try again.",
             status_code=400,
         )
+    selection_start, selection_end, synced_text = recovered
+    selection_text = synced_text
 
     excerpt = working_excerpt if working_excerpt is not None else content[selection_start:selection_end]
     blob_for_facts = fact_blob or kb_block
@@ -8574,24 +8619,38 @@ async def improve_proposal_section(
         and selection_end is not None
         and selection_end > selection_start
     )
-    if not selection_mode:
-        focus_body = next(
-            (s.content or "" for s in draft.sections if s.id == section_id),
-            "",
+    focus_body = next(
+        (s.content or "" for s in draft.sections if s.id == section_id),
+        "",
+    )
+    synced = _recover_selection_bounds(
+        focus_body,
+        start=selection_start if selection_mode else None,
+        end=selection_end if selection_mode else None,
+        selection_text=selection_text,
+    )
+    if synced is not None:
+        selection_start, selection_end, selection_text = synced
+        selection_mode = True
+        logger.info(
+            "Synced selection span for %s / %s: chars %d-%d",
+            rfp_id,
+            section_id,
+            selection_start,
+            selection_end,
         )
-        recovered = _locate_selection_span(focus_body, selection_text)
-        if recovered is not None:
-            selection_start, selection_end = recovered
-            selection_mode = True
-            if not (selection_text or "").strip():
-                selection_text = focus_body[selection_start:selection_end]
-            logger.info(
-                "Recovered selection span for %s / %s: chars %d-%d",
-                rfp_id,
-                section_id,
-                selection_start,
-                selection_end,
-            )
+    elif selection_mode:
+        # Stale offsets with unrecoverable text — drop selection mode rather
+        # than fail the whole Ask Ralph turn as DRAFT UNCHANGED.
+        logger.info(
+            "Dropping stale selection for %s / %s — continuing as section edit",
+            rfp_id,
+            section_id,
+        )
+        selection_mode = False
+        selection_start = None
+        selection_end = None
+        selection_text = None
     # Non-selection chat always sees the whole proposal — never only the open tab.
     if not selection_mode:
         proposal_wide = True
@@ -11117,6 +11176,7 @@ async def improve_proposal_section(
                 "remove too much content" in note
                 or "did not change the excerpt" in note
                 or "did not return replacement text" in note
+                or "Selection no longer matches" in note
             ):
                 logger.info(
                     "Selection splice failed for %s / %s — escalating to full rewrite: %s",
