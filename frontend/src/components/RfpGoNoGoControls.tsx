@@ -184,7 +184,7 @@ export function RfpGoNoGoControls({
         />
       </div>
 
-      <section className="zo-card p-8">
+      <section id="go-no-go" className="zo-card scroll-mt-24 p-8">
         <div className="flex flex-wrap items-start justify-between gap-6">
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">

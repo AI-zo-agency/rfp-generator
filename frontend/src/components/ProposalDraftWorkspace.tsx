@@ -13,6 +13,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
   buildDefaultOutline,
@@ -483,12 +484,13 @@ function WorkspaceRfpChromeActions({
 
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-      <div
-        className="flex items-center gap-2 rounded-full border border-[rgba(17,24,39,0.14)] bg-white px-3 py-1.5"
+      <Link
+        href={`/rfps/${encodeURIComponent(rfp.id)}#go-no-go`}
+        className="flex items-center gap-2 rounded-full border border-[rgba(17,24,39,0.14)] bg-white px-3 py-1.5 no-underline transition hover:border-zo-orange/50 hover:bg-zo-orange/5"
         title={
           unscored
-            ? "Fit checked this upload — score when the full RFP arrives"
-            : "Go / No-Go from Fit analysis"
+            ? "Open Go / No-Go — Fit checked this upload; score when the full RFP arrives"
+            : "Open Go / No-Go score and Fit analysis"
         }
       >
         {unscored ? (
@@ -503,7 +505,7 @@ function WorkspaceRfpChromeActions({
             </span>
           </>
         )}
-      </div>
+      </Link>
       {pdfHref ? (
         <a
           href={pdfHref}
