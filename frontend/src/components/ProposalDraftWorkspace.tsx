@@ -451,6 +451,40 @@ function outlineColsCss(prefs: OutlinePanePrefs): string {
   return `${left} minmax(0, 1fr) ${right}`;
 }
 
+/** Section whose heading is nearest the reading line in the manuscript scroller. */
+function resolveVisibleManuscriptSectionId(
+  root: HTMLElement | null | undefined
+): string | null {
+  if (!root) return null;
+  const articles = Array.from(
+    root.querySelectorAll<HTMLElement>("article.proposal-content-article[id]")
+  );
+  if (articles.length === 0) return null;
+
+  const rootRect = root.getBoundingClientRect();
+  const readLine = rootRect.top + Math.min(120, rootRect.height * 0.22);
+  let bestId: string | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+
+  for (const el of articles) {
+    if (!el.id) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom < rootRect.top + 8 || rect.top > rootRect.bottom - 8) {
+      continue;
+    }
+    // Prefer the article whose top is at/above the read line (already scrolled into).
+    const dist =
+      rect.top <= readLine
+        ? readLine - rect.top
+        : (rect.top - readLine) * 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestId = el.id;
+    }
+  }
+  return bestId;
+}
+
 interface ProposalDraftWorkspaceProps {
   rfp: RfpRecord;
   goRfpCount?: number;
@@ -1287,6 +1321,8 @@ function ProposalDraftWorkspaceInner({
     );
     setHighlightedSectionId(targetId);
     setSelectedSectionId(targetId);
+    // Keep Want-to-Edit / active review in sync with the section the user picked.
+    setFocusedSectionId(targetId);
 
     const scroller =
       activeTab === "export"
@@ -2011,6 +2047,36 @@ function ProposalDraftWorkspaceInner({
     const el = sectionTextareaRefs.current.get(focusedSectionId);
     if (el && document.activeElement !== el) el.focus();
   }, [focusedSectionId]);
+
+  // While reading the whole proposal, track which section is nearest the
+  // reading line. IntersectionObserver only reports *changed* entries, which
+  // left focusedSectionId stuck on Executive Summary after the first paint.
+  useEffect(() => {
+    if (activeTab !== "content") return;
+    const root = contentScrollRef.current;
+    if (!root) return;
+
+    let raf = 0;
+    const syncVisibleSection = () => {
+      raf = 0;
+      const nextId = resolveVisibleManuscriptSectionId(root);
+      if (!nextId) return;
+      setFocusedSectionId((prev) => (prev === nextId ? prev : nextId));
+    };
+    const onScrollOrResize = () => {
+      if (raf) return;
+      raf = window.requestAnimationFrame(syncVisibleSection);
+    };
+
+    syncVisibleSection();
+    root.addEventListener("scroll", onScrollOrResize, { passive: true });
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      root.removeEventListener("scroll", onScrollOrResize);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [activeTab, manuscriptSections]);
 
   const sections1to3Done = useMemo(
     () =>
@@ -4683,14 +4749,48 @@ function ProposalDraftWorkspaceInner({
               className="proposal-workspace-back-btn"
               onClick={() => {
                 setReviewFocusMode(false);
-                setActiveTab("outline");
+                // Prefer the section actually on screen right now (not a stale
+                // Executive Summary focus from first paint).
+                const visibleId = resolveVisibleManuscriptSectionId(
+                  contentScrollRef.current
+                );
+                const targetId =
+                  visibleId ||
+                  focusedSectionId ||
+                  selectedSectionId ||
+                  actionableFlags[0]?.sectionId ||
+                  manuscriptSections[0]?.id ||
+                  null;
+                if (targetId) {
+                  selectSection(targetId);
+                } else {
+                  setActiveTab("outline");
+                }
               }}
             >
               Want to Edit something?
             </button>
             <span>
               {activeTab === "content"
-                ? "Reading the whole proposal"
+                ? (() => {
+                    const visibleId = resolveVisibleManuscriptSectionId(
+                      contentScrollRef.current
+                    );
+                    const target =
+                      outline.sections.find(
+                        (s) =>
+                          s.id ===
+                          (visibleId ||
+                            focusedSectionId ||
+                            selectedSectionId ||
+                            activeReviewSectionId)
+                      ) ?? activeReviewSection;
+                    return target
+                      ? `Opens “${stripLeadingOutlineNumber(target.title)}”`
+                      : actionableFlags[0]
+                        ? "Opens the next section that needs attention"
+                        : "Reading the whole proposal";
+                  })()
                 : "Download extras"}
             </span>
           </div>
@@ -5756,7 +5856,9 @@ function ProposalDraftWorkspaceInner({
                 <ProposalSectionTree
                   sections={reviewSections}
                   manuscriptIndexById={manuscriptIndexById}
-                  selectedSectionId={selectedSectionId}
+                  selectedSectionId={
+                    focusedSectionId ?? selectedSectionId
+                  }
                   highlightedSectionId={highlightedSectionId}
                   manualFillFlags={actionableFlags}
                   sectionRevisions={sectionRevisions}
@@ -5901,10 +6003,22 @@ function ProposalDraftWorkspaceInner({
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
                       {stripLeadingOutlineNumber(section.title)}
                       {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
-                        <span className="ml-2 text-[11px] font-medium text-amber-800">
+                        <button
+                          type="button"
+                          className="ml-2 text-[11px] font-medium text-amber-800 underline-offset-2 hover:underline"
+                          onClick={() => selectSection(section.id)}
+                        >
                           · needs input
-                        </span>
+                        </button>
                       ) : null}
+                      <button
+                        type="button"
+                        onClick={() => selectSection(section.id)}
+                        disabled={anyPipelineRunning}
+                        className="ml-2 align-middle text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                      >
+                        Edit section
+                      </button>
                       <button
                         type="button"
                         onClick={() =>
@@ -5913,7 +6027,7 @@ function ProposalDraftWorkspaceInner({
                           )
                         }
                         disabled={anyPipelineRunning}
-                        className="ml-2 align-middle text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                        className="ml-2 align-middle text-[11px] font-semibold text-zo-text-muted transition-smooth hover:underline disabled:opacity-50"
                       >
                         {editingSectionId === section.id ? "Done editing" : "Edit source"}
                       </button>
@@ -5983,14 +6097,26 @@ function ProposalDraftWorkspaceInner({
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
                       {stripLeadingOutlineNumber(section.title)}
                       {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
-                        <span className="ml-2 text-[11px] font-medium text-amber-800">
+                        <button
+                          type="button"
+                          className="ml-2 text-[11px] font-medium text-amber-800 underline-offset-2 hover:underline"
+                          onClick={() => selectSection(section.id)}
+                        >
                           · needs input
-                        </span>
+                        </button>
                       ) : null}
+                      <button
+                        type="button"
+                        onClick={() => selectSection(section.id)}
+                        disabled={anyPipelineRunning}
+                        className="ml-2 align-middle text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                      >
+                        Edit section
+                      </button>
                     </h3>
                     <div
                       className="proposal-prose proposal-prose--manuscript proposal-prose--editable mt-4"
-                      title="Click to edit this section"
+                      title="Click to focus this section — use Edit section to open it"
                       onClick={() => {
                         setFocusedSectionId(section.id);
                         setEditingSectionId(null);
